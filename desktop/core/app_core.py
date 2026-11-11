@@ -57,6 +57,7 @@ from desktop.core.droid_locator import ENV_OVERRIDE, DroidNotFoundError, locate_
 from desktop.core import files as filetools
 from desktop.core.handoff import AS_TEXT, CarryOption, attachment_text, build_handoff, carry_options, carry_overage, conversation_messages
 from desktop.core.harness import goal as goals
+from desktop.core import language
 from desktop.core.harness import skills
 from desktop.core.import_bridge import ImportBridge
 from desktop.core.chatgpt import side as chatgpt_side
@@ -366,6 +367,8 @@ class AppCore:
                 chatgpt.memory = memory
         # Skills and custom commands (harness/skills): the same hook for every engine, with or without the memory.
         manager.hooks.on_prompt(skills.prompt_hook)
+        # The language of the models' thinking (core/language): the own loop has it in its instructions.
+        manager.hooks.on_prompt(language.prompt_hook(lambda: self.settings.think_chinese))
         for engine in (codex, devin, chatgpt):
             if engine is not None and hasattr(engine, "hooks"):
                 engine.hooks = manager.hooks
@@ -572,6 +575,7 @@ class AppCore:
             "lastProject": self.settings.last_project,
             "compactAuto": self.settings.chatgpt_compact,
             "compactAt": self.settings.chatgpt_compact_at,
+            "thinkChinese": self.settings.think_chinese,
         }
 
     def project_rows(self) -> list[dict[str, Any]]:
@@ -1428,8 +1432,15 @@ class AppCore:
         handoff = getattr(controller, "handoff", None)
         active = datetime.fromtimestamp(controller.active_at, timezone.utc)
         self._feed_usage(conv)
+        # What the running turn has cost so far but the engine has not booked yet (Devin gives a prompt's figure only when
+        # it ends): shown with the total, so the number moves while the turn runs, but never fed to the ledger.
+        total = conv.ledger.total
+        pending_of = getattr(controller, "usage_pending", None)
+        pending = pending_of() if pending_of is not None else None
+        if pending is not None:
+            total = pending if total is None else total.plus(pending)
         # Until the live session reports its own, the page keeps what was known when it was last cached.
-        usage = usage_json(conv.ledger.total) or cached.get("usage")
+        usage = usage_json(total) or cached.get("usage")
         found = speed_of(controller.transcript.turns)
         speed = found.to_json() if found is not None else cached.get("speed")
         self._learn_window(conv, model_id)
@@ -1452,6 +1463,7 @@ class AppCore:
             "context": context,
             "queued": self._queued_json(conv),
             "agents": self._agents_json(conv),
+            "goal": conv.goal.text if conv.goal is not None else "",
             "handoff": (
                 {
                     "carried": handoff.carried,
@@ -1887,6 +1899,8 @@ class AppCore:
             if conv.goal is None:
                 return {"ok": True, "text": "现在没有进行中的目标。"}
             conv.goal = None
+            conv.dirty = True  # (the page shows no goal any more: closing the window need not warn about it)
+            self._schedule_flush()
             return {"ok": True, "text": "目标已取消。"}
         controller = conv.controller
         if not text:
@@ -2958,6 +2972,8 @@ class AppCore:
             s.chatgpt_compact = value
         elif key == "compactAt" and _is_int(value) and COMPACT_AT_RANGE[0] <= value <= COMPACT_AT_RANGE[1]:
             s.chatgpt_compact_at = value
+        elif key == "thinkChinese" and isinstance(value, bool):
+            s.think_chinese = value
         elif key == "maxOpen" and _is_int(value) and MAX_OPEN_SESSIONS_RANGE[0] <= value <= MAX_OPEN_SESSIONS_RANGE[1]:
             s.max_open_sessions = value
         elif key == "sidebarWidth" and _is_int(value) and SIDEBAR_WIDTH_RANGE[0] <= value <= SIDEBAR_WIDTH_RANGE[1]:

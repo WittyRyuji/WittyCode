@@ -286,6 +286,10 @@ def test_every_message_to_the_process_names_the_protocol_version(tmp_path):
         assert all('"jsonrpc"' in line for line in raw) and raw
         (init,) = harness.requests("initialize")
         assert init["protocolVersion"] == 1 and init["clientInfo"]["name"] == "wittycode"
-        assert init["clientCapabilities"] == {"fs": {"readTextFile": False, "writeTextFile": False}, "terminal": False}
+        assert init["clientCapabilities"] == {
+            "fs": {"readTextFile": False, "writeTextFile": False},
+            "terminal": False,
+            "elicitation": {"form": {}, "url": {}},
+        }, "no files or terminal of ours; questions (elicitation) in both modes"
 
     run(scenario())

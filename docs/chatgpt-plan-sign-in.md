@@ -1,6 +1,6 @@
 # 用 ChatGPT 订阅驱动别的 harness：Devin 是怎么做的，我们能不能做
 
-状态：**调研（2026-11-04 上午），已被后续实现取代**：用户决定走自己的 harness 直连 Responses API，已实现为第四个引擎，见 `docs/chatgpt-plan-harness.md`（规范事实、模块合同、待真实令牌核实的清单都在那里）和 `AGENTS.md` 的「ChatGPT Plan 引擎」一条。下面第 3 节「建议先不做」是当时的结论，已经不适用；官方文档里还写了怎么接 Codex app-server（环境变量 `ACCESS_TOKEN` + `model_provider`），我们没有用这条路。来源都是官方文档（括号里是网址）；标「推断」的是我从文档推出来的，没有验证。
+状态：**调研（2026-11-04 上午），已被后续实现取代**：用户决定走自己的 harness 直连 Responses API，已实现为第四个引擎，见 `docs/chatgpt-plan-harness.md`（规范事实、模块合同、待真实令牌核实的清单都在那里）和 `docs/knowledge.md` 的「ChatGPT Plan 引擎」一条。下面第 3 节「建议先不做」是当时的结论，已经不适用；官方文档里还写了怎么接 Codex app-server（环境变量 `ACCESS_TOKEN` + `model_provider`），我们没有用这条路。来源都是官方文档（括号里是网址）；标「推断」的是我从文档推出来的，没有验证。
 
 ## 1. Devin 里用 GPT 订阅：harness 还是 Devin 的
 

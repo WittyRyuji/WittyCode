@@ -487,7 +487,14 @@ class ChatGPTController:
             self.saved.mode = PLAN if self.mode == PLAN else ""
             notes: list[str] = []
             instructions = build_instructions(
-                self.project, model=model, level=self.autonomy, servers=tools.servers(), notes=notes, plan=plan, skills=found
+                self.project,
+                model=model,
+                level=self.autonomy,
+                servers=tools.servers(),
+                notes=notes,
+                plan=plan,
+                skills=found,
+                think_chinese=self.manager.settings.think_chinese,
             )
             if tuple(notes) != self._prompt_notes:
                 self._prompt_notes = tuple(notes)
@@ -649,6 +656,7 @@ class ChatGPTController:
                 await asyncio.wait_for(done.wait(), INTERRUPT_GRACE_SECONDS)
         if self._turn is turn:
             log.warning("the turn did not end within %.0f s of the stop request", INTERRUPT_GRACE_SECONDS)
+            self._release_steers()  # (the loop never took them: back to the user, not into the next turn)
             self.transcript.abort_turn("停止超时：这里先停止显示。")
             self._record_turn("interrupted")
             # The loop of this turn is still winding down but no longer owns the conversation (``_Watch`` drops what it

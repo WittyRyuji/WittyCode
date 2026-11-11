@@ -1,13 +1,13 @@
 # 共享记忆计划：Droid / Codex / Devin 共用一份长期记忆
 
-状态：**Phase 0–4 已做完**（2026-11-02，同一天），Phase 5 没做。实现细节和实机事实在 `AGENTS.md` 的「共享记忆」一条和 `docs/handoff.md` 最上面那条批次记录；本文保留当时的计划，下面这段只写**和计划不同的地方**：
+状态：**Phase 0–4 已做完**（2026-11-02，同一天），Phase 5 没做。实现细节和实机事实在 `docs/knowledge.md` 的「共享记忆」一条和 `docs/handoff.md` 最上面那条批次记录；本文保留当时的计划，下面这段只写**和计划不同的地方**：
 
 - **MCP 审批确认走 elicitation**：Codex 对没标注（或标了破坏）的 MCP 工具，在 `readonly` 档发 `mcpServer/elicitation/request`（`_meta.codex_approval_kind: "mcp_tool_call"`，`persist: ["session","always"]`），不是另一种请求。已在 `core/codex/elicit.py` 接上提问卡（以前一律拒绝）。记忆服务的 5 个工具都标成非破坏，所以 Codex 不会问；Droid 在 `off` 档、Devin 在 `ask` / `code` 档仍会弹引擎自己的权限提示。
 - **记忆页放在设置里**（「共享记忆」一页），不是独立页面；侧栏底部另有一个入口，带「还没看过」的数字。原因：这个应用只有一个主视图（对话），设置对话框是放管理页面的地方。
 - **没有 `system_prompt` / `developerInstructions` 那一层**：Phase 0 看到三家都会读 MCP 的 `instructions` 和工具描述，加上新会话的简介就够了（简介在第一条消息前，页面不显示）。
 - **来源**：不是在回合里看到 `memory_*` 工具调用再补进 journal，而是每个控制器有 `run` 令牌，写进服务进程的命令行和笔记的 `source`，应用再把 `run` 映射到会话（`runs.json`）。更简单，也不用解析各家不同的工具名。
 - **包路径**是 `desktop.core.memory`（计划里写的是 `desktop.memory`）。
-- Phase 0 的结论没有单独写 `docs/shared-memory-spike.md`，探针脚本在 `sandbox/memory_spike_{droid,codex,devin}.py`、`sandbox/elicit_*.py`、`sandbox/memory_feasibility.py`、`sandbox/devin_mcp_caps.py`，事实已进 AGENTS.md。
+- Phase 0 的结论没有单独写 `docs/shared-memory-spike.md`，探针脚本在 `sandbox/memory_spike_{droid,codex,devin}.py`、`sandbox/elicit_*.py`、`sandbox/memory_feasibility.py`、`sandbox/devin_mcp_caps.py`，事实已进 `docs/knowledge.md`。
 
 下面写的"已查实"都标了验证程度；没标"实机"的是读源码或 schema 得到的（Phase 0 之后大多已被实机证实，见上）。
 

@@ -259,7 +259,9 @@ def make_core(
             default_reasoning_effort=ReasoningEffort.MEDIUM,
         ),
     ]
-    settings = AppSettings(max_open_sessions=max_open, default_model="claude-haiku-5-5", reasoning_effort="low")
+    # (``think_chinese`` off: its sentence would ride along with every message these tests compare word for word; the tests
+    # of the language turn it on themselves)
+    settings = AppSettings(max_open_sessions=max_open, default_model="claude-haiku-5-5", reasoning_effort="low", think_chinese=False)
     if projects:
         (tmp_path / "proj").mkdir(exist_ok=True)
         settings.add_project(tmp_path / "proj")

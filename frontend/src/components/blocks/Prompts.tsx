@@ -32,7 +32,8 @@ export function PermissionCard({ sessionId, prompt }: { sessionId: string; promp
           )}
         </div>
       ))}
-      <div className="pbtns">
+      {/* the choices are answers, like a question's options: one per line, so a long one never squeezes the others */}
+      <div className="pbtns choices" role="group" aria-label="选择一个答复">
         {prompt.options.map((o) => (
           <button key={o.value} type="button" className={`btn${o.tone === "primary" ? " primary" : o.tone === "danger" ? " danger" : ""}`} onClick={() => answer(sessionId, prompt.id, o.value)}>
             {o.label}

@@ -17,6 +17,15 @@ import { engineLabel, engineOfSource, envHintOf, envNameOf, envVarText, sourceLa
 import { effortLabel, permissionsFor, reasoningChoices, startingLevel } from "../src/lib/vocab.ts";
 import { CALL_TIMEOUT_MS, QWebChannelTransport } from "../src/transport.ts";
 import { COMMANDS, commandNamed, fromSkills, parseSlash, suggestions, unavailable } from "../src/lib/commands.ts";
+import { quitWarning } from "../src/lib/quit.ts";
+
+test("quitting warns about running sessions, messages still waiting and goals in progress", () => {
+  assert.equal(quitWarning([{ mark: "ready" }, { mark: "dead", queued: [] }]), "", "nothing would be lost: the window just closes");
+  assert.equal(quitWarning([{ mark: "running" }]), "有 1 个会话还在工作。退出会中断它们正在做的事；下次可以从侧边栏恢复会话。");
+  assert.equal(quitWarning([{ mark: "opening", queued: [{}, {}] }]), "2 条排队的消息还没发出，退出后不会再发出或继续；下次可以从侧边栏恢复会话。");
+  const both = quitWarning([{ mark: "attention" }, { mark: "ready", goal: "make the tests pass" }]);
+  assert.ok(both.startsWith("有 1 个会话还在工作") && both.includes("1 个目标（/goal）还没完成"), both);
+});
 
 // ------------------------------------------------------------------------------------------- payloads as Python sends them
 

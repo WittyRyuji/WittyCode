@@ -160,6 +160,9 @@
 .impact-high { color: var(--err); }
 .impact-medium { color: var(--warn); }
 .pbtns { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+/* a permission card's answers: one per line, the label at the left, as a question's options are */
+.pbtns.choices { flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: 6px; }
+.pbtns.choices .btn { justify-content: flex-start; text-align: left; }
 .q { margin: 6px 0 12px; padding: 6px 8px; }
 .q.missing { background: var(--err-bg); }
 .qtopic { display: inline-block; font-size: 11px; font-weight: 700; letter-spacing: 0.06em; padding: 0 6px; background: var(--ink); color: var(--paper); margin-bottom: 3px; }

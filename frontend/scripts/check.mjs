@@ -21,7 +21,12 @@ ok("the built page carries its Content-Security-Policy, ahead of every script an
 
 let page = await openPage(`${index}?scene=ask&theme=light&review=0`);
 
-// question card: submitting with nothing chosen is refused, then answer and submit
+/** Every element the selector matches is on a line of its own: each one below the one before it, all starting at the same left edge. */
+const oneLineEach = (selector) =>
+  `(() => { const r = [...document.querySelectorAll(${JSON.stringify(selector)})].map(e => e.getBoundingClientRect()); return r.length > 1 && r.every((b, i) => i === 0 || (b.top >= r[i - 1].bottom - 1 && Math.abs(b.left - r[0].left) < 1)); })()`;
+
+// question card: the options one per line; submitting with nothing chosen is refused, then answer and submit
+ok("a question's options are one per line", await page.eval(oneLineEach(".prompt.ask .opt")));
 await page.click(".prompt.ask .btn.primary");
 ok("empty submit is refused", await page.eval("document.querySelectorAll('.q.missing').length === 2"));
 await page.click(".prompt.ask .opt input[type=radio]", 1);
@@ -328,6 +333,7 @@ ok("while Codex's own models stay available", await page.eval("[...document.quer
 await page.click(".scroller"); // closes the menu without Esc, which would also stop the turn
 await page.waitFor("document.querySelector('.prompt.perm')", 10000); // Codex's read-only level asks before it edits
 ok("Codex's 只读 level asks for approval before the edit", true);
+ok("the approval's answers are one per line, as wide as the card, the label at the left", await page.eval(`${oneLineEach(".prompt.perm .pbtns .btn")} && (() => { const card = document.querySelector('.prompt.perm .pbtns').getBoundingClientRect(); return [...document.querySelectorAll('.prompt.perm .pbtns .btn')].every(b => Math.abs(b.getBoundingClientRect().width - card.width) < 1 && getComputedStyle(b).justifyContent === 'flex-start'); })()`));
 await page.click(".prompt.perm .btn.primary");
 await page.waitFor(READY, 12000);
 await page.hover(".usage");

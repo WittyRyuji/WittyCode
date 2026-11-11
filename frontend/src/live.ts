@@ -344,6 +344,11 @@ function liveActions(): Partial<Store> {
       const text = s.draft;
       const attachmentIds = s.attachments.map((a) => a.id);
       if (!text.trim() && attachmentIds.length === 0) return;
+      // The turn waits for the answer to a question card: a message typed now would only queue behind it, and the user
+      // would believe they had answered. The words stay in the box.
+      if (running && s.turns.at(-1)?.prompts?.some((p) => p.kind === "question" && p.status === "pending")) {
+        return say("本轮在等你回答上面的问题：请在问题卡片里作答（卡片里也能写自己的答案）。输入框里的字还在。");
+      }
       // More attachments than a message usually holds is the user's call: Python sends nothing and says by how much, the
       // page asks, and sends the same message again with the user's word (`confirmOver`).
       const submit = async (confirmOver: boolean): Promise<void> => {
@@ -409,6 +414,7 @@ function liveActions(): Partial<Store> {
     setMemoryCurate: (on) => void setting("memoryCurate", on),
     setMemoryEngines: (engines) => void setting("memoryEngines", engines),
     setCompactAuto: (on) => void setting("compactAuto", on),
+    setThinkChinese: (on) => void setting("thinkChinese", on),
     setCompactAt: (percent) => void setting("compactAt", clampCompactAt(percent)),
     setDroidPath: (path) => void setting("droidPath", path),
     setCodexPath: (path) => void setting("codexPath", path),

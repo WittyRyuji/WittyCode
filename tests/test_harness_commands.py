@@ -337,7 +337,7 @@ def test_asking_again_when_the_conversation_is_a_summary_already_changes_nothing
 def test_a_summary_that_fails_leaves_the_conversation_as_it_was_and_says_so(tmp_path):
     async def go() -> None:
         with FakeResponses(token=ACCESS_TOKEN) as fake:
-            fake.script(http_error(500, {"error": {"code": "server_error", "message": "overloaded"}}), say("fine now"))
+            fake.script(http_error(400, {"error": {"code": "invalid_request_error", "message": "refused"}}), say("fine now"))
             engine, controller = await opened(tmp_path, fake)
             fill(controller)
             logged = len(controller.saved.items)

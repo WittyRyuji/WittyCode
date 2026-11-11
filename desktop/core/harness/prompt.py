@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from desktop.core.harness.skills import Skill, skills_prompt
+from desktop.core.language import THINK_CHINESE
 
 AGENTS_FILE = "AGENTS.md"
 AGENTS_LIMIT = 24_000
@@ -61,6 +62,9 @@ How to work:
 
 The tools run on Windows. The shell is Windows PowerShell 5.1: use its syntax (`;` between commands, no `&&`), and quote paths that contain spaces."""
 
+
+_ANSWER_RULE = "- Answer in the language the user writes in. Keep answers short and concrete: what you did, what you found, what is left."
+assert _ANSWER_RULE in BASE
 
 PLAN_RULES = (
     "Plan mode is on. Nothing may be changed yet: file edits, file creation and every command that is not read-only are refused. "
@@ -239,11 +243,13 @@ def build_instructions(
     notes: list[str] | None = None,
     plan: bool = False,
     skills: Sequence[Skill] = (),
+    think_chinese: bool = True,
 ) -> str:
     """``servers``: ``(name, instructions)`` of the MCP servers connected to the conversation. ``notes``, when given, gets
     the sentences (Chinese, for the user) about instruction files that did not fit whole. ``plan``: the Plan mode (nothing
-    may be changed). ``skills``: the skills the model may load itself (``harness.skills``)."""
-    parts = [BASE]
+    may be changed). ``skills``: the skills the model may load itself (``harness.skills``). ``think_chinese``: the user's
+    setting (``core/language``)."""
+    parts = [BASE.replace(_ANSWER_RULE, f"{_ANSWER_RULE}\n- {THINK_CHINESE}", 1) if think_chinese else BASE]
     day = today or datetime.date.today()
     runs = "Only reading and searching run (Plan mode)." if plan else LEVEL_RULES.get(level, LEVEL_RULES["ask"])
     parts.append(

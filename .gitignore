@@ -44,3 +44,5 @@ sandbox/*
 !sandbox/probe_skill_goal_real.py
 !sandbox/probe_bedrock_real.py
 !sandbox/check_old_patterns.py
+!sandbox/scan_mojibake.py
+!sandbox/repair_mojibake.py

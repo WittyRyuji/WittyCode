@@ -280,6 +280,8 @@ export interface Session {
   /** messages typed while the session was connecting or a turn was running: shown, and sent by Python one turn at a time,
    *  in order, each when the one before it is over */
   queued?: QueuedMessage[];
+  /** the goal (`/goal`) the conversation is working toward ("" or absent: none) */
+  goal?: string;
 }
 
 /** A file shown in the side panel (what `files.read` answers). `line` / `lineEnd`: the lines the reference named.

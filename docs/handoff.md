@@ -4,6 +4,9 @@
 
 ## 当前状态
 
+- 2026-11-11（深夜，第三批：答复选项一行一个）：用户：「提问回答的选项应该一行一个，包括权限审批」。权限卡的答复按钮改成竖排、占满卡片宽、文字靠左（`.pbtns.choices`，类名 `.pbtns` / `.btn` 不变，测试的选择器照旧）；提问卡的选项本来就一行一个，没改。没有提交。细节见批次记录最上面一条。
+- 2026-11-11（深夜，第二批：用户九条里能直接做的）：`AGENTS.md` 再缩成只有硬约束（16 行：语言、沟通、验证、边界、公开仓库、Git、交接），命令和环境搬到 `docs/development.md`，产品原则进 `docs/project.md`。**Devin 会问问题了**（声明 ACP elicitation，`elicitation/create` 画成提问卡）；**Devin 的 token 合计实时动**（本轮已有调用先显示、不记账）；**思考用中文**（设置开关，默认开）；压缩摘要请求失败会重试；停止超时不再把旧引导塞进下一轮；退出确认提醒排队消息和 `/goal`；提问卡等回答时回车不再悄悄排队。**没做、等用户定**：去掉 Droid / Factory（747 个测试建在 Droid 的假引擎上，要先重写测试底座）、设置里「删除 Codex 的 ACP 模式，只保留 Plan」（理解成去掉「Codex 订阅」引擎，待确认）、Codex 的提问（随上一条定）。没有提交。细节见批次记录最上面一条。
+- 2026-11-11（深夜：`AGENTS.md` 瘦身）：用户：「仓库下的 Agents.md 明显太臃肿……这个应该是对于 Agent 运行的定义。项目信息不应该混入」。`AGENTS.md` 现在只放代理的工作约定（先读什么、规则、命令、版本控制、交接），207 KB → 9 KB；项目概况、模块图、发布包结构和「版本控制」里仓库 / 许可证 / 隐私的原文搬到 `docs/project.md`，原「SDK 已确认的事实」一节（65 条）原样搬到 `docs/knowledge.md`（开头加了索引）。**下面各条和批次记录里说「见 `AGENTS.md` 的「某某」一条」的，现在都在 `docs/knowledge.md`。** 没有提交（等用户说）。细节见批次记录最上面一条。
 - 2026-11-11（深夜：清掉仓库里的私人信息）：用户：「仓库文档里面要清理干净我本地的信息、授权等等私人信息」。**已做**：全库审计后清理。(1) 本机信息：真实绝对路径（开发目录、Codex 数据目录）换成 `<项目根>` / `%CODEX_HOME%` / `C:\Users\me\…`；`fixtures/` 里录下来的 `cwd`（45 个文件，含被流式输出拆成三段的一处）换成 `C:\Users\me\code\wittycode`；「这台机器…」和用户设置里的具体数值改成通用说法。(2) 授权与身份：文档里的 SSH 密钥文件名、git 邮箱、机器上有哪些令牌环境变量、另一把 GitLab 密钥名、ChatGPT 套餐等级、Codex 沙盒密钥路径全删。(3) 用户的其他项目和个人内容：另一个本地项目及其私有仓库的叙述、另一个同类客户端的名字、个人技能名（演示 / 测试里换成 `weekly-report`）。(4) `sandbox/` 探针不再写死开发目录。顺带：`check.mjs` 里 Codex 开关三处没等状态就断言（偶发失败），补了等待。规则写进了 `AGENTS.md`「版本控制」一节。**验证**：全量 pytest **3315 通过 / 1 跳过**；前端 typecheck、unit 68、`check.mjs` 连跑 3 次、`check-live.mjs`、星图单测通过；重新审计无命中（剩下的是旧产品名 `droid-desk`、公开的 GitHub 用户名和测试里的假数据）。**已推送**：用户最后在 GitHub 上删库重建（同名同地址），本地历史压成一个根提交后普通推送到新仓库（没有强推）；旧提交号在新仓库里不存在（提交页是空仓库占位页、旧 raw 文件 404）；本地备份分支 `backup-before-squash` 和旧对象已删（reflog expire + gc prune）。
 - 2026-11-11（夜：包改名 `desktop/`、README 精简、演示数据脱敏）：用户三条：README 废话多；开发目录 `droid_desk/` 要改成 `app/` 或 `desktop/`（程序已改名，不该有遗留）；README 里的对话列表有涉密信息要打马赛克。**已做**：(1) 包 `droid_desk` → `desktop`，环境变量 `DROID_DESK_*` → `WITTYCODE_*`，删 `droid-desk.pyw`，`pyproject` 名 `wittycode`；(2) README 重写，约 100 行；(3) 演示数据里用户自己项目的名字、本机路径和真实提交号全换成中性的 `wittycode` / `inventory-api` / `C:\Users\me\…`，README 五张截图重拍（没有打马赛克，原因见 `AGENTS.md`）；(4) 删 17 张旧界面截图（其中一张露着真实用户名）和文档里对它们的引用。**验证**：全量 pytest **3315 通过 / 1 跳过**（比之前少 1 个：旧启动器那条参数化用例随文件删了）；前端 typecheck、`unit` 68、`check.mjs`、`check-live.mjs` 通过；发布包重建（包内是 `app\desktop`，里面没有旧名字和旧演示数据），离屏冒烟 OK，sha256 `ed171f2a…cea126`。**历史**：仓库是公开的，用户要求清理后最终删库重建，GitHub 上 `main` 是一个根提交（普通推送，没有强推），旧提交号在新仓库里不存在。**注意**：需要重启 WittyCode（包目录名变了），桌面快捷方式要指向 `WittyCode.pyw` 或 `-m desktop`。
 - 2026-11-11（晚：Bedrock 走自有循环、循环审阅、已推送到 GitHub）：用户把 SSH 公钥加到了 GitHub，也给了 git 身份，说 **「Bedrock 必须走我们自己的循环，要做出来」**，并要对现在的循环和本地 harness 做 review。**已做**：(1) 设好 `origin`（SSH 地址）和仓库本地的 `core.sshCommand`，`ssh -T git@github.com` 认证成功（主机指纹与 GitHub 公布的一致）；用户随后自己在仓库里配了身份（我不能代写），提交了全部代码（`b3efd0a`），合并了远端只含 `LICENSE` 的 `Initial commit`（`424f24d`，`-X ours`，普通合并、没有强推），`main` 已推送，远端与本地一致。**这台机器的环境变量 `GIT_SSH_COMMAND` 会盖过仓库的 `core.sshCommand`，在 Droid 的 shell 里推送要先在同一条命令里重设它**（用户自己的终端里没有这个变量）。(2) **Bedrock**：`core/llm/aws.py`（SigV4 + 凭据链 + SSO + 凭据命令 + Bearer）、`core/llm/bedrock.py`（Converse / InvokeModel 请求体 + AWS 事件流解码）、`ProviderStore.bedrock_plan`、`backend._bedrock`；签名用 botocore 的结果逐位对照过；对**真实** `bedrock-runtime.us-east-1.amazonaws.com` 发了带 AWS 示例密钥的签名请求和一个编造的 API Key，得到预期的 403 `UnrecognizedClientException` / 「Invalid API Key format」（说明端点、路径、头和 SigV4 的形状 AWS 认得；**没有真凭据，没验证过一次成功的补全**）。(3) **请求失败重试**（循环的 L1）：429 / 5xx / 连接断 / 回答还没开始就被截断，按 1.5 / 4 / 10 / 25 秒重发，听 `Retry-After`，在对话里告诉用户。(4) **循环 / harness 审阅**：`docs/loop-review-2026-11-11.md`，12 条发现（L1 已修，L2–L12 待决定）。(5) **斜杠菜单**：去掉 `/new`，页面自己的三个命令和用户的技能 / 命令之间加一条分隔线（`.slash-sep`）；顺手查清并修了 e2e 连跑 10 次时的一次偶发失败（`open_rig` 要等 `.boot` 消失，页面在 `app.init` 回答前不处理快捷键）。(6) 发布包 `dist/WittyCode-0.1.0-win-x64.zip` 已在这些改动之后**重建**（冒烟 OK，sha256 `5b9e300e…5255d`）。(7) 交接文档给用户：`outputs/HANDOFF-WittyCode-2026-11-11.md`（不进库）。**还差**：GitHub 令牌环境变量（`GITHUB_TOKEN`）或用户在网页上传 zip → 建 Release `v0.1.0`；一个 Bedrock API Key 或能用的 AWS profile → 真机验证。
@@ -56,6 +59,89 @@
 - 尚未提交到 git；用户之后要推到自己的 GitHub。
 
 ## 批次记录（新的在最上面）
+
+### 2026-11-11（深夜，第三批）答复选项一行一个（Devin 会话）
+
+- **结果**：权限卡（`components/blocks/Prompts.tsx` 的 `PermissionCard`，含子任务面板里的）答复按钮竖排，每个占一行、和卡片一样宽、文字靠左；主按钮仍是反色，「拒绝」仍是红框。提问卡的单选 / 多选项原本就是一行一个（截图确认），没改；「提交回答 / 跳过」是动作不是选项，仍并排。
+- **改动**：`Prompts.tsx`（`pbtns choices`，加 `role="group"`）、`styles/transcript.css`（`.pbtns.choices`）；`check.mjs` 加两条（提问卡选项一行一个；权限卡答复一行一个、等宽、靠左），`check-live.mjs` 加一条。先在旧页面上跑，新断言失败，确认它能抓到旧布局。
+- **验证**：页面重建；`check.mjs`、`check-live.mjs`、`unit` 69 通过；`test_app_e2e.py` 59 个通过（点按钮用的 `.prompt.perm .pbtns .btn` 选择器不变）；浅色和深色主题截图看过。
+- **未解决**：没有提交。
+
+### 2026-11-11（深夜，第二批）Devin 提问、实时 token、思考用中文、几处修复（Devin 会话）
+
+**1. 结果**
+
+- `AGENTS.md` 只剩硬约束；命令、测试的坑、环境、Git 细节在 `docs/development.md`；「工具调用显示」这条产品原则在 `docs/project.md`。
+- Devin 引擎能在运行中提问（ACP elicitation）；Devin 会话的 token 合计在回合中实时更新；新设置「思考过程用中文」；压缩摘要请求遇到可能过去的失败会重试；自有循环停止超时时把没送达的引导放回输入框；退出确认提醒排队的消息和进行中的 `/goal`；提问卡等回答时回车给提示、不排队。
+- 文档：`docs/project.md` 三处过时的说法改了；`sandbox/scan_mojibake.py`、`repair_mojibake.py` 在 `.gitignore` 里放行（文档要求用它们）；`docs/knowledge.md` 更正「模型会问问题」并加了第 66 条。
+- **没做**：去掉 Droid / Factory、Codex 的去留与提问、`outputs/` 交接文档之外的发布动作。
+
+**2. 改动**
+
+- `desktop/core/devin/engine.py`（`clientCapabilities.elicitation`、`open_url` / `open_external`）、`devin/controller.py`（`_elicitation`、`answer_question`、`usage_pending`、`_on_stats` 清 `_calls`）。
+- `desktop/core/app_core.py`（显示的合计加 `usage_pending`；会话数据加 `goal`；语言 hook；设置 `thinkChinese`）、`core/language.py`（新）、`core/settings.py`（`think_chinese`）、`harness/prompt.py`（`build_instructions(think_chinese=)`）、`chatgpt/controller.py`（传设置；`interrupt()` 超时分支 `_release_steers()`）、`harness/compact.py`（`ask` 的重试）。
+- 前端：`lib/quit.ts`（新）、`store.ts`、`live.ts`（提问卡守卫、设置）、`liveReducer.ts`、`protocol.ts`、`types.ts`、`components/Settings.tsx`；页面已重建。
+- 测试：`test_devin_turns.py` +3、`test_app_devin.py` +2、`test_language.py`（新，3）、`test_harness_compact.py` +3、`test_chatgpt_compaction.py` +2、`test_app_commands.py`（goal 字段）、`unit.mjs` +1；`fake_devin.py` 的 `[ask]` 场景；`devin_support` 记录打开的网页；`make_core` 等三个测试核心关掉 `think_chinese`；`test_devin_engine` 的握手断言、三个用 500 当「写不出摘要」的测试改成 400。
+
+**3. 关键决定和原因**
+
+- Devin 提问复用 `codex/elicit.py`：ACP 的 elicitation 就是 MCP 的数据模型，同一张提问卡。
+- 实时 token 只显示不记账：Devin 的 `turn_stats` 才是一轮的准数，账本只记它，所以不会重复计算。
+- 思考语言用一句说明：自有循环写进系统提示；外部引擎的系统提示不归我们管，就随每条消息放在页面看不到的上下文块里。
+- 提问卡守卫选「提示并保留文字」，没有把输入框的字当成卡片的答案（多题卡片会答错）。
+
+**4. 新发现的事实或坑**（已写进 `docs/knowledge.md` 第 66 条）
+
+- Devin 的 `ask_user_question` 走标准 ACP elicitation，要客户端声明能力；以前的「Devin 没有提问请求」不对。
+- 本机 Codex 0.167：默认模式的 `request_user_input` 要开 `default_mode_request_user_input`（开发中，默认关）；`collaborationMode` 要 `experimentalApi`。
+
+**5. 验证**
+
+- 相关测试文件逐个跑过并通过；前端 typecheck、`unit` 69、`check.mjs`、`check-live.mjs` 通过；页面重建。
+- 全量 pytest 最后一次：**3328 passed / 2 skipped**（两个跳过是环境条件：PATH 上要有 ripgrep、POSIX 的只读语义）。之前两次各有 1 个失败，都已修：`test_app_follow_up` 里一个自建核心没关语言开关；`/goal` 测试里我加的「页面收到过目标」断言有时序竞争（两轮在一次刷新间隔内做完就看不到），改成确定性的新测试，顺带发现并修了 `/goal off` 不通知页面（没有 `dirty` + 刷新）。`test_app_devin` 的一个等待 2 秒的测试在并发跑时偶发超时，单独跑两次都通过。
+- 没有调用真实模型，Devin 提问和中文思考都**没在真实引擎上验证**。
+
+**6. 未解决和建议**
+
+- 等用户定：去掉 Droid / Factory 的范围（引擎、`droid-sdk`、Factory 导入、`.factory` 技能目录、API Provider 存在 Factory 设置里）；「删除 Codex 的 ACP 模式」的意思；Codex 的提问。
+- 没有提交。
+
+### 2026-11-11（深夜）`AGENTS.md` 只留代理约定，项目信息搬进 `docs/`（Devin 会话）
+
+**1. 结果**
+
+- `AGENTS.md` 只剩代理的工作约定：开工前先读、规则、命令、版本控制、交接（207,045 → 9,274 字节）。
+- 项目信息原样搬走，没有删任何内容：简介三段、模块图、发布包结构、「版本控制」里仓库 / 许可证 / 隐私规则的原文 → `docs/project.md`；「SDK 已确认的事实」整节 65 条 → `docs/knowledge.md`（顺序不变，条目里的「上一条」「下一条」仍成立；开头加了条目索引）。
+
+**2. 改动**
+
+- `AGENTS.md`（重写）；新增 `docs/project.md`、`docs/knowledge.md`。
+- `docs/shared-memory-plan.md`、`docs/chatgpt-plan-sign-in.md`、`docs/harness-review-2026-11-06.md`、`docs/harness-rereview-2026-11-06.md`：8 处「见 `AGENTS.md` 的某条」改指 `docs/knowledge.md`；审阅当时对 `AGENTS.md` 的测量叙述（字数、截断位置）是历史，没动。
+
+**3. 关键决定和原因**
+
+- 为什么必须拆：Codex（`project_doc_max_bytes` 默认 32 KiB，超出部分静默截掉）和 Devin CLI（每个常驻规则文件 32 KiB）只读得到开头 32 KiB，而「规则」「版本控制」「交接」三节在原文件第 200,447 字节之后，这两个引擎在本仓库干活时从来看不到它们；自有循环也要按章节缩到 24,000 字。现在三家都整份读入。
+- 搬运用一次性脚本按行号原样复制，并断言每个被搬的行（102 行）都逐字出现在新文件里。`AGENTS.md` 里只留规则；新写的只有指路和两处补充（全量 pytest 约 8 分钟、放后台跑；`npm run typecheck`）。
+- 「版本控制」里规则和事实混在一起的几条：规则在 `AGENTS.md` 里写成短句，原文整段放进 `docs/project.md`「仓库与许可证」，并注明以 `AGENTS.md` 为准。
+- 保留 `## 规则` 标题和「不推送」三个字：`test_this_repositorys_own_rules_reach_the_prompt` 断言这两样。
+- 只搬位置，不改内容（包括已经过时的说法，见「未解决」），方便逐行核对。
+
+**4. 新发现的事实或坑**
+
+- Codex 和 Devin CLI 的 32 KiB 上限（见上）：`AGENTS.md` 以后要保持在这个大小以内，项目事实写进 `docs/knowledge.md`（「交接」第 4 条已写明）。
+- `sandbox/scan_mojibake.py`、`sandbox/repair_mojibake.py` 被 `.gitignore` 忽略、没有进库，但 `AGENTS.md` 要求用它们：克隆下来的人没有这两个脚本。
+
+**5. 验证**
+
+- `tests/test_harness_prompt.py` 13 passed；`prompt.load_agents(<项目根>)` 整份读入、没有缩减；`sandbox/scan_mojibake.py` 无可疑；`git diff --check` 干净；`AGENTS.md` 里点名的路径和 `docs/knowledge.md` 条目都在。
+- 拆分前跑过一次全量 pytest：3313 passed / 2 skipped / 1 failed（`test_a_summary_asks_for_the_lowest_reasoning_whatever_the_user_chose`，日志里是 `WinError 10055`（套接字缓冲区耗尽），单独重跑、整个文件重跑都通过）。拆分只动了文档。
+
+**6. 未解决和建议**
+
+- 搬过去的文字里有过时的地方，这次没改：`docs/project.md` 简介里「API Provider（Droid 的 `customModels`）」（现在走自有循环）；模块图的 `core/llm/` 没列 `bedrock.py` / `aws.py`；模块图两处指向的「共享记忆的自动更新」一条不存在（内容在本文件 2026-11-06 的批次记录里）。
+- 上面两个乱码脚本要不要进库（在 `.gitignore` 里放行）。
+- `docs/knowledge.md` 仍是一个 185 KB 的文件，以后可以按主题（引擎 / 自有循环 / 记忆 / 界面 / 测试）再拆。
+- 没有提交：等用户确认。
 
 ### 2026-11-11（深夜）清掉仓库里的私人信息（主会话）
 

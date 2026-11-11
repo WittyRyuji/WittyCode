@@ -253,7 +253,7 @@ def test_an_error_that_is_not_about_size_does_not_start_a_compaction(tmp_path):
 def test_a_summary_that_cannot_be_written_is_a_list_of_what_the_user_asked_and_the_conversation_goes_on(tmp_path):
     async def go() -> None:
         with FakeResponses(token=ACCESS_TOKEN) as fake:
-            fake.script(http_error(500, {"error": {"code": "server_error", "message": "overloaded"}}), say("answer anyway"))
+            fake.script(http_error(400, {"error": {"code": "invalid_request_error", "message": "overloaded"}}), say("answer anyway"))
             engine, controller = await opened(tmp_path, fake)
             fill(controller)
             engine._windows[SOL] = await roomy(controller)  # (the digest, with the instructions and the tools, has to fit the window too)
@@ -263,6 +263,32 @@ def test_a_summary_that_cannot_be_written_is_a_list_of_what_the_user_asked_and_t
             assert record["mechanical"] is True and "question 0" in record["summary"] and "could not be summarised" in record["summary"]
             assert controller.transcript.turns[-1].status is TurnStatus.DONE
             assert any("摘要没写成" in text and "overloaded" in text for text in notices(controller))
+            await engine.close_all()
+
+    run(go())
+
+
+def test_a_summary_request_that_met_a_busy_server_is_asked_again_and_the_summary_is_written(tmp_path, monkeypatch):
+    pauses: list[float] = []
+
+    async def pause(seconds: float) -> None:
+        pauses.append(seconds)
+
+    monkeypatch.setattr(compact, "_sleep", pause)
+
+    async def go() -> None:
+        with FakeResponses(token=ACCESS_TOKEN) as fake:
+            fake.script(http_error(500, {"error": {"code": "server_error", "message": "overloaded"}}), say("SUMMARY"), say("answer"))
+            engine, controller = await opened(tmp_path, fake)
+            fill(controller)
+            engine._windows[SOL] = await roomy(controller)
+            controller.send_prompt("go")
+            await finish_turn(controller)
+            record = controller.saved.compaction
+            assert record["mechanical"] is False and record["summary"] == "SUMMARY", "one busy answer must not cost the model the conversation"
+            assert pauses == [compact.RETRY_DELAYS[0]]
+            assert not any("摘要没写成" in text for text in notices(controller))
+            assert texts_of(controller)[-1] == "answer"
             await engine.close_all()
 
     run(go())
@@ -540,6 +566,43 @@ def test_a_turn_stopped_late_leaves_the_next_turn_and_the_log_alone(tmp_path, mo
             assert controller.transcript.turns[1].tools == {} and controller.transcript.turns[1].status is TurnStatus.DONE
             on_disk = engine.sessions.load(controller.session_id)
             assert [turn.start for turn in on_disk.turns] == [0, 3] and [item["type"] for item in on_disk.items] == [item["type"] for item in items]
+            await engine.close_all()
+
+    run(go())
+
+
+def test_what_was_said_to_a_turn_stopped_late_goes_back_to_the_user_not_into_the_next_turn(tmp_path, monkeypatch):
+    async def go() -> None:
+        started = asyncio.Event()
+
+        async def slow_run(self, call_):  # winds down slower than the stop is willing to wait
+            started.set()
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                await asyncio.sleep(0.8)
+                raise
+
+        monkeypatch.setattr(controller_module, "INTERRUPT_GRACE_SECONDS", 0.15)
+        monkeypatch.setattr(HarnessTools, "run", slow_run)
+        with FakeResponses(token=ACCESS_TOKEN) as fake:
+            fake.script(call("read_file", {"file_path": "a.txt"}, call_id="old-call"), say("second answer"))
+            engine, controller = await opened(tmp_path, fake)
+            controller.send_prompt("first")
+            await asyncio.wait_for(started.wait(), 10)
+            assert (await controller.steer("also check the tests")).ok
+            old = controller._turn_task
+            await controller.interrupt()
+            assert controller.state is SessionState.READY and not old.done(), "the stop ran out of patience"
+            assert controller.take_unadopted() == [("also check the tests", ())], "the words go back to the composer"
+            assert not controller._steers
+            first = controller.transcript.turns[0]
+            assert not [block for block in first.blocks if getattr(block, "steer", False)], "no steer is left waiting in the stopped turn"
+
+            controller.send_prompt("second")
+            await finish_turn(controller)
+            assert "also check the tests" not in str(inputs(fake.requests[1])), "an old instruction must not follow the new message"
+            await asyncio.wait({old}, timeout=10)
             await engine.close_all()
 
     run(go())

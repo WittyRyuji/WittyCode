@@ -187,6 +187,49 @@ def test_a_devin_session_opens_runs_and_reports_its_settings_and_total(tmp_path)
     run(scenario())
 
 
+def test_each_message_to_devin_asks_for_chinese_thinking_until_the_setting_is_off(tmp_path):
+    async def scenario():
+        from desktop.core.language import THINK_CHINESE
+
+        core, _, events, harness = await devin_core(tmp_path)
+        await core.call("settings.set", {"key": "thinkChinese", "value": True})
+        assert core.settings.think_chinese is True and core.settings_view()["thinkChinese"] is True
+        cid = await new_devin(core, events, tmp_path)
+
+        def sent(index):
+            return "".join(block.get("text", "") for block in harness.requests("session/prompt")[index]["prompt"])
+
+        await core.call("session.send", {"id": cid, "text": "hello"})
+        await until(lambda: meta(events, cid).get("mark") == "ready" and answer_of(events, cid).startswith("echo: hello"))
+        assert THINK_CHINESE in sent(-1) and "<wittycode-context>" in sent(-1), "after the typed text, in the block the page never shows"
+        await core.call("settings.set", {"key": "thinkChinese", "value": False})
+        assert core.settings.think_chinese is False and core.settings_view()["thinkChinese"] is False
+        await core.call("session.send", {"id": cid, "text": "again"})
+        await until(lambda: meta(events, cid).get("mark") == "ready" and answer_of(events, cid).startswith("echo: again"))
+        assert THINK_CHINESE not in sent(-1)
+        await core.shutdown()
+
+    run(scenario())
+
+
+def test_the_total_moves_while_a_devin_turn_runs_and_is_not_counted_twice_when_it_ends(tmp_path):
+    async def scenario():
+        core, _, events, harness = await devin_core(tmp_path)
+        cid = await new_devin(core, events, tmp_path)
+        await core.call("session.send", {"id": cid, "text": "[slow] wait"})
+        live = {"input": 900, "output": 10, "cacheWrite": None, "cacheRead": 100}  # (the turn's one model call so far)
+        await until(lambda: meta(events, cid).get("usage") == live)
+        assert meta(events, cid)["mark"] == "running", "the figure is shown while the turn still runs"
+        assert core._by_cid[cid].ledger.total is None, "shown, but not booked before Devin's own figure for the prompt"
+        await core.call("session.stop", {"id": cid})
+        await until(lambda: meta(events, cid).get("mark") == "ready")
+        await asyncio.sleep(0.2)
+        assert meta(events, cid)["usage"] == live, "the prompt's figure takes the place of what was shown: nothing twice"
+        await core.shutdown()
+
+    run(scenario())
+
+
 def test_a_new_session_starts_with_the_default_permission_of_devin_and_remembers_the_one_chosen(tmp_path):
     async def scenario():
         core, _, events, harness = await devin_core(tmp_path)

@@ -22,6 +22,7 @@ import { cancelRun, runTurn, settlePrompt } from "./mock/simulator";
 import { bridge } from "./bridge-instance";
 import { engineLabel, engineOfSource, findModel } from "./lib/models";
 import { handoffOf } from "./lib/handoff";
+import { quitWarning } from "./lib/quit";
 import { effortLabel, permissionsFor, startingLevel } from "./lib/vocab";
 import { COMPACT_AT_DEFAULT, clampCompactAt, emptyLiveData, type LiveData } from "./liveReducer";
 import { LIVE, liveSeed } from "./mode";
@@ -227,6 +228,8 @@ export interface Store extends LiveData {
   /** ChatGPT Plan: summarise a long conversation before it outgrows the model's window (switch), at this percent of it (50 to 95) */
   setCompactAuto: (on: boolean) => void;
   setCompactAt: (percent: number) => void;
+  /** ask every model to write its thinking in Chinese */
+  setThinkChinese: (on: boolean) => void;
   setMemoryState: (state: MemoryState) => void;
   setDroidPath: (p: string) => void;
   setCodexPath: (p: string) => void;
@@ -300,6 +303,7 @@ function mockData(): LiveData {
     memoryEngines: ["droid", "codex", "devin", "chatgpt"],
     compactAuto: true,
     compactAt: COMPACT_AT_DEFAULT,
+    thinkChinese: true,
     lastProject: "",
     memory: { latest: MOCK_MEMORY_LATEST, unseen: 2, seen: MOCK_MEMORY_LATEST - 2, pending: MOCK_PENDING },
     maximized: false,
@@ -741,6 +745,7 @@ export const useStore = create<Store>((set, get) => ({
   setMemoryCurate: (memoryCurate) => set({ memoryCurate }),
   setMemoryEngines: (memoryEngines) => set({ memoryEngines }),
   setCompactAuto: (compactAuto) => set({ compactAuto }),
+  setThinkChinese: (thinkChinese) => set({ thinkChinese }),
   setCompactAt: (percent) => set({ compactAt: clampCompactAt(percent) }),
   setMemoryState: (memory) => set({ memory: { latest: memory.latest, unseen: memory.unseen, seen: memory.seen, pending: memory.pending ?? 0 } }),
   setDroidPath: (droidPath) => set({ droidPath }),
@@ -767,18 +772,12 @@ export const useStore = create<Store>((set, get) => ({
 
 // ------------------------------------------------------------------------------------- questions both modes ask first
 
-/** Closing the window asks first while a session is still working. */
+/** Closing the window asks first while a session is still working, a message waits to be sent or a goal is in progress. */
 export function confirmQuit(close: () => void) {
   const st = useStore.getState();
-  const working = Object.values(st.sessions).filter((s) => s.mark === "running" || s.mark === "attention").length;
-  if (working === 0) return close();
-  st.openDialog({
-    title: "退出 WittyCode？",
-    body: `有 ${working} 个会话还在工作。退出会中断它们正在做的事；下次可以从侧边栏恢复会话。`,
-    confirmLabel: "退出",
-    danger: true,
-    onConfirm: close,
-  });
+  const body = quitWarning(Object.values(st.sessions));
+  if (!body) return close();
+  st.openDialog({ title: "退出 WittyCode？", body, confirmLabel: "退出", danger: true, onConfirm: close });
 }
 
 /** Closing a tab whose turn is running asks first. */

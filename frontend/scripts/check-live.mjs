@@ -178,6 +178,11 @@ const later = await js("document.querySelector('.text.streaming, .block.text-blo
 ok("the answer streams in: the text grows while the turn runs", later > early, [early, later]);
 await page.waitFor("!!document.querySelector('.prompt.perm')", 5000);
 ok("the permission card appears", await js("document.querySelector('.prompt.perm').textContent.includes('创建文件 hello.txt')"));
+ok(
+  "its answers are one per line",
+  await js("(() => { const r = [...document.querySelectorAll('.prompt.perm .pbtns .btn')].map(e => e.getBoundingClientRect()); return r.length > 1 && r.every((b, i) => i === 0 || (b.top >= r[i - 1].bottom - 1 && Math.abs(b.left - r[0].left) < 1)); })()"),
+  await js("[...document.querySelectorAll('.prompt.perm .pbtns .btn')].map(e => { const b = e.getBoundingClientRect(); return [e.textContent, Math.round(b.left), Math.round(b.top)]; })"),
+);
 ok("the turn and the tab say it is waiting", await js("document.querySelector('.turnfoot.live')?.textContent.includes('等待你的确认') && !!document.querySelector('.tab.current .dot-attention')"), await js("[document.querySelector('.turnfoot')?.textContent, document.querySelector('.tab.current').innerHTML]"));
 await shot("permission");
 const promptId = await js("__fake.events.filter(([n]) => n === 'turns').flatMap(([, p]) => p.turns).flatMap(t => t.prompts).at(-1).id");

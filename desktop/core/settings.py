@@ -104,6 +104,8 @@ class AppSettings:
     Off: only when the server has refused a request as too big (a conversation must not get stuck)."""
     chatgpt_compact_at: int = DEFAULT_COMPACT_AT
     """The percent of the window at which that happens (``COMPACT_AT_RANGE``)."""
+    think_chinese: bool = True
+    """Ask every model to write its thinking in Chinese (``core/language``)."""
     mode: str = "auto"
     projects: list[str] = field(default_factory=list)
     max_open_sessions: int = DEFAULT_MAX_OPEN_SESSIONS
@@ -266,6 +268,9 @@ def settings_from_dict(raw: object) -> AppSettings:
     low_at, high_at = COMPACT_AT_RANGE
     if not isinstance(compact_at, int) or isinstance(compact_at, bool) or not low_at <= compact_at <= high_at:
         compact_at = defaults.chatgpt_compact_at
+    think_chinese = raw.get("think_chinese")
+    if not isinstance(think_chinese, bool):
+        think_chinese = defaults.think_chinese
 
     splitter = raw.get("splitter_sizes")
     if not (
@@ -313,6 +318,7 @@ def settings_from_dict(raw: object) -> AppSettings:
         chatgpt_welcomed=chatgpt_welcomed,
         chatgpt_compact=chatgpt_compact,
         chatgpt_compact_at=compact_at,
+        think_chinese=think_chinese,
         mode=text("mode", MODES),
         projects=projects,
         max_open_sessions=max_open,

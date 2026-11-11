@@ -29,6 +29,7 @@ summarised is worse than one that forgot some detail.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -36,6 +37,7 @@ from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from desktop.core.chatgpt.errors import is_transient
 from desktop.core.chatgpt.responses import Finished, Shape, TextDone, build_request, declare_tools, user_message
 
 log = logging.getLogger("desktop.harness.compact")
@@ -434,20 +436,48 @@ OnUsage = Callable[[Any], None]
 """Told the usage of each summary request (they cost tokens like any other)."""
 
 
+RETRY_DELAYS = (1.5, 4.0, 10.0)
+"""Seconds before each repeat of a summary request that failed in a way that may pass (a broken connection, a busy server):
+without them one such failure turned the summary into the digest of what the user asked, and the model lost the rest for good."""
+RETRY_LONGEST = 60.0
+"""The longest ``Retry-After`` of the server that is obeyed."""
+_sleep = asyncio.sleep
+
+
 async def ask(stream: Stream, model: str, reasoning: str | None, previous: str, part: Sequence[str], on_usage: OnUsage | None = None) -> str:
-    texts: list[str] = []
-    async for event in stream(_request(model, reasoning, previous, part)):
-        if isinstance(event, TextDone):
-            texts.append(event.text)
-        elif isinstance(event, Finished):
-            if event.usage is not None and on_usage is not None:
-                on_usage(event.usage)
-            if event.incomplete:
-                raise CompactionFailed(f"the summary was cut short ({event.incomplete})")
-    text = "\n".join(texts).strip()
-    if not text:
-        raise CompactionFailed("the summary came back empty")
-    return text
+    repeats = 0
+    while True:
+        texts: list[str] = []
+        finished = False
+        try:
+            async for event in stream(_request(model, reasoning, previous, part)):
+                if isinstance(event, TextDone):
+                    texts.append(event.text)
+                elif isinstance(event, Finished):
+                    finished = True
+                    if event.usage is not None and on_usage is not None:
+                        on_usage(event.usage)
+                    if event.incomplete:
+                        raise CompactionFailed(f"the summary was cut short ({event.incomplete})")
+        except CompactionFailed:
+            raise
+        except Exception as error:  # (a stop is a CancelledError and passes)
+            # Nothing of a summary is used before it is whole, so asking again is the same request; one whose answer was
+            # finished (and counted) is not asked twice.
+            if finished or repeats >= len(RETRY_DELAYS) or not is_transient(error):
+                raise
+            delay = RETRY_DELAYS[repeats]
+            asked = getattr(error, "retry_after", None)
+            if isinstance(asked, (int, float)) and asked > 0:
+                delay = min(max(float(asked), delay), RETRY_LONGEST)
+            repeats += 1
+            log.warning("the summary request failed (%s); asking again in %.1f s (%d of %d)", error, delay, repeats, len(RETRY_DELAYS))
+            await _sleep(delay)
+            continue
+        text = "\n".join(texts).strip()
+        if not text:
+            raise CompactionFailed("the summary came back empty")
+        return text
 
 
 async def summarise(

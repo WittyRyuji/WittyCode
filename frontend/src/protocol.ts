@@ -73,11 +73,13 @@ export interface SettingsView {
   compactAuto: boolean;
   /** ... when the conversation is this percent of the window (50 to 95) */
   compactAt: number;
+  /** every model is asked to write its thinking in Chinese */
+  thinkChinese?: boolean;
   /** the folder of the conversation started last ("" before the first): the first message box starts there */
   lastProject?: string;
 }
 export type FollowUp = "queue" | "steer";
-export type SettingKey = "theme" | "fontScale" | "followUp" | "maxOpen" | "sidebarWidth" | "droidPath" | "codexPath" | "devinPath" | "memoryEnabled" | "memoryRecall" | "memoryCapture" | "memoryCurate" | "memoryEngines" | "compactAuto" | "compactAt";
+export type SettingKey = "theme" | "fontScale" | "followUp" | "maxOpen" | "sidebarWidth" | "droidPath" | "codexPath" | "devinPath" | "memoryEnabled" | "memoryRecall" | "memoryCapture" | "memoryCurate" | "memoryEngines" | "compactAuto" | "compactAt" | "thinkChinese";
 export type SettingValue = string | number | boolean | string[];
 
 /** What `memory.list` can be narrowed by (all optional). `query`: words to look for; `status` "all" lists forgotten notes too. */
@@ -147,6 +149,8 @@ export interface ConversationMeta {
   handoff: PendingHandoff | null;
   queued: QueuedMessage[];
   agents: AgentInfo[];
+  /** the goal (`/goal`) the conversation is working toward; "" when none */
+  goal?: string;
 }
 
 /** What `app.init` answers, from the application's own cache (`core/cache.py`): the saved sessions, the model list and the

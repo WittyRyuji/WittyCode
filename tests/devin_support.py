@@ -52,6 +52,8 @@ class Harness:
     home: Path
     clients: list[AcpClient] = field(default_factory=list)
     accounts: list[dict[str, Any]] = field(default_factory=list)
+    opened: list[str] = field(default_factory=list)
+    """The pages the engine opened in the browser (``open_external``)."""
 
     def received(self) -> list[dict[str, Any]]:
         path = self.home / "received.jsonl"
@@ -95,6 +97,7 @@ def make_engine(
         client_factory=factory,
         login_timeout=login_timeout,
         cli_env=environment,
+        open_url=harness.opened.append,
     )
     harness.engine.add_account_listener(harness.accounts.append)
     _ENGINES.append(harness.engine)

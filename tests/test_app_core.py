@@ -1289,7 +1289,7 @@ def make_core_with_real_codex(tmp_path, *, account="chatgpt"):
 
     project = tmp_path / "proj"
     project.mkdir(exist_ok=True)
-    settings = AppSettings(default_model="claude-haiku-5-5", reasoning_effort="low")
+    settings = AppSettings(default_model="claude-haiku-5-5", reasoning_effort="low", think_chinese=False)  # (as make_core)
     settings.add_project(project)
     factory = FakeFactory()
     factory.models = [

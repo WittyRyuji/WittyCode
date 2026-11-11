@@ -249,6 +249,24 @@ def test_a_goal_goes_on_by_itself_until_the_model_says_it_is_done_and_each_round
             assert any(b["kind"] == "notice" and "目标完成了（用了 2 轮）" in b["text"] for b in shown)
             assert any(b["kind"] == "notice" and b["text"].startswith("目标已设定：make the tests pass") for b in all_blocks(events, cid))
             assert core._by_cid[cid].goal is None
+            assert meta(events, cid)["goal"] == "", "done: the page shows no goal any more"
+            await core.shutdown()
+
+    run(scenario())
+
+
+def test_the_page_knows_a_goal_is_in_progress_and_when_it_is_called_off(tmp_path):
+    async def scenario():
+        with FakeApi() as api:
+            core, _, events, _, _ = await api_core(tmp_path, api)
+            cid = await new_session(core, events, tmp_path, api_model_id(events))
+            conv = core._by_cid[cid]
+            conv.goal = goals.Goal("ship it")  # (between two rounds: the session is idle and the goal goes on)
+            conv.dirty = True
+            core._flush(conv)
+            assert meta(events, cid)["goal"] == "ship it", "closing the window warns about it"
+            assert await core.call("session.goal", {"id": cid, "text": "off"}) == {"ok": True, "text": "目标已取消。"}
+            await until(lambda: meta(events, cid).get("goal") == "")
             await core.shutdown()
 
     run(scenario())

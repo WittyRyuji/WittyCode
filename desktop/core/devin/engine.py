@@ -24,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import webbrowser
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -157,10 +158,12 @@ class DevinEngine:
         clock: Callable[[], float] = time.time,
         login_timeout: float = LOGIN_TIMEOUT_SECONDS,
         cli_env: Mapping[str, str] | None = None,
+        open_url: Callable[[str], Any] | None = None,
     ) -> None:
         self.settings = settings
         self._locate: Locate = locate if locate is not None else locate_devin
         self._client_factory: ClientFactory = client_factory if client_factory is not None else default_client_factory
+        self._open_url = open_url if open_url is not None else webbrowser.open
         self._clock = clock
         self.login_timeout = login_timeout
         self._cli_env = dict(cli_env) if cli_env is not None else None
@@ -275,7 +278,13 @@ class DevinEngine:
                     "initialize",
                     {
                         "protocolVersion": 1,
-                        "clientCapabilities": {"fs": {"readTextFile": False, "writeTextFile": False}, "terminal": False},
+                        # ``elicitation``: Devin asks the user questions (its ``ask_user_question``) only of a client that
+                        # says it can show them (ACP: each mode named explicitly); without it Devin never asks.
+                        "clientCapabilities": {
+                            "fs": {"readTextFile": False, "writeTextFile": False},
+                            "terminal": False,
+                            "elicitation": {"form": {}, "url": {}},
+                        },
                         "clientInfo": dict(CLIENT_INFO),
                     },
                     timeout=INITIALIZE_SECONDS,
@@ -463,6 +472,11 @@ class DevinEngine:
         folder = Path(tempfile.gettempdir()) / "WittyCode" / "devin-scratch"
         folder.mkdir(parents=True, exist_ok=True)
         return str(folder)
+
+    def open_external(self, url: str) -> None:
+        """Open a page in the user's browser, after the user agreed to (a URL-mode elicitation: a sign-in Devin asks for)."""
+        if url.lower().startswith(("http://", "https://")):
+            self._open_url(url)
 
     async def list_models(self, *, refresh: bool = False) -> list[DevinModel]:
         """The account's models, with the thought levels each offers (cached; ``refresh`` asks again).

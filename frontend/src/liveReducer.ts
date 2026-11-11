@@ -63,6 +63,8 @@ export interface LiveData {
   /** ChatGPT Plan: summarise the early part of a long conversation at this percent of the model's window (off: only after the server refuses) */
   compactAuto: boolean;
   compactAt: number;
+  /** every model is asked to write its thinking in Chinese */
+  thinkChinese: boolean;
   /** the folder of the conversation started last: where the first message box starts when nothing else was chosen */
   lastProject: string;
   /** the newest change of the shared memory, and how many by agents the user has not looked at (the badge) */
@@ -137,6 +139,7 @@ export function emptyLiveData(theme: ThemeChoice = "system", fontScale: FontScal
     memoryEngines: [...ALL_ENGINES],
     compactAuto: true,
     compactAt: COMPACT_AT_DEFAULT,
+    thinkChinese: true,
     lastProject: "",
     memory: { ...NO_MEMORY },
     maximized: false,
@@ -219,6 +222,7 @@ export function settingsFields(v: SettingsView): Partial<LiveData> {
     memoryEngines: v.memoryEngines ?? [...ALL_ENGINES],
     compactAuto: v.compactAuto ?? true,
     compactAt: v.compactAt ?? COMPACT_AT_DEFAULT,
+    thinkChinese: v.thinkChinese ?? true,
     lastProject: v.lastProject ?? "",
   };
 }
