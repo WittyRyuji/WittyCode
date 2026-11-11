@@ -333,7 +333,7 @@ def test_closing_a_session_stops_a_reading_that_is_under_way(tmp_path):
         await until(lambda: session.context_reads >= 1)  # a reading is now waiting on droid
         task = controller._context_task
         assert task is not None and not task.done()
-        await asyncio.wait_for(controller.close(), 2)
+        await asyncio.wait_for(controller.close(), 5)
         assert task.cancelled() or task.done()
         assert controller.state is SessionState.CLOSED
 

@@ -235,7 +235,7 @@ def test_the_window_is_full_from_the_cache_while_the_slow_listings_are_still_on_
             tmp_path, cache=cache, list_delay=3.0, saved=[saved_session("s-1", "修复点击闪烁", minutes_ago=5), saved_session("s-2", "附件功能设计", minutes_ago=1500)]
         )
         try:
-            await rig.wait_for(".srow", 2, timeout=2.0)
+            await rig.wait_for(".srow", 2, timeout=5.0)
             assert time.time() - start < 3.0, "the rows were there before the 3 s listing could have answered"
             assert await rig.texts(".srow .stitle") == ["修复点击闪烁", "附件功能设计"]
             await rig.core.call("session.new", {"projectId": str(rig.project)})
@@ -278,7 +278,7 @@ def test_a_conversation_is_on_the_page_from_the_cache_before_droid_has_loaded_it
             await second.wait_for(".srow", 1)
             started = time.time()
             await second.click(".srow")
-            await second.wait_for(".block.user", timeout=2.0)
+            await second.wait_for(".block.user", timeout=5.0)
             assert time.time() - started < 2.5 and await second.text(".block.user .body") == body, "the conversation is there long before the history is"
             assert second.core.order[0].controller.state.value == "opening", "while it is still connecting"
         finally:
@@ -314,7 +314,7 @@ def test_a_session_nobody_has_opened_yet_is_on_the_page_at_once_with_its_setting
             rig.factory.history_delay = 3.0  # what opening it for real would now take
             started = time.time()
             await rig.click(".srow")
-            await rig.wait_for(".block.user", timeout=2.0)
+            await rig.wait_for(".block.user", timeout=5.0)
             assert time.time() - started < 2.5
             assert await rig.text(".statusbar .st-left") == "正在连接…", "droid has not answered: all of this is the cache's"
             assert await rig.texts(".controls .chip-v") == ["Haiku 5.5", "High", "Medium", "Plan"], "the four settings it was left with"

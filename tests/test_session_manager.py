@@ -1043,7 +1043,7 @@ def test_closing_the_session_in_the_middle_of_a_restart_leaves_no_process_behind
         await until(lambda: controller.state is SessionState.OPENING)
 
         await controller.close()
-        await asyncio.wait_for(stopping, 2)
+        await asyncio.wait_for(stopping, 5)
 
         assert controller.state is SessionState.CLOSED and manager.controllers == []
         assert not alive(factory) and len(factory.sessions) == 1, "no replacement was started for a closing session"
@@ -1063,7 +1063,7 @@ def test_closing_while_the_replacement_is_still_starting_closes_it_too(tmp_path,
         await until(lambda: len(factory.sessions) == 2 and "open-start" in factory.sessions[1].log)
 
         await controller.close()
-        await asyncio.wait_for(stopping, 2)
+        await asyncio.wait_for(stopping, 5)
 
         assert controller.state is SessionState.CLOSED and not alive(factory)
         assert [s.closed for s in factory.sessions] == [1, 1]

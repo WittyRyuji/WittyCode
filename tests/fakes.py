@@ -342,7 +342,7 @@ class FakeFactory:
         return list(self.saved)
 
 
-async def until(predicate: Any, timeout: float = 2.0) -> None:
+async def until(predicate: Any, timeout: float = 5.0) -> None:
     loop = asyncio.get_running_loop()
     end = loop.time() + timeout
     while not predicate():

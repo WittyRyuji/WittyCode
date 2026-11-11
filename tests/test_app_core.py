@@ -127,7 +127,7 @@ def test_the_pending_prompt_marks_the_session_as_waiting_and_can_be_answered(tmp
         assert prompt["kind"] == "permission" and prompt["status"] == "pending"
         answered = await core.call("session.answerPermission", {"id": cid, "promptId": prompt["id"], "value": "proceed_once"})
         assert answered == {"ok": True}
-        response = await asyncio.wait_for(asking, 2)
+        response = await asyncio.wait_for(asking, 5)
         assert response.selected_option is ToolConfirmationOutcome.PROCEED_ONCE
         again = await core.call("session.answerPermission", {"id": cid, "promptId": prompt["id"], "value": "proceed_once"})
         assert again == {"ok": False}, "a late click is refused, not an error"

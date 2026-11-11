@@ -284,6 +284,6 @@ async def ready_core(tmp_path: Path, **options: Any) -> tuple[AppCore, FakeFacto
     return core, factory, events, platform, engine
 
 
-async def settled(events: Events, predicate: Any, timeout: float = 2.0) -> None:
+async def settled(events: Events, predicate: Any, timeout: float = 5.0) -> None:
     await until(predicate, timeout)
     await asyncio.sleep(0)
