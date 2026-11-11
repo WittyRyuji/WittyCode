@@ -1,0 +1,165 @@
+{
+ "results": {
+  "A": {
+   "session_id": "1aa6b7c4-cd7c-4ab1-9edf-58aca18d9b00",
+   "message_count": 7,
+   "is_agent_loop_in_progress": false,
+   "found": {
+    "X": true,
+    "Y": false,
+    "Z": false,
+    "payload_interrupt": false,
+    "payload_cancel": false,
+    "c1": false,
+    "c2": false,
+    "c3": false,
+    "rw": false
+   },
+   "unexpected": [],
+   "missing_expected": [],
+   "soft_missing": [],
+   "pass": true
+  },
+  "B": {
+   "session_id": "4fa14d1b-3f90-4c26-801a-264091d568a8",
+   "message_count": 5,
+   "is_agent_loop_in_progress": false,
+   "found": {
+    "X": false,
+    "Y": true,
+    "Z": false,
+    "payload_interrupt": false,
+    "payload_cancel": false,
+    "c1": false,
+    "c2": false,
+    "c3": false,
+    "rw": false
+   },
+   "unexpected": [],
+   "missing_expected": [],
+   "soft_missing": [],
+   "pass": true
+  },
+  "A_fork": {
+   "session_id": "c2e621a2-9653-471a-ae9d-3af26e6917bc",
+   "message_count": 9,
+   "is_agent_loop_in_progress": false,
+   "found": {
+    "X": true,
+    "Y": false,
+    "Z": true,
+    "payload_interrupt": false,
+    "payload_cancel": false,
+    "c1": false,
+    "c2": false,
+    "c3": false,
+    "rw": false
+   },
+   "unexpected": [],
+   "missing_expected": [],
+   "soft_missing": [],
+   "pass": true
+  },
+  "C": {
+   "session_id": "cb4d58c7-3f5d-4d2c-a265-313d8ebeead6",
+   "message_count": 3,
+   "is_agent_loop_in_progress": false,
+   "found": {
+    "X": false,
+    "Y": false,
+    "Z": false,
+    "payload_interrupt": false,
+    "payload_cancel": false,
+    "c1": false,
+    "c2": false,
+    "c3": false,
+    "rw": false
+   },
+   "unexpected": [],
+   "missing_expected": [],
+   "soft_missing": [],
+   "pass": true
+  },
+  "actions": {
+   "session_id": "9c43d878-4882-469a-aba1-e4899fb2b4d7",
+   "message_count": 11,
+   "is_agent_loop_in_progress": false,
+   "found": {
+    "X": false,
+    "Y": false,
+    "Z": false,
+    "payload_interrupt": true,
+    "payload_cancel": true,
+    "c1": false,
+    "c2": false,
+    "c3": false,
+    "rw": false
+   },
+   "unexpected": [],
+   "missing_expected": [],
+   "soft_missing": [],
+   "pass": true
+  },
+  "compact_succ": {
+   "session_id": "a9ee4ded-8549-4608-b06f-ff3433db83e7",
+   "message_count": 6,
+   "is_agent_loop_in_progress": false,
+   "found": {
+    "X": false,
+    "Y": false,
+    "Z": false,
+    "payload_interrupt": false,
+    "payload_cancel": false,
+    "c1": true,
+    "c2": true,
+    "c3": true,
+    "rw": false
+   },
+   "unexpected": [],
+   "missing_expected": [],
+   "soft_missing": [],
+   "pass": true
+  },
+  "rewind_src": {
+   "session_id": "fe6c09d1-8b0e-477e-bbbe-854f6124828e",
+   "message_count": 5,
+   "is_agent_loop_in_progress": false,
+   "found": {
+    "X": false,
+    "Y": false,
+    "Z": false,
+    "payload_interrupt": false,
+    "payload_cancel": false,
+    "c1": false,
+    "c2": false,
+    "c3": false,
+    "rw": true
+   },
+   "unexpected": [],
+   "missing_expected": [],
+   "soft_missing": [],
+   "pass": true
+  },
+  "rewind_succ": {
+   "session_id": "6e57ddaf-54e5-4172-996a-70f5f8355b70",
+   "message_count": 4,
+   "is_agent_loop_in_progress": false,
+   "found": {
+    "X": false,
+    "Y": false,
+    "Z": false,
+    "payload_interrupt": false,
+    "payload_cancel": false,
+    "c1": false,
+    "c2": false,
+    "c3": false,
+    "rw": false
+   },
+   "unexpected": [],
+   "missing_expected": [],
+   "soft_missing": [],
+   "pass": true
+  }
+ },
+ "pass": true
+}

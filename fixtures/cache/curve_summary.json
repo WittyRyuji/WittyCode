@@ -1,0 +1,279 @@
+{
+ "session_id": "df98eee8-93cd-4f45-b24a-2454a22dd698",
+ "model": "claude-haiku-5-5",
+ "reasoning": "low",
+ "pid": null,
+ "idle_seconds": 360.0,
+ "turns": [
+  {
+   "n": 1,
+   "prompt": "Reply with exactly: p1",
+   "subtype": "success",
+   "success": true,
+   "reply": "p1",
+   "duration_s": 3.652,
+   "usage": {
+    "_type": "Usage",
+    "input_tokens": 347,
+    "output_tokens": 9,
+    "cache_creation_tokens": 3090,
+    "cache_read_tokens": 14492,
+    "thinking_tokens": 0,
+    "factory_credits": 362.0
+   }
+  },
+  {
+   "n": 2,
+   "prompt": "Reply with exactly: p2",
+   "subtype": "success",
+   "success": true,
+   "reply": "p2",
+   "duration_s": 2.002,
+   "usage": {
+    "_type": "Usage",
+    "input_tokens": 4,
+    "output_tokens": 4,
+    "cache_creation_tokens": 16,
+    "cache_read_tokens": 17582,
+    "thinking_tokens": 0,
+    "factory_credits": 73.0
+   }
+  },
+  {
+   "n": 3,
+   "prompt": "Reply with exactly: p3",
+   "subtype": "success",
+   "success": true,
+   "reply": "p3",
+   "duration_s": 1.928,
+   "usage": {
+    "_type": "Usage",
+    "input_tokens": 4,
+    "output_tokens": 4,
+    "cache_creation_tokens": 16,
+    "cache_read_tokens": 17598,
+    "thinking_tokens": 0,
+    "factory_credits": 73.0
+   }
+  },
+  {
+   "n": 4,
+   "prompt": "Reply with exactly: p4",
+   "subtype": "success",
+   "success": true,
+   "reply": "p4",
+   "duration_s": 8.274,
+   "usage": {
+    "_type": "Usage",
+    "input_tokens": 4,
+    "output_tokens": 4,
+    "cache_creation_tokens": 3138,
+    "cache_read_tokens": 14492,
+    "thinking_tokens": 0,
+    "factory_credits": 216.0
+   }
+  }
+ ],
+ "tracker": {
+  "usage_events": [
+   {
+    "t": 5.53,
+    "tokenUsage": {
+     "inputTokens": 0,
+     "outputTokens": 0,
+     "cacheCreationTokens": 0,
+     "cacheReadTokens": 0,
+     "thinkingTokens": 0,
+     "factoryCredits": 0
+    },
+    "lastCallTokenUsage": {
+     "inputTokens": 343,
+     "outputTokens": 5,
+     "cacheReadTokens": 0
+    }
+   },
+   {
+    "t": 5.683,
+    "tokenUsage": {
+     "inputTokens": 343,
+     "outputTokens": 5,
+     "cacheCreationTokens": 0,
+     "cacheReadTokens": 0,
+     "thinkingTokens": 0,
+     "factoryCredits": 148
+    },
+    "lastCallTokenUsage": {
+     "inputTokens": 343,
+     "outputTokens": 5,
+     "cacheReadTokens": 0
+    }
+   },
+   {
+    "t": 6.459,
+    "tokenUsage": {
+     "inputTokens": 347,
+     "outputTokens": 9,
+     "cacheCreationTokens": 3090,
+     "cacheReadTokens": 14492,
+     "thinkingTokens": 0,
+     "factoryCredits": 362
+    },
+    "lastCallTokenUsage": {
+     "inputTokens": 3094,
+     "outputTokens": 4,
+     "cacheReadTokens": 14492
+    }
+   },
+   {
+    "t": 8.465,
+    "tokenUsage": {
+     "inputTokens": 351,
+     "outputTokens": 13,
+     "cacheCreationTokens": 3106,
+     "cacheReadTokens": 32074,
+     "thinkingTokens": 0,
+     "factoryCredits": 435
+    },
+    "lastCallTokenUsage": {
+     "inputTokens": 20,
+     "outputTokens": 4,
+     "cacheReadTokens": 17582
+    }
+   },
+   {
+    "t": 10.399,
+    "tokenUsage": {
+     "inputTokens": 355,
+     "outputTokens": 17,
+     "cacheCreationTokens": 3122,
+     "cacheReadTokens": 49672,
+     "thinkingTokens": 0,
+     "factoryCredits": 508
+    },
+    "lastCallTokenUsage": {
+     "inputTokens": 20,
+     "outputTokens": 4,
+     "cacheReadTokens": 17598
+    }
+   },
+   {
+    "t": 378.64,
+    "tokenUsage": {
+     "inputTokens": 355,
+     "outputTokens": 17,
+     "cacheCreationTokens": 3122,
+     "cacheReadTokens": 49672,
+     "thinkingTokens": 0,
+     "factoryCredits": 508
+    },
+    "lastCallTokenUsage": {
+     "inputTokens": 3142,
+     "outputTokens": 4,
+     "cacheReadTokens": 14492
+    }
+   },
+   {
+    "t": 378.691,
+    "tokenUsage": {
+     "inputTokens": 359,
+     "outputTokens": 21,
+     "cacheCreationTokens": 6260,
+     "cacheReadTokens": 64164,
+     "thinkingTokens": 0,
+     "factoryCredits": 724
+    },
+    "lastCallTokenUsage": {
+     "inputTokens": 3142,
+     "outputTokens": 4,
+     "cacheReadTokens": 14492
+    }
+   }
+  ],
+  "turn_results": [
+   {
+    "t": 6.459,
+    "reason": "completed",
+    "tokenUsage": {
+     "inputTokens": 347,
+     "outputTokens": 9,
+     "cacheCreationTokens": 3090,
+     "cacheReadTokens": 14492,
+     "thinkingTokens": 0,
+     "factoryCredits": 362
+    },
+    "cumulativeTokenUsage": {
+     "inputTokens": 347,
+     "outputTokens": 9,
+     "cacheCreationTokens": 3090,
+     "cacheReadTokens": 14492,
+     "thinkingTokens": 0,
+     "factoryCredits": 362
+    },
+    "durationMs": 3652
+   },
+   {
+    "t": 8.466,
+    "reason": "completed",
+    "tokenUsage": {
+     "inputTokens": 4,
+     "outputTokens": 4,
+     "cacheCreationTokens": 16,
+     "cacheReadTokens": 17582,
+     "thinkingTokens": 0,
+     "factoryCredits": 73
+    },
+    "cumulativeTokenUsage": {
+     "inputTokens": 351,
+     "outputTokens": 13,
+     "cacheCreationTokens": 3106,
+     "cacheReadTokens": 32074,
+     "thinkingTokens": 0,
+     "factoryCredits": 435
+    },
+    "durationMs": 2002
+   },
+   {
+    "t": 10.399,
+    "reason": "completed",
+    "tokenUsage": {
+     "inputTokens": 4,
+     "outputTokens": 4,
+     "cacheCreationTokens": 16,
+     "cacheReadTokens": 17598,
+     "thinkingTokens": 0,
+     "factoryCredits": 73
+    },
+    "cumulativeTokenUsage": {
+     "inputTokens": 355,
+     "outputTokens": 17,
+     "cacheCreationTokens": 3122,
+     "cacheReadTokens": 49672,
+     "thinkingTokens": 0,
+     "factoryCredits": 508
+    },
+    "durationMs": 1928
+   },
+   {
+    "t": 378.692,
+    "reason": "completed",
+    "tokenUsage": {
+     "inputTokens": 4,
+     "outputTokens": 4,
+     "cacheCreationTokens": 3138,
+     "cacheReadTokens": 14492,
+     "thinkingTokens": 0,
+     "factoryCredits": 216
+    },
+    "cumulativeTokenUsage": {
+     "inputTokens": 359,
+     "outputTokens": 21,
+     "cacheCreationTokens": 6260,
+     "cacheReadTokens": 64164,
+     "thinkingTokens": 0,
+     "factoryCredits": 724
+    },
+    "durationMs": 8274
+   }
+  ]
+ }
+}

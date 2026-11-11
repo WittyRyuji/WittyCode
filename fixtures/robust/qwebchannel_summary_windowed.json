@@ -1,0 +1,16 @@
+{
+  "platform": "windows",
+  "load_ok": true,
+  "load_s": 0.026,
+  "echo_result": "pong:hello-from-js",
+  "bridge_calls": [
+    "hello-from-js"
+  ],
+  "turn_subtype": "success",
+  "turn_text": "webchannel webchannel webchannel webchannel webchannel",
+  "deltas_pushed": 3,
+  "page_chunks": 3.0,
+  "page_joined": "webchannel webchannel webchannel webchannel webchannel",
+  "js_error": "",
+  "js_matches_turn": true
+}

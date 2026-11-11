@@ -1,0 +1,37 @@
+/* ---------------------------------------------------------------- a file the conversation named, in the right-hand panel */
+.filepanel { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--bg); border-left: 1px solid var(--line-strong); }
+.fp-head { display: flex; align-items: center; gap: 4px; padding: 8px 8px 8px 14px; border-bottom: 1px solid var(--line); }
+.fp-icon { flex: none; color: var(--muted); margin-right: 6px; }
+.fp-title { flex: 1; min-width: 0; margin-right: 4px; }
+.fp-name { font-weight: 700; font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fp-dir { font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fp-facts { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 14px; padding: 6px 14px; font-size: 11.5px; color: var(--muted); border-bottom: 1px solid var(--line); }
+.fp-facts .linkbtn { font-size: 11.5px; padding: 0; margin-left: auto; }
+.fp-note { padding: 6px 14px; font-size: 12px; color: var(--fg-2); background: var(--accent-soft); border-bottom: 1px solid var(--line); }
+.fp-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.fp-scroll { flex: 1; min-height: 0; overflow: auto; }
+.fp-rows { position: relative; display: flex; min-width: max-content; min-height: 100%; font: var(--fs-code) / 20px var(--font-mono); tab-size: 4; }
+.fp-gutter, .fp-text { margin: 0; padding: 8px 0; font: inherit; white-space: pre; }
+.fp-gutter { position: sticky; left: 0; z-index: 1; flex: none; min-width: 3.4em; padding: 8px 10px 8px 12px; text-align: right; color: var(--muted); background: var(--bg); border-right: 1px solid var(--line); user-select: none; }
+.fp-text { position: relative; flex: 1; padding: 8px 18px 8px 14px; }
+.fp-text code { font: inherit; background: none; padding: 0; }
+.fp-mark { position: absolute; left: 0; right: 0; z-index: 0; background: var(--mark-bg); pointer-events: none; }
+.fp-doc { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 18px 32px; }
+.fp-state { padding: 18px 16px; font-size: 12.5px; color: var(--muted); display: flex; align-items: center; gap: 8px; }
+.fp-state.fp-error { flex-direction: column; align-items: flex-start; color: var(--fg); }
+.fp-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+
+/* a path in the conversation: code (a bare path) or a link (a path with words of its own) that can be clicked */
+.text .pathref { cursor: pointer; text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px; }
+.text code.pathref { text-decoration-style: dotted; }
+.text .pathref:hover, .text .pathref:focus-visible { text-decoration-style: solid; outline: none; }
+.text code.pathref:hover, .text code.pathref:focus-visible { background: var(--hover); }
+.fp-pdf { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.fp-pages { flex: 1; min-height: 0; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px; background: var(--bg-side); }
+.fp-sheet { position: relative; flex: none; width: 100%; background: #fff; border: 1px solid var(--line-strong); box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18); }
+.fp-sheet img { display: block; width: 100%; height: 100%; user-select: none; }
+.fp-wait { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 12px; color: #777; background: none; border: 0; }
+.fp-pagepill { position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); padding: 2px 11px; font-size: 11.5px; color: var(--fg); background: var(--bg-raised); border: 1px solid var(--line-strong); border-radius: 999px; pointer-events: none; }
+.fp-picture { flex: 1; min-height: 0; overflow: auto; display: flex; padding: 12px; background: var(--bg-side); }
+.fp-picture img { margin: auto; max-width: 100%; max-height: 100%; object-fit: contain; cursor: zoom-in; background: repeating-conic-gradient(#d8d8d8 0% 25%, #fff 0% 50%) 50% / 16px 16px; }
+.fp-picture.actual img { max-width: none; max-height: none; cursor: zoom-out; }

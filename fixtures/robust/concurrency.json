@@ -1,0 +1,4334 @@
+{
+  "environment": {
+    "sdk_version": "0.5.0",
+    "droid_executable": "C:\\Users\\me\\AppData\\Local\\Factory\\app-0.208.0\\resources\\bin\\droid.exe",
+    "droid_version": "0.251.0",
+    "python": "3.11.9",
+    "platform": "Windows-10-10.0.26200-SP0",
+    "factory_api_key_env_set": false,
+    "model": "claude-haiku-5-5",
+    "reasoning": "low",
+    "ticks": 8,
+    "idle_s": 300.0,
+    "python_pid": 53792
+  },
+  "process_model": {},
+  "levels": {
+    "1": {
+      "wall_s": 26.15,
+      "sessions": [
+        {
+          "label": "n1_s1",
+          "cwd": "C:\\Users\\me\\code\\wittycode\\sandbox\\robust\\conc\\n1_s1",
+          "open_s": 3.403,
+          "session_id": "cce926d4-3398-4d2e-8a43-2fab22a76e23",
+          "droid_pid": 7632,
+          "droid_ppid": 53792,
+          "python_pid": 53792,
+          "mem_before_turn": {
+            "alive": true,
+            "members": 1,
+            "rss_mb": 272.0,
+            "private_mb": 504.5,
+            "member_list": [
+              {
+                "pid": 7632,
+                "exe": "droid.exe",
+                "rss_mb": 272.0
+              }
+            ]
+          },
+          "turn_s": 17.567,
+          "first_event_s": 0.0039,
+          "first_tool_progress_s": 6.7572,
+          "mem_after_turn": {
+            "alive": true,
+            "members": 1,
+            "rss_mb": 283.3,
+            "private_mb": 473.9,
+            "member_list": [
+              {
+                "pid": 7632,
+                "exe": "droid.exe",
+                "rss_mb": 283.3
+              }
+            ]
+          },
+          "peak_during_turn": {
+            "rss": 452.3,
+            "private": 592.3,
+            "members": 5
+          },
+          "error": null,
+          "result": {
+            "type": "RunSuccess",
+            "subtype": "success",
+            "success": true,
+            "credits": 505.0,
+            "text": "done"
+          },
+          "tool_progress_events": [
+            {
+              "turn_t": 6.76,
+              "type": "status",
+              "text_len": 0,
+              "text": "",
+              "full_output_len": 0,
+              "value_snippet": null,
+              "terminal_id": "787bb003-2de4-4a08-8d22-96e8155b360c"
+            },
+            {
+              "turn_t": 7.17,
+              "type": "status",
+              "text_len": 8,
+              "text": "\ntick 1\r",
+              "full_output_len": 8,
+              "value_snippet": null,
+              "terminal_id": "787bb003-2de4-4a08-8d22-96e8155b360c"
+            },
+            {
+              "turn_t": 8.19,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 1\r\ntick 2\r",
+              "full_output_len": 16,
+              "value_snippet": null,
+              "terminal_id": "787bb003-2de4-4a08-8d22-96e8155b360c"
+            },
+            {
+              "turn_t": 9.21,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 2\r\ntick 3\r",
+              "full_output_len": 24,
+              "value_snippet": null,
+              "terminal_id": "787bb003-2de4-4a08-8d22-96e8155b360c"
+            },
+            {
+              "turn_t": 10.18,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 3\r\ntick 4\r",
+              "full_output_len": 32,
+              "value_snippet": null,
+              "terminal_id": "787bb003-2de4-4a08-8d22-96e8155b360c"
+            },
+            {
+              "turn_t": 11.2,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 4\r\ntick 5\r",
+              "full_output_len": 40,
+              "value_snippet": null,
+              "terminal_id": "787bb003-2de4-4a08-8d22-96e8155b360c"
+            },
+            {
+              "turn_t": 12.18,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 5\r\ntick 6\r",
+              "full_output_len": 48,
+              "value_snippet": null,
+              "terminal_id": "787bb003-2de4-4a08-8d22-96e8155b360c"
+            },
+            {
+              "turn_t": 13.2,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 6\r\ntick 7\r",
+              "full_output_len": 56,
+              "value_snippet": null,
+              "terminal_id": "787bb003-2de4-4a08-8d22-96e8155b360c"
+            },
+            {
+              "turn_t": 14.22,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 7\r\ntick 8\r",
+              "full_output_len": 64,
+              "value_snippet": null,
+              "terminal_id": "787bb003-2de4-4a08-8d22-96e8155b360c"
+            },
+            {
+              "turn_t": 15.05,
+              "type": "status",
+              "text_len": 0,
+              "text": "",
+              "full_output_len": 64,
+              "value_snippet": null,
+              "terminal_id": "787bb003-2de4-4a08-8d22-96e8155b360c"
+            }
+          ],
+          "event_counts": {
+            "1": {
+              "WorkingStateChanged": 9,
+              "UserMessage": 2,
+              "TokenUsageUpdate": 6,
+              "SessionTitleUpdated": 1,
+              "ToolCallDelta": 4,
+              "ToolCall": 1,
+              "AssistantMessage": 2,
+              "PermissionResolved": 1,
+              "ToolProgress": 10,
+              "ToolResult": 1,
+              "TextDelta": 1,
+              "TextComplete": 1,
+              "RunSuccess": 1
+            }
+          },
+          "droid_gone_within_s": 0.5,
+          "droid_alive_final": false
+        }
+      ],
+      "new_droid_pids": [],
+      "new_droid_ppids": [],
+      "turn_times_s": [
+        17.567
+      ]
+    },
+    "3": {
+      "wall_s": 32.88,
+      "sessions": [
+        {
+          "label": "n3_s1",
+          "cwd": "C:\\Users\\me\\code\\wittycode\\sandbox\\robust\\conc\\n3_s1",
+          "open_s": 6.088,
+          "session_id": "69dbd4b8-5e88-4cee-9365-af3fb19ae404",
+          "droid_pid": 44044,
+          "droid_ppid": 53792,
+          "python_pid": 53792,
+          "mem_before_turn": {
+            "alive": true,
+            "members": 1,
+            "rss_mb": 275.3,
+            "private_mb": 535.1,
+            "member_list": [
+              {
+                "pid": 44044,
+                "exe": "droid.exe",
+                "rss_mb": 275.3
+              }
+            ]
+          },
+          "turn_s": 21.622,
+          "first_event_s": 0.0038,
+          "first_tool_progress_s": 8.2593,
+          "mem_after_turn": {
+            "alive": true,
+            "members": 1,
+            "rss_mb": 279.9,
+            "private_mb": 485.9,
+            "member_list": [
+              {
+                "pid": 44044,
+                "exe": "droid.exe",
+                "rss_mb": 279.9
+              }
+            ]
+          },
+          "peak_during_turn": {
+            "rss": 461.4,
+            "private": 631.6,
+            "members": 5
+          },
+          "error": null,
+          "result": {
+            "type": "RunSuccess",
+            "subtype": "success",
+            "success": true,
+            "credits": 507.0,
+            "text": "done"
+          },
+          "tool_progress_events": [
+            {
+              "turn_t": 8.26,
+              "type": "status",
+              "text_len": 0,
+              "text": "",
+              "full_output_len": 0,
+              "value_snippet": null,
+              "terminal_id": "969f0893-6db7-4ae7-9f35-00078a44ecda"
+            },
+            {
+              "turn_t": 8.67,
+              "type": "status",
+              "text_len": 8,
+              "text": "\ntick 1\r",
+              "full_output_len": 8,
+              "value_snippet": null,
+              "terminal_id": "969f0893-6db7-4ae7-9f35-00078a44ecda"
+            },
+            {
+              "turn_t": 9.7,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 1\r\ntick 2\r",
+              "full_output_len": 16,
+              "value_snippet": null,
+              "terminal_id": "969f0893-6db7-4ae7-9f35-00078a44ecda"
+            },
+            {
+              "turn_t": 10.67,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 2\r\ntick 3\r",
+              "full_output_len": 24,
+              "value_snippet": null,
+              "terminal_id": "969f0893-6db7-4ae7-9f35-00078a44ecda"
+            },
+            {
+              "turn_t": 11.69,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 3\r\ntick 4\r",
+              "full_output_len": 32,
+              "value_snippet": null,
+              "terminal_id": "969f0893-6db7-4ae7-9f35-00078a44ecda"
+            },
+            {
+              "turn_t": 12.71,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 4\r\ntick 5\r",
+              "full_output_len": 40,
+              "value_snippet": null,
+              "terminal_id": "969f0893-6db7-4ae7-9f35-00078a44ecda"
+            },
+            {
+              "turn_t": 13.68,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 5\r\ntick 6\r",
+              "full_output_len": 48,
+              "value_snippet": null,
+              "terminal_id": "969f0893-6db7-4ae7-9f35-00078a44ecda"
+            },
+            {
+              "turn_t": 14.7,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 6\r\ntick 7\r",
+              "full_output_len": 56,
+              "value_snippet": null,
+              "terminal_id": "969f0893-6db7-4ae7-9f35-00078a44ecda"
+            },
+            {
+              "turn_t": 15.72,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 7\r\ntick 8\r",
+              "full_output_len": 64,
+              "value_snippet": null,
+              "terminal_id": "969f0893-6db7-4ae7-9f35-00078a44ecda"
+            },
+            {
+              "turn_t": 16.55,
+              "type": "status",
+              "text_len": 0,
+              "text": "",
+              "full_output_len": 64,
+              "value_snippet": null,
+              "terminal_id": "969f0893-6db7-4ae7-9f35-00078a44ecda"
+            }
+          ],
+          "event_counts": {
+            "1": {
+              "WorkingStateChanged": 9,
+              "UserMessage": 2,
+              "TokenUsageUpdate": 6,
+              "SessionTitleUpdated": 1,
+              "ToolCallDelta": 4,
+              "ToolCall": 1,
+              "AssistantMessage": 2,
+              "PermissionResolved": 1,
+              "ToolProgress": 10,
+              "ToolResult": 1,
+              "TextDelta": 1,
+              "TextComplete": 1,
+              "RunSuccess": 1
+            }
+          },
+          "droid_gone_within_s": 0.5,
+          "droid_alive_final": false
+        },
+        {
+          "label": "n3_s2",
+          "cwd": "C:\\Users\\me\\code\\wittycode\\sandbox\\robust\\conc\\n3_s2",
+          "open_s": 4.575,
+          "session_id": "b4559587-4c33-4243-abad-570173cfc941",
+          "droid_pid": 44272,
+          "droid_ppid": 53792,
+          "python_pid": 53792,
+          "mem_before_turn": {
+            "alive": true,
+            "members": 1,
+            "rss_mb": 272.6,
+            "private_mb": 509.0,
+            "member_list": [
+              {
+                "pid": 44272,
+                "exe": "droid.exe",
+                "rss_mb": 272.6
+              }
+            ]
+          },
+          "turn_s": 19.028,
+          "first_event_s": 0.0035,
+          "first_tool_progress_s": 7.4518,
+          "mem_after_turn": {
+            "alive": true,
+            "members": 1,
+            "rss_mb": 279.9,
+            "private_mb": 468.7,
+            "member_list": [
+              {
+                "pid": 44272,
+                "exe": "droid.exe",
+                "rss_mb": 279.9
+              }
+            ]
+          },
+          "peak_during_turn": {
+            "rss": 458.4,
+            "private": 596.2,
+            "members": 5
+          },
+          "error": null,
+          "result": {
+            "type": "RunSuccess",
+            "subtype": "success",
+            "success": true,
+            "credits": 507.0,
+            "text": "done"
+          },
+          "tool_progress_events": [
+            {
+              "turn_t": 7.45,
+              "type": "status",
+              "text_len": 0,
+              "text": "",
+              "full_output_len": 0,
+              "value_snippet": null,
+              "terminal_id": "02d49107-9223-4fdd-a630-c34b08e1cbb8"
+            },
+            {
+              "turn_t": 7.87,
+              "type": "status",
+              "text_len": 8,
+              "text": "\ntick 1\r",
+              "full_output_len": 8,
+              "value_snippet": null,
+              "terminal_id": "02d49107-9223-4fdd-a630-c34b08e1cbb8"
+            },
+            {
+              "turn_t": 8.89,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 1\r\ntick 2\r",
+              "full_output_len": 16,
+              "value_snippet": null,
+              "terminal_id": "02d49107-9223-4fdd-a630-c34b08e1cbb8"
+            },
+            {
+              "turn_t": 9.86,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 2\r\ntick 3\r",
+              "full_output_len": 24,
+              "value_snippet": null,
+              "terminal_id": "02d49107-9223-4fdd-a630-c34b08e1cbb8"
+            },
+            {
+              "turn_t": 10.88,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 3\r\ntick 4\r",
+              "full_output_len": 32,
+              "value_snippet": null,
+              "terminal_id": "02d49107-9223-4fdd-a630-c34b08e1cbb8"
+            },
+            {
+              "turn_t": 11.9,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 4\r\ntick 5\r",
+              "full_output_len": 40,
+              "value_snippet": null,
+              "terminal_id": "02d49107-9223-4fdd-a630-c34b08e1cbb8"
+            },
+            {
+              "turn_t": 12.92,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 5\r\ntick 6\r",
+              "full_output_len": 48,
+              "value_snippet": null,
+              "terminal_id": "02d49107-9223-4fdd-a630-c34b08e1cbb8"
+            },
+            {
+              "turn_t": 13.89,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 6\r\ntick 7\r",
+              "full_output_len": 56,
+              "value_snippet": null,
+              "terminal_id": "02d49107-9223-4fdd-a630-c34b08e1cbb8"
+            },
+            {
+              "turn_t": 14.91,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 7\r\ntick 8\r",
+              "full_output_len": 64,
+              "value_snippet": null,
+              "terminal_id": "02d49107-9223-4fdd-a630-c34b08e1cbb8"
+            },
+            {
+              "turn_t": 15.76,
+              "type": "status",
+              "text_len": 0,
+              "text": "",
+              "full_output_len": 64,
+              "value_snippet": null,
+              "terminal_id": "02d49107-9223-4fdd-a630-c34b08e1cbb8"
+            }
+          ],
+          "event_counts": {
+            "1": {
+              "WorkingStateChanged": 9,
+              "UserMessage": 2,
+              "TokenUsageUpdate": 6,
+              "SessionTitleUpdated": 1,
+              "ToolCallDelta": 3,
+              "ToolCall": 1,
+              "AssistantMessage": 2,
+              "PermissionResolved": 1,
+              "ToolProgress": 10,
+              "ToolResult": 1,
+              "TextDelta": 1,
+              "TextComplete": 1,
+              "RunSuccess": 1
+            }
+          },
+          "droid_gone_within_s": 0.5,
+          "droid_alive_final": false
+        },
+        {
+          "label": "n3_s3",
+          "cwd": "C:\\Users\\me\\code\\wittycode\\sandbox\\robust\\conc\\n3_s3",
+          "open_s": 6.727,
+          "session_id": "e2c48ec5-6154-480a-a381-7f7498ea88fc",
+          "droid_pid": 11688,
+          "droid_ppid": 53792,
+          "python_pid": 53792,
+          "mem_before_turn": {
+            "alive": true,
+            "members": 1,
+            "rss_mb": 271.5,
+            "private_mb": 492.9,
+            "member_list": [
+              {
+                "pid": 11688,
+                "exe": "droid.exe",
+                "rss_mb": 271.5
+              }
+            ]
+          },
+          "turn_s": 19.801,
+          "first_event_s": 0.0046,
+          "first_tool_progress_s": 7.6983,
+          "mem_after_turn": {
+            "alive": true,
+            "members": 1,
+            "rss_mb": 278.0,
+            "private_mb": 454.6,
+            "member_list": [
+              {
+                "pid": 11688,
+                "exe": "droid.exe",
+                "rss_mb": 278.0
+              }
+            ]
+          },
+          "peak_during_turn": {
+            "rss": 452.3,
+            "private": 573.0,
+            "members": 5
+          },
+          "error": null,
+          "result": {
+            "type": "RunSuccess",
+            "subtype": "success",
+            "success": true,
+            "credits": 505.0,
+            "text": "done"
+          },
+          "tool_progress_events": [
+            {
+              "turn_t": 7.7,
+              "type": "status",
+              "text_len": 0,
+              "text": "",
+              "full_output_len": 0,
+              "value_snippet": null,
+              "terminal_id": "b36adbdd-0714-4ca8-a4c9-5b30dd5bacb8"
+            },
+            {
+              "turn_t": 8.11,
+              "type": "status",
+              "text_len": 8,
+              "text": "\ntick 1\r",
+              "full_output_len": 8,
+              "value_snippet": null,
+              "terminal_id": "b36adbdd-0714-4ca8-a4c9-5b30dd5bacb8"
+            },
+            {
+              "turn_t": 9.13,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 1\r\ntick 2\r",
+              "full_output_len": 16,
+              "value_snippet": null,
+              "terminal_id": "b36adbdd-0714-4ca8-a4c9-5b30dd5bacb8"
+            },
+            {
+              "turn_t": 10.15,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 2\r\ntick 3\r",
+              "full_output_len": 24,
+              "value_snippet": null,
+              "terminal_id": "b36adbdd-0714-4ca8-a4c9-5b30dd5bacb8"
+            },
+            {
+              "turn_t": 11.12,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 3\r\ntick 4\r",
+              "full_output_len": 32,
+              "value_snippet": null,
+              "terminal_id": "b36adbdd-0714-4ca8-a4c9-5b30dd5bacb8"
+            },
+            {
+              "turn_t": 12.14,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 4\r\ntick 5\r",
+              "full_output_len": 40,
+              "value_snippet": null,
+              "terminal_id": "b36adbdd-0714-4ca8-a4c9-5b30dd5bacb8"
+            },
+            {
+              "turn_t": 13.17,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 5\r\ntick 6\r",
+              "full_output_len": 48,
+              "value_snippet": null,
+              "terminal_id": "b36adbdd-0714-4ca8-a4c9-5b30dd5bacb8"
+            },
+            {
+              "turn_t": 14.14,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 6\r\ntick 7\r",
+              "full_output_len": 56,
+              "value_snippet": null,
+              "terminal_id": "b36adbdd-0714-4ca8-a4c9-5b30dd5bacb8"
+            },
+            {
+              "turn_t": 15.16,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 7\r\ntick 8\r",
+              "full_output_len": 64,
+              "value_snippet": null,
+              "terminal_id": "b36adbdd-0714-4ca8-a4c9-5b30dd5bacb8"
+            },
+            {
+              "turn_t": 15.98,
+              "type": "status",
+              "text_len": 0,
+              "text": "",
+              "full_output_len": 64,
+              "value_snippet": null,
+              "terminal_id": "b36adbdd-0714-4ca8-a4c9-5b30dd5bacb8"
+            }
+          ],
+          "event_counts": {
+            "1": {
+              "WorkingStateChanged": 9,
+              "UserMessage": 2,
+              "TokenUsageUpdate": 5,
+              "SessionTitleUpdated": 1,
+              "ToolCallDelta": 4,
+              "ToolCall": 1,
+              "AssistantMessage": 2,
+              "PermissionResolved": 1,
+              "ToolProgress": 10,
+              "ToolResult": 1,
+              "TextDelta": 1,
+              "TextComplete": 1,
+              "RunSuccess": 1
+            }
+          },
+          "droid_gone_within_s": 0.5,
+          "droid_alive_final": false
+        }
+      ],
+      "new_droid_pids": [
+        38976
+      ],
+      "new_droid_ppids": [
+        41700
+      ],
+      "turn_times_s": [
+        21.622,
+        19.028,
+        19.801
+      ]
+    },
+    "5": {
+      "wall_s": 34.22,
+      "sessions": [
+        {
+          "label": "n5_s1",
+          "cwd": "C:\\Users\\me\\code\\wittycode\\sandbox\\robust\\conc\\n5_s1",
+          "open_s": 2.161,
+          "session_id": "32649db0-7109-4a7c-99ca-d60b22885a8b",
+          "droid_pid": 49852,
+          "droid_ppid": 53792,
+          "python_pid": 53792,
+          "mem_before_turn": {
+            "alive": true,
+            "members": 1,
+            "rss_mb": 273.8,
+            "private_mb": 512.1,
+            "member_list": [
+              {
+                "pid": 49852,
+                "exe": "droid.exe",
+                "rss_mb": 273.8
+              }
+            ]
+          },
+          "turn_s": 22.697,
+          "first_event_s": 0.004,
+          "first_tool_progress_s": 10.3198,
+          "mem_after_turn": {
+            "alive": true,
+            "members": 1,
+            "rss_mb": 279.1,
+            "private_mb": 478.2,
+            "member_list": [
+              {
+                "pid": 49852,
+                "exe": "droid.exe",
+                "rss_mb": 279.1
+              }
+            ]
+          },
+          "peak_during_turn": {
+            "rss": 448.3,
+            "private": 596.7,
+            "members": 5
+          },
+          "error": null,
+          "result": {
+            "type": "RunSuccess",
+            "subtype": "success",
+            "success": true,
+            "credits": 507.0,
+            "text": "done"
+          },
+          "tool_progress_events": [
+            {
+              "turn_t": 10.32,
+              "type": "status",
+              "text_len": 0,
+              "text": "",
+              "full_output_len": 0,
+              "value_snippet": null,
+              "terminal_id": "a1ee110b-7470-4081-a145-1e4532132e53"
+            },
+            {
+              "turn_t": 10.73,
+              "type": "status",
+              "text_len": 8,
+              "text": "\ntick 1\r",
+              "full_output_len": 8,
+              "value_snippet": null,
+              "terminal_id": "a1ee110b-7470-4081-a145-1e4532132e53"
+            },
+            {
+              "turn_t": 11.75,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 1\r\ntick 2\r",
+              "full_output_len": 16,
+              "value_snippet": null,
+              "terminal_id": "a1ee110b-7470-4081-a145-1e4532132e53"
+            },
+            {
+              "turn_t": 12.78,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 2\r\ntick 3\r",
+              "full_output_len": 24,
+              "value_snippet": null,
+              "terminal_id": "a1ee110b-7470-4081-a145-1e4532132e53"
+            },
+            {
+              "turn_t": 13.75,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 3\r\ntick 4\r",
+              "full_output_len": 32,
+              "value_snippet": null,
+              "terminal_id": "a1ee110b-7470-4081-a145-1e4532132e53"
+            },
+            {
+              "turn_t": 14.77,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 4\r\ntick 5\r",
+              "full_output_len": 40,
+              "value_snippet": null,
+              "terminal_id": "a1ee110b-7470-4081-a145-1e4532132e53"
+            },
+            {
+              "turn_t": 15.79,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 5\r\ntick 6\r",
+              "full_output_len": 48,
+              "value_snippet": null,
+              "terminal_id": "a1ee110b-7470-4081-a145-1e4532132e53"
+            },
+            {
+              "turn_t": 16.77,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 6\r\ntick 7\r",
+              "full_output_len": 56,
+              "value_snippet": null,
+              "terminal_id": "a1ee110b-7470-4081-a145-1e4532132e53"
+            },
+            {
+              "turn_t": 17.79,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 7\r\ntick 8\r",
+              "full_output_len": 64,
+              "value_snippet": null,
+              "terminal_id": "a1ee110b-7470-4081-a145-1e4532132e53"
+            },
+            {
+              "turn_t": 18.61,
+              "type": "status",
+              "text_len": 0,
+              "text": "",
+              "full_output_len": 64,
+              "value_snippet": null,
+              "terminal_id": "a1ee110b-7470-4081-a145-1e4532132e53"
+            }
+          ],
+          "event_counts": {
+            "1": {
+              "WorkingStateChanged": 9,
+              "UserMessage": 2,
+              "TokenUsageUpdate": 6,
+              "SessionTitleUpdated": 1,
+              "ToolCallDelta": 4,
+              "ToolCall": 1,
+              "AssistantMessage": 2,
+              "PermissionResolved": 1,
+              "ToolProgress": 10,
+              "ToolResult": 1,
+              "TextDelta": 1,
+              "TextComplete": 1,
+              "RunSuccess": 1
+            }
+          }
+        },
+        {
+          "label": "n5_s2",
+          "cwd": "C:\\Users\\me\\code\\wittycode\\sandbox\\robust\\conc\\n5_s2",
+          "open_s": 3.391,
+          "session_id": "e6e6dd59-15aa-4a38-82c7-84c4fb24cb3d",
+          "droid_pid": 19172,
+          "droid_ppid": 53792,
+          "python_pid": 53792,
+          "mem_before_turn": {
+            "alive": true,
+            "members": 1,
+            "rss_mb": 272.7,
+            "private_mb": 497.6,
+            "member_list": [
+              {
+                "pid": 19172,
+                "exe": "droid.exe",
+                "rss_mb": 272.7
+              }
+            ]
+          },
+          "turn_s": 24.432,
+          "first_event_s": 0.004,
+          "first_tool_progress_s": 12.1533,
+          "mem_after_turn": {
+            "alive": true,
+            "members": 1,
+            "rss_mb": 277.2,
+            "private_mb": 455.6,
+            "member_list": [
+              {
+                "pid": 19172,
+                "exe": "droid.exe",
+                "rss_mb": 277.2
+              }
+            ]
+          },
+          "peak_during_turn": {
+            "rss": 457.4,
+            "private": 575.3,
+            "members": 5
+          },
+          "error": null,
+          "result": {
+            "type": "RunSuccess",
+            "subtype": "success",
+            "success": true,
+            "credits": 507.0,
+            "text": "done"
+          },
+          "tool_progress_events": [
+            {
+              "turn_t": 12.15,
+              "type": "status",
+              "text_len": 0,
+              "text": "",
+              "full_output_len": 0,
+              "value_snippet": null,
+              "terminal_id": "1a94d368-b484-4ede-83f5-127d6b593ffb"
+            },
+            {
+              "turn_t": 12.56,
+              "type": "status",
+              "text_len": 8,
+              "text": "\ntick 1\r",
+              "full_output_len": 8,
+              "value_snippet": null,
+              "terminal_id": "1a94d368-b484-4ede-83f5-127d6b593ffb"
+            },
+            {
+              "turn_t": 13.59,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 1\r\ntick 2\r",
+              "full_output_len": 16,
+              "value_snippet": null,
+              "terminal_id": "1a94d368-b484-4ede-83f5-127d6b593ffb"
+            },
+            {
+              "turn_t": 14.57,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 2\r\ntick 3\r",
+              "full_output_len": 24,
+              "value_snippet": null,
+              "terminal_id": "1a94d368-b484-4ede-83f5-127d6b593ffb"
+            },
+            {
+              "turn_t": 15.59,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 3\r\ntick 4\r",
+              "full_output_len": 32,
+              "value_snippet": null,
+              "terminal_id": "1a94d368-b484-4ede-83f5-127d6b593ffb"
+            },
+            {
+              "turn_t": 16.61,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 4\r\ntick 5\r",
+              "full_output_len": 40,
+              "value_snippet": null,
+              "terminal_id": "1a94d368-b484-4ede-83f5-127d6b593ffb"
+            },
+            {
+              "turn_t": 17.58,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 5\r\ntick 6\r",
+              "full_output_len": 48,
+              "value_snippet": null,
+              "terminal_id": "1a94d368-b484-4ede-83f5-127d6b593ffb"
+            },
+            {
+              "turn_t": 18.61,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 6\r\ntick 7\r",
+              "full_output_len": 56,
+              "value_snippet": null,
+              "terminal_id": "1a94d368-b484-4ede-83f5-127d6b593ffb"
+            },
+            {
+              "turn_t": 19.63,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 7\r\ntick 8\r",
+              "full_output_len": 64,
+              "value_snippet": null,
+              "terminal_id": "1a94d368-b484-4ede-83f5-127d6b593ffb"
+            },
+            {
+              "turn_t": 20.42,
+              "type": "status",
+              "text_len": 0,
+              "text": "",
+              "full_output_len": 64,
+              "value_snippet": null,
+              "terminal_id": "1a94d368-b484-4ede-83f5-127d6b593ffb"
+            }
+          ],
+          "event_counts": {
+            "1": {
+              "WorkingStateChanged": 9,
+              "UserMessage": 2,
+              "SessionTitleUpdated": 1,
+              "TokenUsageUpdate": 5,
+              "ToolCallDelta": 3,
+              "ToolCall": 1,
+              "AssistantMessage": 2,
+              "PermissionResolved": 1,
+              "ToolProgress": 10,
+              "ToolResult": 1,
+              "TextDelta": 1,
+              "TextComplete": 1,
+              "RunSuccess": 1
+            }
+          }
+        },
+        {
+          "label": "n5_s3",
+          "cwd": "C:\\Users\\me\\code\\wittycode\\sandbox\\robust\\conc\\n5_s3",
+          "open_s": 3.145,
+          "session_id": "61e38a1c-2228-4036-8220-66fc6a3ba047",
+          "droid_pid": 15568,
+          "droid_ppid": 53792,
+          "python_pid": 53792,
+          "mem_before_turn": {
+            "alive": true,
+            "members": 1,
+            "rss_mb": 274.9,
+            "private_mb": 559.2,
+            "member_list": [
+              {
+                "pid": 15568,
+                "exe": "droid.exe",
+                "rss_mb": 274.9
+              }
+            ]
+          },
+          "turn_s": 21.134,
+          "first_event_s": 0.0041,
+          "first_tool_progress_s": 6.696,
+          "mem_after_turn": {
+            "alive": true,
+            "members": 1,
+            "rss_mb": 282.2,
+            "private_mb": 520.4,
+            "member_list": [
+              {
+                "pid": 15568,
+                "exe": "droid.exe",
+                "rss_mb": 282.2
+              }
+            ]
+          },
+          "peak_during_turn": {
+            "rss": 461.2,
+            "private": 651.2,
+            "members": 5
+          },
+          "error": null,
+          "result": {
+            "type": "RunSuccess",
+            "subtype": "success",
+            "success": true,
+            "credits": 505.0,
+            "text": "done"
+          },
+          "tool_progress_events": [
+            {
+              "turn_t": 6.7,
+              "type": "status",
+              "text_len": 0,
+              "text": "",
+              "full_output_len": 0,
+              "value_snippet": null,
+              "terminal_id": "a4321d95-733f-476a-956f-15a47a7f1a21"
+            },
+            {
+              "turn_t": 7.1,
+              "type": "status",
+              "text_len": 8,
+              "text": "\ntick 1\r",
+              "full_output_len": 8,
+              "value_snippet": null,
+              "terminal_id": "a4321d95-733f-476a-956f-15a47a7f1a21"
+            },
+            {
+              "turn_t": 8.13,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 1\r\ntick 2\r",
+              "full_output_len": 16,
+              "value_snippet": null,
+              "terminal_id": "a4321d95-733f-476a-956f-15a47a7f1a21"
+            },
+            {
+              "turn_t": 9.15,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 2\r\ntick 3\r",
+              "full_output_len": 24,
+              "value_snippet": null,
+              "terminal_id": "a4321d95-733f-476a-956f-15a47a7f1a21"
+            },
+            {
+              "turn_t": 10.12,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 3\r\ntick 4\r",
+              "full_output_len": 32,
+              "value_snippet": null,
+              "terminal_id": "a4321d95-733f-476a-956f-15a47a7f1a21"
+            },
+            {
+              "turn_t": 11.14,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 4\r\ntick 5\r",
+              "full_output_len": 40,
+              "value_snippet": null,
+              "terminal_id": "a4321d95-733f-476a-956f-15a47a7f1a21"
+            },
+            {
+              "turn_t": 12.16,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 5\r\ntick 6\r",
+              "full_output_len": 48,
+              "value_snippet": null,
+              "terminal_id": "a4321d95-733f-476a-956f-15a47a7f1a21"
+            },
+            {
+              "turn_t": 13.13,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 6\r\ntick 7\r",
+              "full_output_len": 56,
+              "value_snippet": null,
+              "terminal_id": "a4321d95-733f-476a-956f-15a47a7f1a21"
+            },
+            {
+              "turn_t": 14.15,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 7\r\ntick 8\r",
+              "full_output_len": 64,
+              "value_snippet": null,
+              "terminal_id": "a4321d95-733f-476a-956f-15a47a7f1a21"
+            },
+            {
+              "turn_t": 14.98,
+              "type": "status",
+              "text_len": 0,
+              "text": "",
+              "full_output_len": 64,
+              "value_snippet": null,
+              "terminal_id": "a4321d95-733f-476a-956f-15a47a7f1a21"
+            }
+          ],
+          "event_counts": {
+            "1": {
+              "WorkingStateChanged": 9,
+              "UserMessage": 2,
+              "TokenUsageUpdate": 6,
+              "SessionTitleUpdated": 1,
+              "ToolCallDelta": 4,
+              "ToolCall": 1,
+              "AssistantMessage": 2,
+              "PermissionResolved": 1,
+              "ToolProgress": 10,
+              "ToolResult": 1,
+              "TextDelta": 1,
+              "TextComplete": 1,
+              "RunSuccess": 1
+            }
+          }
+        },
+        {
+          "label": "n5_s4",
+          "cwd": "C:\\Users\\me\\code\\wittycode\\sandbox\\robust\\conc\\n5_s4",
+          "open_s": 2.729,
+          "session_id": "26056619-d059-44ea-94e6-82e68ab55b58",
+          "droid_pid": 53488,
+          "droid_ppid": 53792,
+          "python_pid": 53792,
+          "mem_before_turn": {
+            "alive": true,
+            "members": 1,
+            "rss_mb": 272.6,
+            "private_mb": 513.5,
+            "member_list": [
+              {
+                "pid": 53488,
+                "exe": "droid.exe",
+                "rss_mb": 272.6
+              }
+            ]
+          },
+          "turn_s": 25.354,
+          "first_event_s": 0.0042,
+          "first_tool_progress_s": 10.5703,
+          "mem_after_turn": {
+            "alive": true,
+            "members": 1,
+            "rss_mb": 279.5,
+            "private_mb": 465.7,
+            "member_list": [
+              {
+                "pid": 53488,
+                "exe": "droid.exe",
+                "rss_mb": 279.5
+              }
+            ]
+          },
+          "peak_during_turn": {
+            "rss": 459.5,
+            "private": 599.0,
+            "members": 5
+          },
+          "error": null,
+          "result": {
+            "type": "RunSuccess",
+            "subtype": "success",
+            "success": true,
+            "credits": 505.0,
+            "text": "done"
+          },
+          "tool_progress_events": [
+            {
+              "turn_t": 10.57,
+              "type": "status",
+              "text_len": 0,
+              "text": "",
+              "full_output_len": 0,
+              "value_snippet": null,
+              "terminal_id": "c963bb6d-234c-486b-9ee0-c9abd578aaa4"
+            },
+            {
+              "turn_t": 10.98,
+              "type": "status",
+              "text_len": 8,
+              "text": "\ntick 1\r",
+              "full_output_len": 8,
+              "value_snippet": null,
+              "terminal_id": "c963bb6d-234c-486b-9ee0-c9abd578aaa4"
+            },
+            {
+              "turn_t": 12.0,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 1\r\ntick 2\r",
+              "full_output_len": 16,
+              "value_snippet": null,
+              "terminal_id": "c963bb6d-234c-486b-9ee0-c9abd578aaa4"
+            },
+            {
+              "turn_t": 13.02,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 2\r\ntick 3\r",
+              "full_output_len": 24,
+              "value_snippet": null,
+              "terminal_id": "c963bb6d-234c-486b-9ee0-c9abd578aaa4"
+            },
+            {
+              "turn_t": 14.0,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 3\r\ntick 4\r",
+              "full_output_len": 32,
+              "value_snippet": null,
+              "terminal_id": "c963bb6d-234c-486b-9ee0-c9abd578aaa4"
+            },
+            {
+              "turn_t": 15.02,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 4\r\ntick 5\r",
+              "full_output_len": 40,
+              "value_snippet": null,
+              "terminal_id": "c963bb6d-234c-486b-9ee0-c9abd578aaa4"
+            },
+            {
+              "turn_t": 16.04,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 5\r\ntick 6\r",
+              "full_output_len": 48,
+              "value_snippet": null,
+              "terminal_id": "c963bb6d-234c-486b-9ee0-c9abd578aaa4"
+            },
+            {
+              "turn_t": 17.01,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 6\r\ntick 7\r",
+              "full_output_len": 56,
+              "value_snippet": null,
+              "terminal_id": "c963bb6d-234c-486b-9ee0-c9abd578aaa4"
+            },
+            {
+              "turn_t": 18.03,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 7\r\ntick 8\r",
+              "full_output_len": 64,
+              "value_snippet": null,
+              "terminal_id": "c963bb6d-234c-486b-9ee0-c9abd578aaa4"
+            },
+            {
+              "turn_t": 18.84,
+              "type": "status",
+              "text_len": 0,
+              "text": "",
+              "full_output_len": 64,
+              "value_snippet": null,
+              "terminal_id": "c963bb6d-234c-486b-9ee0-c9abd578aaa4"
+            }
+          ],
+          "event_counts": {
+            "1": {
+              "WorkingStateChanged": 9,
+              "UserMessage": 2,
+              "TokenUsageUpdate": 5,
+              "SessionTitleUpdated": 1,
+              "ToolCallDelta": 4,
+              "ToolCall": 1,
+              "AssistantMessage": 2,
+              "PermissionResolved": 1,
+              "ToolProgress": 10,
+              "ToolResult": 1,
+              "TextDelta": 1,
+              "TextComplete": 1,
+              "RunSuccess": 1
+            }
+          }
+        },
+        {
+          "label": "n5_s5",
+          "cwd": "C:\\Users\\me\\code\\wittycode\\sandbox\\robust\\conc\\n5_s5",
+          "open_s": 3.279,
+          "session_id": "53b88d63-7a5d-414f-b0ab-37f95f9bbc6d",
+          "droid_pid": 31748,
+          "droid_ppid": 53792,
+          "python_pid": 53792,
+          "mem_before_turn": {
+            "alive": true,
+            "members": 1,
+            "rss_mb": 272.5,
+            "private_mb": 505.1,
+            "member_list": [
+              {
+                "pid": 31748,
+                "exe": "droid.exe",
+                "rss_mb": 272.5
+              }
+            ]
+          },
+          "turn_s": 25.452,
+          "first_event_s": 0.0036,
+          "first_tool_progress_s": 9.571,
+          "mem_after_turn": {
+            "alive": true,
+            "members": 1,
+            "rss_mb": 279.0,
+            "private_mb": 458.7,
+            "member_list": [
+              {
+                "pid": 31748,
+                "exe": "droid.exe",
+                "rss_mb": 279.0
+              }
+            ]
+          },
+          "peak_during_turn": {
+            "rss": 449.0,
+            "private": 581.2,
+            "members": 5
+          },
+          "error": null,
+          "result": {
+            "type": "RunSuccess",
+            "subtype": "success",
+            "success": true,
+            "credits": 505.0,
+            "text": "done"
+          },
+          "tool_progress_events": [
+            {
+              "turn_t": 9.57,
+              "type": "status",
+              "text_len": 0,
+              "text": "",
+              "full_output_len": 0,
+              "value_snippet": null,
+              "terminal_id": "8e364c2a-8ea3-4015-bce9-b29b47fbedc4"
+            },
+            {
+              "turn_t": 9.98,
+              "type": "status",
+              "text_len": 8,
+              "text": "\ntick 1\r",
+              "full_output_len": 8,
+              "value_snippet": null,
+              "terminal_id": "8e364c2a-8ea3-4015-bce9-b29b47fbedc4"
+            },
+            {
+              "turn_t": 11.01,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 1\r\ntick 2\r",
+              "full_output_len": 16,
+              "value_snippet": null,
+              "terminal_id": "8e364c2a-8ea3-4015-bce9-b29b47fbedc4"
+            },
+            {
+              "turn_t": 12.03,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 2\r\ntick 3\r",
+              "full_output_len": 24,
+              "value_snippet": null,
+              "terminal_id": "8e364c2a-8ea3-4015-bce9-b29b47fbedc4"
+            },
+            {
+              "turn_t": 13.0,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 3\r\ntick 4\r",
+              "full_output_len": 32,
+              "value_snippet": null,
+              "terminal_id": "8e364c2a-8ea3-4015-bce9-b29b47fbedc4"
+            },
+            {
+              "turn_t": 14.02,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 4\r\ntick 5\r",
+              "full_output_len": 40,
+              "value_snippet": null,
+              "terminal_id": "8e364c2a-8ea3-4015-bce9-b29b47fbedc4"
+            },
+            {
+              "turn_t": 14.99,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 5\r\ntick 6\r",
+              "full_output_len": 48,
+              "value_snippet": null,
+              "terminal_id": "8e364c2a-8ea3-4015-bce9-b29b47fbedc4"
+            },
+            {
+              "turn_t": 16.01,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 6\r\ntick 7\r",
+              "full_output_len": 56,
+              "value_snippet": null,
+              "terminal_id": "8e364c2a-8ea3-4015-bce9-b29b47fbedc4"
+            },
+            {
+              "turn_t": 17.04,
+              "type": "status",
+              "text_len": 15,
+              "text": "tick 7\r\ntick 8\r",
+              "full_output_len": 64,
+              "value_snippet": null,
+              "terminal_id": "8e364c2a-8ea3-4015-bce9-b29b47fbedc4"
+            },
+            {
+              "turn_t": 17.86,
+              "type": "status",
+              "text_len": 0,
+              "text": "",
+              "full_output_len": 64,
+              "value_snippet": null,
+              "terminal_id": "8e364c2a-8ea3-4015-bce9-b29b47fbedc4"
+            }
+          ],
+          "event_counts": {
+            "1": {
+              "WorkingStateChanged": 9,
+              "UserMessage": 2,
+              "TokenUsageUpdate": 5,
+              "SessionTitleUpdated": 1,
+              "ToolCallDelta": 4,
+              "ToolCall": 1,
+              "AssistantMessage": 2,
+              "PermissionResolved": 1,
+              "ToolProgress": 10,
+              "ToolResult": 1,
+              "TextDelta": 1,
+              "TextComplete": 1,
+              "RunSuccess": 1
+            }
+          }
+        }
+      ],
+      "new_droid_pids": [
+        15568,
+        19172,
+        31748,
+        49852,
+        53488
+      ],
+      "new_droid_ppids": [
+        53792
+      ],
+      "turn_times_s": [
+        22.697,
+        24.432,
+        21.134,
+        25.354,
+        25.452
+      ]
+    }
+  },
+  "idle": {
+    "seconds": 300.0,
+    "mem_at_start": {
+      "n5_s1": {
+        "alive": true,
+        "members": 1,
+        "rss_mb": 279.1,
+        "private_mb": 478.0,
+        "member_list": [
+          {
+            "pid": 49852,
+            "exe": "droid.exe",
+            "rss_mb": 279.1
+          }
+        ]
+      },
+      "n5_s2": {
+        "alive": true,
+        "members": 1,
+        "rss_mb": 277.2,
+        "private_mb": 455.6,
+        "member_list": [
+          {
+            "pid": 19172,
+            "exe": "droid.exe",
+            "rss_mb": 277.2
+          }
+        ]
+      },
+      "n5_s3": {
+        "alive": true,
+        "members": 1,
+        "rss_mb": 282.2,
+        "private_mb": 519.3,
+        "member_list": [
+          {
+            "pid": 15568,
+            "exe": "droid.exe",
+            "rss_mb": 282.2
+          }
+        ]
+      },
+      "n5_s4": {
+        "alive": true,
+        "members": 1,
+        "rss_mb": 279.5,
+        "private_mb": 465.7,
+        "member_list": [
+          {
+            "pid": 53488,
+            "exe": "droid.exe",
+            "rss_mb": 279.5
+          }
+        ]
+      },
+      "n5_s5": {
+        "alive": true,
+        "members": 1,
+        "rss_mb": 279.0,
+        "private_mb": 458.7,
+        "member_list": [
+          {
+            "pid": 31748,
+            "exe": "droid.exe",
+            "rss_mb": 279.0
+          }
+        ]
+      }
+    },
+    "mem_at_end": {
+      "n5_s1": {
+        "alive": true,
+        "members": 1,
+        "rss_mb": 271.3,
+        "private_mb": 417.3,
+        "member_list": [
+          {
+            "pid": 49852,
+            "exe": "droid.exe",
+            "rss_mb": 271.3
+          }
+        ]
+      },
+      "n5_s2": {
+        "alive": true,
+        "members": 1,
+        "rss_mb": 269.3,
+        "private_mb": 396.5,
+        "member_list": [
+          {
+            "pid": 19172,
+            "exe": "droid.exe",
+            "rss_mb": 269.3
+          }
+        ]
+      },
+      "n5_s3": {
+        "alive": true,
+        "members": 1,
+        "rss_mb": 272.9,
+        "private_mb": 472.6,
+        "member_list": [
+          {
+            "pid": 15568,
+            "exe": "droid.exe",
+            "rss_mb": 272.9
+          }
+        ]
+      },
+      "n5_s4": {
+        "alive": true,
+        "members": 1,
+        "rss_mb": 271.4,
+        "private_mb": 410.7,
+        "member_list": [
+          {
+            "pid": 53488,
+            "exe": "droid.exe",
+            "rss_mb": 271.4
+          }
+        ]
+      },
+      "n5_s5": {
+        "alive": true,
+        "members": 1,
+        "rss_mb": 269.8,
+        "private_mb": 400.5,
+        "member_list": [
+          {
+            "pid": 31748,
+            "exe": "droid.exe",
+            "rss_mb": 269.8
+          }
+        ]
+      }
+    },
+    "python_mb_at_end": 48.8
+  },
+  "peaks": {
+    "python": {
+      "rss": 48.8,
+      "private": 37.7,
+      "members": 0
+    },
+    "n1_s1": {
+      "rss": 452.3,
+      "private": 592.3,
+      "members": 5
+    },
+    "n3_s2": {
+      "rss": 458.4,
+      "private": 596.2,
+      "members": 5
+    },
+    "n3_s1": {
+      "rss": 461.4,
+      "private": 631.6,
+      "members": 5
+    },
+    "n3_s3": {
+      "rss": 452.3,
+      "private": 573.0,
+      "members": 5
+    },
+    "n5_s1": {
+      "rss": 448.3,
+      "private": 596.7,
+      "members": 5
+    },
+    "n5_s4": {
+      "rss": 459.5,
+      "private": 599.0,
+      "members": 5
+    },
+    "n5_s3": {
+      "rss": 461.2,
+      "private": 651.2,
+      "members": 5
+    },
+    "n5_s2": {
+      "rss": 457.4,
+      "private": 575.3,
+      "members": 5
+    },
+    "n5_s5": {
+      "rss": 449.0,
+      "private": 581.2,
+      "members": 5
+    }
+  },
+  "close_errors": [],
+  "closed": {
+    "n5_s1": {
+      "gone_after_s": 0.0,
+      "alive_final": false
+    },
+    "n5_s2": {
+      "gone_after_s": 0.0,
+      "alive_final": false
+    },
+    "n5_s3": {
+      "gone_after_s": 0.0,
+      "alive_final": false
+    },
+    "n5_s4": {
+      "gone_after_s": 0.0,
+      "alive_final": false
+    },
+    "n5_s5": {
+      "gone_after_s": 0.0,
+      "alive_final": false
+    }
+  },
+  "sample_count": 376,
+  "samples_rss_mb": [
+    {
+      "t": 0.0,
+      "python": 46.0
+    },
+    {
+      "t": 0.261,
+      "python": 46.5
+    },
+    {
+      "t": 0.522,
+      "python": 46.5
+    },
+    {
+      "t": 0.785,
+      "python": 46.5
+    },
+    {
+      "t": 1.049,
+      "python": 46.5
+    },
+    {
+      "t": 1.31,
+      "python": 46.5
+    },
+    {
+      "t": 1.573,
+      "python": 46.5
+    },
+    {
+      "t": 1.837,
+      "python": 46.5
+    },
+    {
+      "t": 2.098,
+      "python": 46.5
+    },
+    {
+      "t": 2.361,
+      "python": 46.5
+    },
+    {
+      "t": 2.623,
+      "python": 46.5
+    },
+    {
+      "t": 2.887,
+      "python": 46.5
+    },
+    {
+      "t": 3.151,
+      "python": 46.5
+    },
+    {
+      "t": 3.415,
+      "python": 46.5
+    },
+    {
+      "t": 3.677,
+      "n1_s1": 321.2,
+      "python": 46.7
+    },
+    {
+      "t": 3.953,
+      "n1_s1": 277.0,
+      "python": 46.7
+    },
+    {
+      "t": 4.233,
+      "n1_s1": 271.6,
+      "python": 46.7
+    },
+    {
+      "t": 4.511,
+      "n1_s1": 271.6,
+      "python": 46.7
+    },
+    {
+      "t": 4.775,
+      "n1_s1": 271.3,
+      "python": 46.7
+    },
+    {
+      "t": 5.052,
+      "n1_s1": 271.3,
+      "python": 46.7
+    },
+    {
+      "t": 5.316,
+      "n1_s1": 271.3,
+      "python": 46.7
+    },
+    {
+      "t": 5.594,
+      "n1_s1": 272.0,
+      "python": 46.7
+    },
+    {
+      "t": 5.857,
+      "n1_s1": 282.6,
+      "python": 46.7
+    },
+    {
+      "t": 6.121,
+      "n1_s1": 284.2,
+      "python": 46.7
+    },
+    {
+      "t": 6.386,
+      "n1_s1": 281.7,
+      "python": 46.7
+    },
+    {
+      "t": 6.65,
+      "n1_s1": 276.6,
+      "python": 46.7
+    },
+    {
+      "t": 6.914,
+      "n1_s1": 276.6,
+      "python": 46.7
+    },
+    {
+      "t": 7.179,
+      "n1_s1": 276.8,
+      "python": 46.8
+    },
+    {
+      "t": 7.457,
+      "n1_s1": 277.0,
+      "python": 46.8
+    },
+    {
+      "t": 7.737,
+      "n1_s1": 278.6,
+      "python": 46.8
+    },
+    {
+      "t": 8.002,
+      "n1_s1": 278.3,
+      "python": 46.8
+    },
+    {
+      "t": 8.269,
+      "n1_s1": 278.1,
+      "python": 46.8
+    },
+    {
+      "t": 8.546,
+      "n1_s1": 277.4,
+      "python": 46.8
+    },
+    {
+      "t": 8.811,
+      "n1_s1": 277.4,
+      "python": 46.8
+    },
+    {
+      "t": 9.076,
+      "n1_s1": 277.4,
+      "python": 46.8
+    },
+    {
+      "t": 9.342,
+      "n1_s1": 277.4,
+      "python": 46.8
+    },
+    {
+      "t": 9.608,
+      "n1_s1": 277.4,
+      "python": 46.8
+    },
+    {
+      "t": 9.887,
+      "n1_s1": 277.7,
+      "python": 46.8
+    },
+    {
+      "t": 10.167,
+      "n1_s1": 277.6,
+      "python": 46.8
+    },
+    {
+      "t": 10.432,
+      "n1_s1": 276.2,
+      "python": 46.8
+    },
+    {
+      "t": 10.709,
+      "n1_s1": 277.6,
+      "python": 46.8
+    },
+    {
+      "t": 10.985,
+      "n1_s1": 276.7,
+      "python": 46.8
+    },
+    {
+      "t": 11.262,
+      "n1_s1": 276.7,
+      "python": 46.8
+    },
+    {
+      "t": 11.537,
+      "n1_s1": 275.6,
+      "python": 46.8
+    },
+    {
+      "t": 11.815,
+      "n1_s1": 276.0,
+      "python": 46.8
+    },
+    {
+      "t": 12.079,
+      "n1_s1": 276.0,
+      "python": 46.8
+    },
+    {
+      "t": 12.357,
+      "n1_s1": 276.6,
+      "python": 46.8
+    },
+    {
+      "t": 12.635,
+      "n1_s1": 448.2,
+      "python": 46.8
+    },
+    {
+      "t": 12.911,
+      "n1_s1": 363.6,
+      "python": 46.8
+    },
+    {
+      "t": 13.19,
+      "n1_s1": 363.4,
+      "python": 46.8
+    },
+    {
+      "t": 13.454,
+      "n1_s1": 360.9,
+      "python": 46.8
+    },
+    {
+      "t": 13.729,
+      "n1_s1": 361.0,
+      "python": 46.8
+    },
+    {
+      "t": 14.006,
+      "n1_s1": 361.0,
+      "python": 46.8
+    },
+    {
+      "t": 14.284,
+      "n1_s1": 361.0,
+      "python": 46.8
+    },
+    {
+      "t": 14.562,
+      "n1_s1": 433.2,
+      "python": 46.8
+    },
+    {
+      "t": 14.839,
+      "n1_s1": 452.3,
+      "python": 46.8
+    },
+    {
+      "t": 15.104,
+      "n1_s1": 361.4,
+      "python": 46.8
+    },
+    {
+      "t": 15.381,
+      "n1_s1": 361.1,
+      "python": 46.8
+    },
+    {
+      "t": 15.655,
+      "n1_s1": 361.2,
+      "python": 46.8
+    },
+    {
+      "t": 15.919,
+      "n1_s1": 361.2,
+      "python": 46.8
+    },
+    {
+      "t": 16.185,
+      "n1_s1": 361.2,
+      "python": 46.8
+    },
+    {
+      "t": 16.464,
+      "n1_s1": 404.8,
+      "python": 46.8
+    },
+    {
+      "t": 16.729,
+      "n1_s1": 447.4,
+      "python": 46.8
+    },
+    {
+      "t": 17.006,
+      "n1_s1": 361.7,
+      "python": 46.8
+    },
+    {
+      "t": 17.285,
+      "n1_s1": 361.5,
+      "python": 46.8
+    },
+    {
+      "t": 17.549,
+      "n1_s1": 362.5,
+      "python": 46.8
+    },
+    {
+      "t": 17.826,
+      "n1_s1": 362.6,
+      "python": 46.8
+    },
+    {
+      "t": 18.091,
+      "n1_s1": 362.6,
+      "python": 46.8
+    },
+    {
+      "t": 18.356,
+      "n1_s1": 362.5,
+      "python": 46.8
+    },
+    {
+      "t": 18.621,
+      "n1_s1": 447.4,
+      "python": 46.8
+    },
+    {
+      "t": 18.888,
+      "n1_s1": 362.0,
+      "python": 46.8
+    },
+    {
+      "t": 19.164,
+      "n1_s1": 361.9,
+      "python": 46.8
+    },
+    {
+      "t": 19.428,
+      "n1_s1": 361.7,
+      "python": 46.8
+    },
+    {
+      "t": 19.707,
+      "n1_s1": 361.8,
+      "python": 46.8
+    },
+    {
+      "t": 19.972,
+      "n1_s1": 361.9,
+      "python": 46.8
+    },
+    {
+      "t": 20.236,
+      "n1_s1": 361.8,
+      "python": 46.8
+    },
+    {
+      "t": 20.513,
+      "n1_s1": 425.4,
+      "python": 46.8
+    },
+    {
+      "t": 20.779,
+      "n1_s1": 412.6,
+      "python": 46.8
+    },
+    {
+      "t": 21.057,
+      "n1_s1": 370.1,
+      "python": 46.8
+    },
+    {
+      "t": 21.335,
+      "n1_s1": 285.0,
+      "python": 46.8
+    },
+    {
+      "t": 21.599,
+      "n1_s1": 284.2,
+      "python": 46.8
+    },
+    {
+      "t": 21.865,
+      "n1_s1": 284.2,
+      "python": 46.8
+    },
+    {
+      "t": 22.141,
+      "n1_s1": 284.2,
+      "python": 46.8
+    },
+    {
+      "t": 22.418,
+      "n1_s1": 282.8,
+      "python": 46.8
+    },
+    {
+      "t": 22.696,
+      "n1_s1": 282.8,
+      "python": 46.8
+    },
+    {
+      "t": 22.972,
+      "n1_s1": 282.8,
+      "python": 46.8
+    },
+    {
+      "t": 23.248,
+      "n1_s1": 286.7,
+      "python": 46.8
+    },
+    {
+      "t": 23.522,
+      "n1_s1": 284.5,
+      "python": 46.8
+    },
+    {
+      "t": 23.801,
+      "n1_s1": 284.4,
+      "python": 46.8
+    },
+    {
+      "t": 24.066,
+      "n1_s1": 284.0,
+      "python": 46.8
+    },
+    {
+      "t": 24.342,
+      "n1_s1": 284.0,
+      "python": 46.8
+    },
+    {
+      "t": 24.607,
+      "n1_s1": 283.9,
+      "python": 46.8
+    },
+    {
+      "t": 24.87,
+      "n1_s1": 283.4,
+      "python": 46.8
+    },
+    {
+      "t": 25.135,
+      "n1_s1": 283.4,
+      "python": 46.8
+    },
+    {
+      "t": 25.415,
+      "n1_s1": 283.3,
+      "python": 46.8
+    },
+    {
+      "t": 25.693,
+      "n1_s1": 283.3,
+      "python": 46.8
+    },
+    {
+      "t": 25.956,
+      "n1_s1": 283.3,
+      "python": 46.8
+    },
+    {
+      "t": 26.22,
+      "n1_s1": 283.3,
+      "python": 46.8
+    },
+    {
+      "t": 26.496,
+      "python": 46.9
+    },
+    {
+      "t": 26.76,
+      "python": 47.2
+    },
+    {
+      "t": 27.025,
+      "python": 47.2
+    },
+    {
+      "t": 27.289,
+      "python": 47.2
+    },
+    {
+      "t": 27.552,
+      "python": 47.2
+    },
+    {
+      "t": 27.817,
+      "python": 47.2
+    },
+    {
+      "t": 28.08,
+      "python": 47.2
+    },
+    {
+      "t": 28.33,
+      "python": 47.2
+    },
+    {
+      "t": 28.594,
+      "python": 47.2
+    },
+    {
+      "t": 28.858,
+      "python": 47.2
+    },
+    {
+      "t": 29.121,
+      "python": 47.2
+    },
+    {
+      "t": 29.382,
+      "python": 47.2
+    },
+    {
+      "t": 29.647,
+      "python": 47.2
+    },
+    {
+      "t": 29.91,
+      "python": 47.2
+    },
+    {
+      "t": 30.175,
+      "python": 47.2
+    },
+    {
+      "t": 30.436,
+      "python": 47.2
+    },
+    {
+      "t": 30.7,
+      "python": 47.2
+    },
+    {
+      "t": 30.951,
+      "python": 47.2
+    },
+    {
+      "t": 31.21,
+      "n3_s2": 349.8,
+      "python": 47.3
+    },
+    {
+      "t": 31.488,
+      "n3_s2": 277.1,
+      "python": 47.3
+    },
+    {
+      "t": 31.765,
+      "n3_s2": 272.8,
+      "python": 47.3
+    },
+    {
+      "t": 32.043,
+      "n3_s2": 273.8,
+      "python": 47.3
+    },
+    {
+      "t": 32.308,
+      "n3_s2": 272.4,
+      "python": 47.3
+    },
+    {
+      "t": 32.585,
+      "n3_s2": 271.6,
+      "n3_s1": 346.3,
+      "python": 47.4
+    },
+    {
+      "t": 32.865,
+      "n3_s2": 273.4,
+      "n3_s1": 274.2,
+      "python": 47.4
+    },
+    {
+      "t": 33.141,
+      "n3_s2": 280.6,
+      "n3_s1": 273.0,
+      "python": 47.4
+    },
+    {
+      "t": 33.435,
+      "n3_s2": 283.6,
+      "n3_s1": 275.1,
+      "n3_s3": 278.2,
+      "python": 47.4
+    },
+    {
+      "t": 33.743,
+      "n3_s2": 282.3,
+      "n3_s1": 275.6,
+      "n3_s3": 276.6,
+      "python": 47.4
+    },
+    {
+      "t": 34.039,
+      "n3_s2": 279.7,
+      "n3_s1": 277.1,
+      "n3_s3": 272.7,
+      "python": 47.4
+    },
+    {
+      "t": 34.333,
+      "n3_s2": 279.6,
+      "n3_s1": 275.1,
+      "n3_s3": 272.1,
+      "python": 47.4
+    },
+    {
+      "t": 34.627,
+      "n3_s2": 279.6,
+      "n3_s1": 286.7,
+      "n3_s3": 272.0,
+      "python": 47.4
+    },
+    {
+      "t": 34.921,
+      "n3_s2": 277.4,
+      "n3_s1": 280.1,
+      "n3_s3": 271.2,
+      "python": 47.4
+    },
+    {
+      "t": 35.227,
+      "n3_s2": 277.4,
+      "n3_s1": 278.9,
+      "n3_s3": 271.5,
+      "python": 47.4
+    },
+    {
+      "t": 35.522,
+      "n3_s2": 277.5,
+      "n3_s1": 279.5,
+      "n3_s3": 273.5,
+      "python": 47.4
+    },
+    {
+      "t": 35.816,
+      "n3_s2": 277.5,
+      "n3_s1": 279.5,
+      "n3_s3": 274.2,
+      "python": 47.4
+    },
+    {
+      "t": 36.112,
+      "n3_s2": 277.5,
+      "n3_s1": 279.5,
+      "n3_s3": 273.4,
+      "python": 47.4
+    },
+    {
+      "t": 36.405,
+      "n3_s2": 277.5,
+      "n3_s1": 279.5,
+      "n3_s3": 273.4,
+      "python": 47.4
+    },
+    {
+      "t": 36.701,
+      "n3_s2": 276.7,
+      "n3_s1": 277.5,
+      "n3_s3": 272.6,
+      "python": 47.4
+    },
+    {
+      "t": 36.997,
+      "n3_s2": 276.2,
+      "n3_s1": 277.0,
+      "n3_s3": 272.0,
+      "python": 47.4
+    },
+    {
+      "t": 37.292,
+      "n3_s2": 276.2,
+      "n3_s1": 277.5,
+      "n3_s3": 272.0,
+      "python": 47.4
+    },
+    {
+      "t": 37.583,
+      "n3_s2": 277.0,
+      "n3_s1": 277.6,
+      "n3_s3": 271.4,
+      "python": 47.4
+    },
+    {
+      "t": 37.875,
+      "n3_s2": 277.3,
+      "n3_s1": 276.6,
+      "n3_s3": 276.1,
+      "python": 47.4
+    },
+    {
+      "t": 38.181,
+      "n3_s2": 278.1,
+      "n3_s1": 278.0,
+      "n3_s3": 278.8,
+      "python": 47.4
+    },
+    {
+      "t": 38.475,
+      "n3_s2": 278.2,
+      "n3_s1": 277.4,
+      "n3_s3": 280.7,
+      "python": 47.4
+    },
+    {
+      "t": 38.769,
+      "n3_s2": 277.0,
+      "n3_s1": 277.2,
+      "n3_s3": 280.6,
+      "python": 47.4
+    },
+    {
+      "t": 39.064,
+      "n3_s2": 276.3,
+      "n3_s1": 277.2,
+      "n3_s3": 274.0,
+      "python": 47.4
+    },
+    {
+      "t": 39.357,
+      "n3_s2": 276.3,
+      "n3_s1": 277.2,
+      "n3_s3": 274.0,
+      "python": 47.4
+    },
+    {
+      "t": 39.65,
+      "n3_s2": 276.3,
+      "n3_s1": 278.0,
+      "n3_s3": 274.1,
+      "python": 47.4
+    },
+    {
+      "t": 39.945,
+      "n3_s2": 276.5,
+      "n3_s1": 276.8,
+      "n3_s3": 274.1,
+      "python": 47.4
+    },
+    {
+      "t": 40.237,
+      "n3_s2": 276.4,
+      "n3_s1": 276.8,
+      "n3_s3": 274.1,
+      "python": 47.4
+    },
+    {
+      "t": 40.53,
+      "n3_s2": 284.4,
+      "n3_s1": 276.8,
+      "n3_s3": 274.3,
+      "python": 47.4
+    },
+    {
+      "t": 40.827,
+      "n3_s2": 448.5,
+      "n3_s1": 276.7,
+      "n3_s3": 274.2,
+      "python": 47.4
+    },
+    {
+      "t": 41.122,
+      "n3_s2": 362.3,
+      "n3_s1": 276.7,
+      "n3_s3": 275.4,
+      "python": 47.4
+    },
+    {
+      "t": 41.419,
+      "n3_s2": 362.2,
+      "n3_s1": 276.7,
+      "n3_s3": 276.0,
+      "python": 47.4
+    },
+    {
+      "t": 41.714,
+      "n3_s2": 362.0,
+      "n3_s1": 276.7,
+      "n3_s3": 275.7,
+      "python": 47.4
+    },
+    {
+      "t": 42.012,
+      "n3_s2": 361.3,
+      "n3_s1": 276.7,
+      "n3_s3": 275.6,
+      "python": 47.4
+    },
+    {
+      "t": 42.305,
+      "n3_s2": 361.4,
+      "n3_s1": 278.1,
+      "n3_s3": 274.8,
+      "python": 47.4
+    },
+    {
+      "t": 42.6,
+      "n3_s2": 405.4,
+      "n3_s1": 277.6,
+      "n3_s3": 275.2,
+      "python": 47.4
+    },
+    {
+      "t": 42.893,
+      "n3_s2": 447.6,
+      "n3_s1": 417.2,
+      "n3_s3": 277.0,
+      "python": 47.4
+    },
+    {
+      "t": 43.199,
+      "n3_s2": 361.8,
+      "n3_s1": 461.4,
+      "n3_s3": 441.7,
+      "python": 47.4
+    },
+    {
+      "t": 43.504,
+      "n3_s2": 361.8,
+      "n3_s1": 364.3,
+      "n3_s3": 364.5,
+      "python": 47.4
+    },
+    {
+      "t": 43.8,
+      "n3_s2": 361.8,
+      "n3_s1": 361.8,
+      "n3_s3": 360.4,
+      "python": 47.4
+    },
+    {
+      "t": 44.094,
+      "n3_s2": 361.8,
+      "n3_s1": 361.8,
+      "n3_s3": 360.2,
+      "python": 47.4
+    },
+    {
+      "t": 44.388,
+      "n3_s2": 361.8,
+      "n3_s1": 361.8,
+      "n3_s3": 360.3,
+      "python": 47.4
+    },
+    {
+      "t": 44.683,
+      "n3_s2": 429.3,
+      "n3_s1": 361.9,
+      "n3_s3": 360.3,
+      "python": 47.4
+    },
+    {
+      "t": 44.978,
+      "n3_s2": 458.4,
+      "n3_s1": 446.5,
+      "n3_s3": 360.3,
+      "python": 47.4
+    },
+    {
+      "t": 45.273,
+      "n3_s2": 362.2,
+      "n3_s1": 362.5,
+      "n3_s3": 447.0,
+      "python": 47.4
+    },
+    {
+      "t": 45.566,
+      "n3_s2": 363.4,
+      "n3_s1": 362.2,
+      "n3_s3": 360.7,
+      "python": 47.4
+    },
+    {
+      "t": 45.863,
+      "n3_s2": 362.3,
+      "n3_s1": 362.0,
+      "n3_s3": 360.6,
+      "python": 47.4
+    },
+    {
+      "t": 46.16,
+      "n3_s2": 362.3,
+      "n3_s1": 362.1,
+      "n3_s3": 360.7,
+      "python": 47.4
+    },
+    {
+      "t": 46.456,
+      "n3_s2": 362.3,
+      "n3_s1": 362.1,
+      "n3_s3": 360.8,
+      "python": 47.4
+    },
+    {
+      "t": 46.75,
+      "n3_s2": 445.3,
+      "n3_s1": 362.8,
+      "n3_s3": 361.1,
+      "python": 47.4
+    },
+    {
+      "t": 47.043,
+      "n3_s2": 418.7,
+      "n3_s1": 449.2,
+      "n3_s3": 399.2,
+      "python": 47.4
+    },
+    {
+      "t": 47.339,
+      "n3_s2": 363.3,
+      "n3_s1": 363.7,
+      "n3_s3": 447.7,
+      "python": 47.4
+    },
+    {
+      "t": 47.637,
+      "n3_s2": 363.3,
+      "n3_s1": 363.2,
+      "n3_s3": 361.6,
+      "python": 47.4
+    },
+    {
+      "t": 47.934,
+      "n3_s2": 362.9,
+      "n3_s1": 363.8,
+      "n3_s3": 361.0,
+      "python": 47.4
+    },
+    {
+      "t": 48.229,
+      "n3_s2": 363.0,
+      "n3_s1": 363.9,
+      "n3_s3": 362.1,
+      "python": 47.4
+    },
+    {
+      "t": 48.521,
+      "n3_s2": 363.0,
+      "n3_s1": 363.9,
+      "n3_s3": 362.2,
+      "python": 47.4
+    },
+    {
+      "t": 48.832,
+      "n3_s2": 403.1,
+      "n3_s1": 409.5,
+      "n3_s3": 361.2,
+      "python": 47.4
+    },
+    {
+      "t": 49.125,
+      "n3_s2": 371.3,
+      "n3_s1": 449.3,
+      "n3_s3": 425.5,
+      "python": 47.4
+    },
+    {
+      "t": 49.421,
+      "n3_s2": 289.0,
+      "n3_s1": 363.5,
+      "n3_s3": 452.3,
+      "python": 47.4
+    },
+    {
+      "t": 49.733,
+      "n3_s2": 284.7,
+      "n3_s1": 363.4,
+      "n3_s3": 361.7,
+      "python": 47.4
+    },
+    {
+      "t": 50.041,
+      "n3_s2": 284.7,
+      "n3_s1": 363.4,
+      "n3_s3": 361.7,
+      "python": 47.4
+    },
+    {
+      "t": 50.337,
+      "n3_s2": 284.0,
+      "n3_s1": 363.4,
+      "n3_s3": 361.8,
+      "python": 47.4
+    },
+    {
+      "t": 50.631,
+      "n3_s2": 283.9,
+      "n3_s1": 363.4,
+      "n3_s3": 361.7,
+      "python": 47.4
+    },
+    {
+      "t": 50.925,
+      "n3_s2": 282.0,
+      "n3_s1": 438.1,
+      "n3_s3": 361.7,
+      "python": 47.4
+    },
+    {
+      "t": 51.22,
+      "n3_s2": 279.5,
+      "n3_s1": 428.9,
+      "n3_s3": 437.9,
+      "python": 47.4
+    },
+    {
+      "t": 51.528,
+      "n3_s2": 279.5,
+      "n3_s1": 282.9,
+      "n3_s3": 368.8,
+      "python": 47.5
+    },
+    {
+      "t": 51.836,
+      "n3_s2": 279.5,
+      "n3_s1": 284.0,
+      "n3_s3": 285.1,
+      "python": 47.5
+    },
+    {
+      "t": 52.146,
+      "n3_s2": 283.9,
+      "n3_s1": 284.1,
+      "n3_s3": 283.0,
+      "python": 47.5
+    },
+    {
+      "t": 52.441,
+      "n3_s2": 284.0,
+      "n3_s1": 284.1,
+      "n3_s3": 283.0,
+      "python": 47.5
+    },
+    {
+      "t": 52.736,
+      "n3_s2": 283.2,
+      "n3_s1": 283.6,
+      "n3_s3": 282.9,
+      "python": 47.5
+    },
+    {
+      "t": 53.03,
+      "n3_s2": 280.2,
+      "n3_s1": 283.6,
+      "n3_s3": 282.1,
+      "python": 47.5
+    },
+    {
+      "t": 53.325,
+      "n3_s2": 280.2,
+      "n3_s1": 283.6,
+      "n3_s3": 282.1,
+      "python": 47.5
+    },
+    {
+      "t": 53.62,
+      "n3_s2": 279.5,
+      "n3_s1": 284.0,
+      "n3_s3": 282.6,
+      "python": 47.5
+    },
+    {
+      "t": 53.917,
+      "n3_s2": 279.5,
+      "n3_s1": 282.1,
+      "n3_s3": 278.6,
+      "python": 47.5
+    },
+    {
+      "t": 54.224,
+      "n3_s2": 279.5,
+      "n3_s1": 281.6,
+      "n3_s3": 278.4,
+      "python": 47.5
+    },
+    {
+      "t": 54.53,
+      "n3_s2": 279.5,
+      "n3_s1": 279.6,
+      "n3_s3": 277.9,
+      "python": 47.5
+    },
+    {
+      "t": 54.823,
+      "n3_s2": 279.5,
+      "n3_s1": 279.5,
+      "n3_s3": 277.9,
+      "python": 47.5
+    },
+    {
+      "t": 55.133,
+      "n3_s2": 139.9,
+      "n3_s1": 279.6,
+      "n3_s3": 281.7,
+      "python": 47.5
+    },
+    {
+      "t": 55.425,
+      "n3_s1": 280.7,
+      "n3_s3": 282.2,
+      "python": 47.5
+    },
+    {
+      "t": 55.717,
+      "n3_s1": 280.4,
+      "n3_s3": 281.9,
+      "python": 47.5
+    },
+    {
+      "t": 56.009,
+      "n3_s1": 280.9,
+      "n3_s3": 278.9,
+      "python": 47.5
+    },
+    {
+      "t": 56.301,
+      "n3_s1": 284.1,
+      "n3_s3": 278.8,
+      "python": 47.5
+    },
+    {
+      "t": 56.58,
+      "n3_s1": 285.0,
+      "n3_s3": 278.8,
+      "python": 47.5
+    },
+    {
+      "t": 56.859,
+      "n3_s1": 282.9,
+      "n3_s3": 278.0,
+      "python": 47.5
+    },
+    {
+      "t": 57.141,
+      "n3_s1": 280.0,
+      "n3_s3": 278.0,
+      "python": 47.5
+    },
+    {
+      "t": 57.419,
+      "n3_s1": 280.0,
+      "n3_s3": 278.0,
+      "python": 47.5
+    },
+    {
+      "t": 57.713,
+      "n3_s1": 279.9,
+      "n3_s3": 278.0,
+      "python": 47.5
+    },
+    {
+      "t": 57.993,
+      "n3_s1": 279.9,
+      "n3_s3": 278.0,
+      "python": 47.5
+    },
+    {
+      "t": 58.272,
+      "n3_s1": 279.9,
+      "python": 47.5
+    },
+    {
+      "t": 58.551,
+      "n3_s1": 279.9,
+      "python": 47.5
+    },
+    {
+      "t": 58.815,
+      "n3_s1": 279.9,
+      "python": 47.5
+    },
+    {
+      "t": 59.081,
+      "n3_s1": 279.9,
+      "python": 47.5
+    },
+    {
+      "t": 59.357,
+      "python": 47.5
+    },
+    {
+      "t": 59.617,
+      "python": 47.5
+    },
+    {
+      "t": 59.882,
+      "python": 48.0
+    },
+    {
+      "t": 60.145,
+      "python": 48.0
+    },
+    {
+      "t": 60.409,
+      "python": 48.0
+    },
+    {
+      "t": 60.671,
+      "python": 48.0
+    },
+    {
+      "t": 60.937,
+      "python": 48.0
+    },
+    {
+      "t": 61.198,
+      "python": 48.0
+    },
+    {
+      "t": 61.46,
+      "python": 48.3
+    },
+    {
+      "t": 61.721,
+      "n5_s1": 288.0,
+      "python": 48.3
+    },
+    {
+      "t": 61.996,
+      "n5_s1": 284.2,
+      "python": 48.3
+    },
+    {
+      "t": 62.273,
+      "n5_s1": 274.1,
+      "python": 48.3
+    },
+    {
+      "t": 62.55,
+      "n5_s1": 273.6,
+      "n5_s4": 285.2,
+      "python": 48.3
+    },
+    {
+      "t": 62.84,
+      "n5_s1": 272.8,
+      "n5_s4": 272.0,
+      "n5_s3": 288.2,
+      "n5_s2": 348.4,
+      "python": 48.3
+    },
+    {
+      "t": 63.161,
+      "n5_s1": 272.8,
+      "n5_s4": 271.7,
+      "n5_s3": 274.2,
+      "n5_s2": 283.1,
+      "n5_s5": 283.2,
+      "python": 48.4
+    },
+    {
+      "t": 63.501,
+      "n5_s1": 275.8,
+      "n5_s4": 271.7,
+      "n5_s3": 277.2,
+      "n5_s2": 285.7,
+      "n5_s5": 284.8,
+      "python": 48.4
+    },
+    {
+      "t": 63.841,
+      "n5_s1": 280.6,
+      "n5_s4": 272.3,
+      "n5_s3": 275.4,
+      "n5_s2": 285.3,
+      "n5_s5": 284.6,
+      "python": 48.4
+    },
+    {
+      "t": 64.167,
+      "n5_s1": 279.1,
+      "n5_s4": 271.6,
+      "n5_s3": 274.2,
+      "n5_s2": 281.6,
+      "n5_s5": 271.8,
+      "python": 48.4
+    },
+    {
+      "t": 64.492,
+      "n5_s1": 278.8,
+      "n5_s4": 284.4,
+      "n5_s3": 274.2,
+      "n5_s2": 272.0,
+      "n5_s5": 271.8,
+      "python": 48.4
+    },
+    {
+      "t": 64.832,
+      "n5_s1": 278.7,
+      "n5_s4": 280.9,
+      "n5_s3": 283.1,
+      "n5_s2": 280.9,
+      "n5_s5": 272.5,
+      "python": 48.4
+    },
+    {
+      "t": 65.172,
+      "n5_s1": 278.4,
+      "n5_s4": 278.5,
+      "n5_s3": 281.3,
+      "n5_s2": 284.4,
+      "n5_s5": 282.7,
+      "python": 48.4
+    },
+    {
+      "t": 65.511,
+      "n5_s1": 279.7,
+      "n5_s4": 278.0,
+      "n5_s3": 280.2,
+      "n5_s2": 283.6,
+      "n5_s5": 283.5,
+      "python": 48.4
+    },
+    {
+      "t": 65.85,
+      "n5_s1": 279.1,
+      "n5_s4": 278.1,
+      "n5_s3": 280.3,
+      "n5_s2": 277.3,
+      "n5_s5": 283.5,
+      "python": 48.4
+    },
+    {
+      "t": 66.177,
+      "n5_s1": 278.1,
+      "n5_s4": 278.1,
+      "n5_s3": 280.3,
+      "n5_s2": 277.3,
+      "n5_s5": 277.2,
+      "python": 48.4
+    },
+    {
+      "t": 66.502,
+      "n5_s1": 278.1,
+      "n5_s4": 276.7,
+      "n5_s3": 280.2,
+      "n5_s2": 277.7,
+      "n5_s5": 276.8,
+      "python": 48.4
+    },
+    {
+      "t": 66.845,
+      "n5_s1": 278.1,
+      "n5_s4": 276.6,
+      "n5_s3": 278.9,
+      "n5_s2": 278.9,
+      "n5_s5": 276.8,
+      "python": 48.4
+    },
+    {
+      "t": 67.171,
+      "n5_s1": 278.2,
+      "n5_s4": 276.6,
+      "n5_s3": 278.9,
+      "n5_s2": 278.2,
+      "n5_s5": 277.2,
+      "python": 48.4
+    },
+    {
+      "t": 67.495,
+      "n5_s1": 278.2,
+      "n5_s4": 276.7,
+      "n5_s3": 278.9,
+      "n5_s2": 278.0,
+      "n5_s5": 277.2,
+      "python": 48.4
+    },
+    {
+      "t": 67.821,
+      "n5_s1": 278.2,
+      "n5_s4": 276.7,
+      "n5_s3": 279.0,
+      "n5_s2": 278.0,
+      "n5_s5": 277.6,
+      "python": 48.4
+    },
+    {
+      "t": 68.161,
+      "n5_s1": 278.2,
+      "n5_s4": 276.8,
+      "n5_s3": 279.0,
+      "n5_s2": 278.0,
+      "n5_s5": 279.0,
+      "python": 48.4
+    },
+    {
+      "t": 68.49,
+      "n5_s1": 278.2,
+      "n5_s4": 276.7,
+      "n5_s3": 279.0,
+      "n5_s2": 278.0,
+      "n5_s5": 278.6,
+      "python": 48.4
+    },
+    {
+      "t": 68.813,
+      "n5_s1": 279.8,
+      "n5_s4": 276.8,
+      "n5_s3": 279.0,
+      "n5_s2": 277.3,
+      "n5_s5": 278.3,
+      "python": 48.4
+    },
+    {
+      "t": 69.139,
+      "n5_s1": 278.5,
+      "n5_s4": 277.4,
+      "n5_s3": 279.6,
+      "n5_s2": 277.3,
+      "n5_s5": 277.5,
+      "python": 48.4
+    },
+    {
+      "t": 69.464,
+      "n5_s1": 278.5,
+      "n5_s4": 280.6,
+      "n5_s3": 282.0,
+      "n5_s2": 277.4,
+      "n5_s5": 277.5,
+      "python": 48.4
+    },
+    {
+      "t": 69.79,
+      "n5_s1": 277.7,
+      "n5_s4": 279.1,
+      "n5_s3": 280.1,
+      "n5_s2": 278.3,
+      "n5_s5": 276.7,
+      "python": 48.4
+    },
+    {
+      "t": 70.131,
+      "n5_s1": 276.5,
+      "n5_s4": 275.8,
+      "n5_s3": 278.3,
+      "n5_s2": 276.8,
+      "n5_s5": 276.8,
+      "python": 48.4
+    },
+    {
+      "t": 70.456,
+      "n5_s1": 276.5,
+      "n5_s4": 275.8,
+      "n5_s3": 278.1,
+      "n5_s2": 276.8,
+      "n5_s5": 276.8,
+      "python": 48.4
+    },
+    {
+      "t": 70.782,
+      "n5_s1": 276.5,
+      "n5_s4": 275.8,
+      "n5_s3": 278.1,
+      "n5_s2": 276.8,
+      "n5_s5": 275.7,
+      "python": 48.4
+    },
+    {
+      "t": 71.107,
+      "n5_s1": 276.5,
+      "n5_s4": 275.8,
+      "n5_s3": 278.5,
+      "n5_s2": 275.7,
+      "n5_s5": 275.6,
+      "python": 48.4
+    },
+    {
+      "t": 71.433,
+      "n5_s1": 276.6,
+      "n5_s4": 275.9,
+      "n5_s3": 414.0,
+      "n5_s2": 275.7,
+      "n5_s5": 275.6,
+      "python": 48.4
+    },
+    {
+      "t": 71.761,
+      "n5_s1": 276.6,
+      "n5_s4": 275.9,
+      "n5_s3": 461.2,
+      "n5_s2": 275.7,
+      "n5_s5": 275.7,
+      "python": 48.4
+    },
+    {
+      "t": 72.097,
+      "n5_s1": 276.6,
+      "n5_s4": 275.9,
+      "n5_s3": 363.8,
+      "n5_s2": 275.7,
+      "n5_s5": 275.7,
+      "python": 48.4
+    },
+    {
+      "t": 72.42,
+      "n5_s1": 276.5,
+      "n5_s4": 275.9,
+      "n5_s3": 363.4,
+      "n5_s2": 275.6,
+      "n5_s5": 275.7,
+      "python": 48.4
+    },
+    {
+      "t": 72.742,
+      "n5_s1": 276.5,
+      "n5_s4": 276.1,
+      "n5_s3": 363.5,
+      "n5_s2": 275.6,
+      "n5_s5": 275.7,
+      "python": 48.4
+    },
+    {
+      "t": 73.065,
+      "n5_s1": 276.5,
+      "n5_s4": 275.9,
+      "n5_s3": 363.4,
+      "n5_s2": 276.0,
+      "n5_s5": 275.7,
+      "python": 48.4
+    },
+    {
+      "t": 73.405,
+      "n5_s1": 277.1,
+      "n5_s4": 275.9,
+      "n5_s3": 426.0,
+      "n5_s2": 275.9,
+      "n5_s5": 275.7,
+      "python": 48.4
+    },
+    {
+      "t": 73.744,
+      "n5_s1": 277.6,
+      "n5_s4": 275.9,
+      "n5_s3": 450.4,
+      "n5_s2": 275.8,
+      "n5_s5": 275.7,
+      "python": 48.4
+    },
+    {
+      "t": 74.081,
+      "n5_s1": 447.7,
+      "n5_s4": 275.9,
+      "n5_s3": 363.9,
+      "n5_s2": 275.8,
+      "n5_s5": 276.1,
+      "python": 48.4
+    },
+    {
+      "t": 74.403,
+      "n5_s1": 363.9,
+      "n5_s4": 276.4,
+      "n5_s3": 363.8,
+      "n5_s2": 275.8,
+      "n5_s5": 277.2,
+      "python": 48.4
+    },
+    {
+      "t": 74.745,
+      "n5_s1": 362.6,
+      "n5_s4": 276.3,
+      "n5_s3": 363.9,
+      "n5_s2": 275.8,
+      "n5_s5": 447.3,
+      "python": 48.4
+    },
+    {
+      "t": 75.072,
+      "n5_s1": 360.3,
+      "n5_s4": 430.6,
+      "n5_s3": 363.8,
+      "n5_s2": 275.8,
+      "n5_s5": 362.0,
+      "python": 48.4
+    },
+    {
+      "t": 75.4,
+      "n5_s1": 360.3,
+      "n5_s4": 364.2,
+      "n5_s3": 420.7,
+      "n5_s2": 275.8,
+      "n5_s5": 362.2,
+      "python": 48.4
+    },
+    {
+      "t": 75.739,
+      "n5_s1": 360.3,
+      "n5_s4": 363.8,
+      "n5_s3": 450.4,
+      "n5_s2": 276.1,
+      "n5_s5": 362.0,
+      "python": 48.4
+    },
+    {
+      "t": 76.083,
+      "n5_s1": 446.8,
+      "n5_s4": 361.4,
+      "n5_s3": 364.2,
+      "n5_s2": 274.8,
+      "n5_s5": 361.2,
+      "python": 48.4
+    },
+    {
+      "t": 76.408,
+      "n5_s1": 361.1,
+      "n5_s4": 361.4,
+      "n5_s3": 365.4,
+      "n5_s2": 273.2,
+      "n5_s5": 361.2,
+      "python": 48.4
+    },
+    {
+      "t": 76.75,
+      "n5_s1": 360.5,
+      "n5_s4": 361.4,
+      "n5_s3": 365.5,
+      "n5_s2": 273.7,
+      "n5_s5": 447.7,
+      "python": 48.4
+    },
+    {
+      "t": 77.09,
+      "n5_s1": 360.6,
+      "n5_s4": 437.3,
+      "n5_s3": 364.3,
+      "n5_s2": 434.3,
+      "n5_s5": 361.9,
+      "python": 48.4
+    },
+    {
+      "t": 77.43,
+      "n5_s1": 360.6,
+      "n5_s4": 459.5,
+      "n5_s3": 431.3,
+      "n5_s2": 457.4,
+      "n5_s5": 361.6,
+      "python": 48.4
+    },
+    {
+      "t": 77.772,
+      "n5_s1": 360.6,
+      "n5_s4": 361.7,
+      "n5_s3": 455.0,
+      "n5_s2": 358.2,
+      "n5_s5": 361.6,
+      "python": 48.4
+    },
+    {
+      "t": 78.127,
+      "n5_s1": 447.2,
+      "n5_s4": 361.8,
+      "n5_s3": 364.6,
+      "n5_s2": 356.8,
+      "n5_s5": 361.6,
+      "python": 48.4
+    },
+    {
+      "t": 78.467,
+      "n5_s1": 361.2,
+      "n5_s4": 361.8,
+      "n5_s3": 364.6,
+      "n5_s2": 356.8,
+      "n5_s5": 375.5,
+      "python": 48.4
+    },
+    {
+      "t": 78.809,
+      "n5_s1": 362.1,
+      "n5_s4": 361.9,
+      "n5_s3": 364.6,
+      "n5_s2": 356.8,
+      "n5_s5": 448.3,
+      "python": 48.4
+    },
+    {
+      "t": 79.147,
+      "n5_s1": 362.0,
+      "n5_s4": 448.0,
+      "n5_s3": 364.6,
+      "n5_s2": 444.0,
+      "n5_s5": 362.1,
+      "python": 48.4
+    },
+    {
+      "t": 79.5,
+      "n5_s1": 362.1,
+      "n5_s4": 362.6,
+      "n5_s3": 439.2,
+      "n5_s2": 357.7,
+      "n5_s5": 363.2,
+      "python": 48.4
+    },
+    {
+      "t": 79.841,
+      "n5_s1": 383.5,
+      "n5_s4": 362.6,
+      "n5_s3": 458.9,
+      "n5_s2": 357.7,
+      "n5_s5": 362.6,
+      "python": 48.4
+    },
+    {
+      "t": 80.181,
+      "n5_s1": 448.3,
+      "n5_s4": 363.7,
+      "n5_s3": 288.8,
+      "n5_s2": 357.7,
+      "n5_s5": 362.6,
+      "python": 48.4
+    },
+    {
+      "t": 80.519,
+      "n5_s1": 361.9,
+      "n5_s4": 363.7,
+      "n5_s3": 286.9,
+      "n5_s2": 357.7,
+      "n5_s5": 405.2,
+      "python": 48.4
+    },
+    {
+      "t": 80.859,
+      "n5_s1": 361.7,
+      "n5_s4": 362.6,
+      "n5_s3": 286.0,
+      "n5_s2": 357.8,
+      "n5_s5": 449.0,
+      "python": 48.4
+    },
+    {
+      "t": 81.202,
+      "n5_s1": 361.1,
+      "n5_s4": 449.1,
+      "n5_s3": 285.7,
+      "n5_s2": 444.6,
+      "n5_s5": 362.6,
+      "python": 48.4
+    },
+    {
+      "t": 81.542,
+      "n5_s1": 361.5,
+      "n5_s4": 362.8,
+      "n5_s3": 285.5,
+      "n5_s2": 358.2,
+      "n5_s5": 362.6,
+      "python": 48.4
+    },
+    {
+      "t": 81.881,
+      "n5_s1": 403.3,
+      "n5_s4": 363.1,
+      "n5_s3": 283.8,
+      "n5_s2": 359.3,
+      "n5_s5": 362.9,
+      "python": 48.4
+    },
+    {
+      "t": 82.222,
+      "n5_s1": 428.2,
+      "n5_s4": 363.2,
+      "n5_s3": 281.1,
+      "n5_s2": 359.4,
+      "n5_s5": 362.9,
+      "python": 48.4
+    },
+    {
+      "t": 82.577,
+      "n5_s1": 369.4,
+      "n5_s4": 363.2,
+      "n5_s3": 281.1,
+      "n5_s2": 359.4,
+      "n5_s5": 427.0,
+      "python": 48.4
+    },
+    {
+      "t": 82.915,
+      "n5_s1": 283.7,
+      "n5_s4": 383.2,
+      "n5_s3": 281.1,
+      "n5_s2": 389.5,
+      "n5_s5": 446.5,
+      "python": 48.4
+    },
+    {
+      "t": 83.259,
+      "n5_s1": 282.9,
+      "n5_s4": 431.3,
+      "n5_s3": 281.0,
+      "n5_s2": 445.0,
+      "n5_s5": 373.9,
+      "python": 48.5
+    },
+    {
+      "t": 83.616,
+      "n5_s1": 282.9,
+      "n5_s4": 374.0,
+      "n5_s3": 281.0,
+      "n5_s2": 358.6,
+      "n5_s5": 284.1,
+      "python": 48.5
+    },
+    {
+      "t": 83.957,
+      "n5_s1": 282.8,
+      "n5_s4": 284.8,
+      "n5_s3": 281.0,
+      "n5_s2": 358.5,
+      "n5_s5": 284.0,
+      "python": 48.5
+    },
+    {
+      "t": 84.31,
+      "n5_s1": 282.2,
+      "n5_s4": 284.6,
+      "n5_s3": 281.0,
+      "n5_s2": 358.5,
+      "n5_s5": 284.0,
+      "python": 48.5
+    },
+    {
+      "t": 84.663,
+      "n5_s1": 282.2,
+      "n5_s4": 284.6,
+      "n5_s3": 281.0,
+      "n5_s2": 358.6,
+      "n5_s5": 283.6,
+      "python": 48.5
+    },
+    {
+      "t": 85.018,
+      "n5_s1": 282.5,
+      "n5_s4": 283.8,
+      "n5_s3": 281.0,
+      "n5_s2": 425.6,
+      "n5_s5": 281.2,
+      "python": 48.5
+    },
+    {
+      "t": 85.361,
+      "n5_s1": 282.5,
+      "n5_s4": 283.2,
+      "n5_s3": 282.0,
+      "n5_s2": 437.1,
+      "n5_s5": 279.0,
+      "python": 48.5
+    },
+    {
+      "t": 85.701,
+      "n5_s1": 278.8,
+      "n5_s4": 283.7,
+      "n5_s3": 282.6,
+      "n5_s2": 277.4,
+      "n5_s5": 279.0,
+      "python": 48.5
+    },
+    {
+      "t": 86.058,
+      "n5_s1": 278.8,
+      "n5_s4": 280.6,
+      "n5_s3": 284.0,
+      "n5_s2": 280.9,
+      "n5_s5": 278.8,
+      "python": 48.5
+    },
+    {
+      "t": 86.397,
+      "n5_s1": 282.0,
+      "n5_s4": 280.2,
+      "n5_s3": 282.9,
+      "n5_s2": 280.2,
+      "n5_s5": 278.9,
+      "python": 48.5
+    },
+    {
+      "t": 86.738,
+      "n5_s1": 283.1,
+      "n5_s4": 280.2,
+      "n5_s3": 282.9,
+      "n5_s2": 280.2,
+      "n5_s5": 278.9,
+      "python": 48.5
+    },
+    {
+      "t": 87.074,
+      "n5_s1": 283.0,
+      "n5_s4": 280.0,
+      "n5_s3": 282.9,
+      "n5_s2": 278.6,
+      "n5_s5": 278.9,
+      "python": 48.5
+    },
+    {
+      "t": 87.429,
+      "n5_s1": 279.1,
+      "n5_s4": 279.3,
+      "n5_s3": 282.9,
+      "n5_s2": 278.7,
+      "n5_s5": 278.9,
+      "python": 48.5
+    },
+    {
+      "t": 87.767,
+      "n5_s1": 279.1,
+      "n5_s4": 279.3,
+      "n5_s3": 282.9,
+      "n5_s2": 279.1,
+      "n5_s5": 278.8,
+      "python": 48.5
+    },
+    {
+      "t": 88.106,
+      "n5_s1": 279.1,
+      "n5_s4": 279.3,
+      "n5_s3": 282.2,
+      "n5_s2": 279.1,
+      "n5_s5": 278.8,
+      "python": 48.5
+    },
+    {
+      "t": 88.444,
+      "n5_s1": 279.1,
+      "n5_s4": 279.3,
+      "n5_s3": 282.2,
+      "n5_s2": 279.1,
+      "n5_s5": 279.8,
+      "python": 48.5
+    },
+    {
+      "t": 88.782,
+      "n5_s1": 279.1,
+      "n5_s4": 280.3,
+      "n5_s3": 282.2,
+      "n5_s2": 278.5,
+      "n5_s5": 278.8,
+      "python": 48.6
+    },
+    {
+      "t": 89.121,
+      "n5_s1": 279.1,
+      "n5_s4": 280.3,
+      "n5_s3": 282.2,
+      "n5_s2": 279.8,
+      "n5_s5": 278.8,
+      "python": 48.7
+    },
+    {
+      "t": 89.464,
+      "n5_s1": 279.1,
+      "n5_s4": 280.3,
+      "n5_s3": 282.2,
+      "n5_s2": 281.5,
+      "n5_s5": 278.8,
+      "python": 48.7
+    },
+    {
+      "t": 89.791,
+      "n5_s1": 279.2,
+      "n5_s4": 283.6,
+      "n5_s3": 282.2,
+      "n5_s2": 281.1,
+      "n5_s5": 278.8,
+      "python": 48.7
+    },
+    {
+      "t": 90.119,
+      "n5_s1": 279.2,
+      "n5_s4": 280.7,
+      "n5_s3": 282.2,
+      "n5_s2": 277.2,
+      "n5_s5": 278.8,
+      "python": 48.7
+    },
+    {
+      "t": 90.446,
+      "n5_s1": 279.1,
+      "n5_s4": 280.2,
+      "n5_s3": 282.2,
+      "n5_s2": 277.2,
+      "n5_s5": 282.2,
+      "python": 48.7
+    },
+    {
+      "t": 90.773,
+      "n5_s1": 279.1,
+      "n5_s4": 280.3,
+      "n5_s3": 283.4,
+      "n5_s2": 277.2,
+      "n5_s5": 283.2,
+      "python": 48.7
+    },
+    {
+      "t": 91.097,
+      "n5_s1": 279.2,
+      "n5_s4": 280.3,
+      "n5_s3": 282.3,
+      "n5_s2": 277.2,
+      "n5_s5": 279.8,
+      "python": 48.7
+    },
+    {
+      "t": 91.422,
+      "n5_s1": 280.2,
+      "n5_s4": 280.2,
+      "n5_s3": 282.2,
+      "n5_s2": 277.2,
+      "n5_s5": 279.0,
+      "python": 48.7
+    },
+    {
+      "t": 91.763,
+      "n5_s1": 280.2,
+      "n5_s4": 279.5,
+      "n5_s3": 282.2,
+      "n5_s2": 277.2,
+      "n5_s5": 279.0,
+      "python": 48.7
+    },
+    {
+      "t": 92.091,
+      "n5_s1": 280.1,
+      "n5_s4": 279.5,
+      "n5_s3": 282.2,
+      "n5_s2": 277.2,
+      "n5_s5": 279.0,
+      "python": 48.7
+    },
+    {
+      "t": 92.447,
+      "n5_s1": 279.1,
+      "n5_s4": 279.6,
+      "n5_s3": 282.2,
+      "n5_s2": 277.2,
+      "n5_s5": 279.0,
+      "python": 48.7
+    },
+    {
+      "t": 92.772,
+      "n5_s1": 279.1,
+      "n5_s4": 279.5,
+      "n5_s3": 282.2,
+      "n5_s2": 277.2,
+      "n5_s5": 279.0,
+      "python": 48.7
+    },
+    {
+      "t": 93.1,
+      "n5_s1": 279.1,
+      "n5_s4": 279.5,
+      "n5_s3": 282.2,
+      "n5_s2": 277.2,
+      "n5_s5": 279.0,
+      "python": 48.7
+    },
+    {
+      "t": 93.444,
+      "n5_s1": 279.1,
+      "n5_s4": 279.5,
+      "n5_s3": 282.2,
+      "n5_s2": 277.2,
+      "n5_s5": 279.0,
+      "python": 48.7
+    },
+    {
+      "t": 98.571,
+      "n5_s1": 277.8,
+      "n5_s4": 279.5,
+      "n5_s3": 278.9,
+      "n5_s2": 277.2,
+      "n5_s5": 279.0,
+      "python": 48.7
+    },
+    {
+      "t": 103.653,
+      "n5_s1": 278.6,
+      "n5_s4": 278.6,
+      "n5_s3": 279.3,
+      "n5_s2": 276.9,
+      "n5_s5": 277.7,
+      "python": 48.7
+    },
+    {
+      "t": 108.743,
+      "n5_s1": 277.6,
+      "n5_s4": 277.9,
+      "n5_s3": 279.3,
+      "n5_s2": 276.1,
+      "n5_s5": 277.1,
+      "python": 48.7
+    },
+    {
+      "t": 113.83,
+      "n5_s1": 277.4,
+      "n5_s4": 277.0,
+      "n5_s3": 279.1,
+      "n5_s2": 275.7,
+      "n5_s5": 277.0,
+      "python": 48.7
+    },
+    {
+      "t": 118.909,
+      "n5_s1": 277.5,
+      "n5_s4": 277.0,
+      "n5_s3": 279.2,
+      "n5_s2": 275.2,
+      "n5_s5": 276.5,
+      "python": 48.7
+    },
+    {
+      "t": 123.999,
+      "n5_s1": 278.1,
+      "n5_s4": 277.3,
+      "n5_s3": 279.4,
+      "n5_s2": 275.4,
+      "n5_s5": 276.8,
+      "python": 48.7
+    },
+    {
+      "t": 129.073,
+      "n5_s1": 278.1,
+      "n5_s4": 277.3,
+      "n5_s3": 279.4,
+      "n5_s2": 275.4,
+      "n5_s5": 276.8,
+      "python": 48.7
+    },
+    {
+      "t": 134.152,
+      "n5_s1": 277.8,
+      "n5_s4": 277.1,
+      "n5_s3": 279.3,
+      "n5_s2": 275.2,
+      "n5_s5": 276.6,
+      "python": 48.7
+    },
+    {
+      "t": 139.221,
+      "n5_s1": 279.4,
+      "n5_s4": 279.2,
+      "n5_s3": 281.1,
+      "n5_s2": 277.4,
+      "n5_s5": 278.5,
+      "python": 48.7
+    },
+    {
+      "t": 144.307,
+      "n5_s1": 279.4,
+      "n5_s4": 278.9,
+      "n5_s3": 281.1,
+      "n5_s2": 277.1,
+      "n5_s5": 278.1,
+      "python": 48.7
+    },
+    {
+      "t": 149.386,
+      "n5_s1": 279.2,
+      "n5_s4": 278.8,
+      "n5_s3": 280.9,
+      "n5_s2": 276.8,
+      "n5_s5": 278.0,
+      "python": 48.7
+    },
+    {
+      "t": 154.46,
+      "n5_s1": 279.3,
+      "n5_s4": 278.8,
+      "n5_s3": 281.0,
+      "n5_s2": 276.9,
+      "n5_s5": 278.1,
+      "python": 48.7
+    },
+    {
+      "t": 159.541,
+      "n5_s1": 277.8,
+      "n5_s4": 278.8,
+      "n5_s3": 279.5,
+      "n5_s2": 276.9,
+      "n5_s5": 278.1,
+      "python": 48.7
+    },
+    {
+      "t": 164.616,
+      "n5_s1": 277.8,
+      "n5_s4": 277.3,
+      "n5_s3": 279.5,
+      "n5_s2": 275.4,
+      "n5_s5": 276.6,
+      "python": 48.7
+    },
+    {
+      "t": 169.684,
+      "n5_s1": 277.6,
+      "n5_s4": 277.3,
+      "n5_s3": 279.3,
+      "n5_s2": 275.4,
+      "n5_s5": 276.6,
+      "python": 48.7
+    },
+    {
+      "t": 174.754,
+      "n5_s1": 277.5,
+      "n5_s4": 277.1,
+      "n5_s3": 279.2,
+      "n5_s2": 275.2,
+      "n5_s5": 276.3,
+      "python": 48.7
+    },
+    {
+      "t": 179.827,
+      "n5_s1": 277.5,
+      "n5_s4": 277.1,
+      "n5_s3": 279.2,
+      "n5_s2": 275.1,
+      "n5_s5": 276.3,
+      "python": 48.7
+    },
+    {
+      "t": 184.902,
+      "n5_s1": 277.3,
+      "n5_s4": 277.1,
+      "n5_s3": 279.3,
+      "n5_s2": 275.2,
+      "n5_s5": 276.5,
+      "python": 48.7
+    },
+    {
+      "t": 189.983,
+      "n5_s1": 277.5,
+      "n5_s4": 277.3,
+      "n5_s3": 279.6,
+      "n5_s2": 275.4,
+      "n5_s5": 276.5,
+      "python": 48.7
+    },
+    {
+      "t": 195.051,
+      "n5_s1": 277.0,
+      "n5_s4": 277.2,
+      "n5_s3": 278.7,
+      "n5_s2": 275.3,
+      "n5_s5": 276.5,
+      "python": 48.7
+    },
+    {
+      "t": 200.13,
+      "n5_s1": 276.7,
+      "n5_s4": 276.4,
+      "n5_s3": 278.4,
+      "n5_s2": 275.2,
+      "n5_s5": 275.9,
+      "python": 48.7
+    },
+    {
+      "t": 205.209,
+      "n5_s1": 276.7,
+      "n5_s4": 276.2,
+      "n5_s3": 278.4,
+      "n5_s2": 274.6,
+      "n5_s5": 275.6,
+      "python": 48.7
+    },
+    {
+      "t": 210.288,
+      "n5_s1": 271.2,
+      "n5_s4": 276.8,
+      "n5_s3": 272.8,
+      "n5_s2": 275.1,
+      "n5_s5": 275.6,
+      "python": 48.7
+    },
+    {
+      "t": 215.362,
+      "n5_s1": 271.2,
+      "n5_s4": 270.6,
+      "n5_s3": 272.8,
+      "n5_s2": 269.0,
+      "n5_s5": 270.0,
+      "python": 48.7
+    },
+    {
+      "t": 220.43,
+      "n5_s1": 271.2,
+      "n5_s4": 270.6,
+      "n5_s3": 272.8,
+      "n5_s2": 269.0,
+      "n5_s5": 270.0,
+      "python": 48.7
+    },
+    {
+      "t": 225.511,
+      "n5_s1": 271.2,
+      "n5_s4": 270.6,
+      "n5_s3": 272.8,
+      "n5_s2": 269.0,
+      "n5_s5": 270.0,
+      "python": 48.7
+    },
+    {
+      "t": 230.596,
+      "n5_s1": 271.2,
+      "n5_s4": 270.6,
+      "n5_s3": 272.8,
+      "n5_s2": 269.0,
+      "n5_s5": 270.0,
+      "python": 48.7
+    },
+    {
+      "t": 235.677,
+      "n5_s1": 271.2,
+      "n5_s4": 270.6,
+      "n5_s3": 272.8,
+      "n5_s2": 269.0,
+      "n5_s5": 270.0,
+      "python": 48.7
+    },
+    {
+      "t": 240.749,
+      "n5_s1": 271.2,
+      "n5_s4": 270.6,
+      "n5_s3": 272.3,
+      "n5_s2": 269.0,
+      "n5_s5": 270.0,
+      "python": 48.7
+    },
+    {
+      "t": 245.826,
+      "n5_s1": 271.2,
+      "n5_s4": 270.1,
+      "n5_s3": 272.3,
+      "n5_s2": 269.0,
+      "n5_s5": 270.0,
+      "python": 48.7
+    },
+    {
+      "t": 250.892,
+      "n5_s1": 270.9,
+      "n5_s4": 269.8,
+      "n5_s3": 272.1,
+      "n5_s2": 268.7,
+      "n5_s5": 269.9,
+      "python": 48.7
+    },
+    {
+      "t": 255.967,
+      "n5_s1": 270.9,
+      "n5_s4": 269.8,
+      "n5_s3": 272.1,
+      "n5_s2": 268.7,
+      "n5_s5": 269.7,
+      "python": 48.7
+    },
+    {
+      "t": 261.041,
+      "n5_s1": 270.9,
+      "n5_s4": 269.8,
+      "n5_s3": 272.1,
+      "n5_s2": 268.7,
+      "n5_s5": 269.7,
+      "python": 48.7
+    },
+    {
+      "t": 266.128,
+      "n5_s1": 270.9,
+      "n5_s4": 269.8,
+      "n5_s3": 272.3,
+      "n5_s2": 268.7,
+      "n5_s5": 269.7,
+      "python": 48.7
+    },
+    {
+      "t": 271.222,
+      "n5_s1": 270.6,
+      "n5_s4": 270.0,
+      "n5_s3": 271.1,
+      "n5_s2": 268.9,
+      "n5_s5": 269.9,
+      "python": 48.7
+    },
+    {
+      "t": 276.32,
+      "n5_s1": 270.6,
+      "n5_s4": 270.0,
+      "n5_s3": 271.0,
+      "n5_s2": 268.7,
+      "n5_s5": 269.9,
+      "python": 48.7
+    },
+    {
+      "t": 281.409,
+      "n5_s1": 270.4,
+      "n5_s4": 268.1,
+      "n5_s3": 270.8,
+      "n5_s2": 268.5,
+      "n5_s5": 267.7,
+      "python": 48.7
+    },
+    {
+      "t": 286.49,
+      "n5_s1": 270.4,
+      "n5_s4": 268.1,
+      "n5_s3": 270.8,
+      "n5_s2": 268.5,
+      "n5_s5": 267.7,
+      "python": 48.7
+    },
+    {
+      "t": 291.572,
+      "n5_s1": 270.4,
+      "n5_s4": 268.1,
+      "n5_s3": 270.8,
+      "n5_s2": 268.5,
+      "n5_s5": 267.7,
+      "python": 48.7
+    },
+    {
+      "t": 296.655,
+      "n5_s1": 270.4,
+      "n5_s4": 268.1,
+      "n5_s3": 271.1,
+      "n5_s2": 268.5,
+      "n5_s5": 267.7,
+      "python": 48.7
+    },
+    {
+      "t": 301.741,
+      "n5_s1": 268.6,
+      "n5_s4": 268.3,
+      "n5_s3": 270.1,
+      "n5_s2": 268.7,
+      "n5_s5": 267.9,
+      "python": 48.8
+    },
+    {
+      "t": 306.826,
+      "n5_s1": 268.6,
+      "n5_s4": 268.3,
+      "n5_s3": 269.8,
+      "n5_s2": 267.2,
+      "n5_s5": 267.9,
+      "python": 48.8
+    },
+    {
+      "t": 311.922,
+      "n5_s1": 268.4,
+      "n5_s4": 268.6,
+      "n5_s3": 269.8,
+      "n5_s2": 267.0,
+      "n5_s5": 267.4,
+      "python": 48.8
+    },
+    {
+      "t": 317.011,
+      "n5_s1": 268.4,
+      "n5_s4": 268.6,
+      "n5_s3": 269.8,
+      "n5_s2": 267.0,
+      "n5_s5": 267.4,
+      "python": 48.8
+    },
+    {
+      "t": 322.096,
+      "n5_s1": 268.4,
+      "n5_s4": 268.6,
+      "n5_s3": 269.9,
+      "n5_s2": 267.0,
+      "n5_s5": 267.5,
+      "python": 48.8
+    },
+    {
+      "t": 327.183,
+      "n5_s1": 268.6,
+      "n5_s4": 268.6,
+      "n5_s3": 270.1,
+      "n5_s2": 267.0,
+      "n5_s5": 267.5,
+      "python": 48.8
+    },
+    {
+      "t": 332.283,
+      "n5_s1": 268.6,
+      "n5_s4": 268.8,
+      "n5_s3": 269.8,
+      "n5_s2": 267.2,
+      "n5_s5": 267.7,
+      "python": 48.8
+    },
+    {
+      "t": 337.371,
+      "n5_s1": 269.0,
+      "n5_s4": 268.8,
+      "n5_s3": 270.1,
+      "n5_s2": 266.9,
+      "n5_s5": 267.7,
+      "python": 48.8
+    },
+    {
+      "t": 342.455,
+      "n5_s1": 268.9,
+      "n5_s4": 268.6,
+      "n5_s3": 270.1,
+      "n5_s2": 267.2,
+      "n5_s5": 267.9,
+      "python": 48.8
+    },
+    {
+      "t": 347.532,
+      "n5_s1": 268.9,
+      "n5_s4": 268.6,
+      "n5_s3": 270.1,
+      "n5_s2": 267.2,
+      "n5_s5": 267.9,
+      "python": 48.8
+    },
+    {
+      "t": 352.613,
+      "n5_s1": 269.0,
+      "n5_s4": 268.6,
+      "n5_s3": 270.1,
+      "n5_s2": 267.2,
+      "n5_s5": 267.9,
+      "python": 48.8
+    },
+    {
+      "t": 357.691,
+      "n5_s1": 272.7,
+      "n5_s4": 273.0,
+      "n5_s3": 273.1,
+      "n5_s2": 270.9,
+      "n5_s5": 271.4,
+      "python": 48.8
+    },
+    {
+      "t": 362.769,
+      "n5_s1": 271.3,
+      "n5_s4": 271.7,
+      "n5_s3": 273.2,
+      "n5_s2": 269.7,
+      "n5_s5": 270.1,
+      "python": 48.8
+    },
+    {
+      "t": 367.853,
+      "n5_s1": 271.1,
+      "n5_s4": 271.7,
+      "n5_s3": 273.0,
+      "n5_s2": 269.7,
+      "n5_s5": 270.1,
+      "python": 48.8
+    },
+    {
+      "t": 372.927,
+      "n5_s1": 270.9,
+      "n5_s4": 271.3,
+      "n5_s3": 272.8,
+      "n5_s2": 269.2,
+      "n5_s5": 269.7,
+      "python": 48.8
+    },
+    {
+      "t": 378.006,
+      "n5_s1": 271.1,
+      "n5_s4": 271.2,
+      "n5_s3": 272.7,
+      "n5_s2": 269.1,
+      "n5_s5": 269.6,
+      "python": 48.8
+    },
+    {
+      "t": 383.085,
+      "n5_s1": 271.1,
+      "n5_s4": 271.2,
+      "n5_s3": 272.7,
+      "n5_s2": 269.1,
+      "n5_s5": 269.6,
+      "python": 48.8
+    },
+    {
+      "t": 388.173,
+      "n5_s1": 271.3,
+      "n5_s4": 271.2,
+      "n5_s3": 272.9,
+      "n5_s2": 269.1,
+      "n5_s5": 269.6,
+      "python": 48.8
+    },
+    {
+      "t": 393.243,
+      "n5_s1": 271.3,
+      "n5_s4": 271.4,
+      "n5_s3": 272.9,
+      "n5_s2": 269.3,
+      "n5_s5": 269.8,
+      "python": 48.8
+    }
+  ]
+}

@@ -1,0 +1,65 @@
+[
+  {
+    "case": "bad_cwd_missing",
+    "exception_type": "InvalidWorkingDirectoryError",
+    "message": "Invalid working directory: C:\\Users\\me\\code\\wittycode\\sandbox\\robust\\errors\\no-such-dir",
+    "cwd": "C:\\Users\\me\\code\\wittycode\\sandbox\\robust\\errors\\no-such-dir"
+  },
+  {
+    "case": "bad_cwd_file",
+    "exception_type": "InvalidWorkingDirectoryError",
+    "message": "Invalid working directory: C:\\Users\\me\\code\\wittycode\\sandbox\\robust\\errors\\a-file.txt",
+    "cwd": "C:\\Users\\me\\code\\wittycode\\sandbox\\robust\\errors\\a-file.txt"
+  },
+  {
+    "case": "bad_exe_missing",
+    "exception_type": "DroidConnectionError",
+    "message": "Droid executable was not found, cwd='C:\\\\Users\\\\me\\\\code\\\\wittycode\\\\sandbox\\\\robust\\\\errors', exec_path='C:\\\\Users\\\\me\\\\code\\\\wittycode\\\\sandbox\\\\robust\\\\errors\\\\no-such-droid.exe'",
+    "cwd": "C:\\Users\\me\\code\\wittycode\\sandbox\\robust\\errors",
+    "exec_path": "C:\\Users\\me\\code\\wittycode\\sandbox\\robust\\errors\\no-such-droid.exe"
+  },
+  {
+    "case": "bad_exe_text",
+    "exception_type": "DroidConnectionError",
+    "message": "Failed to start droid process: [WinError 193] %1 is not a valid Win32 application, cwd='C:\\\\Users\\\\me\\\\code\\\\wittycode\\\\sandbox\\\\robust\\\\errors', exec_path='C:\\\\Users\\\\me\\\\code\\\\wittycode\\\\sandbox\\\\robust\\\\errors\\\\a-file.txt'",
+    "cwd": "C:\\Users\\me\\code\\wittycode\\sandbox\\robust\\errors",
+    "exec_path": "C:\\Users\\me\\code\\wittycode\\sandbox\\robust\\errors\\a-file.txt"
+  },
+  {
+    "case": "invalid_model",
+    "stage": "turn",
+    "result_type": "RunSuccess",
+    "subtype": "success",
+    "error": null,
+    "text": "ok"
+  },
+  {
+    "case": "kill_mid_turn",
+    "droid_pid": 45256,
+    "droid_alive": true,
+    "exception_type": "DroidProcessError",
+    "message": "Droid process exited unexpectedly (exit code 1), exit_code=1",
+    "exit_code": 1
+  },
+  {
+    "case": "kill_mid_turn_close",
+    "closed": false,
+    "exception_type": "DroidProcessError",
+    "message": "Droid process exited unexpectedly (exit code 1), exit_code=1",
+    "exit_code": 1
+  },
+  {
+    "case": "handler_raises",
+    "result_type": "RunSuccess",
+    "subtype": "success",
+    "a_txt_exists": false,
+    "text": ""
+  },
+  {
+    "case": "invalid_response",
+    "result_type": "RunSuccess",
+    "subtype": "success",
+    "b_txt_exists": false,
+    "text": ""
+  }
+]

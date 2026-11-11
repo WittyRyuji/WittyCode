@@ -1,0 +1,261 @@
+[
+  {
+    "phase": "a",
+    "droid_pid": 38976,
+    "tree_while_running": {
+      "alive": true,
+      "members": [
+        {
+          "pid": 9872,
+          "ppid": 35700,
+          "exe": "conhost.exe",
+          "rss_mb": 7.0
+        },
+        {
+          "pid": 19640,
+          "ppid": 42456,
+          "exe": "conhost.exe",
+          "rss_mb": 7.0
+        },
+        {
+          "pid": 29532,
+          "ppid": 42456,
+          "exe": "PING.EXE",
+          "rss_mb": 5.2
+        },
+        {
+          "pid": 35700,
+          "ppid": 38976,
+          "exe": "powershell.exe",
+          "rss_mb": 10.8
+        },
+        {
+          "pid": 38976,
+          "ppid": 41700,
+          "exe": "droid.exe",
+          "rss_mb": 288.9
+        },
+        {
+          "pid": 42456,
+          "ppid": 38976,
+          "exe": "powershell.exe",
+          "rss_mb": 64.7
+        }
+      ]
+    },
+    "close_s": 1.415,
+    "turn_result": "TimeoutError: ",
+    "tree_after_close": {
+      "alive": false,
+      "members": [
+        {
+          "pid": 38976,
+          "ppid": null,
+          "exe": null,
+          "rss_mb": null
+        }
+      ]
+    },
+    "survivors_after_close": [],
+    "cleanup_killed": {},
+    "alive_after_cleanup": []
+  },
+  {
+    "phase": "b",
+    "droid_pid": 37500,
+    "tree_while_running": {
+      "alive": true,
+      "members": [
+        {
+          "pid": 36596,
+          "ppid": 37500,
+          "exe": "powershell.exe",
+          "rss_mb": 14.6
+        },
+        {
+          "pid": 37500,
+          "ppid": 41700,
+          "exe": "droid.exe",
+          "rss_mb": 281.7
+        },
+        {
+          "pid": 38976,
+          "ppid": 37500,
+          "exe": "powershell.exe",
+          "rss_mb": 64.8
+        },
+        {
+          "pid": 51800,
+          "ppid": 38976,
+          "exe": "PING.EXE",
+          "rss_mb": 5.2
+        },
+        {
+          "pid": 52472,
+          "ppid": 38976,
+          "exe": "conhost.exe",
+          "rss_mb": 7.0
+        },
+        {
+          "pid": 53572,
+          "ppid": 36596,
+          "exe": "conhost.exe",
+          "rss_mb": 6.9
+        }
+      ]
+    },
+    "interrupt_to_result_s": 1.262,
+    "turn_result": "RunInterrupted/interrupted",
+    "tree_after_interrupt": {
+      "alive": true,
+      "members": [
+        {
+          "pid": 37500,
+          "ppid": 41700,
+          "exe": "droid.exe",
+          "rss_mb": 282.4
+        }
+      ]
+    },
+    "close_s": 0.026,
+    "tree_after_close": {
+      "alive": false,
+      "members": [
+        {
+          "pid": 37500,
+          "ppid": null,
+          "exe": null,
+          "rss_mb": null
+        }
+      ]
+    },
+    "survivors_after_close": [],
+    "cleanup_killed": {},
+    "alive_after_cleanup": []
+  },
+  {
+    "phase": "c",
+    "state": {
+      "python_pid": 12332,
+      "droid_pid": 53440,
+      "job": false,
+      "opened": true,
+      "command_started": true
+    },
+    "child_python_pid": 34800,
+    "tree_before_kill": {
+      "alive": true,
+      "members": [
+        {
+          "pid": 14232,
+          "ppid": 30660,
+          "exe": "conhost.exe",
+          "rss_mb": 7.0
+        },
+        {
+          "pid": 30660,
+          "ppid": 53440,
+          "exe": "powershell.exe",
+          "rss_mb": 64.7
+        },
+        {
+          "pid": 51892,
+          "ppid": 30660,
+          "exe": "PING.EXE",
+          "rss_mb": 5.2
+        },
+        {
+          "pid": 53440,
+          "ppid": 12332,
+          "exe": "droid.exe",
+          "rss_mb": 279.6
+        }
+      ]
+    },
+    "child_exit": 1,
+    "tree_after_kill": {
+      "alive": false,
+      "members": [
+        {
+          "pid": 53440,
+          "ppid": null,
+          "exe": null,
+          "rss_mb": null
+        }
+      ]
+    },
+    "survivors_after_kill": [],
+    "leaked": [],
+    "cleanup_killed": {},
+    "alive_after_cleanup": []
+  },
+  {
+    "phase": "d",
+    "state": {
+      "python_pid": 7064,
+      "droid_pid": 54504,
+      "job": true,
+      "opened": true,
+      "job_assigned": true,
+      "command_started": true
+    },
+    "child_python_pid": 31860,
+    "tree_before_kill": {
+      "alive": true,
+      "members": [
+        {
+          "pid": 30836,
+          "ppid": 54504,
+          "exe": "powershell.exe",
+          "rss_mb": 64.6
+        },
+        {
+          "pid": 35940,
+          "ppid": 51712,
+          "exe": "conhost.exe",
+          "rss_mb": 7.0
+        },
+        {
+          "pid": 39060,
+          "ppid": 30836,
+          "exe": "PING.EXE",
+          "rss_mb": 5.2
+        },
+        {
+          "pid": 50772,
+          "ppid": 30836,
+          "exe": "conhost.exe",
+          "rss_mb": 7.0
+        },
+        {
+          "pid": 51712,
+          "ppid": 54504,
+          "exe": "powershell.exe",
+          "rss_mb": 79.0
+        },
+        {
+          "pid": 54504,
+          "ppid": 7064,
+          "exe": "droid.exe",
+          "rss_mb": 282.9
+        }
+      ]
+    },
+    "child_exit": 1,
+    "tree_after_kill": {
+      "alive": false,
+      "members": [
+        {
+          "pid": 54504,
+          "ppid": null,
+          "exe": null,
+          "rss_mb": null
+        }
+      ]
+    },
+    "survivors_after_kill": [],
+    "leaked": [],
+    "cleanup_killed": {},
+    "alive_after_cleanup": []
+  }
+]

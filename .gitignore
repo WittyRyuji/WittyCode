@@ -1,0 +1,46 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+*.log
+.env
+.env.*
+
+# generated: `npm run build:app` writes the page the application loads
+frontend/node_modules/
+frontend/shots/
+frontend/dist/
+desktop/ui_dist/
+
+# what the release script builds (scripts/build_release.py) and the folder it works in
+dist/
+build/
+.venv-build/
+
+# files handed to the user in the chat (reports, exports): not part of the project
+outputs/
+
+# sandbox/ is the scratch folder of probes against the real programs (CLIs, copies of their data, recordings, screenshots).
+# Only the scripts the documentation tells you to run are kept.
+sandbox/*
+!sandbox/README.txt
+!sandbox/mutate_*.py
+!sandbox/e2e_loop.ps1
+!sandbox/real_window_smoke.py
+!sandbox/chatgpt_real_probe.py
+!sandbox/chatgpt_probe_dryrun.py
+!sandbox/followup_real_probe.py
+!sandbox/probe_review_links.py
+!sandbox/probe_importers.py
+!sandbox/probe_harness_review_20261108.py
+!sandbox/probe_api_real.py
+!sandbox/probe_plan_real.py
+!sandbox/probe_chat_real.py
+!sandbox/probe_codex_compact.py
+!sandbox/probe_droid_compact.py
+!sandbox/probe_skill_goal_real.py
+!sandbox/probe_bedrock_real.py
+!sandbox/check_old_patterns.py

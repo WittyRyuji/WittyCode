@@ -1,0 +1,26 @@
+[project]
+name = "wittycode"
+version = "0.1.0"
+description = "WittyCode: a Windows desktop client for coding agents (ChatGPT Plan, Factory Droid, Codex, Devin), PySide6 + Qt WebEngine + React"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+authors = [{ name = "NiuXiao@WittyLoong Studio" }]
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "droid-sdk==0.5.0",
+    "PySide6==6.12.0",
+    "qasync==0.28.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.2.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra"
+markers = [
+    "ui: drives the real Qt WebEngine page (runs offscreen, no live model calls)",
+]

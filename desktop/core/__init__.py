@@ -1,0 +1,1 @@
+"""Qt-free core: droid discovery, settings, the transcript reducer and session management."""

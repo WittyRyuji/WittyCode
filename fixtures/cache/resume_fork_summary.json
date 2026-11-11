@@ -1,0 +1,48 @@
+{
+ "resumed_session": "df98eee8-93cd-4f45-b24a-2454a22dd698",
+ "fork_session": "983eeab6-0361-4e81-add0-b44544b1a8a5",
+ "only_fork": true,
+ "turns": [
+  {
+   "label": "fork_turn",
+   "prompt_index": 8,
+   "settings": null,
+   "success": true,
+   "text": "p8",
+   "usage": {
+    "_type": "Usage",
+    "input_tokens": 4,
+    "output_tokens": 4,
+    "cache_creation_tokens": 16,
+    "cache_read_tokens": 18697,
+    "thinking_tokens": 0,
+    "factory_credits": 77.0
+   },
+   "tracker_turn": [
+    {
+     "t": 5.984,
+     "reason": "completed",
+     "tokenUsage": {
+      "inputTokens": 4,
+      "outputTokens": 4,
+      "cacheCreationTokens": 16,
+      "cacheReadTokens": 18697,
+      "thinkingTokens": 0,
+      "factoryCredits": 77
+     },
+     "cumulativeTokenUsage": {
+      "inputTokens": 4,
+      "outputTokens": 4,
+      "cacheCreationTokens": 16,
+      "cacheReadTokens": 18697,
+      "thinkingTokens": 0,
+      "factoryCredits": 77
+     },
+     "durationMs": 3491
+    }
+   ]
+  }
+ ],
+ "fatal": null,
+ "pass": true
+}

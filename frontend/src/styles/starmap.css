@@ -1,0 +1,146 @@
+/* The memory star map (components/MemoryStarMap.tsx). The sky is the same deep ink in both themes; its frame, the hard
+   offset shadow and the tooltip follow the theme like the other cards. Every class here starts with sm-. */
+
+.sm-panel {
+  --sm-text: #e8edf9;
+  --sm-text-2: rgba(216, 225, 246, 0.8);
+  --sm-text-3: rgba(186, 200, 236, 0.56);
+  --sm-btn: rgba(205, 216, 245, 0.3);
+  --sm-halo: #070c1c;
+  position: relative;
+  width: 100%;
+  overflow: hidden;
+  isolation: isolate;
+  border: 1px solid var(--ink);
+  box-shadow: 4px 4px 0 var(--shadow-hard);
+  background:
+    radial-gradient(58% 46% at 74% 24%, rgba(112, 86, 200, 0.14), transparent 70%),
+    radial-gradient(52% 44% at 20% 80%, rgba(40, 128, 168, 0.12), transparent 70%),
+    radial-gradient(120% 95% at 50% 47%, #13224c 0%, #0c1735 36%, #080f25 68%, #050914 100%);
+  color: var(--sm-text);
+  font-family: var(--font-sans);
+  user-select: none;
+  touch-action: none;
+}
+
+/* ------------------------------------------------------------------------------------------------ the sky */
+.sm-sky { position: absolute; inset: 0; pointer-events: none; }
+.sm-sky circle { fill: #dfe7ff; }
+.sm-twinkle { position: absolute; width: 2px; height: 2px; margin: -1px 0 0 -1px; border-radius: 50%; background: #f3f6ff; box-shadow: 0 0 5px 1px rgba(196, 212, 255, 0.55); opacity: 0.15; pointer-events: none; will-change: opacity; animation: sm-twinkle 6s ease-in-out infinite; }
+@keyframes sm-twinkle { 0%, 100% { opacity: 0.1; } 50% { opacity: 0.7; } }
+
+.sm-svg { position: absolute; inset: 0; display: block; cursor: grab; overflow: hidden; }
+.sm-svg.sm-panning { cursor: grabbing; }
+
+/* ------------------------------------------------------------------------------- polar grid and the lines */
+.sm-ring, .sm-frame, .sm-ticks, .sm-spokes, .sm-edge, .sm-orbit, .sm-sel, .sm-mark, .sm-focus, .sm-cl-ring { fill: none; vector-effect: non-scaling-stroke; pointer-events: none; }
+.sm-ring { stroke: rgba(150, 172, 234, 0.24); stroke-width: 1.2; stroke-dasharray: 0.1 5; stroke-linecap: round; }
+.sm-ring-leaf { stroke: rgba(150, 172, 234, 0.14); }
+.sm-frame { stroke: rgba(176, 195, 242, 0.3); stroke-width: 1; }
+.sm-frame-in { stroke: rgba(176, 195, 242, 0.13); }
+.sm-ticks { stroke: rgba(176, 195, 242, 0.34); stroke-width: 1; }
+.sm-spokes { stroke: rgba(150, 172, 234, 0.1); stroke-width: 1; stroke-dasharray: 0.1 7; stroke-linecap: round; }
+
+.sm-edge { stroke: rgba(200, 214, 250, 0.55); stroke-width: 1.6; stroke-dasharray: 0.1 5.5; stroke-linecap: round; }
+.sm-edge.sm-leaf { stroke: rgba(176, 196, 246, 0.3); stroke-width: 1.25; stroke-dasharray: 0.1 4.6; }
+.sm-edge.sm-dim { stroke: rgba(176, 196, 246, 0.08); }
+.sm-edge.sm-on { stroke: #f6f8ff; stroke-width: 2.1; stroke-dasharray: 0.1 4.4; }
+
+/* ------------------------------------------------------------------------------------------------- nodes */
+.sm-star, .sm-node, .sm-cluster { cursor: pointer; outline: none; }
+.sm-hit { fill: transparent; stroke: none; }
+.sm-halo, .sm-core, .sm-body, .sm-sparkle, .sm-root-core { pointer-events: none; }
+.sm-star > .sm-core, .sm-star > .sm-halo, .sm-star > .sm-sel, .sm-star > .sm-mark { transform: scale(var(--sm-s, 1)); transform-box: fill-box; transform-origin: center; }
+.sm-star.sm-forgotten > .sm-core { stroke-width: 1.3; vector-effect: non-scaling-stroke; }
+.sm-star:hover > .sm-core { fill-opacity: 1; stroke-opacity: 1; }
+.sm-star:hover > .sm-halo { fill-opacity: 1; }
+.sm-sel { stroke: #ffffff; stroke-width: 1.4; }
+/* a search match: ringed, so that a few hits stand out among hundreds of dimmed stars */
+.sm-mark { stroke: rgba(255, 255, 255, 0.85); stroke-width: 1.1; }
+
+.sm-sparkle { fill: #ffffff; }
+.sm-root-core { fill: #ffffff; }
+
+.sm-orbit { stroke: rgba(222, 231, 252, 0.42); stroke-width: 1; }
+.sm-scope .sm-body { fill: #edf1fb; }
+.sm-kind .sm-orbit { stroke: rgba(222, 231, 252, 0.26); }
+.sm-node.sm-collapsed .sm-orbit { stroke: rgba(242, 246, 255, 0.85); stroke-dasharray: 2 2.4; }
+.sm-node:hover .sm-orbit, .sm-node.sm-on .sm-orbit { stroke: #ffffff; }
+.sm-node.sm-dim, .sm-cluster.sm-dim, .sm-root.sm-dim { opacity: 0.32; }
+.sm-cl-ring { stroke: rgba(232, 238, 255, 0.6); stroke-width: 1; stroke-dasharray: 1.5 2.5; }
+.sm-cluster:hover .sm-cl-ring, .sm-cluster.sm-on .sm-cl-ring { stroke: #ffffff; }
+.sm-focus { stroke: #ffffff; stroke-width: 1.5; stroke-dasharray: 3 2.5; }
+
+/* ---------------------------------------------------------------------------------------------- labels */
+.sm-lb { fill: var(--sm-text-2); font-family: var(--font-sans); font-weight: 600; paint-order: stroke; stroke: var(--sm-halo); stroke-width: 0.32em; stroke-linejoin: round; pointer-events: none; }
+.sm-lb[data-id] { pointer-events: auto; cursor: pointer; }
+.sm-lb-scope { fill: var(--sm-text); font-weight: 700; letter-spacing: 0.05em; }
+.sm-lb-kind { font-weight: 600; letter-spacing: 0.04em; }
+.sm-lb-root { fill: #ffffff; font-weight: 800; letter-spacing: 0.14em; }
+.sm-lb-note { fill: var(--sm-text-2); font-weight: 500; }
+.sm-lb-cluster { fill: var(--sm-text); font-family: var(--font-mono); font-weight: 700; }
+.sm-count { fill: var(--sm-text-3); font-family: var(--font-mono); font-size: 0.8em; font-weight: 600; letter-spacing: 0; }
+.sm-lb.sm-on { fill: #ffffff; }
+.sm-lb.sm-dim { opacity: 0.35; }
+.sm-lb[data-id]:hover { fill: #ffffff; }
+.sm-lb-note.sm-dim { opacity: 0.2; }
+
+/* ------------------------------------------------------------------------------ the chosen star (HTML) */
+.sm-pulse { position: absolute; z-index: 2; border: 1.5px solid currentColor; border-radius: 50%; pointer-events: none; opacity: 0; transform: translate(-50%, -50%) scale(0.6); will-change: transform, opacity; animation: sm-pulse 2.6s cubic-bezier(0.2, 0.6, 0.35, 1) infinite; }
+@keyframes sm-pulse {
+  0% { opacity: 0.95; transform: translate(-50%, -50%) scale(0.6); }
+  75%, 100% { opacity: 0; transform: translate(-50%, -50%) scale(2.1); }
+}
+.sm-sel-label { position: absolute; z-index: 3; max-width: 240px; padding: 1px 7px 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; background: rgba(7, 12, 28, 0.8); border: 1px solid rgba(222, 231, 252, 0.4); color: #ffffff; font-size: 12px; font-weight: 700; line-height: 18px; pointer-events: none; }
+
+/* -------------------------------------------------------------------------------------------- tooltip */
+.sm-tip { position: absolute; z-index: 5; width: max-content; max-width: 290px; padding: 9px 12px 10px; background: var(--bg-raised); color: var(--fg); border: 1px solid var(--ink); box-shadow: 4px 4px 0 var(--shadow-hard); font-size: 12px; line-height: 1.55; pointer-events: none; animation: fade 0.12s; user-select: none; }
+.sm-tip-title { font-size: 13px; font-weight: 800; line-height: 1.45; overflow-wrap: anywhere; }
+.sm-tip-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 1px 12px; margin-top: 3px; color: var(--fg-2); font-size: 11.5px; }
+.sm-tip-i { display: inline-flex; align-items: center; gap: 5px; }
+.sm-tip-dot { width: 8px; height: 8px; flex: none; border-radius: 50%; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.28); }
+.sm-tip-text { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--line); color: var(--fg-2); overflow-wrap: anywhere; }
+.sm-tip-flag { display: inline-block; margin-top: 6px; padding: 0 6px; border: 1px solid var(--line-strong); color: var(--muted); font-size: 11px; }
+.sm-tip-hint { margin-top: 3px; color: var(--muted); font-size: 11.5px; }
+
+/* ------------------------------------------------------------------------- caption, tools, legend, hint */
+.sm-cap { position: absolute; top: 12px; left: 14px; z-index: 2; display: flex; align-items: baseline; gap: 10px; pointer-events: none; }
+.sm-cap-t { font-size: 11px; font-weight: 800; letter-spacing: 0.24em; color: var(--sm-text); }
+.sm-cap-n { font: 600 11px var(--font-mono); color: var(--sm-text-3); }
+
+.sm-tools { position: absolute; top: 8px; right: 10px; z-index: 4; display: flex; align-items: center; gap: 8px; }
+.sm-seg, .sm-zoom { display: inline-flex; align-items: stretch; border: 1px solid var(--sm-btn); background: rgba(6, 10, 24, 0.6); }
+.sm-seg-k { display: inline-flex; align-items: center; padding: 0 8px; border-right: 1px solid var(--sm-btn); font-size: 11px; color: var(--sm-text-3); }
+.sm-tools button { display: inline-flex; align-items: center; justify-content: center; min-width: 26px; height: 24px; padding: 0 9px; color: var(--sm-text-2); font-size: 11.5px; font-weight: 600; }
+.sm-tools button + button { border-left: 1px solid var(--sm-btn); }
+.sm-tools button:hover:not(:disabled) { background: rgba(222, 231, 252, 0.14); color: #ffffff; }
+.sm-tools button.on { background: #e8edf9; color: #0a1022; }
+.sm-tools button:disabled { opacity: 0.38; cursor: default; }
+.sm-tools button:focus-visible { outline: 2px solid #ffffff; outline-offset: -2px; }
+.sm-zoom button { padding: 0 7px; }
+.sm-zoom .sm-reset { padding: 0 10px; }
+
+.sm-legend { position: absolute; left: 10px; bottom: 10px; z-index: 2; display: flex; flex-direction: column; gap: 2px; max-width: min(290px, calc(100% - 20px)); padding: 6px 10px 6px 9px; background: rgba(6, 10, 24, 0.55); border: 1px solid rgba(205, 216, 245, 0.16); color: var(--sm-text-2); font-size: 11px; pointer-events: none; }
+.sm-leg-row { display: flex; flex-wrap: wrap; align-items: center; gap: 1px 9px; line-height: 17px; }
+.sm-leg-k { width: 24px; flex: none; color: var(--sm-text-3); font-weight: 700; }
+.sm-leg-i { display: inline-flex; align-items: center; gap: 4px; }
+.sm-leg-dot { width: 7px; height: 7px; border-radius: 50%; box-shadow: 0 0 6px 0 currentColor; }
+.sm-leg-sizes, .sm-leg-glow { display: inline-flex; align-items: center; gap: 5px; }
+.sm-leg-sizes i, .sm-leg-glow i { display: block; border-radius: 50%; background: #e8edf9; }
+.sm-leg-sizes i:nth-child(1) { width: 4px; height: 4px; }
+.sm-leg-sizes i:nth-child(2) { width: 6px; height: 6px; }
+.sm-leg-sizes i:nth-child(3) { width: 9px; height: 9px; }
+.sm-leg-glow i { width: 6px; height: 6px; }
+.sm-leg-glow i:nth-child(1) { opacity: 1; box-shadow: 0 0 6px 1px rgba(232, 237, 249, 0.7); }
+.sm-leg-glow i:nth-child(2) { opacity: 0.72; }
+.sm-leg-glow i:nth-child(3) { opacity: 0.45; }
+.sm-leg-ring { width: 8px; height: 8px; border: 1.3px solid #e8edf9; border-radius: 50%; opacity: 0.7; }
+.sm-hint { position: absolute; right: 12px; bottom: 10px; z-index: 1; color: var(--sm-text-3); font-size: 10.5px; pointer-events: none; }
+
+.sm-empty { position: absolute; inset: 0; z-index: 2; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; color: var(--sm-text-2); font-size: 13px; letter-spacing: 0.06em; pointer-events: none; }
+.sm-empty-star { width: 5px; height: 5px; border-radius: 50%; background: #ffffff; box-shadow: 0 0 12px 4px rgba(196, 212, 255, 0.45); }
+
+@media (prefers-reduced-motion: reduce) {
+  .sm-twinkle { animation: none; opacity: 0.4; }
+  .sm-pulse { animation: none; opacity: 0.8; transform: translate(-50%, -50%) scale(1.3); }
+}

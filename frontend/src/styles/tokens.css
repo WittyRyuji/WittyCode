@@ -1,0 +1,133 @@
+/* Design tokens: the one place colours, type and sizes are decided. Components only use these variables.
+
+   The look comes from the WITTY LOONG logo: pure black and white, thick outlines, sharp corners, boxed frames,
+   a chunky inverted label. So the UI has no accent hue: the "accent" is the ink itself (white on the dark theme,
+   black on the light one), and the only colours are the ones that carry meaning (state, success, warning, error,
+   diff). Light is the logo inverted. <html data-theme="light|dark"> swaps the neutrals. */
+
+:root {
+  color-scheme: light;
+
+  /* type */
+  --font-sans: "Inter Variable", "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono Variable", "Cascadia Mono", Consolas, "Microsoft YaHei UI", monospace;
+  --fs-ui: 13.5px; /* sidebar, tabs, controls */
+  --fs-small: 12px;
+  --fs-tiny: 11px;
+  --fs-body: 15px; /* what the assistant writes: the part that must be easy to read */
+  --fs-code: 13px;
+  --lh-body: 1.72;
+
+  /* ink and paper */
+  --ink: #0a0a0a;
+  --paper: #ffffff;
+
+  /* neutrals (light = the logo inverted) */
+  --bg: #ffffff;
+  --bg-side: #f5f5f5;
+  --bg-bar: #ececec;
+  --bg-raised: #ffffff;
+  --desk: #cfcfcf; /* review page only: what the window stands on */
+  --fg: #0a0a0a;
+  --fg-2: #3d3d3d;
+  --muted: #6b6b6b;
+  --faint: #9a9a9a;
+  --line: #e2e2e2; /* quiet dividers */
+  --line-strong: #a9a9a9; /* borders of controls */
+  --frame-line: #8a8a8a; /* the outline of the window: it has to show on a white window behind it */
+  --soft: #f4f4f4;
+  --hover: rgba(0, 0, 0, 0.06);
+  --press: rgba(0, 0, 0, 0.11);
+  --scrim: rgba(0, 0, 0, 0.5);
+  --shadow-hard: #0a0a0a; /* offset shadow of menus and dialogs: a second frame, as in the logo */
+  --shadow-sm: 0 1px 0 rgba(0, 0, 0, 0.06);
+
+  /* the "accent" is the ink */
+  --accent: var(--ink);
+  --accent-fg: var(--paper);
+
+  /* meaning (the only hues) */
+  --ok: #17803d;
+  --warn: #9a6700;
+  --warn-bg: #fff6dc;
+  --warn-line: #d9b44a;
+  --err: #c62828;
+  --err-bg: #fdeceb;
+  --add-bg: #e3f6e8;
+  --add-fg: #17803d;
+  --del-bg: #fde8e6;
+  --del-fg: #c62828;
+  --code-bg: #f4f4f4;
+  --inline-code-bg: rgba(0, 0, 0, 0.07);
+  --mark-bg: rgba(250, 204, 21, 0.32);
+
+  /* session states: the dot in the sidebar, the tabs and the status bar */
+  --st-ready: #17803d;
+  --st-running: #c98a00;
+  --st-attention: var(--ink);
+  --st-dead: #c62828;
+  --st-opening: #9a9a9a;
+
+  /* shape: sharp, like the logo */
+  --r-sm: 2px;
+  --r: 2px;
+  --r-lg: 3px;
+  --r-xl: 4px;
+  --bw: 2px; /* the logo's line weight, for the frames that matter */
+
+  /* derived */
+  --accent-soft: color-mix(in srgb, var(--ink) 6%, var(--bg));
+  --accent-soft-2: color-mix(in srgb, var(--ink) 11%, var(--bg));
+  --accent-line: color-mix(in srgb, var(--ink) 40%, var(--bg));
+  --user-bg: var(--soft);
+  --gap-bg: color-mix(in srgb, var(--ink) 6%, var(--bg));
+}
+
+html[data-theme="dark"] {
+  color-scheme: dark;
+
+  --ink: #f5f5f5;
+  --paper: #000000;
+
+  --bg: #0b0b0b;
+  --bg-side: #000000;
+  --bg-bar: #000000;
+  --bg-raised: #131313;
+  --desk: #1b1b1b;
+  --fg: #f2f2f2;
+  --fg-2: #c9c9c9;
+  --muted: #8d8d8d;
+  --faint: #5d5d5d;
+  --line: #242424;
+  --line-strong: #4b4b4b;
+  --frame-line: #5e5e5e;
+  --soft: #121212;
+  --hover: rgba(255, 255, 255, 0.07);
+  --press: rgba(255, 255, 255, 0.12);
+  --scrim: rgba(0, 0, 0, 0.7);
+  --shadow-hard: rgba(255, 255, 255, 0.24);
+  --shadow-sm: 0 1px 0 rgba(255, 255, 255, 0.04);
+
+  --ok: #5ad07a;
+  --warn: #f0b94a;
+  --warn-bg: #1f1b0e;
+  --warn-line: #6b5a1e;
+  --err: #ff6b60;
+  --err-bg: #261110;
+  --add-bg: #0f2a18;
+  --add-fg: #7ee787;
+  --del-bg: #351416;
+  --del-fg: #ffa198;
+  --code-bg: #101010;
+  --inline-code-bg: rgba(255, 255, 255, 0.12);
+  --mark-bg: rgba(250, 204, 21, 0.2);
+
+  --st-ready: #5ad07a;
+  --st-running: #f0b94a;
+  --st-dead: #ff6b60;
+  --st-opening: #5d5d5d;
+}
+
+/* Text size, set in the settings: only the reading text and the UI text scale. */
+html[data-fs="sm"] { --fs-body: 14px; --fs-ui: 13px; --fs-code: 12.5px; }
+html[data-fs="lg"] { --fs-body: 16.5px; --fs-ui: 14.5px; --fs-code: 14px; }

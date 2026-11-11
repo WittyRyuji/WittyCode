@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>channel test page</title>
+</head>
+<body>
+<a id="ext" href="https://example.com/docs">external</a>
+<script>
+  // A stand-in for the real page: it only speaks the transport protocol (backend.call / reply / event).
+  window.log = [];
+  window.pending = {};
+  window.sawQWebChannel = typeof QWebChannel === 'function';
+  var counter = 0;
+  window.rpc = function (method, params) {
+    return new Promise(function (resolve, reject) {
+      var id = 'c' + (++counter);
+      window.pending[id] = function (ok, value) { ok ? resolve(value) : reject(new Error(value)); };
+      window.backend.call(method, JSON.stringify(params || {}), id);
+    });
+  };
+  // runJavaScript does not wait for promises: the result of a call is stored for the test to poll.
+  window.results = {};
+  window.rpcStore = function (key, method, params) {
+    window.rpc(method, params).then(
+      function (v) { window.results[key] = JSON.stringify({ ok: true, v: v }); },
+      function (e) { window.results[key] = JSON.stringify({ ok: false, v: e.message }); });
+    return true;
+  };
+  new QWebChannel(qt.webChannelTransport, function (channel) {
+    var backend = channel.objects.backend;
+    window.backend = backend;
+    backend.reply.connect(function (id, ok, payload) {
+      var done = window.pending[id];
+      if (done) { delete window.pending[id]; done(ok, JSON.parse(payload)); }
+    });
+    backend.event.connect(function (name, payload) { window.log.push([name, JSON.parse(payload)]); });
+    window.ready = true;
+  });
+</script>
+</body>
+</html>

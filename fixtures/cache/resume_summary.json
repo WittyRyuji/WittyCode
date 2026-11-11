@@ -1,0 +1,130 @@
+{
+ "resumed_session": "df98eee8-93cd-4f45-b24a-2454a22dd698",
+ "fork_session": null,
+ "turns": [
+  {
+   "label": "resume_turn",
+   "prompt_index": 5,
+   "settings": null,
+   "success": true,
+   "text": "p5",
+   "usage": {
+    "_type": "Usage",
+    "input_tokens": 4,
+    "output_tokens": 4,
+    "cache_creation_tokens": 3154,
+    "cache_read_tokens": 14492,
+    "thinking_tokens": 0,
+    "factory_credits": 217.0
+   },
+   "tracker_turn": [
+    {
+     "t": 7.635,
+     "reason": "completed",
+     "tokenUsage": {
+      "inputTokens": 4,
+      "outputTokens": 4,
+      "cacheCreationTokens": 3154,
+      "cacheReadTokens": 14492,
+      "thinkingTokens": 0,
+      "factoryCredits": 217
+     },
+     "cumulativeTokenUsage": {
+      "inputTokens": 363,
+      "outputTokens": 25,
+      "cacheCreationTokens": 9414,
+      "cacheReadTokens": 78656,
+      "thinkingTokens": 0,
+      "factoryCredits": 941
+     },
+     "durationMs": 3286
+    }
+   ]
+  },
+  {
+   "label": "model_change",
+   "prompt_index": 6,
+   "settings": {
+    "model": "gpt-6-luna"
+   },
+   "success": true,
+   "text": "p6",
+   "usage": {
+    "_type": "Usage",
+    "input_tokens": 3,
+    "output_tokens": 6,
+    "cache_creation_tokens": 10705,
+    "cache_read_tokens": 0,
+    "thinking_tokens": 0,
+    "factory_credits": 537.0
+   },
+   "tracker_turn": [
+    {
+     "t": 14.775,
+     "reason": "completed",
+     "tokenUsage": {
+      "inputTokens": 3,
+      "outputTokens": 6,
+      "cacheCreationTokens": 10705,
+      "cacheReadTokens": 0,
+      "thinkingTokens": 0,
+      "factoryCredits": 537
+     },
+     "cumulativeTokenUsage": {
+      "inputTokens": 366,
+      "outputTokens": 31,
+      "cacheCreationTokens": 20119,
+      "cacheReadTokens": 78656,
+      "thinkingTokens": 0,
+      "factoryCredits": 1478
+     },
+     "durationMs": 7105
+    }
+   ]
+  },
+  {
+   "label": "model_and_reasoning_change",
+   "prompt_index": 7,
+   "settings": {
+    "model": "claude-haiku-5-5",
+    "reasoning_effort": "ReasoningEffort.MEDIUM"
+   },
+   "success": true,
+   "text": "p7",
+   "usage": {
+    "_type": "Usage",
+    "input_tokens": 4,
+    "output_tokens": 4,
+    "cache_creation_tokens": 4205,
+    "cache_read_tokens": 14492,
+    "thinking_tokens": 0,
+    "factory_credits": 270.0
+   },
+   "tracker_turn": [
+    {
+     "t": 16.986,
+     "reason": "completed",
+     "tokenUsage": {
+      "inputTokens": 4,
+      "outputTokens": 4,
+      "cacheCreationTokens": 4205,
+      "cacheReadTokens": 14492,
+      "thinkingTokens": 0,
+      "factoryCredits": 270
+     },
+     "cumulativeTokenUsage": {
+      "inputTokens": 370,
+      "outputTokens": 35,
+      "cacheCreationTokens": 24324,
+      "cacheReadTokens": 93148,
+      "thinkingTokens": 0,
+      "factoryCredits": 1748
+     },
+     "durationMs": 2182
+    }
+   ]
+  }
+ ],
+ "fatal": "AttributeError: 'Session' object has no attribute 'session'",
+ "pass": false
+}

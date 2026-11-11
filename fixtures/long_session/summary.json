@@ -1,0 +1,265 @@
+{
+ "canary": "garnet-4485",
+ "checkpoints": [
+  {
+   "kind": "checkpoint",
+   "minute": 5.0,
+   "t_min": 5.057,
+   "pid": 54848,
+   "alive": true,
+   "memory_bytes": 274382848,
+   "recall_success": true,
+   "canary_recalled": true,
+   "latency_s": 3.091,
+   "usage": {
+    "_type": "Usage",
+    "input_tokens": 4,
+    "output_tokens": 10,
+    "cache_creation_tokens": 86,
+    "cache_read_tokens": 17613,
+    "thinking_tokens": 0,
+    "factory_credits": 77.0
+   },
+   "tracker_turn": [
+    {
+     "t": 303.432,
+     "reason": "completed",
+     "tokenUsage": {
+      "inputTokens": 4,
+      "outputTokens": 10,
+      "cacheCreationTokens": 86,
+      "cacheReadTokens": 17613,
+      "thinkingTokens": 0,
+      "factoryCredits": 77
+     },
+     "cumulativeTokenUsage": {
+      "inputTokens": 373,
+      "outputTokens": 19,
+      "cacheCreationTokens": 129,
+      "cacheReadTokens": 35183,
+      "thinkingTokens": 0,
+      "factoryCredits": 305
+     },
+     "durationMs": 3085
+    }
+   ],
+   "pass": true
+  },
+  {
+   "kind": "checkpoint",
+   "minute": 15.0,
+   "t_min": 15.059,
+   "pid": 54848,
+   "alive": true,
+   "memory_bytes": 273727488,
+   "recall_success": true,
+   "canary_recalled": true,
+   "latency_s": 3.209,
+   "usage": {
+    "_type": "Usage",
+    "input_tokens": 4,
+    "output_tokens": 10,
+    "cache_creation_tokens": 3298,
+    "cache_read_tokens": 14492,
+    "thinking_tokens": 0,
+    "factory_credits": 226.0
+   },
+   "tracker_turn": [
+    {
+     "t": 903.531,
+     "reason": "completed",
+     "tokenUsage": {
+      "inputTokens": 4,
+      "outputTokens": 10,
+      "cacheCreationTokens": 3298,
+      "cacheReadTokens": 14492,
+      "thinkingTokens": 0,
+      "factoryCredits": 226
+     },
+     "cumulativeTokenUsage": {
+      "inputTokens": 377,
+      "outputTokens": 29,
+      "cacheCreationTokens": 3427,
+      "cacheReadTokens": 49675,
+      "thinkingTokens": 0,
+      "factoryCredits": 531
+     },
+     "durationMs": 3202
+    }
+   ],
+   "pass": true
+  },
+  {
+   "kind": "checkpoint",
+   "minute": 30.0,
+   "t_min": 30.075,
+   "pid": 54848,
+   "alive": true,
+   "memory_bytes": 267796480,
+   "recall_success": true,
+   "canary_recalled": true,
+   "latency_s": 4.171,
+   "usage": {
+    "_type": "Usage",
+    "input_tokens": 4,
+    "output_tokens": 10,
+    "cache_creation_tokens": 3389,
+    "cache_read_tokens": 14492,
+    "thinking_tokens": 0,
+    "factory_credits": 230.0
+   },
+   "tracker_turn": [
+    {
+     "t": 1804.509,
+     "reason": "completed",
+     "tokenUsage": {
+      "inputTokens": 4,
+      "outputTokens": 10,
+      "cacheCreationTokens": 3389,
+      "cacheReadTokens": 14492,
+      "thinkingTokens": 0,
+      "factoryCredits": 230
+     },
+     "cumulativeTokenUsage": {
+      "inputTokens": 381,
+      "outputTokens": 39,
+      "cacheCreationTokens": 6816,
+      "cacheReadTokens": 64167,
+      "thinkingTokens": 0,
+      "factoryCredits": 761
+     },
+     "durationMs": 4165
+    }
+   ],
+   "pass": true
+  },
+  {
+   "kind": "checkpoint",
+   "minute": 60.0,
+   "t_min": 60.082,
+   "pid": 54848,
+   "alive": true,
+   "memory_bytes": 263135232,
+   "recall_success": true,
+   "canary_recalled": true,
+   "latency_s": 4.381,
+   "usage": {
+    "_type": "Usage",
+    "input_tokens": 4,
+    "output_tokens": 10,
+    "cache_creation_tokens": 3480,
+    "cache_read_tokens": 14492,
+    "thinking_tokens": 0,
+    "factory_credits": 235.0
+   },
+   "tracker_turn": [
+    {
+     "t": 3604.903,
+     "reason": "completed",
+     "tokenUsage": {
+      "inputTokens": 4,
+      "outputTokens": 10,
+      "cacheCreationTokens": 3480,
+      "cacheReadTokens": 14492,
+      "thinkingTokens": 0,
+      "factoryCredits": 235
+     },
+     "cumulativeTokenUsage": {
+      "inputTokens": 385,
+      "outputTokens": 49,
+      "cacheCreationTokens": 10296,
+      "cacheReadTokens": 78659,
+      "thinkingTokens": 0,
+      "factoryCredits": 996
+     },
+     "durationMs": 4373
+    }
+   ],
+   "pass": true
+  },
+  {
+   "kind": "checkpoint",
+   "minute": 90.0,
+   "t_min": 90.069,
+   "pid": 54848,
+   "alive": true,
+   "memory_bytes": 263655424,
+   "recall_success": true,
+   "canary_recalled": true,
+   "latency_s": 3.683,
+   "usage": {
+    "_type": "Usage",
+    "input_tokens": 4,
+    "output_tokens": 10,
+    "cache_creation_tokens": 3571,
+    "cache_read_tokens": 14492,
+    "thinking_tokens": 0,
+    "factory_credits": 239.0
+   },
+   "tracker_turn": [
+    {
+     "t": 5404.128,
+     "reason": "completed",
+     "tokenUsage": {
+      "inputTokens": 4,
+      "outputTokens": 10,
+      "cacheCreationTokens": 3571,
+      "cacheReadTokens": 14492,
+      "thinkingTokens": 0,
+      "factoryCredits": 239
+     },
+     "cumulativeTokenUsage": {
+      "inputTokens": 389,
+      "outputTokens": 59,
+      "cacheCreationTokens": 13867,
+      "cacheReadTokens": 93151,
+      "thinkingTokens": 0,
+      "factoryCredits": 1235
+     },
+     "durationMs": 3676
+    }
+   ],
+   "pass": true
+  }
+ ],
+ "kill": {
+  "pid": 54848,
+  "taskkill_exit": 0,
+  "alive_after_kill": false
+ },
+ "fatal": null,
+ "session_id": "1ece46c2-805a-4257-a717-ccc671ce64ef",
+ "pid": 54848,
+ "memory_at_open": 293011456,
+ "plant": {
+  "success": true,
+  "usage": {
+   "_type": "Usage",
+   "input_tokens": 4,
+   "output_tokens": 5,
+   "cache_creation_tokens": 43,
+   "cache_read_tokens": 17570,
+   "thinking_tokens": 0,
+   "factory_credits": 74.0
+  }
+ },
+ "recovery": {
+  "kind": "resume_after_kill",
+  "new_pid": 43004,
+  "recall_success": true,
+  "canary_recalled": true,
+  "latency_s": 6.775,
+  "usage": {
+   "_type": "Usage",
+   "input_tokens": 4,
+   "output_tokens": 10,
+   "cache_creation_tokens": 91,
+   "cache_read_tokens": 18063,
+   "thinking_tokens": 0,
+   "factory_credits": 79.0
+  },
+  "pass": true
+ },
+ "wall_minutes": 90.25,
+ "pass": true
+}

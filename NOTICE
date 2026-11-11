@@ -1,0 +1,13 @@
+WittyCode
+Copyright 2026 NiuXiao@WittyLoong Studio
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+WittyCode's own agent loop was designed with ideas from DeepSeek Harness
+(https://github.com/deepseek-ai/deepseek-harness, MIT License): a thin seam between the loop
+and each vendor's wire format, a to-do list tool, and a reminder when the same call repeats.
+No source code of that project is included.
+
+The packages WittyCode needs to run (PySide6 / Qt, droid-sdk, qasync and what they depend on)
+are separate works under their own licenses. Releases that bundle them list them, with their
+license texts, in THIRD_PARTY_NOTICES.txt.

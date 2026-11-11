@@ -1,0 +1,58 @@
+{
+  "phase": "e",
+  "state": {
+    "python_pid": 53420,
+    "droid_pid": 44092,
+    "opened": true,
+    "droid_in_job": true,
+    "command_started": true,
+    "tree": {
+      "34764": {
+        "exe": "powershell.exe",
+        "in_job": true
+      },
+      "51508": {
+        "exe": "conhost.exe",
+        "in_job": true
+      },
+      "48796": {
+        "exe": "powershell.exe",
+        "in_job": true
+      },
+      "37988": {
+        "exe": "conhost.exe",
+        "in_job": true
+      }
+    }
+  },
+  "child_launcher_pid": 52936,
+  "shells_before_kill": {
+    "34764": {
+      "exe": "powershell.exe",
+      "in_job": true
+    },
+    "51508": {
+      "exe": "conhost.exe",
+      "in_job": true
+    },
+    "48796": {
+      "exe": "powershell.exe",
+      "in_job": true
+    },
+    "37988": {
+      "exe": "conhost.exe",
+      "in_job": true
+    }
+  },
+  "droid_in_job": true,
+  "child_exit": 1,
+  "shells_alive_after_kill": {
+    "34764": false,
+    "51508": false,
+    "48796": false,
+    "37988": false
+  },
+  "droid_alive_after_kill": false,
+  "python_alive_after_kill": false,
+  "alive_after_cleanup": []
+}

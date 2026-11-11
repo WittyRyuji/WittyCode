@@ -1,0 +1,17 @@
+{"seq": 0, "t": 0.0851, "turn": 0, "turn_t": null, "source": "meta", "type": "Environment", "data": {"real_executable": "C:\\Users\\me\\AppData\\Local\\Factory\\app-0.208.0\\resources\\bin\\droid.exe", "real_version": "0.251.0", "fake_root": "C:\\Users\\me\\code\\wittycode\\sandbox\\robust\\fakeapp"}}
+{"seq": 1, "t": 0.2187, "turn": 0, "turn_t": null, "source": "meta", "type": "Step", "data": {"step": "copy", "size_mb": 310.6, "seconds": 0.13}}
+{"seq": 2, "t": 0.219, "turn": 0, "turn_t": null, "source": "meta", "type": "Step", "data": {"step": "detect_initial", "found": [[[[0, 208, 0], 1, ""], "C:\\Users\\me\\code\\wittycode\\sandbox\\robust\\fakeapp\\app-0.208.0\\resources\\bin\\droid.exe"]]}}
+{"seq": 3, "t": 0.4593, "turn": 0, "turn_t": null, "source": "meta", "type": "Step", "data": {"step": "copied_version", "version": "0.251.0"}}
+{"seq": 4, "t": 4.9242, "turn": 0, "turn_t": null, "source": "meta", "type": "Step", "data": {"step": "session_open", "session_id": "1881e9d0-b80f-4aa1-bc4b-00bd85b5a01f", "droid_pid": 38588, "open_s": 4.46, "exe": "C:\\Users\\me\\code\\wittycode\\sandbox\\robust\\fakeapp\\app-0.208.0\\resources\\bin\\droid.exe"}}
+{"seq": 5, "t": 4.9244, "turn": 0, "turn_t": null, "source": "meta", "type": "Step", "data": {"step": "delete_running_exe", "result": "blocked: PermissionError winerror=5"}}
+{"seq": 6, "t": 4.9247, "turn": 0, "turn_t": null, "source": "meta", "type": "Step", "data": {"step": "rename_running_exe", "result": "SUCCEEDED"}}
+{"seq": 7, "t": 4.925, "turn": 0, "turn_t": null, "source": "meta", "type": "Step", "data": {"step": "rename_back", "result": "ok"}}
+{"seq": 8, "t": 5.0885, "turn": 0, "turn_t": null, "source": "meta", "type": "Step", "data": {"step": "detect_after_update", "found": [[[[0, 209, 0], 1, ""], "C:\\Users\\me\\code\\wittycode\\sandbox\\robust\\fakeapp\\app-0.209.0\\resources\\bin\\droid.exe"], [[[0, 208, 0], 1, ""], "C:\\Users\\me\\code\\wittycode\\sandbox\\robust\\fakeapp\\app-0.208.0\\resources\\bin\\droid.exe"]]}}
+{"seq": 9, "t": 5.0921, "turn": 0, "turn_t": null, "source": "meta", "type": "Step", "data": {"step": "running_session_rpc", "tool_count": 35, "seconds": 0.0}}
+{"seq": 10, "t": 5.0925, "turn": 0, "turn_t": null, "source": "meta", "type": "Step", "data": {"step": "rename_running_app_folder", "result": "SUCCEEDED (folder rename works while exe runs)"}}
+{"seq": 11, "t": 5.0927, "turn": 0, "turn_t": null, "source": "meta", "type": "Step", "data": {"step": "detect_after_folder_rename", "found": [[[[0, 209, 0], 1, ""], "C:\\Users\\me\\code\\wittycode\\sandbox\\robust\\fakeapp\\app-0.209.0\\resources\\bin\\droid.exe"]]}}
+{"seq": 12, "t": 5.0952, "turn": 0, "turn_t": null, "source": "meta", "type": "Step", "data": {"step": "session_alive_after_folder_rename", "tool_count": 35}}
+{"seq": 13, "t": 5.1322, "turn": 0, "turn_t": null, "source": "meta", "type": "Step", "data": {"step": "session_closed", "seconds": 0.037, "droid_alive_after_close": true}}
+{"seq": 14, "t": 5.1701, "turn": 0, "turn_t": null, "source": "meta", "type": "Step", "data": {"step": "delete_after_close", "result": "SUCCEEDED (lock released)"}}
+{"seq": 15, "t": 5.1702, "turn": 0, "turn_t": null, "source": "meta", "type": "Done", "data": {"failures": []}}
+{"seq": 16, "t": 5.1703, "turn": 0, "turn_t": null, "source": "meta", "type": "Summary", "data": {"latency_s": {}, "counts": {}, "order": {}}}

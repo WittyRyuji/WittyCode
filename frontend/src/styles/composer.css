@@ -1,0 +1,142 @@
+.composer-wrap { flex: none; padding: 6px 36px 10px 32px; background: var(--bg); }
+.composer-wrap > * { max-width: 796px; margin-left: auto; margin-right: auto; }
+/* The frame of the logo: a thick outline; when you type in it, a second, offset frame appears behind it. */
+.composer { container-type: inline-size; display: flex; flex-direction: column; gap: 6px; padding: 10px 12px 8px; border: var(--bw) solid var(--line-strong); background: var(--bg-raised); transition: border-color 0.1s, box-shadow 0.1s; }
+.composer:focus-within { border-color: var(--ink); box-shadow: 4px 4px 0 var(--shadow-hard); }
+.composer.off { background: var(--soft); }
+/* The messages waiting for their turn: one line each, the width of the box below them. At the end of the line: see all of it,
+   change it, take it back, send it now. */
+.queue-strip { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; max-height: 148px; overflow-y: auto; }
+.qs-row { display: flex; align-items: center; gap: 8px; min-height: 32px; padding: 2px 4px 2px 10px; border: 1px solid var(--line-strong); border-left: 3px dashed var(--ink); background: var(--bg-raised); font-size: 12.5px; }
+.qs-tag { flex: none; font-size: 11px; font-weight: 700; letter-spacing: 0.03em; color: var(--muted); white-space: nowrap; }
+.qs-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); }
+.qs-att { flex: none; display: inline-flex; align-items: center; gap: 3px; font-size: 11.5px; color: var(--muted); }
+.qs-icons { flex: none; display: inline-flex; align-items: center; gap: 0; }
+.qs-row.open { align-items: flex-start; padding-top: 5px; }
+.qs-row.open .qs-text { white-space: pre-wrap; overflow: visible; overflow-wrap: anywhere; max-height: 9em; overflow-y: auto; line-height: 1.55; padding-top: 3px; }
+.qs-row.open .qs-tag, .qs-row.open .qs-att { padding-top: 4px; }
+.qs-row.editing { align-items: flex-start; padding-top: 5px; }
+.qs-row.editing .qs-tag { padding-top: 5px; }
+.qs-edit { flex: 1 1 auto; min-width: 0; resize: none; border: 1px solid var(--line-strong); background: var(--bg); color: var(--fg); padding: 3px 6px; font: inherit; line-height: 1.5; outline: 0; }
+.qs-edit:focus { border-color: var(--ink); }
+.att-row { display: flex; flex-wrap: wrap; gap: 8px; padding-bottom: 2px; }
+.input { display: block; width: 100%; resize: none; border: 0; outline: 0; background: transparent; padding: 2px 3px; font: 14.5px/1.6 var(--font-sans); color: var(--fg); min-height: 26px; max-height: 220px; user-select: text; }
+.input::placeholder { color: var(--faint); }
+/* One line, always: the chips give way (their values end in an ellipsis, the full text is the tooltip) before the send button is
+   pushed onto a line of its own, which leaves a blank strip under the box. */
+.composer-bar { display: flex; align-items: center; gap: 8px; flex-wrap: nowrap; }
+.composer-bar > :not(.controls) { flex: none; }
+.attach { cursor: pointer; }
+/* The group around the four chips takes no box of its own: the bar lays the chips out, so the permission and the mode stay on the
+   left, and the model and the reasoning go to the right, next to the send button. (In the page they stay in the order model,
+   reasoning, permission, mode; only what is shown is moved.) */
+.controls { display: contents; }
+.composer-bar > .spacer { flex: 1 1 0; min-width: 0; order: 3; }
+.chip-permission { order: 1; }
+.chip-mode { order: 2; }
+.chip-model { order: 4; }
+.chip-reasoning { order: 5; }
+.bar-actions { order: 6; display: flex; align-items: center; gap: 8px; }
+.chip { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 6px 0 10px; border: 1px solid var(--line-strong); background: transparent; font-size: 12.5px; flex: 0 1 auto; min-width: 0; white-space: nowrap; }
+.chip-k, .chip-c, .src-tag { flex: none; }
+.chip:hover:not(:disabled) { background: var(--hover); border-color: var(--muted); }
+.chip.open { border-color: var(--ink); background: var(--hover); }
+.chip:disabled { opacity: 0.45; }
+.chip-k { color: var(--muted); }
+.chip-v { font-weight: 700; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.chip-c { color: var(--muted); margin-left: -1px; }
+/* where a model is billed, when that is not Factory */
+.src-tag { padding: 0 4px; border: 1px solid var(--line-strong); font-size: 10.5px; font-weight: 600; color: var(--muted); line-height: 15px; }
+/* "Using ChatGPT plan" at the right end of the line under the box of a ChatGPT Plan conversation (OpenAI's UI guideline), with the
+   way to its usage page. Not among the controls: there it pushed the send button onto a line of its own. */
+.plan-badge { display: inline-flex; align-items: center; gap: 7px; flex: none; margin-left: auto; font-size: 11.5px; color: var(--fg-2); }
+.plan-badge .pdot { background: var(--st-ready); }
+.plan-badge.off { color: var(--muted); }
+.plan-badge.off .pdot { background: var(--st-dead); }
+/* the ring after "Manage usage": how much of the plan is used (grey and empty when it cannot be read) */
+.plan-ring { display: inline-flex; align-items: center; flex: none; cursor: default; }
+.usage-ring { display: block; flex: none; }
+.usage-ring circle { fill: none; stroke-width: 2.5; }
+.usage-ring .ring-track { stroke: var(--line-strong); }
+.usage-ring .ring-arc { stroke: var(--ink); stroke-linecap: butt; }
+.usage-ring.warn .ring-arc { stroke: var(--warn); }
+.usage-ring.crit .ring-arc { stroke: var(--err); }
+.usage-ring.unknown { opacity: 0.55; }
+.inline-link { color: var(--fg-2); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+.inline-link:hover { color: var(--ink); }
+.defaults-note { font-size: 11.5px; color: var(--muted); }
+.spacer { flex: 1; }
+.send { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px 0 16px; border: var(--bw) solid var(--ink); background: var(--ink); color: var(--paper); font-weight: 700; }
+.send:hover:not(:disabled) { background: var(--bg-raised); color: var(--ink); }
+.send:disabled { background: transparent; border-color: var(--line-strong); color: var(--faint); }
+.send.stop { background: transparent; color: var(--err); border-color: var(--err); padding: 0 14px; }
+.send.stop:hover { background: var(--err-bg); color: var(--err); }
+/* what a message typed during a turn can become (queue / steer): the one Enter does is filled, the other outlined */
+.send.how { padding: 0 14px; }
+.send.how.alt { background: transparent; color: var(--ink); }
+.send.how.alt:hover:not(:disabled) { background: var(--bg-raised); }
+/* ---------------------------------------------------------------- sub-agents: the bar above the composer and the side panel */
+.agentbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin: 0 auto; padding: 6px 32px 0; width: 100%; max-width: 924px; }
+.agentbar-title { font-size: 11px; font-weight: 700; letter-spacing: 0.06em; color: var(--muted); }
+.agent-chip { display: inline-flex; align-items: center; gap: 7px; padding: 3px 10px 3px 8px; border: 1px solid var(--line-strong); background: var(--bg-raised); font-size: 12px; color: var(--fg); max-width: 260px; }
+.agent-chip:hover { border-color: var(--ink); }
+.agent-chip.on { background: var(--ink); border-color: var(--ink); color: var(--paper); }
+.agent-chip.waiting { border-color: var(--st-attention); font-weight: 600; }
+.agent-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-state { color: var(--muted); font-size: 11.5px; white-space: nowrap; }
+.agent-chip.on .agent-state { color: inherit; opacity: 0.8; }
+.agentpanel { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--bg); border-left: 1px solid var(--line-strong); }
+.agentpanel-head { display: flex; align-items: center; gap: 10px; padding: 10px 12px 10px 14px; border-bottom: 1px solid var(--line); }
+.agentpanel-title { flex: 1; min-width: 0; }
+.agentpanel-name { font-weight: 700; font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agentpanel-facts { font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agentpanel-head .agent-state.waiting { color: var(--fg); font-weight: 700; }
+.agentpanel-task { padding: 8px 14px; font-size: 12.5px; color: var(--fg-2); border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.agentpanel-run { flex: 1; min-height: 0; overflow-y: auto; }
+.agentpanel-transcript { padding: 14px 16px 32px; max-width: none; }
+.hint { display: flex; flex-wrap: wrap; align-items: center; column-gap: 16px; row-gap: 2px; margin-top: 8px; padding: 0 4px; font-size: 11.5px; color: var(--faint); }
+.hint-text { flex: 1 1 auto; min-width: 0; }
+.hint .linkbtn { font-size: 11.5px; padding: 0; }
+.hint.handoff { color: var(--fg-2); font-weight: 600; }
+
+/* In a narrow window the chips drop their "Model / Reasoning / ..." labels, so the row and the send button stay on one line.
+   With the labels the row needs about 660px (a long model name more): a composer between 600 and that used to wrap, and the
+   send button then stood alone on a line of its own. */
+@container (max-width: 720px) {
+  .chip-k { display: none; }
+  .chip { padding-left: 9px; }
+  .defaults-note { display: none; }
+}
+@container (max-width: 400px) {
+  .send { padding: 0 10px; }
+  .send svg { display: none; }
+}
+/* A long model name gives way (its full name is the chip's tooltip) instead of pushing the send button off the line. */
+.chip-model .chip-v { max-width: 190px; }
+/* The project is chosen on the line under the box (first message box only): a long folder name gives way too. */
+.chip-project .chip-v { max-width: 240px; }
+.hint .chip-project { flex: none; }
+
+/* The commands for a line that begins with a slash: above the box, as wide as it is. */
+.composer { position: relative; }
+.slash-menu { position: absolute; left: -1px; right: -1px; bottom: calc(100% + 6px); z-index: 20; display: flex; flex-direction: column; padding: 4px; max-height: 280px; overflow-y: auto; border: var(--bw) solid var(--ink); background: var(--bg-raised); box-shadow: 4px 4px 0 var(--shadow-hard); }
+.slash-item { display: flex; align-items: baseline; gap: 10px; width: 100%; padding: 6px 8px; border: 0; background: transparent; text-align: left; font: inherit; font-size: 13px; color: var(--fg); cursor: pointer; }
+.slash-item.on { background: var(--soft); }
+.slash-sep { flex: none; height: 0; margin: 4px 0; border-top: 1px solid var(--faint); }
+.slash-item .sl-name { flex: none; font-family: var(--font-mono); font-weight: 700; }
+.slash-item .sl-args { flex: none; font-family: var(--font-mono); color: var(--faint); }
+.slash-item .sl-hint { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--fg-2); }
+.slash-item .sl-kind { flex: none; padding: 0 5px; border: 1px solid var(--faint); font-size: 10px; line-height: 15px; color: var(--faint); }
+.slash-item.off .sl-name { color: var(--faint); }
+.slash-item.off .sl-hint { color: var(--faint); }
+/* The smallest window is 900px wide, the composer 544px in it (less with the review pane open): without labels the row still
+   needs about 520px, so the chips lose their arrows and, narrower still, the model chip its tag and part of its name. */
+@container (max-width: 600px) {
+  .chip-c { display: none; }
+  .chip { padding-right: 8px; }
+  .controls, .composer-bar { gap: 4px 6px; }
+}
+@container (max-width: 470px) {
+  .chip-model .chip-v { max-width: 84px; }
+  .chip-model .src-tag { display: none; }
+}
