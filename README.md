@@ -1,9 +1,10 @@
 # WittyCode
 
-English | [简体中文](README.zh-CN.md)
+English | [简体中文](README.zh-CN.md) | [Wiki](https://deepwiki.com/WittyRyuji/WittyCode)
 
 [![CI](https://github.com/WittyRyuji/WittyCode/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/WittyRyuji/WittyCode/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/WittyRyuji/WittyCode/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/WittyRyuji/WittyCode/actions/workflows/codeql.yml)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/WittyRyuji/WittyCode)
 
 A coding-agent desktop app for Windows, with its own agent loop: the answer comes first, tool calls fold into one line.
 

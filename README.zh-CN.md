@@ -1,9 +1,10 @@
 # WittyCode
 
-[English](README.md) | 简体中文
+[English](README.md) | 简体中文 | [Wiki](https://deepwiki.com/WittyRyuji/WittyCode)
 
 [![CI](https://github.com/WittyRyuji/WittyCode/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/WittyRyuji/WittyCode/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/WittyRyuji/WittyCode/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/WittyRyuji/WittyCode/actions/workflows/codeql.yml)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/WittyRyuji/WittyCode)
 
 Windows 上的编程代理桌面应用，自带代理循环：回答放在第一位，工具调用折叠成一行。
 
