@@ -345,7 +345,7 @@ ok("the approval's answers are one per line, as wide as the card, the label at t
 await page.click(".prompt.perm .btn.primary");
 await page.waitFor(READY, 12000);
 await page.hover(".usage");
-await page.wait(700);
+await page.waitFor("[...document.querySelectorAll('.tip-row dt')].some(e => e.textContent === '合计')", 3000);
 ok("the first turn on the new engine adds to the conversation's total", await page.eval("(() => { const rows = Object.fromEntries([...document.querySelectorAll('.tip-row')].map(r => [r.querySelector('dt').textContent, r.querySelector('dd').textContent])); return /\\d/.test(rows['合计']) && rows['Cache 命中率'] !== '—'; })()"));
 await page.mouse("mouseMoved", 5, 5, { button: "none", clickCount: 0 });
 
@@ -993,6 +993,7 @@ const errors = page.consoleErrors();
 ok("no console errors", errors.length === 0);
 await page.close();
 await import("./check-plan.mjs");
+await import("./check-turn-navigation.mjs");
 await import("./check-step-limit.mjs");
 console.log(failed ? `${failed} check(s) FAILED` : "all checks passed");
 process.exit(failed ? 1 : 0);

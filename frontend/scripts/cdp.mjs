@@ -28,11 +28,11 @@ export function writeScreenshot(file, data) {
 const CSP_WATCH = `document.addEventListener("securitypolicyviolation", (e) => console.error("CSP violation: " + e.violatedDirective + " " + (e.blockedURI || "")));`;
 
 /** `init`: script sources evaluated in every new document before the page's own scripts. */
-export async function openPage(url, { width = 1500, height = 960, port = 9333 + Math.floor(Math.random() * 400), init = [] } = {}) {
+export async function openPage(url, { width = 1500, height = 960, port = 9333 + Math.floor(Math.random() * 400), init = [], hideScrollbars = true } = {}) {
   const profile = mkdtempSync(join(tmpdir(), "wc-cdp-"));
   const proc = spawn(
     EDGE,
-    ["--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-first-run", `--user-data-dir=${profile}`, `--remote-debugging-port=${port}`, `--window-size=${width},${height}`, "about:blank"],
+    ["--headless=new", "--disable-gpu", ...(hideScrollbars ? ["--hide-scrollbars"] : []), "--no-first-run", `--user-data-dir=${profile}`, `--remote-debugging-port=${port}`, `--window-size=${width},${height}`, "about:blank"],
     { stdio: "ignore" },
   );
   let targets;

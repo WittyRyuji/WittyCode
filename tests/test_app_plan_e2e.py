@@ -35,7 +35,16 @@ def test_the_plan_is_live_on_the_right_and_follows_only_its_conversation(qapp, l
             assert await rig.text(".plan-count") == "0/3"
             assert await rig.count(".plan-step.st-in_progress") == 1
             assert await rig.js("document.querySelector('.planpanel').getBoundingClientRect().left >= document.querySelector('.stage').getBoundingClientRect().right - 1")
+            aligned = "(() => { const t = document.querySelector('.transcript').getBoundingClientRect(), c = document.querySelector('.composer').getBoundingClientRect(); return Math.abs(t.left - c.left) < 1 && Math.abs(t.right - c.right) < 1; })()"
+            assert await rig.js(aligned), "the message and composer edges share the same reading grid"
+            await rig.click(".plan-close")
+            await rig.wait_for(".planpanel", 0)
+            assert await rig.js("document.querySelector('.conversation-column').getBoundingClientRect().width === document.querySelector('.conversation-body').getBoundingClientRect().width"), "closing releases the whole plan column"
+            assert await rig.js(aligned)
             model.go()
+            await rig.wait_text(".plan-toggle", "1/3")
+            assert not await rig.exists(".planpanel"), "streamed progress must not reopen a dismissed plan"
+            await rig.click(".plan-toggle")
             await rig.wait_text(".plan-count", "1/3")
             assert await rig.count(".planpanel") == 1 and await rig.count(".plan-step") == 3, "updates replace the plan rather than append copies"
             assert await rig.text(".plan-step.st-in_progress") == "实现修改"

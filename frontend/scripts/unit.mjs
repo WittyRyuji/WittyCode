@@ -21,6 +21,7 @@ import { COMMANDS, commandNamed, fromSkills, parseSlash, suggestions, unavailabl
 import { quitWarning } from "../src/lib/quit.ts";
 import "./usage.test.mjs";
 import "./plan.test.mjs";
+import "./turn-navigation.test.mjs";
 
 test("API windows use exact specifications, preserve overrides and require unknown limits", () => {
   const model = { id: "gpt-6.1-sol", displayName: "demo", images: true, reasoning: "max" };
