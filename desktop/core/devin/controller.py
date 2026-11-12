@@ -749,9 +749,13 @@ class DevinController:
             items.prompt_blocks(text, attachments)
         except ValueError as error:
             return SteerOutcome(False, message=f"附件无法发送：{error}")
+        context = self.manager.hooks.prompt(PromptEvent(self.engine, self.project, text, frozenset(self.recalled)))
+        sent = text + wrap_context(context.text)
         block = self.transcript.add_steer(turn, text, attachments, pending=False)
+        if context.notice:
+            self.transcript.add_notice(context.notice)
         self._changed()
-        self._spawn(self._run_prompt(turn, text, attachments, block))
+        self._spawn(self._run_prompt(turn, sent, attachments, block))
         return SteerOutcome(True)
 
     def take_unadopted(self) -> list[tuple[str, tuple[Attachment, ...]]]:
@@ -1000,7 +1004,7 @@ class DevinController:
         # (a question tied to one of Devin's tool calls sits on that call's row, and Devin reports how the call ended)
         call_id = _text(params.get("toolCallId"))
         item_id = call_id or f"elicitation-{request_id}"
-        prompt = self.transcript.add_question_prompt(item_id, plan.views)
+        prompt = self.transcript.add_question_prompt(item_id, plan.views, who="Devin")
         self._changed()
         if prompt is None or prompt.status is not PromptStatus.PENDING:
             return {"action": "cancel"}

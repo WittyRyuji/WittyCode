@@ -4,6 +4,7 @@
 
 ## 当前状态
 
+- 2026-11-12（中文进度与 Devin 提问显示）：修复 Devin 运行中引导漏带中文要求；语言规则明确覆盖工具调用之后、续作和每一步，同一条进度直接用中文表达一次，不先英文再翻译。提问适配器对 `message` / 字段标题 / 字段说明里的相同文字去重（只统一连续空白，不合并单词，不猜语义）；问题记录实际提问者 `who`，Devin 卡片明确写 Devin，旧缓存保留按会话推断的兼容逻辑。已补单元、协议和 Qt 整机回归；前端已重建。全量 pytest（含整机）**2810 通过 / 2 跳过 / 2 条 Windows 子进程管道清理警告**；前端 typecheck、unit 69、`check.mjs`、`check-live.mjs` 通过。一次正式审查未发现阻塞问题。没有调用真实模型，不能保证外部模型会全程遵守语言指令；截图人工观感未验证。本批在 `dev` 仅本地提交，不推送。
 - 2026-11-12（独立化：去掉 Droid / Factory / Codex；提交 `e993ba7`，已推到 `dev`）：WittyCode 只剩自有循环（ChatGPT Plan、API Provider，引擎名 `chatgpt`）和可选的 Devin。删了 `desktop/core/codex/`、`session_manager.py`、`droid_locator.py`、`droid_limits.py`、`history.py`、`devtools/replay.py` 和 `droid-sdk` 依赖；前端去掉 Factory / Codex 卡片和 Plan 额度来源，设置里「Droid」页改成「外部程序」（只有 Devin 路径）；API Provider 的模型存在 WittyCode 自己的 `models.json`，**不再读也不复制 `~/.factory/settings.json`**（用户定）；技能目录 `.wittycode` 优先，其他代理的目录只读兼容（`~/.factory/settings.json` 里的 `disabledSkills`、插件仍在读，Roadmap 里写了要去掉）。测试底座换成 `tests/app_support.make_core`（真 ChatGPTEngine + 本机假 Responses 服务，`Plan.script` / `("hold", key)` / `release`）、`save_conversation`、假 Devin 的 `FAKE_DEVIN_OPEN_DELAY` / `FAKE_DEVIN_OPEN_FAIL`、e2e 的 `Model` 帮手。**事故**：一个旧测试用默认路径建 `ProviderStore`，把 `~/.factory/settings.json` 的 `customModels` 复制进了用户真实的 `%APPDATA%\WittyCode\models.json`；已按用户意见删除该文件、删掉迁移逻辑，并在 `tests/conftest.py` 加了 autouse 的 `_no_files_of_the_real_user`（每个测试的 `WITTYCODE_SETTINGS` 指向临时目录）。新增 `README.md`（英文）/ `README.zh-CN.md`、`ROADMAP.md` / `ROADMAP.zh-CN.md`、`SECURITY.md`、`CONTRIBUTING.md`。验证：全量 pytest（不含 e2e）2743 通过 / 2 跳过（之后又修了一个时序断言），整机 e2e 54 通过，前端 typecheck、unit 69、星图单测 26、`check.mjs` 332、`check-live.mjs` 261，冒烟脚本 OK；版本号 `0.1.0a1`、`release.yml`（推 `v*` tag 时构建发布）、发布说明 `docs/releases/v0.1.0-alpha.1.md` 都做了。提交前最后一次全量 pytest（含整机测试）2798 通过 / 2 跳过。**GitHub 上 CI / CodeQL 仍是启动失败**：仓库的 Actions 策略只允许本人名下的 action，要用户在 Settings → Actions → General 放宽。**等用户**：放宽策略、开 PR `main...dev` 并批准合并；合并后再打 tag `v0.1.0-alpha.1`。`fixtures/` 里的 Droid 录像已没有测试在用，留给用户定（`fixtures/long_session/` 不许动）。
 - 2026-11-11（深夜，第三批：答复选项一行一个）：用户：「提问回答的选项应该一行一个，包括权限审批」。权限卡的答复按钮改成竖排、占满卡片宽、文字靠左（`.pbtns.choices`，类名 `.pbtns` / `.btn` 不变，测试的选择器照旧）；提问卡的选项本来就一行一个，没改。没有提交。细节见批次记录最上面一条。
 - 2026-11-11（深夜，第二批：用户九条里能直接做的）：`AGENTS.md` 再缩成只有硬约束（16 行：语言、沟通、验证、边界、公开仓库、Git、交接），命令和环境搬到 `docs/development.md`，产品原则进 `docs/project.md`。**Devin 会问问题了**（声明 ACP elicitation，`elicitation/create` 画成提问卡）；**Devin 的 token 合计实时动**（本轮已有调用先显示、不记账）；**思考用中文**（设置开关，默认开）；压缩摘要请求失败会重试；停止超时不再把旧引导塞进下一轮；退出确认提醒排队消息和 `/goal`；提问卡等回答时回车不再悄悄排队。**没做、等用户定**：去掉 Droid / Factory（747 个测试建在 Droid 的假引擎上，要先重写测试底座）、设置里「删除 Codex 的 ACP 模式，只保留 Plan」（理解成去掉「Codex 订阅」引擎，待确认）、Codex 的提问（随上一条定）。没有提交。细节见批次记录最上面一条。
@@ -60,6 +61,22 @@
 - 尚未提交到 git；用户之后要推到自己的 GitHub。
 
 ## 批次记录（新的在最上面）
+
+### 2026-11-12 中文进度只说一次、Devin 问题去重与提问者归属
+
+**结果**：Devin 普通消息、后续回合和运行中引导都会带上开启的中文要求；要求整轮各步骤直接用中文表达一次，不先英文再中文复述。重复的提问正文已修复，卡片由实际提问者署名（Devin / ChatGPT Plan / API 模型），不是应用自己在问。
+
+**改动**：`core/language.py` 加强整轮语言规则；`devin/controller.py` 的 `steer` 补调用 prompt hooks，页面仍只显示用户输入；`core/elicit.py` 合并相同的 `message` / 标题 / 说明，字段名保留为题目标签。`QuestionPrompt.who` 经 `transcript` / `viewmodel` 送到 React，两个控制器在提问时记录来源，自有循环按正在运行的模型而非下一轮所选模型署名；`Prompts.tsx` 优先用它、兼容没有该字段的旧卡片，不再画重复的来源或正文标签。新增 `test_elicit.py`，补语言、引导、协议、API、ChatGPT Plan、Qt 整机和 `check-live.mjs` 回归。
+
+**关键决定**：不通过删除英文段落或在页面自动翻译来假装修好模型输出（会误删代码、引用或有用信息）；只增强模型收到的指令，并如实说明外部引擎不保证遵守。表单去重只比对统一连续空白后的完全相同文字，不把 `a b` 和 `ab` 或近似问题当成重复，不改字段键和返回答案的数据形状。
+
+**发现**：普通 Devin 消息早已逐条运行语言 hook，但 `steer` 绕过了 hooks；原 `elicit.plan_of` 则把总说明和字段说明无条件拼接，Devin 在二者填同一句问题就会重复。截图中的双语内容无法仅凭截图判定来自引擎哪一阶段，不据此声称模型效果已修复。
+
+**验证**：定向 Python 110 通过；新增 API / ChatGPT Plan / Qt 整机用例 3 通过；补了单词间空白保护后，相关定向 79 通过。前端 typecheck、unit 69、构建、`check.mjs`、`check-live.mjs` 通过。第一次全量因把 `--basetemp` 放进仓库而失败（34 失败 / 2775 通过 / 2 跳过 / 2 警告），测试目录继承了本仓库的 Git 配置和 AGENTS；已改回 pytest 原本的仓库外临时目录重跑：**2810 通过 / 2 跳过 / 2 条 Windows 子进程管道清理警告（451.65 秒）**，没有删测试或放宽断言。两个跳过分别依赖 ripgrep 和 POSIX 只读语义；管道清理警告出现在共享记忆整理测试中，本批未处理。`check-live.mjs` 生成深浅色 Devin 提问卡截图，Qt 整机实际校验了提问者、正文出现次数和答复回传；截图人工观感未验证（当前工具不提供图片查看）。
+
+**正式审查（一次）**：未发现阻塞问题；核对了不同字段细节与原答案键的保留、提问者按正在运行的来源固定、缺 `who` 的旧卡片兼容、引导不显示隐藏指令、关闭时等待中的请求能释放、测试只用临时设置和本机模拟服务。没有因测试为绿就声称真实模型已全程遵守中文要求。
+
+**未解决**：真实 Devin / 模型的整轮中文遵守情况未验证（真实模型 0 次）；既有双语历史不会自动改写，已经运行的外部回合也不会被追发隐形引导。需要重启应用载入新前端和后端。本批在 `dev` 仅本地提交，不推送；提交号见 git log。
 
 ### 2026-11-12 独立化：去掉 Droid / Factory / Codex，公开发布的准备（Devin 会话）
 

@@ -469,6 +469,7 @@ def test_a_question_of_the_model_reaches_the_page_as_a_card_and_the_answer_goes_
             assert await core.call("session.send", {"id": cid, "text": "set up storage"}) == {"ok": True}
             await until(lambda: pending_card(events, cid) is not None)
             card = pending_card(events, cid)
+            assert card["who"] == "ChatGPT Plan"
             assert card["questions"] == [{"topic": "Storage", "question": "Which database?", "options": ["SQLite", "Postgres"], "multiSelect": False}]
             assert meta(events, cid)["mark"] == "attention", "the tab says the session is waiting for the user"
             assert await core.call("session.answerQuestion", {"id": cid, "promptId": card["id"], "answers": ["Postgres"]}) == {"ok": True}

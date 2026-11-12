@@ -312,6 +312,9 @@ def test_devin_may_ask_questions_and_the_answers_go_back_to_it(tmp_path):
         controller.send_prompt("[ask] pick one")
         prompt = await pending_prompt(controller)
         first, second = prompt.questions
+        from desktop.core.viewmodel import prompt_json
+
+        assert prompt_json(prompt)["who"] == "Devin", "the engine that asked, not the app displaying the card"
         assert first.question.startswith("Which way?") and first.options == ("fast", "safe") and not first.multi_select
         assert second.options == ("tests", "docs") and second.multi_select
         assert controller.answer_question(prompt.id, ["safe", ["tests", "docs"]])
@@ -325,6 +328,35 @@ def test_devin_may_ask_questions_and_the_answers_go_back_to_it(tmp_path):
         await until(lambda: controller.state is SessionState.READY)
         assert text_of(controller.transcript.turns[-1]).endswith('answered: {"action": "cancel"}'), "skipping is cancel"
         await harness.engine.close_all()
+
+    run(scenario())
+
+
+def test_a_devin_form_does_not_repeat_its_description_and_keeps_the_actual_asker(tmp_path):
+    async def scenario():
+        from desktop.core.viewmodel import prompt_json
+
+        harness = make_engine(tmp_path)
+        controller = await opened(harness, tmp_path, autonomy="code")
+        try:
+            controller.send_prompt("[slow] wait")
+            question = "如何处理这份演示配置？"
+            request = {
+                "sessionId": controller.session_id, "mode": "form", "message": question,
+                "requestedSchema": {"type": "object", "properties": {
+                    "config": {"type": "string", "title": "配置文件", "description": question, "enum": ["保留", "移除"]},
+                }, "required": ["config"]},
+            }
+            waiting = asyncio.ensure_future(harness.engine._route_request(harness.clients[0], "elicitation/create", request, "form1"))
+            prompt = await pending_prompt(controller)
+            shown = prompt_json(prompt)
+            assert shown["who"] == "Devin"
+            assert shown["questions"] == [{"topic": "配置文件", "question": question, "options": ["保留", "移除"], "multiSelect": False}]
+            assert controller.answer_question(prompt.id, ["保留"])
+            assert await waiting == {"action": "accept", "content": {"config": "保留"}}
+            await controller.interrupt()
+        finally:
+            await harness.engine.close_all()
 
     run(scenario())
 

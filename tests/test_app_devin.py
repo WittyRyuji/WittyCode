@@ -203,12 +203,42 @@ def test_each_message_to_devin_asks_for_chinese_thinking_until_the_setting_is_of
         await core.call("session.send", {"id": cid, "text": "hello"})
         await until(lambda: meta(events, cid).get("mark") == "ready" and answer_of(events, cid).startswith("echo: hello"))
         assert THINK_CHINESE in sent(-1) and "<wittycode-context>" in sent(-1), "after the typed text, in the block the page never shows"
+        await core.call("session.send", {"id": cid, "text": "next step"})
+        await until(lambda: meta(events, cid).get("mark") == "ready" and answer_of(events, cid).startswith("echo: next step"))
+        assert sent(-1).count(THINK_CHINESE) == 1, "later turns get the same rule, exactly once"
         await core.call("settings.set", {"key": "thinkChinese", "value": False})
         assert core.settings.think_chinese is False and core.settings_view()["thinkChinese"] is False
         await core.call("session.send", {"id": cid, "text": "again"})
         await until(lambda: meta(events, cid).get("mark") == "ready" and answer_of(events, cid).startswith("echo: again"))
         assert THINK_CHINESE not in sent(-1)
         await core.shutdown()
+
+    run(scenario())
+
+
+def test_steering_carries_the_chinese_rule_without_showing_it_and_reads_the_setting_each_time(tmp_path):
+    async def scenario():
+        from desktop.core.language import THINK_CHINESE
+
+        core, _, events, harness = await devin_core(tmp_path)
+        try:
+            await core.call("settings.set", {"key": "thinkChinese", "value": True})
+            cid = await new_devin(core, events, tmp_path)
+            for index, enabled in enumerate((True, False)):
+                await core.call("session.send", {"id": cid, "text": "[slow] wait"})
+                await until(lambda: len(harness.requests("session/prompt")) == index * 2 + 1)
+                await core.call("settings.set", {"key": "thinkChinese", "value": enabled})
+                text = f"continue {index}"
+                assert await core.call("session.send", {"id": cid, "text": text, "how": "steer"}) == {"ok": True, "steered": True}
+                await until(lambda: len(harness.requests("session/prompt")) == index * 2 + 2)
+                sent = harness.requests("session/prompt")[-1]["prompt"][0]["text"]
+                assert sent.startswith(text) and (THINK_CHINESE in sent) is enabled
+                if enabled:
+                    assert sent.count(THINK_CHINESE) == 1 and "<wittycode-context>" in sent
+                await until(lambda: any(b.get("steer") and b["text"] == text for b in last_turn_blocks(events, cid)))
+                await until(lambda: meta(events, cid).get("mark") == "ready")
+        finally:
+            await core.shutdown()
 
     run(scenario())
 

@@ -317,6 +317,8 @@ class QuestionPrompt:
     status: PromptStatus = PromptStatus.PENDING
     answers: tuple[str, ...] | None = None
     version: int = 0
+    who: str = ""
+    """The actual asker, captured when asked rather than inferred from a later model selection."""
     kind: ClassVar[str] = "question"
 
 
@@ -974,13 +976,13 @@ class Transcript:
         self._touch(turn, prompt)
         return prompt
 
-    def add_question_prompt(self, tool_call_id: str, questions: Sequence[QuestionView]) -> QuestionPrompt | None:
+    def add_question_prompt(self, tool_call_id: str, questions: Sequence[QuestionView], *, who: str = "") -> QuestionPrompt | None:
         """``add_question`` from display data; the questions belong to an ``AskUser`` item of the active turn."""
         turn = self.active_turn
         if turn is None:
             return None
         item = self.ensure_tool(turn, tool_call_id, "AskUser")
-        prompt = QuestionPrompt(id=self.new_id("p"), tool_call_id=tool_call_id, questions=tuple(questions))
+        prompt = QuestionPrompt(id=self.new_id("p"), tool_call_id=tool_call_id, questions=tuple(questions), who=who)
         if item.terminal:
             prompt.status = PromptStatus.EXPIRED
         else:

@@ -127,6 +127,30 @@ def test_a_conversation_with_an_api_model_is_asked_at_the_provider(tmp_path):
     run(scenario())
 
 
+def test_an_api_question_names_the_api_model_as_its_asker(tmp_path):
+    async def scenario():
+        with FakeApi() as api:
+            questions = {"questions": [{"header": "配置", "question": "采用哪种方案？", "options": ["先测试", "先实现"]}]}
+            api.script([
+                chunk({"tool_calls": [{"index": 0, "id": "ask1", "type": "function", "function": {"name": "ask_user", "arguments": json.dumps(questions)}}]}, finish="tool_calls"),
+                "[DONE]",
+            ], says("收到。"))
+            core, _, events, _, _ = await api_core(tmp_path, api)
+            try:
+                cid = await new_session(core, events, tmp_path, api_model_id(events))
+                await core.call("session.send", {"id": cid, "text": "先确认方案"})
+                controller = core._by_cid[cid].controller
+                await until(lambda: controller.transcript.pending_prompts())
+                (prompt,) = controller.transcript.pending_prompts()
+                assert prompt.who == "API 模型"
+                assert await core.call("session.answerQuestion", {"id": cid, "promptId": prompt.id, "answers": ["先测试"]}) == {"ok": True}
+                await until(lambda: meta(events, cid).get("mark") == "ready" and answer_of(events, cid) == "收到。")
+            finally:
+                await core.shutdown()
+
+    run(scenario())
+
+
 def test_a_tool_call_runs_in_the_project_and_its_result_goes_back_to_the_model(tmp_path):
     async def scenario():
         with FakeApi() as api:

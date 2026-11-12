@@ -110,6 +110,17 @@ def test_a_question_prompt_and_its_answer_block():
     assert qa["cancelled"] is False and qa["pairs"][0][1] == "a"
 
 
+def test_a_question_carries_its_actual_asker_to_the_page():
+    from desktop.core.prompts import QuestionView
+
+    transcript = Transcript()
+    turn = transcript.start_turn("go")
+    question = QuestionView(0, "方案", "采用哪种方案？", ("先测试", "先实现"), False)
+    transcript.add_question_prompt("q1", [question], who="Devin")
+    (shown,) = turn_json(turn)["prompts"]
+    assert shown["who"] == "Devin", "the page need not infer the asker from the selected model"
+
+
 def test_attachments_carry_a_thumbnail_only_for_pictures():
     transcript = Transcript()
     picture = image_attachment("shot.png", tiny_png(40, 30), "image/png")

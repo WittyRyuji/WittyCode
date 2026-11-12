@@ -30,6 +30,13 @@ def test_the_own_loop_s_instructions_ask_for_chinese_thinking_only_when_the_sett
     assert plain.startswith(BASE)
 
 
+def test_the_rule_covers_later_steps_and_forbids_an_english_version_then_translation():
+    rule = language.THINK_CHINESE
+    assert "after tool calls" in rule and "every step" in rule
+    assert "only once" in rule and "do not write an English version" in rule
+    assert "code, commands, paths and identifiers unchanged" in rule
+
+
 def test_the_setting_is_on_by_default_and_kept():
     assert AppSettings().think_chinese is True
     assert settings_from_dict({"think_chinese": False}).think_chinese is False

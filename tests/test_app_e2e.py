@@ -1458,6 +1458,41 @@ def test_devin_sign_in_and_out_from_the_settings(qapp, loop, tmp_path):
     run(loop, scenario())
 
 
+def test_a_devin_question_is_shown_once_and_names_devin_not_the_app(qapp, loop, tmp_path):
+    async def scenario():
+        harness = make_devin(tmp_path)
+        rig = await open_rig(tmp_path, devin_engine=harness.engine, plan=False)
+        try:
+            await wait_for(lambda: any(m["source"] == "devin" for m in rig.core.catalog.models), 15, "the Devin models")
+            cid = (await rig.core.call("session.new", {"projectId": str(rig.project), "modelId": "devin:swe-2-high"}))["id"]
+            await rig.wait_text(".statusbar .st-left", "就绪")
+            await rig.send("[slow] 先确认方案")
+            controller = rig.core._by_cid[cid].controller
+            await until(lambda: controller.state is SessionState.RUNNING)
+            question = "如何处理这份演示配置？"
+            request = {
+                "sessionId": controller.session_id, "mode": "form", "message": question,
+                "requestedSchema": {"type": "object", "properties": {
+                    "config": {"type": "string", "title": "配置文件", "description": question, "enum": ["保留", "移除"]},
+                }, "required": ["config"]},
+            }
+            waiting = asyncio.ensure_future(harness.engine._route_request(harness.clients[0], "elicitation/create", request, "form1"))
+            await rig.wait_for(".prompt.ask", 1)
+            assert (await rig.text(".prompt.ask .phead")).strip() == "Devin 想先问你几个问题"
+            assert (await rig.text(".prompt.ask .qtext")).strip() == question
+            assert (await rig.text(".prompt.ask")).count(question) == 1
+            assert await rig.text(".prompt.ask .qtopic") == "配置文件"
+            await rig.click_text(".prompt.ask .opt", "保留")
+            await rig.click_text(".prompt.ask .btn", "提交回答")
+            assert await waiting == {"action": "accept", "content": {"config": "保留"}}
+            await rig.wait_for(".prompt.ask", 0)
+            await rig.core.call("session.stop", {"id": cid})
+        finally:
+            await rig.finish()
+
+    run(loop, scenario())
+
+
 async def chatgpt_rig(tmp_path, fake, *, welcomed: bool = True, **options):
     """The real page on the real core and the real ChatGPT Plan engine (its own agent loop and tools), which talks to the
     loopback fake of OpenAI's Responses API."""

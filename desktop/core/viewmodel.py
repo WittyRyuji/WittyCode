@@ -225,7 +225,10 @@ def prompt_json(prompt: Prompt) -> dict[str, Any]:
             out["selected"] = prompt.selected
         return out
     assert isinstance(prompt, QuestionPrompt)
-    return {"kind": "question", "id": prompt.id, "status": status, "questions": [_question_json(q) for q in prompt.questions]}
+    out = {"kind": "question", "id": prompt.id, "status": status, "questions": [_question_json(q) for q in prompt.questions]}
+    if prompt.who:
+        out["who"] = prompt.who
+    return out
 
 
 _TURN_STATUS = {

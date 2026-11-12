@@ -940,7 +940,8 @@ class ChatGPTController:
         without them)."""
         if self._live() is None:
             return None
-        prompt = self.transcript.add_question_prompt(call.call_id, views)
+        who = "API 模型" if self.running_model.startswith("api:") else "ChatGPT Plan"
+        prompt = self.transcript.add_question_prompt(call.call_id, views, who=who)
         self._changed()
         if prompt is None or prompt.status is not PromptStatus.PENDING:
             return None

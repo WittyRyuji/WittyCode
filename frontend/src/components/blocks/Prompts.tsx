@@ -47,6 +47,7 @@ export function PermissionCard({ sessionId, prompt }: { sessionId: string; promp
 export function QuestionCard({ sessionId, prompt }: { sessionId: string; prompt: QuestionPrompt }) {
   const answer = useStore((s) => s.answerQuestion);
   const who = useStore((s) => {
+    if (prompt.who) return prompt.who;
     const session = s.sessions[sessionId];
     if (!session) return "模型";
     const model = findModel(s.models, session.settings.model);
@@ -81,7 +82,7 @@ export function QuestionCard({ sessionId, prompt }: { sessionId: string; prompt:
       </div>
       {prompt.questions.map((q, i) => (
         <div key={i} className={`q${tried && missing(i) ? " missing" : ""}`}>
-          <span className="qtopic">{q.topic}</span>
+          {q.topic && q.topic !== who && q.topic !== q.question && <span className="qtopic">{q.topic}</span>}
           <div className="qtext">
             {q.question} {q.multiSelect && <span className="qhint">（可多选）</span>}
           </div>

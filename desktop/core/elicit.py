@@ -59,6 +59,11 @@ def _text(value: Any) -> str:
     return value if isinstance(value, str) else ""
 
 
+def _same_text(left: str, right: str) -> bool:
+    """Only identical wording is redundant; collapse whitespace without joining words, never guess at translations."""
+    return " ".join(left.split()) == " ".join(right.split())
+
+
 def _choice(spec: Mapping[str, Any]) -> tuple[tuple[str, ...], tuple[Any, ...]] | None:
     """Labels and values of a single-choice schema (``enum`` with or without ``enumNames``, or ``oneOf`` of ``const``s)."""
     if isinstance(spec.get("oneOf"), list):
@@ -121,14 +126,20 @@ def plan_of(params: Mapping[str, Any]) -> Plan | None:
         field = _field(str(key), spec, str(key) in required)
         if field is None:
             return None
-        title = _text(spec.get("title")) or str(key)
+        title = _text(spec.get("title")).strip() or str(key)
         description = _text(spec.get("description")).strip()
+        if _same_text(title, description):
+            description = ""
         question = title + (f"（{description}）" if description else "")
         if index == 0 and message:
-            question = f"{message}\n{question}"
+            if _same_text(message, description):
+                question = message
+            elif not _same_text(message, title):
+                question = f"{message}\n{question}"
+        topic = "" if _same_text(title, question) else title
         options = {"boolean": (YES, NO), "choice": field.labels, "choices": field.labels}.get(field.kind, ())
         fields.append(field)
-        views.append(QuestionView(index, server if index == 0 else title, question, tuple(options), field.kind == "choices"))
+        views.append(QuestionView(index, topic, question, tuple(options), field.kind == "choices"))
     return Plan("form", server, tuple(views), tuple(fields))
 
 

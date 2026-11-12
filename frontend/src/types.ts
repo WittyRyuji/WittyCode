@@ -178,6 +178,8 @@ export interface QuestionPrompt {
   id: string;
   questions: QuestionView[];
   status: PromptStatus;
+  /** The actual asker at the time of the request; older cached cards may not have it. */
+  who?: string;
 }
 
 export type Prompt = PermissionPrompt | QuestionPrompt;
