@@ -4,6 +4,8 @@
 
 ## 当前状态
 
+- 2026-11-12（GitHub Actions 失败排查）：逐一读取截图中六次 CI / CodeQL 的公开运行页，均因仓库策略仅允许仓库所有者名下的 Action 而 `startup_failure`；官方 `actions/*` 和 `github/codeql-action/*` 被拦截。最新两次运行的 jobs / check-runs 都为 0，尚未执行 runner 或测试。工作流已固定完整 SHA，无需改代码或取消 SHA 要求；维护者需在 Settings → Actions → General 放行所用 GitHub 官方 Action，保存后重新运行 CI / CodeQL。未改远端设置，放行后的运行结果未验证；本批只记录诊断，不包含工作树中其他任务的改动，不推送。
+
 - 2026-11-12（中文进度与 Devin 提问显示）：修复 Devin 运行中引导漏带中文要求；语言规则明确覆盖工具调用之后、续作和每一步，同一条进度直接用中文表达一次，不先英文再翻译。提问适配器对 `message` / 字段标题 / 字段说明里的相同文字去重（只统一连续空白，不合并单词，不猜语义）；问题记录实际提问者 `who`，Devin 卡片明确写 Devin，旧缓存保留按会话推断的兼容逻辑。已补单元、协议和 Qt 整机回归；前端已重建。全量 pytest（含整机）**2810 通过 / 2 跳过 / 2 条 Windows 子进程管道清理警告**；前端 typecheck、unit 69、`check.mjs`、`check-live.mjs` 通过。一次正式审查未发现阻塞问题。没有调用真实模型，不能保证外部模型会全程遵守语言指令；截图人工观感未验证。本批在 `dev` 仅本地提交，不推送。
 - 2026-11-12（独立化：去掉 Droid / Factory / Codex；提交 `e993ba7`，已推到 `dev`）：WittyCode 只剩自有循环（ChatGPT Plan、API Provider，引擎名 `chatgpt`）和可选的 Devin。删了 `desktop/core/codex/`、`session_manager.py`、`droid_locator.py`、`droid_limits.py`、`history.py`、`devtools/replay.py` 和 `droid-sdk` 依赖；前端去掉 Factory / Codex 卡片和 Plan 额度来源，设置里「Droid」页改成「外部程序」（只有 Devin 路径）；API Provider 的模型存在 WittyCode 自己的 `models.json`，**不再读也不复制 `~/.factory/settings.json`**（用户定）；技能目录 `.wittycode` 优先，其他代理的目录只读兼容（`~/.factory/settings.json` 里的 `disabledSkills`、插件仍在读，Roadmap 里写了要去掉）。测试底座换成 `tests/app_support.make_core`（真 ChatGPTEngine + 本机假 Responses 服务，`Plan.script` / `("hold", key)` / `release`）、`save_conversation`、假 Devin 的 `FAKE_DEVIN_OPEN_DELAY` / `FAKE_DEVIN_OPEN_FAIL`、e2e 的 `Model` 帮手。**事故**：一个旧测试用默认路径建 `ProviderStore`，把 `~/.factory/settings.json` 的 `customModels` 复制进了用户真实的 `%APPDATA%\WittyCode\models.json`；已按用户意见删除该文件、删掉迁移逻辑，并在 `tests/conftest.py` 加了 autouse 的 `_no_files_of_the_real_user`（每个测试的 `WITTYCODE_SETTINGS` 指向临时目录）。新增 `README.md`（英文）/ `README.zh-CN.md`、`ROADMAP.md` / `ROADMAP.zh-CN.md`、`SECURITY.md`、`CONTRIBUTING.md`。验证：全量 pytest（不含 e2e）2743 通过 / 2 跳过（之后又修了一个时序断言），整机 e2e 54 通过，前端 typecheck、unit 69、星图单测 26、`check.mjs` 332、`check-live.mjs` 261，冒烟脚本 OK；版本号 `0.1.0a1`、`release.yml`（推 `v*` tag 时构建发布）、发布说明 `docs/releases/v0.1.0-alpha.1.md` 都做了。提交前最后一次全量 pytest（含整机测试）2798 通过 / 2 跳过。**GitHub 上 CI / CodeQL 仍是启动失败**：仓库的 Actions 策略只允许本人名下的 action，要用户在 Settings → Actions → General 放宽。**等用户**：放宽策略、开 PR `main...dev` 并批准合并；合并后再打 tag `v0.1.0-alpha.1`。`fixtures/` 里的 Droid 录像已没有测试在用，留给用户定（`fixtures/long_session/` 不许动）。
 - 2026-11-11（深夜，第三批：答复选项一行一个）：用户：「提问回答的选项应该一行一个，包括权限审批」。权限卡的答复按钮改成竖排、占满卡片宽、文字靠左（`.pbtns.choices`，类名 `.pbtns` / `.btn` 不变，测试的选择器照旧）；提问卡的选项本来就一行一个，没改。没有提交。细节见批次记录最上面一条。
@@ -61,6 +63,18 @@
 - 尚未提交到 git；用户之后要推到自己的 GitHub。
 
 ## 批次记录（新的在最上面）
+
+### 2026-11-12 GitHub Actions 六次启动失败的原因确认
+
+**结果**：不是 runner 环境或测试断言失败；截图中的三次 CI 和三次 CodeQL 全部被仓库 Actions 允许列表在启动前拒绝。
+
+**证据与验证**：GitHub REST API 显示六次运行均为 `startup_failure`；逐一读取六个公开运行页，均明确报错只允许仓库所有者名下且固定完整 SHA 的 Action。最新 CI / CodeQL 的 jobs 和 check-runs 数均为 0。核对三个本地工作流，所用 Action 已固定完整 SHA；CI 的 Windows 镜像不是本次启动失败原因。仅诊断和文档变更，未重跑业务测试。
+
+**关键决定与修复方式**：不为绕过策略改写工作流，也不取消完整 SHA 要求。由维护者在 Settings → Actions → General 的 Actions permissions 中允许 GitHub 官方 Action（或精确放行工作流所用条目），保存后重跑。发布流程还使用 `actions/attest-build-provenance`，允许列表也需覆盖它。
+
+**改动与审查**：只更新交接和知识库；一次正式审查核对了六次运行的共同报错、本地 SHA 固定状态和验证边界，不包含其他任务尚未提交的代码。
+
+**未解决**：匿名读取 Actions 权限设置接口返回 HTTP 401，未更改仓库安全设置；策略放行后的 CI、CodeQL 和 Release 结果未验证。没有调用真实模型，不推送。
 
 ### 2026-11-12 中文进度只说一次、Devin 问题去重与提问者归属
 
