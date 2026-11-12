@@ -103,7 +103,7 @@ def tool_json(item: ToolItem) -> dict[str, Any]:
         "status": item.status.value,
     }
     command = item.input.get("command")
-    if item.name == "TodoWrite":
+    if item.category is Category.PLAN:
         todos = parse_todos(item.input.get("todos"))
         if todos or item.input.get("todos") == []:
             out["todos"] = [{"text": todo.text, "state": todo.status} for todo in todos]
@@ -246,6 +246,8 @@ def turn_json(turn: Turn, thumbnail: Thumbnailer | None = None) -> dict[str, Any
         "blocks": [block_json(block, thumbnail) for block in turn.blocks],
         "prompts": [prompt_json(prompt) for prompt in turn.prompts if prompt.status is PromptStatus.PENDING],
     }
+    if turn.plan is not None:
+        out["plan"] = {"id": turn.plan.id, "steps": [{"text": step.text, "state": step.status} for step in turn.plan.steps]}
     if turn.duration is not None:
         out["seconds"] = round(turn.duration, 1)
     steps = turn.stats().steps

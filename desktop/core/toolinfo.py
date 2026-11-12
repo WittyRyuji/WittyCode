@@ -61,6 +61,7 @@ _TOOL_CATEGORIES: dict[str, Category] = {
     ),
     **dict.fromkeys(("Execute", "Bash", "Shell", "PowerShell"), Category.COMMAND),
     "TodoWrite": Category.PLAN,
+    "todo_write": Category.PLAN,
     "AskUser": Category.ASK,
 }
 _TOOL_CATEGORIES_LOWER = {name.lower(): category for name, category in _TOOL_CATEGORIES.items()}
@@ -264,6 +265,25 @@ def parse_todos(value: Any) -> list[TodoEntry]:
     return entries
 
 
+def plan_steps(value: Any) -> tuple[TodoEntry, ...] | None:
+    """A complete accepted snapshot, or None for partial/malformed data; only an explicit empty list clears a plan."""
+    if not isinstance(value, (str, list, tuple)):
+        return None
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            if not isinstance(item, Mapping):
+                return None
+            text = item.get("content") or item.get("text") or item.get("title")
+            if not isinstance(text, str) or not text.strip() or not isinstance(item.get("status"), str):
+                return None
+    entries = parse_todos(value)
+    if isinstance(value, str) and not entries:
+        return None
+    if any(not entry.text.strip() or entry.status not in ("pending", "in_progress", "completed") for entry in entries):
+        return None
+    return tuple(entries)
+
+
 _QUESTION = re.compile(r"\[question\]\s*(.+)")
 
 
@@ -330,7 +350,7 @@ def describe_input(name: str, data: Mapping[str, Any]) -> str:
         return f"{text} · {display_path(where, 48)}" if where else text
     if name == "Execute" or category is Category.COMMAND:
         return first_line(_string(data, "command"), 140) or _string(data, "summary")
-    if name == "TodoWrite":
+    if category is Category.PLAN:
         todos = parse_todos(data.get("todos"))
         if not todos:
             return ""

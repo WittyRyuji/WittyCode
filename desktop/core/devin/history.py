@@ -22,7 +22,8 @@ from typing import Any
 
 from desktop.core.engine_items import command_result
 from desktop.core.devin import items
-from desktop.core.transcript import Transcript, Turn, TurnStatus
+from desktop.core.toolinfo import plan_steps
+from desktop.core.transcript import ToolStatus, Transcript, Turn, TurnStatus
 from desktop.core.usage import Tokens
 
 
@@ -83,6 +84,8 @@ class Replay:
             self._tool_call(update)
         elif kind == "tool_call_update":
             self._tool_update(update)
+        elif kind == "plan" and plan_steps(update.get("entries")) is not None:
+            self.transcript.set_plan(self._ensure_turn(), update.get("entries"))
         elif kind == "session_info_update":
             title = _text(update.get("title")).strip()
             if title:
@@ -156,12 +159,19 @@ class Replay:
         diffs = items.call_diffs(update.get("content"))
         if diffs:
             self.transcript.set_tool_diffs(turn, tool, diffs)
+        status = items.call_status(update.get("status"))
+        if tool.name == "TodoWrite" and status is not None:
+            self.transcript.finish_tool(turn, tool, items.content_text(update.get("content")), status=status, at=self._last)
 
     def _tool_update(self, update: Mapping[str, Any]) -> None:
         turn, call_id = self._turn, _text(update.get("toolCallId"))
         tool = turn.tools.get(call_id) if turn is not None else None
         if turn is None or tool is None:
             return
+        if tool.name == "TodoWrite" and isinstance(update.get("rawInput"), Mapping):
+            self.transcript.set_tool_input(
+                turn, tool, {**tool.input, **update["rawInput"]}, final=True, accept_plan=items.call_status(update.get("status")) is not ToolStatus.ERROR
+            )
         text = items.content_text([c for c in update.get("content") or () if not (isinstance(c, Mapping) and c.get("type") == "diff")])
         if text:
             self._outputs[call_id] = text

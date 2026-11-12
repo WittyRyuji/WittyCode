@@ -191,6 +191,8 @@ export interface Turn {
   status: TurnStatus;
   seconds?: number;
   steps?: number;
+  /** Latest accepted snapshot in event order; absent on older cached history, empty steps explicitly clear it. */
+  plan?: { id: string; steps: TodoEntry[] };
 }
 
 /** Token use of the whole conversation: summed over every time it was disconnected, closed and reopened, and over the

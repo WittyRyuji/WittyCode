@@ -854,6 +854,10 @@ class DevinController:
             self._on_tool_call(update)
         elif kind == "tool_call_update":
             self._on_tool_update(update)
+        elif kind == "plan":
+            turn = self._live()
+            if turn is not None and self.transcript.set_plan(turn, update.get("entries")):
+                self._changed()
         elif kind == "session_info_update":
             title = _text(update.get("title")).strip()
             if title and title != self.transcript.title:
@@ -928,7 +932,10 @@ class DevinController:
         diffs = items.call_diffs(update.get("content"))
         if diffs:
             self.transcript.set_tool_diffs(turn, tool, diffs)
-        if not self._prompting(turn, call_id):
+        status = items.call_status(update.get("status"))
+        if tool.name == "TodoWrite" and status is not None:
+            self.transcript.finish_tool(turn, tool, items.content_text(update.get("content")), status=status)
+        elif not self._prompting(turn, call_id):
             self.transcript.tool_running(turn, tool)
         self.transcript.set_working_state("executing_tool")
         self._changed()
@@ -942,6 +949,10 @@ class DevinController:
             name, data = items.tool_spec(update)
             tool = self.transcript.ensure_tool(turn, call_id, name)
             self.transcript.set_tool_input(turn, tool, data, final=False)
+        if tool.name == "TodoWrite" and isinstance(update.get("rawInput"), Mapping):
+            self.transcript.set_tool_input(
+                turn, tool, {**tool.input, **update["rawInput"]}, final=True, accept_plan=items.call_status(update.get("status")) is not ToolStatus.ERROR
+            )
         shown = items.content_text([c for c in update.get("content") or () if not (isinstance(c, Mapping) and c.get("type") == "diff")])
         if shown:
             # (the output arrives as ever longer snapshots of the whole text: the latest one replaces the rest)

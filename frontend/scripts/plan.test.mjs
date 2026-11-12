@@ -28,6 +28,17 @@ test("a failed, cancelled or partial update does not erase an accepted plan", ()
   }
 });
 
+test("an explicit current snapshot overrides stale tool rows and accepts same-id progress, text and clear updates", () => {
+  const stale = turn(write("old", [step("旧步骤")]));
+  const current = { ...stale, plan: { id: "current", steps: [step("检查", "completed"), step("实现", "in_progress")] } };
+  assert.deepEqual(latestPlan([current]), { id: "current", steps: current.plan.steps, completed: 1 });
+  const changed = { ...current, plan: { id: "current", steps: [step("新任务", "completed")] } };
+  assert.deepEqual(latestPlan([changed]), { id: "current", steps: changed.plan.steps, completed: 1 });
+  assert.equal(latestPlan([{ ...current, plan: { id: "clear", steps: [] } }]), null);
+  assert.equal(latestPlan([stale, { ...turn(), plan: { id: "native", steps: [] } }]), null);
+  assert.equal(latestPlan([{ ...stale, plan: { id: "bad", steps: [step("partial", "unknown")] } }]).id, "old");
+});
+
 test("a conversation without a plan never borrows another conversation's steps", () => {
   const withPlan = [turn(write("p1", [step("only in A")]))];
   assert.equal(latestPlan(withPlan).steps[0].text, "only in A");

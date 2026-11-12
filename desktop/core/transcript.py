@@ -25,7 +25,7 @@ from typing import Any, ClassVar
 from desktop.core.attachments import Attachment
 from desktop.core.diffs import FileDiff, input_diffs, result_diff
 from desktop.core.prompts import ActionView, OptionView, QuestionView
-from desktop.core.toolinfo import Category, describe_input, tool_category
+from desktop.core.toolinfo import Category, TodoEntry, describe_input, plan_steps, tool_category
 
 class WorkingState(str, Enum):
     """What a running turn is doing (the page's labels are in ``toolinfo.working_label``)."""
@@ -325,6 +325,12 @@ class QuestionPrompt:
 Prompt = PermissionPrompt | QuestionPrompt
 
 
+@dataclass(frozen=True)
+class PlanSnapshot:
+    id: str
+    steps: tuple[TodoEntry, ...]
+
+
 @dataclass(eq=False)
 class Turn:
     id: str
@@ -356,6 +362,8 @@ class Turn:
     texts: dict[tuple[str, int], TextBlockView] = field(default_factory=dict, repr=False)
     thinking: dict[tuple[str, int], ThinkingEntry] = field(default_factory=dict, repr=False)
     group_of: dict[str, ActivityBlock] = field(default_factory=dict, repr=False)
+    plan: PlanSnapshot | None = None
+    """Latest accepted plan in event order, independent of historical tool row positions; empty steps explicitly clear it."""
 
     @property
     def running(self) -> bool:
@@ -473,6 +481,18 @@ class Transcript:
 
     # ---------------------------------------------------------------- builder API (live + history)
 
+    def set_plan(self, turn: Turn, value: Any, *, source_id: str = "") -> bool:
+        steps = plan_steps(value)
+        if steps is None or (turn.plan is not None and turn.plan.steps == steps):
+            return False
+        turn.plan = PlanSnapshot(source_id or self.new_id("p"), steps)
+        self._touch(turn)
+        return True
+
+    def _accept_tool_plan(self, turn: Turn, item: ToolItem) -> None:
+        if item.category is Category.PLAN and item.status is ToolStatus.DONE and item.input_final:
+            self.set_plan(turn, item.input.get("todos"), source_id=item.id)
+
     def ensure_tool(self, turn: Turn, tool_use_id: str, name: str, *, message_id: str | None = None) -> ToolItem:
         item = turn.tools.get(tool_use_id)
         if item is None:
@@ -495,10 +515,12 @@ class Transcript:
             item.message_id = message_id
         return item
 
-    def set_tool_input(self, turn: Turn, item: ToolItem, data: Mapping[str, Any], *, final: bool) -> None:
+    def set_tool_input(self, turn: Turn, item: ToolItem, data: Mapping[str, Any], *, final: bool, accept_plan: bool = True) -> None:
         if item.input_final and not final:
             return
-        item.input = plain(data)
+        incoming = plain(data)
+        changed = item.input != incoming
+        item.input = incoming
         if final:
             item.input_final = True
             if item.diff_source not in ("result", "permission"):
@@ -506,6 +528,8 @@ class Transcript:
                 if diffs:
                     item.diffs = diffs
                     item.diff_source = "input"
+        if changed and final and accept_plan:
+            self._accept_tool_plan(turn, item)
         self._touch_item(turn, item)
 
     def text_block(self, turn: Turn, message_id: str, block_index: int) -> TextBlockView:
@@ -547,6 +571,7 @@ class Transcript:
                 item.diffs = (diff,)
                 item.diff_source = "result"
         self._settle_prompts_for(turn, item)
+        self._accept_tool_plan(turn, item)
         self._touch_item(turn, item)
 
     def new_history_turn(
@@ -947,6 +972,7 @@ class Transcript:
         item.is_error = item.status is ToolStatus.ERROR
         item.finished_at = self._clock() if at is None else at
         self._settle_prompts_for(turn, item)
+        self._accept_tool_plan(turn, item)
         self._touch_item(turn, item)
 
     def add_permission_prompt(

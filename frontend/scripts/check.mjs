@@ -993,6 +993,7 @@ const errors = page.consoleErrors();
 ok("no console errors", errors.length === 0);
 await page.close();
 await import("./check-plan.mjs");
+await import("./check-usage-plan-updates.mjs");
 await import("./check-turn-navigation.mjs");
 await import("./check-step-limit.mjs");
 console.log(failed ? `${failed} check(s) FAILED` : "all checks passed");

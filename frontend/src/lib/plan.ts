@@ -6,10 +6,15 @@ export interface PlanView {
   completed: number;
 }
 
-/** Only structured substeps are a plan. Read the latest accepted update across this conversation, not a mention of
- *  Plan mode or an old checklist from a different tab. An explicit empty update clears the panel. */
+/** Prefer the accepted current snapshot, which follows updates even when an existing tool row changes in place.
+ *  Older cached history falls back to structured tool inputs; an explicit empty update clears the panel. */
 export function latestPlan(turns: Turn[]): PlanView | null {
   for (let t = turns.length - 1; t >= 0; t--) {
+    const current = turns[t]!.plan;
+    if (current && typeof current.id === "string" && Array.isArray(current.steps)) {
+      const steps = current.steps.filter((s) => s && typeof s.text === "string" && s.text.trim() && ["pending", "in_progress", "completed"].includes(s.state));
+      if (steps.length === current.steps.length) return steps.length ? { id: current.id, steps, completed: steps.filter((s) => s.state === "completed").length } : null;
+    }
     const blocks = turns[t]!.blocks;
     for (let b = blocks.length - 1; b >= 0; b--) {
       const block = blocks[b]!;

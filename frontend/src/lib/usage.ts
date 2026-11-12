@@ -8,12 +8,42 @@ export interface UsageSlice {
   color: string;
 }
 
-const COLORS = ["#56b4e9", "#e69f00", "#009e73", "#cc79a7", "#d55e00", "#0072b2", "#b3a600", "#7d75d8"];
-const colorOf = (id: string) => {
-  let hash = 0;
-  for (const ch of id) hash = (Math.imul(hash, 31) + ch.charCodeAt(0)) >>> 0;
-  return COLORS[hash % COLORS.length]!;
-};
+const UNKNOWN_COLOR = "#72777b";
+
+/** Muted mid-dark colors remain legible on either tooltip background without neon/high-saturation wedges. */
+function mutedColor(hue: number, saturation = 28, lightness = 42): string {
+  const s = saturation / 100, l = lightness / 100;
+  const a = s * Math.min(l, 1 - l);
+  const channel = (n: number) => {
+    const k = (n + hue / 30) % 12;
+    return Math.round(255 * (l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1)))).toString(16).padStart(2, "0");
+  };
+  return `#${channel(0)}${channel(8)}${channel(4)}`;
+}
+
+const COLORS = [210, 155, 330, 30, 270, 70, 185, 0].map((hue) => mutedColor(hue));
+function modelColors(ids: string[]): Map<string, string> {
+  const colors = new Map<string, string>();
+  const used = new Set([UNKNOWN_COLOR]);
+  let extra = 0;
+  // Allocate by ID, never by token rank or catalog label. Resolve collisions instead of wrapping the palette.
+  for (const id of [...ids].sort()) {
+    let hash = 0;
+    for (const ch of id) hash = (Math.imul(hash, 31) + ch.charCodeAt(0)) >>> 0;
+    let color: string | undefined;
+    for (let offset = 0; offset < COLORS.length; offset++) {
+      const candidate = COLORS[(hash + offset) % COLORS.length]!;
+      if (!used.has(candidate)) { color = candidate; break; }
+    }
+    while (!color) {
+      const candidate = mutedColor((++extra * 137.508) % 360, 24 + Math.floor(extra / 36) % 3 * 2, 40 + Math.floor(extra / 108) % 3 * 2);
+      if (!used.has(candidate)) color = candidate;
+    }
+    used.add(color);
+    colors.set(id, color);
+  }
+  return colors;
+}
 
 /** Shares use the very same total as the status bar, including cached input. Missing history is never assigned to the
  *  selected model. An inconsistent breakdown is unknown, not rescaled into seemingly exact percentages. */
@@ -24,6 +54,7 @@ export function usageSlices(total: number, byModel: Record<string, number> = {},
   const parts: [string, number][] = counted > total ? [] : known.map(([id, n]) => [id, n]);
   const rest = total - (counted > total ? 0 : counted);
   if (rest > 0) parts.push(["", rest]);
+  const colors = modelColors(parts.map(([id]) => id).filter(Boolean));
   const labelOf = (id: string) => id ? models.find((m) => m.id === id)?.label ?? id.replace(/^(chatgpt|devin):/, "") : "未归属";
   const label = (id: string) => {
     const name = labelOf(id);
@@ -36,7 +67,7 @@ export function usageSlices(total: number, byModel: Record<string, number> = {},
     label: label(id),
     tokens,
     share: tokens / total,
-    color: id ? colorOf(id) : "#8b8b8b",
+    color: id ? colors.get(id)! : UNKNOWN_COLOR,
   }));
 }
 
