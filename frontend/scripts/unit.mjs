@@ -3,6 +3,7 @@
 // (Node 24 runs the .ts files as they are, it only strips the types).
 import assert from "node:assert/strict";
 import test from "node:test";
+import "./screenshot.test.mjs";
 import { COMPACT_AT_DEFAULT, COMPACT_AT_MAX, COMPACT_AT_MIN, NO_CHATGPT, applyEvent, applyInit, chatgptView, clampCompactAt, emptyLiveData, selectWhenKnown, upsertTurns } from "../src/liveReducer.ts";
 import { chatgptReady, chatgptState, planUsage, usageLevel } from "../src/lib/chatgpt.ts";
 import { buildModelMenu } from "../src/components/modelMenu.ts";
