@@ -25,7 +25,7 @@ Fields of one entry (``model`` is the only one that is always there):
 - ``authMode``: ``bearer`` (send ``Authorization: Bearer`` instead of ``x-api-key``; only valid with
   ``provider: anthropic`` and no ``bedrock``) or ``provider-default``.
 - ``maxOutputTokens``, ``maxContextLimit`` (positive ints), ``reasoningEffort`` (the default level; it also makes the
-  menu offer off/low/medium/high), ``noImageSupport`` (bool; the default is true for ``generic-chat-completion-api`` and
+  menu offer off/minimal/low/medium/high/xhigh/max), ``noImageSupport`` (bool; the default is true for ``generic-chat-completion-api`` and
   false for the other three), ``enableThinking`` / ``thinkingMaxTokens`` (anthropic and bedrock only), ``baseModelId`` /
   ``useInRouter`` (kept as they are), ``extraHeaders`` (object of str; names unique ignoring case), ``extraArgs``
   (object, merged into the request body).
@@ -81,6 +81,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from desktop.core.llm.aws import Access, AwsError, BedrockSettings, Resolver
+from desktop.core.llm.model_specs import known_window
 from desktop.core.settings import default_settings_path
 
 log = logging.getLogger(__name__)
@@ -421,6 +422,7 @@ def _model_view(entry: dict) -> dict[str, Any]:
     view: dict[str, Any] = {"id": entry["model"].strip(), "displayName": display if isinstance(display, str) else ""}
     context = _positive_int(entry.get("maxContextLimit"))
     output = _positive_int(entry.get("maxOutputTokens"))
+    # Leave the editable value empty when the bundled specification is being used, so it is not saved as a user override.
     if context:
         view["contextWindow"] = context
     if output:
@@ -811,7 +813,7 @@ def _model_ids(payload: Any) -> list[str] | None:
     return ids
 
 
-_WINDOW_KEYS = ("context_window", "context_length", "max_context_length", "max_input_tokens", "inputTokenLimit", "max_model_len", "contextWindow", "context_size")
+_WINDOW_KEYS = ("context_window", "context_length", "max_context_length", "max_input_tokens", "inputTokenLimit", "max_model_len", "contextWindow", "context_size", "max_context_window", "maxContextLimit")
 _OUTPUT_KEYS = ("max_output_tokens", "max_completion_tokens", "outputTokenLimit", "max_tokens", "maxOutputTokens")
 _FIGURE_SOURCES = (None, "top_provider", "capabilities", "limits")
 """Where a server puts the figures: on the entry (Anthropic, Gemini, Together, Mistral, vLLM, LiteLLM) or in a nested object
@@ -1016,8 +1018,8 @@ class ProviderStore:
             return {i: g.id for g in state.groups for i in g.indices}.get(index)
 
     def limits_of(self, custom_model_id: str, display_name: str = "") -> tuple[int | None, int | None]:
-        """``(context window, largest answer)`` the user gave a custom model id (``maxContextLimit``, ``maxOutputTokens``); each is
-        None when there is none (or the model is not ours)."""
+        """``(context window, largest answer)`` from the entry; a missing window falls back to an exact documented model id.
+        Each is None when neither is known (or the model is not ours)."""
         with self._lock:
             try:
                 state = self._load()
@@ -1027,10 +1029,10 @@ class ProviderStore:
             if index is None:
                 return None, None
             entry = state.entries[index]
-            return _positive_int(entry.get("maxContextLimit")), _positive_int(entry.get("maxOutputTokens"))
+            return _positive_int(entry.get("maxContextLimit")) or known_window(entry["model"]), _positive_int(entry.get("maxOutputTokens"))
 
     def window_of(self, custom_model_id: str, display_name: str = "") -> int | None:
-        """The context window the user gave a custom model id (``maxContextLimit``); None when there is none (or it is not ours)."""
+        """The configured window, or the exact model's documented window; None when neither is known (or it is not ours)."""
         return self.limits_of(custom_model_id, display_name)[0]
 
     # ------------------------------------------------------------------------------- the models WittyCode runs itself
@@ -1062,7 +1064,7 @@ class ProviderStore:
                         provider_name=group.name,
                         kind=entry["provider"],
                         base_url=_text(entry.get("baseUrl")),
-                        window=_positive_int(entry.get("maxContextLimit")),
+                        window=_positive_int(entry.get("maxContextLimit")) or known_window(entry["model"]),
                         max_output=_positive_int(entry.get("maxOutputTokens")),
                         reasoning=reasoning if reasoning in EFFORTS else "",
                         images=not (entry["noImageSupport"] if isinstance(entry.get("noImageSupport"), bool) else entry["provider"] == "generic-chat-completion-api"),
@@ -1256,10 +1258,18 @@ class ProviderStore:
         return list(result.get("models") or [])
 
     async def model_details(self, draft: dict) -> list[dict[str, Any]]:
-        """The server's model list as the page adds it: ``{id, contextWindow?, maxOutput?}``, the figures only where the server gives them."""
+        """The server's model ids and figures, with exact documented windows as a fallback and their source marked."""
         result = await asyncio.to_thread(self._probe, draft)
         figures = {entry["id"]: entry for entry in result.get("details") or ()}
-        return [figures.get(model_id, {"id": model_id}) for model_id in result.get("models") or ()]
+        models = []
+        for model_id in result.get("models") or ():
+            entry = dict(figures.get(model_id, {"id": model_id}))
+            if entry.get("contextWindow"):
+                entry["contextSource"] = "server"
+            elif window := known_window(model_id):
+                entry.update(contextWindow=window, contextSource="catalog")
+            models.append(entry)
+        return models
 
     def _probe(self, draft: Any) -> dict[str, Any]:
         try:

@@ -9,7 +9,7 @@ import { buildModelMenu } from "../src/components/modelMenu.ts";
 import { formatRelative } from "../src/lib/time.ts";
 import { localTarget, parsePathRef } from "../src/lib/pathref.ts";
 import { carryOverage } from "../src/lib/carry.ts";
-import { imagesAfterKindChange, imagesByDefault } from "../src/lib/providerDefaults.ts";
+import { API_EFFORTS, contextProblem, contextWindowOf, imagesAfterKindChange, imagesByDefault, modelSpecification, withRemoteFigures } from "../src/lib/providerDefaults.ts";
 import { CATEGORY_LABELS, groupSummary, toolLabel, usageTotal } from "../src/lib/format.ts";
 import { changeVerb, isUnseen, parseTags, samePath, scopeLabel, sourceLine, whoConversation, whoName } from "../src/lib/memory.ts";
 import { PRESETS } from "../src/lib/vocab.ts";
@@ -18,6 +18,27 @@ import { effortLabel, permissionsFor, reasoningChoices, startingLevel } from "..
 import { CALL_TIMEOUT_MS, QWebChannelTransport } from "../src/transport.ts";
 import { COMMANDS, commandNamed, fromSkills, parseSlash, suggestions, unavailable } from "../src/lib/commands.ts";
 import { quitWarning } from "../src/lib/quit.ts";
+
+test("API windows use exact specifications, preserve overrides and require unknown limits", () => {
+  const model = { id: "gpt-6.1-sol", displayName: "demo", images: true, reasoning: "max" };
+  assert.equal(contextWindowOf(model), 1050000);
+  assert.equal(contextProblem(model), "");
+  assert.ok(modelSpecification(model.id).source.startsWith("https://developers.openai.com/"));
+  assert.equal(contextWindowOf({ ...model, contextWindow: 64000 }), 64000);
+  for (const id of ["gpt-6.1-sol-custom", "vendor/gpt-6.1-sol", "unknown"]) {
+    assert.equal(modelSpecification(id), undefined);
+    assert.ok(contextProblem({ ...model, id }).includes("请获取服务端数据"));
+  }
+  for (const contextWindow of [0, -1, 1.5, NaN]) assert.ok(contextProblem({ ...model, contextWindow }));
+});
+
+test("API metadata fills blank fields but never persists a catalog fallback as an override", () => {
+  const model = { id: "gpt-6.1-sol", displayName: "", images: true, reasoning: "" };
+  assert.equal(withRemoteFigures(model, { id: model.id, contextWindow: 1050000, contextSource: "catalog" }).contextWindow, undefined);
+  assert.equal(withRemoteFigures(model, { id: model.id, contextWindow: 32000, contextSource: "server" }).contextWindow, 32000);
+  assert.equal(withRemoteFigures({ ...model, contextWindow: 16000 }, { id: model.id, contextWindow: 32000, contextSource: "server" }).contextWindow, 16000);
+  assert.deepEqual(API_EFFORTS, ["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+});
 
 test("quitting warns about running sessions, messages still waiting and goals in progress", () => {
   assert.equal(quitWarning([{ mark: "ready" }, { mark: "dead", queued: [] }]), "", "nothing would be lost: the window just closes");

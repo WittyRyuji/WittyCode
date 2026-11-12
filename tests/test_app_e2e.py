@@ -992,11 +992,20 @@ def test_a_provider_is_added_through_the_settings_editor(qapp, loop, tmp_path):
         await rig.click("input[aria-label='模型 ID']")
         await rig.type("my-model")
         await rig.click_text(".pe-foot .btn", "保存")
+        assert "上下文窗口未知" in await rig.text(".stack-err")
+        await rig.click("input[aria-label='上下文窗口']")
+        await rig.type("64000")
+        await rig.click(".mrow:not(.mhead) .selectbox")
+        assert "XHigh" in await rig.text(".menu") and "Max" in await rig.text(".menu")
+        await rig.click_text(".menu-item", "Max")
+        await rig.click_text(".pe-foot .btn", "保存")
         await rig.wait_for(".pe", 0)
         await rig.wait_for(".prov", 1)
         assert await rig.text(".prov .prov-name") == "Test GW"
         saved = json.loads((tmp_path / "app" / "models.json").read_text(encoding="utf-8"))
         assert [(m["model"], m["baseUrl"]) for m in saved["customModels"]] == [("my-model", "https://example.com/v1")]
+        assert saved["customModels"][0]["maxContextLimit"] == 64_000
+        assert saved["customModels"][0]["reasoningEffort"] == "max"
         await rig.finish()
 
     run(loop, scenario())

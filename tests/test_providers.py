@@ -1363,7 +1363,7 @@ def test_an_answer_limit_that_is_as_big_as_the_window_is_not_an_answer_limit_and
 def test_the_page_gets_every_model_the_server_lists_with_the_figures_it_gave_for_some(tmp_path):
     opener = Opener({"data": [{"id": "with", "context_length": 64_000, "max_completion_tokens": 4_096}, {"id": "without"}]})
     store = ProviderStore(models_file=tmp_path / "f.json", sidecar=tmp_path / "s.json", environ={"OPENROUTER_API_KEY": "k"}, opener=opener)
-    assert run(store.model_details(draft())) == [{"id": "with", "contextWindow": 64_000, "maxOutput": 4_096}, {"id": "without"}]
+    assert run(store.model_details(draft())) == [{"id": "with", "contextWindow": 64_000, "contextSource": "server", "maxOutput": 4_096}, {"id": "without"}]
     broken = ProviderStore(models_file=tmp_path / "f.json", sidecar=tmp_path / "s.json", environ={"OPENROUTER_API_KEY": "k"}, opener=Opener(error=ConnectionRefusedError()))
     assert run(broken.model_details(draft())) == []
 

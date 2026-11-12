@@ -30,7 +30,7 @@ def entry(kind: str = "bedrock-converse", base: str = "", **bedrock: Any) -> dic
     block = {"authMethod": "aws-credentials", "awsRegion": "us-east-1", **bedrock}
     if base:
         block["bedrockBaseUrl"] = base
-    return {"model": CLAUDE, "displayName": "Claude on Bedrock", "provider": kind, "bedrock": block}
+    return {"model": CLAUDE, "displayName": "Claude on Bedrock", "provider": kind, "bedrock": block, "maxContextLimit": 200_000}
 
 
 def store_for(path: Path, environ: dict[str, str] | None = None, **more: Any) -> ProviderStore:
@@ -230,7 +230,7 @@ def test_missing_credentials_a_missing_region_and_a_bad_variable_say_what_to_do(
     with pytest.raises(ChatGPTError, match="找不到 AWS 凭据") as nothing:
         run(ask(ApiBackend(store_for(write_settings(tmp_path, entry()), {})), request_for(store_for(write_settings(tmp_path, entry()), {}))))
     assert nothing.value.code == "api"
-    no_region = {"model": CLAUDE, "provider": "bedrock-converse", "bedrock": {"authMethod": "environment-api-key"}}
+    no_region = {"model": CLAUDE, "provider": "bedrock-converse", "maxContextLimit": 200_000, "bedrock": {"authMethod": "environment-api-key"}}
     store = store_for(write_settings(tmp_path, no_region), {"AWS_BEARER_TOKEN_BEDROCK": "k"})
     with pytest.raises(ChatGPTError, match="没有指定 AWS 区域"):
         run(ask(ApiBackend(store), request_for(store)))

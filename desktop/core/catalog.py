@@ -13,6 +13,8 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from desktop.core.providers import EFFORTS
+
 DEVIN_PREFIX = "devin:"
 CHATGPT_PREFIX = "chatgpt:"
 API_PREFIX = "api:"
@@ -166,7 +168,7 @@ def build_catalog(
             "label": spec.display,
             "source": f"{API_PREFIX}{spec.provider_id}",
             "engine": OWN_ENGINE,
-            "efforts": ["off", "low", "medium", "high"] if spec.reasoning else [],
+            "efforts": list(EFFORTS) if spec.reasoning else [],
             "defaultEffort": spec.reasoning,
             "window": spec.window or 0,
         }

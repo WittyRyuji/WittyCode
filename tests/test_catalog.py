@@ -70,7 +70,7 @@ def test_an_api_providers_model_is_run_by_the_own_loop_and_its_figures_are_the_u
     deep = catalog.find("api:p1:custom:Deep-0")
     assert deep == {
         "id": "api:p1:custom:Deep-0", "label": "Deep", "source": "api:p1", "engine": "chatgpt",
-        "efforts": ["off", "low", "medium", "high"], "defaultEffort": "high", "window": 64_000,
+        "efforts": ["off", "minimal", "low", "medium", "high", "xhigh", "max"], "defaultEffort": "high", "window": 64_000,
     }
     plain = catalog.find("api:p1:custom:Plain-0")
     assert plain["efforts"] == [] and plain["window"] == 0 and plain["noImages"] is True

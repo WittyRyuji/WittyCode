@@ -598,16 +598,16 @@ export interface ApiModel {
   displayName: string;
   contextWindow?: number; // maxContextLimit
   maxOutput?: number; // maxOutputTokens
-  /** default reasoning level; "" = the model has no reasoning control. Setting one offers Off / Low / Medium / High. */
+  /** Default reasoning level; "" = no reasoning control. Configurable levels include XHigh and Max. */
   reasoning: Effort | "";
   images: boolean; // not noImageSupport
 }
 
-/** A model a server's own list names (`providers.listModels`). The figures are there only when the server gives them:
- *  OpenRouter, Anthropic, Gemini, Together, Mistral and vLLM do; OpenAI's list has only ids. */
+/** A model named by `providers.listModels`. Windows may come from the server or the bundled exact-id specification. */
 export interface RemoteModel {
   id: string;
   contextWindow?: number;
+  contextSource?: "server" | "catalog";
   maxOutput?: number;
 }
 
