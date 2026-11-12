@@ -11,6 +11,7 @@ import { COMPACT_AT_MAX, COMPACT_AT_MIN } from "../liveReducer";
 import { Field, Select, Seg, Switch } from "./formkit";
 import { buildModelMenu } from "./modelMenu";
 import { MemoryPage } from "./MemoryPage";
+import { StepLimitSetting } from "./StepLimitSetting";
 import { ProviderEditor } from "./ProviderEditor";
 import { ProvidersPage } from "./ProvidersPage";
 import type { MenuItem } from "./ui";
@@ -21,7 +22,7 @@ const PAGES = [
   { id: "defaults", label: "新会话默认值", icon: <SlidersHorizontal size={15} /> },
   { id: "sessions", label: "会话", icon: <Layers size={15} /> },
   { id: "memory", label: "共享记忆", icon: <Brain size={15} /> },
-  { id: "droid", label: "Droid", icon: <Cpu size={15} /> },
+  { id: "programs", label: "外部程序", icon: <Cpu size={15} /> },
   { id: "projects", label: "项目", icon: <FolderOpen size={15} /> },
   { id: "shortcuts", label: "快捷键", icon: <Keyboard size={15} /> },
   { id: "about", label: "关于", icon: <Info size={15} /> },
@@ -64,7 +65,7 @@ function AppearancePage() {
 function DefaultsPage() {
   const s = useStore();
   const model = findModel(s.models, s.defaults.model);
-  const engine = engineOfSource(model?.source ?? "factory");
+  const engine = engineOfSource(model?.source ?? "chatgpt");
   const levels = permissionsFor(engine);
   const pick = (field: "reasoning" | "autonomy" | "mode", list: { value: string; label: string; hint?: string }[]): MenuItem[] =>
     list.map((o) => ({ id: o.value, label: o.label, description: o.hint, checked: s.defaults[field] === o.value, onSelect: () => s.setDefault(field, o.value) }));
@@ -75,15 +76,11 @@ function DefaultsPage() {
       <Field
         label="模型"
         hint={
-          engine === "codex"
-            ? "Codex 订阅的模型，由 Codex 运行。"
-            : engine === "devin"
-              ? "Devin 账号里的模型，由 Devin 运行。"
-              : engine === "chatgpt"
-                ? model?.source.startsWith("api:")
-                  ? "API Provider 的模型，由 WittyCode 自己的代理循环直接请求你的接口。"
-                  : "ChatGPT 套餐里的模型，由 WittyCode 自己的代理循环运行。"
-                : undefined
+          engine === "devin"
+            ? "Devin 账号里的模型，由 Devin 运行。"
+            : model?.source.startsWith("api:")
+              ? "API Provider 的模型，由 WittyCode 自己的代理循环直接请求你的接口。"
+              : "ChatGPT 套餐里的模型，由 WittyCode 自己的代理循环运行。"
         }
       >
         <Select
@@ -92,10 +89,8 @@ function DefaultsPage() {
           items={buildModelMenu({
             models: s.models,
             providers: s.providers,
-            codex: s.codex,
             devin: s.devin,
             chatgpt: s.chatgpt,
-            factory: s.factory,
             current: s.defaults.model,
             hidden: s.hiddenModels,
             onPick: (id) => s.setDefault("model", id),
@@ -110,13 +105,9 @@ function DefaultsPage() {
       <Field
         label="权限"
         hint={
-          engine === "codex"
-            ? "Codex 的沙箱和询问方式。"
-            : engine === "devin"
-              ? "Devin 的工作模式：问答、计划、写代码、智能、完全访问。"
-              : engine === "chatgpt"
-                ? "不经询问能做多少事：询问、写代码、完全访问（没有操作系统沙箱）。"
-                : "Droid 不经询问就能做多少事。"
+          engine === "devin"
+            ? "Devin 的工作模式：问答、计划、写代码、智能、完全访问。"
+            : "不经询问能做多少事：询问、写代码、完全访问（没有操作系统沙箱）。"
         }
       >
         <Select value={levels.find((r) => r.value === s.defaults.autonomy)?.label ?? s.defaults.autonomy} items={pick("autonomy", levels)} />
@@ -147,7 +138,7 @@ function SessionsPage() {
       </Field>
       <Field
         label="自动压缩上下文"
-        hint="只管 ChatGPT Plan 的会话（Droid、Codex、Devin 各自压缩自己的）。对话快超出所选模型的上下文窗口时，较早的部分由模型写成一段摘要，最近的原样保留；页面上的完整记录还在。关掉后，只有服务器拒绝「对话太长」时才压缩，免得会话卡住。"
+        hint="只管 ChatGPT Plan 的会话（Devin 自己管自己的上下文）。对话快超出所选模型的上下文窗口时，较早的部分由模型写成一段摘要，最近的原样保留；页面上的完整记录还在。关掉后，只有服务器拒绝「对话太长」时才压缩，免得会话卡住。"
       >
         <Switch on={s.compactAuto} onChange={s.setCompactAuto} label="自动压缩上下文" />
       </Field>
@@ -167,7 +158,14 @@ function SessionsPage() {
           </div>
         </Field>
       )}
-      <Field label="同时打开的会话上限" hint="每个打开的会话占用一个 droid 进程，约 300 MB 内存。">
+      <StepLimitSetting />
+      <Field
+        label="思考过程用中文"
+        hint="让模型把思考过程（回答下面折叠的那部分）也写成中文：WittyCode 自己的循环写进系统提示，其他引擎随每条消息附上一句说明（页面上看不到）。是否照做取决于模型；服务端自己生成的推理摘要可能仍是英文。"
+      >
+        <Switch on={s.thinkChinese} onChange={s.setThinkChinese} label="思考过程用中文" />
+      </Field>
+      <Field label="同时打开的会话上限" hint="打开的会话越多，占用的内存越多；Devin 的会话各自占一个进程。">
         <div className="stepper">
           <button type="button" aria-label="减少" onClick={() => s.setMaxOpen(s.maxOpen - 1)} disabled={s.maxOpen <= 1}>
             <Minus size={14} />
@@ -230,36 +228,13 @@ function ProgramPath({ label, autoHint, found, path, onPath, browse }: { label: 
   );
 }
 
-function DroidPage() {
+function ProgramsPage() {
   const s = useStore();
   return (
     <>
-      <ProgramPath
-        label="droid.exe"
-        autoHint="自动检测：在常见安装位置和 PATH 里找。"
-        found={s.droidFound}
-        path={s.droidPath}
-        onPath={s.setDroidPath}
-        browse={LIVE ? undefined : () => s.say("（演示）这里会打开文件选择对话框。")}
-      />
-      <div className="kvs">
-        <div>
-          <span>droid</span>
-          <b>{s.factory.version || "—"}</b>
-        </div>
-        <div>
-          <span>Droid SDK</span>
-          <b>0.5.0</b>
-        </div>
-      </div>
-      <div className="row-btns">
-        <button type="button" className="btn" onClick={() => void s.recheckDroid()}>
-          重新检测
-        </button>
-      </div>
-      <p className="page-note">改了路径后，已经打开的会话继续用旧进程；新开的会话才用新路径。</p>
-      <ProgramPath label="Codex 命令行" autoHint="自动检测：在 PATH 和 npm 的全局目录里找 codex。" found={s.codex.cliPath ?? ""} path={s.codexPath} onPath={s.setCodexPath} />
+      <p className="page-note">WittyCode 自己的代理循环（ChatGPT Plan、API Provider）不需要任何别的程序。装了 Devin 的话，它的模型会出现在模型菜单里；这里可以指定它的位置。</p>
       <ProgramPath label="Devin 命令行" autoHint="自动检测：在 PATH 和 Devin 桌面版的安装目录里找 devin。" found={s.devin.cliPath ?? ""} path={s.devinPath} onPath={s.setDevinPath} />
+      <p className="page-note">改了路径后，已经打开的会话继续用旧进程；新开的会话才用新路径。</p>
     </>
   );
 }
@@ -327,15 +302,11 @@ function AboutPage() {
       <LogoVertical width={132} />
       <div className="about-text">
         <h3>WittyCode</h3>
-        <p className="muted-text">Factory Droid 的 Windows 桌面客户端。</p>
+        <p className="muted-text">Windows 上的编程代理桌面应用：自己的代理循环，ChatGPT Plan、API Provider 和 Devin 都在同一个界面里。</p>
         <div className="kvs">
           <div>
             <span>版本</span>
             <b>0.2.0</b>
-          </div>
-          <div>
-            <span>Droid SDK</span>
-            <b>0.5.0</b>
           </div>
           <div>
             <span>日志</span>
@@ -404,7 +375,7 @@ export function SettingsHost() {
             {current.id === "defaults" && <DefaultsPage />}
             {current.id === "sessions" && <SessionsPage />}
             {current.id === "memory" && <MemoryPage />}
-            {current.id === "droid" && <DroidPage />}
+            {current.id === "programs" && <ProgramsPage />}
             {current.id === "projects" && <ProjectsPage />}
             {current.id === "shortcuts" && <ShortcutsPage />}
             {current.id === "about" && <AboutPage />}

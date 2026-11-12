@@ -5,10 +5,11 @@ from __future__ import annotations
 import asyncio
 
 from desktop.core.attachments import image_attachment, pdf_attachment, text_attachment
+from desktop.core.elicit import DENY, OPEN
 from desktop.core.devin import controller as devin_controller
 from desktop.core.devin.controller import DevinController
 from desktop.core.handoff import build_handoff
-from desktop.core.session_manager import LiveSettings, SessionState
+from desktop.core.session_state import LiveSettings, SessionState
 from desktop.core.transcript import (
     ActivityBlock,
     ErrorBlock,
@@ -282,6 +283,109 @@ def test_stopping_with_a_question_open_answers_it_cancelled(tmp_path):
         await controller.interrupt()
         assert controller.state is SessionState.READY and prompt.status is PromptStatus.EXPIRED
         assert [m["result"] for m in harness.answers() if "result" in m] == [{"outcome": {"outcome": "cancelled"}}]
+
+    run(scenario())
+
+
+def test_what_the_running_turn_has_cost_so_far_is_known_before_the_prompt_s_figure(tmp_path):
+    async def scenario():
+        harness = make_engine(tmp_path)
+        controller = await opened(harness, tmp_path)
+        controller.send_prompt("[slow] wait")
+        await until(lambda: controller.usage_pending() is not None)
+        assert controller.usage_pending() == Tokens(900, 10, None, 100), "the call so far: input without the cache, output, cache read"
+        assert controller.usage_series() == {}, "not booked: Devin gives the prompt's own figure when the turn ends"
+        await controller.interrupt()
+        await until(lambda: controller.state is SessionState.READY)
+        assert controller.usage_pending() is None
+        await harness.engine.close_all()
+
+    run(scenario())
+
+
+def test_devin_may_ask_questions_and_the_answers_go_back_to_it(tmp_path):
+    async def scenario():
+        harness = make_engine(tmp_path)
+        controller = await opened(harness, tmp_path, autonomy="code")
+        (init,) = harness.requests("initialize")
+        assert init["clientCapabilities"]["elicitation"] == {"form": {}, "url": {}}, "Devin asks only a client that says it can show questions"
+        controller.send_prompt("[ask] pick one")
+        prompt = await pending_prompt(controller)
+        first, second = prompt.questions
+        from desktop.core.viewmodel import prompt_json
+
+        assert prompt_json(prompt)["who"] == "Devin", "the engine that asked, not the app displaying the card"
+        assert first.question.startswith("Which way?") and first.options == ("fast", "safe") and not first.multi_select
+        assert second.options == ("tests", "docs") and second.multi_select
+        assert controller.answer_question(prompt.id, ["safe", ["tests", "docs"]])
+        assert not controller.answer_question(prompt.id, ["fast", []]), "a late second answer"
+        await until(lambda: controller.state is SessionState.READY)
+        turn = controller.transcript.turns[-1]
+        assert text_of(turn).endswith('answered: {"action": "accept", "content": {"approach": "safe", "extras": ["tests", "docs"]}}')
+        controller.send_prompt("[ask] again")
+        prompt = await pending_prompt(controller)
+        assert controller.answer_question(prompt.id, None)
+        await until(lambda: controller.state is SessionState.READY)
+        assert text_of(controller.transcript.turns[-1]).endswith('answered: {"action": "cancel"}'), "skipping is cancel"
+        await harness.engine.close_all()
+
+    run(scenario())
+
+
+def test_a_devin_form_does_not_repeat_its_description_and_keeps_the_actual_asker(tmp_path):
+    async def scenario():
+        from desktop.core.viewmodel import prompt_json
+
+        harness = make_engine(tmp_path)
+        controller = await opened(harness, tmp_path, autonomy="code")
+        try:
+            controller.send_prompt("[slow] wait")
+            question = "如何处理这份演示配置？"
+            request = {
+                "sessionId": controller.session_id, "mode": "form", "message": question,
+                "requestedSchema": {"type": "object", "properties": {
+                    "config": {"type": "string", "title": "配置文件", "description": question, "enum": ["保留", "移除"]},
+                }, "required": ["config"]},
+            }
+            waiting = asyncio.ensure_future(harness.engine._route_request(harness.clients[0], "elicitation/create", request, "form1"))
+            prompt = await pending_prompt(controller)
+            shown = prompt_json(prompt)
+            assert shown["who"] == "Devin"
+            assert shown["questions"] == [{"topic": "配置文件", "question": question, "options": ["保留", "移除"], "multiSelect": False}]
+            assert controller.answer_question(prompt.id, ["保留"])
+            assert await waiting == {"action": "accept", "content": {"config": "保留"}}
+            await controller.interrupt()
+        finally:
+            await harness.engine.close_all()
+
+    run(scenario())
+
+
+def test_a_page_devin_asks_to_open_is_opened_only_with_consent_and_an_unknown_request_is_declined(tmp_path):
+    async def scenario():
+        harness = make_engine(tmp_path)
+        controller = await opened(harness, tmp_path, autonomy="code")
+        engine, client = harness.engine, harness.clients[0]
+        controller.send_prompt("[slow] wait")
+        await until(lambda: controller.state is SessionState.RUNNING and controller.transcript.active_turn is not None)
+        request = {"sessionId": controller.session_id, "mode": "url", "message": "Sign in", "url": "https://example.com/connect", "elicitationId": "e1"}
+        agreed = asyncio.ensure_future(engine._route_request(client, "elicitation/create", request, "x1"))
+        prompt = await pending_prompt(controller)
+        assert "https://example.com/connect" in prompt.questions[0].question, "the full address is shown before consent"
+        assert controller.answer_question(prompt.id, [OPEN])
+        assert await agreed == {"action": "accept"} and harness.opened == ["https://example.com/connect"]
+        refused = asyncio.ensure_future(engine._route_request(client, "elicitation/create", {**request, "elicitationId": "e2"}, "x2"))
+        prompt = await pending_prompt(controller)
+        assert controller.answer_question(prompt.id, [DENY])
+        assert await refused == {"action": "decline"} and len(harness.opened) == 1
+        odd = await engine._route_request(client, "elicitation/create", {"sessionId": controller.session_id, "mode": "telepathy", "message": "?"}, "x3")
+        assert odd == {"action": "decline"}
+        assert any("不会显示的提问" in block.text for block in controller.transcript.turns[-1].blocks if isinstance(block, NoticeBlock))
+        await controller.interrupt()
+        await until(lambda: controller.state is SessionState.READY)
+        late = await engine._route_request(client, "elicitation/create", {**request, "elicitationId": "e3"}, "x4")
+        assert late == {"action": "decline"}, "no turn to show it in"
+        await harness.engine.close_all()
 
     run(scenario())
 

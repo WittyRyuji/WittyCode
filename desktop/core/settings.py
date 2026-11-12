@@ -27,9 +27,6 @@ SETTINGS_FILE = "settings.json"
 SETTINGS_VERSION = 2
 """2: the ChatGPT Plan engine joined the shared memory (``MEMORY_ENGINES``); a file written before that, with every engine
 then known switched on, gets it switched on too (``settings_from_dict``)."""
-AUTONOMY_LEVELS = ("off", "low", "medium", "high")
-CODEX_PERMISSIONS = ("readonly", "workspace", "full")
-"""The permission scale of Codex sessions (the page's 只读 / 工作区 / 完全访问); Droid's is ``AUTONOMY_LEVELS``."""
 DEVIN_PERMISSIONS = ("ask", "plan", "code", "smart", "full")
 """The permission scale of Devin sessions: its modes (Ask / Plan / Code / Smart / Bypass), see ``core/devin/policy``."""
 CHATGPT_PERMISSIONS = ("ask", "code", "full")
@@ -43,30 +40,25 @@ to the running turn now. Ctrl+Enter does the other one."""
 SIDEBAR_WIDTH_RANGE = (220, 440)
 MAX_OPEN_SESSIONS_RANGE = (1, 16)
 DEFAULT_MAX_OPEN_SESSIONS = 4
+DEFAULT_MAX_STEPS = 80
+MAX_STEPS_RANGE = (1, 2**53 - 1)  # positive integers that survive the JSON/JavaScript bridge exactly
 MAX_REMEMBERED_SESSIONS = 5000
 """Archived and renamed conversations kept in the settings file; a file with more is cut here."""
 MAX_SESSION_TITLE = 120
 COMPACT_AT_RANGE = (50, 95)
 DEFAULT_COMPACT_AT = 85
 """Percent of a model's context window at which a ChatGPT Plan conversation is summarised (``harness/compact``)."""
-MEMORY_ENGINES = ("droid", "codex", "devin", "chatgpt")
-LEGACY_MEMORY_ENGINES = ("droid", "codex", "devin")
+MEMORY_ENGINES = ("devin", "chatgpt")
 
 
 @dataclass
 class AppSettings:
-    droid_path: str = ""
-    """Explicit droid.exe path; empty means auto-detect."""
-    codex_path: str = ""
-    """Explicit Codex CLI path; empty means auto-detect."""
-    codex_enabled: bool = True
-    """Show the Codex subscription's models in the model menu."""
     devin_path: str = ""
     """Explicit Devin CLI path; empty means auto-detect."""
     devin_enabled: bool = True
     """Show the Devin account's models in the model menu."""
     hidden_models: list[str] = field(default_factory=list)
-    """Page ids of models (Factory, Codex or API) the user does not want in the conversation's model menu. A model in
+    """Page ids of models (ChatGPT Plan, Devin or API) the user does not want in the conversation's model menu. A model in
     use is shown anyway; ids that no longer exist stay, so a model that comes back is still hidden."""
     memory_enabled: bool = True
     """The shared memory (``core/memory``): notes common to all engines, given to each conversation as an MCP server."""
@@ -85,12 +77,9 @@ class AppSettings:
     """One of ``FOLLOW_UPS``: what Enter does while a turn is running."""
     sidebar_width: int = 288
     default_model: str = ""
-    """Model id for new sessions; empty lets Droid pick the account default."""
+    """Model id for new sessions; empty: the first model of the menu."""
     reasoning_effort: str = ""
     """Reasoning effort for new sessions; empty uses the model default."""
-    autonomy: str = "off"
-    codex_autonomy: str = "readonly"
-    """Permission level for new Codex sessions (one of ``CODEX_PERMISSIONS``)."""
     devin_autonomy: str = "code"
     """Permission level for new Devin sessions (one of ``DEVIN_PERMISSIONS``)."""
     chatgpt_enabled: bool = True
@@ -104,6 +93,10 @@ class AppSettings:
     Off: only when the server has refused a request as too big (a conversation must not get stuck)."""
     chatgpt_compact_at: int = DEFAULT_COMPACT_AT
     """The percent of the window at which that happens (``COMPACT_AT_RANGE``)."""
+    max_steps: int = DEFAULT_MAX_STEPS
+    """Model decision steps allowed in one turn of the own loop; read again between steps."""
+    think_chinese: bool = True
+    """Ask every model to write its thinking in Chinese (``core/language``)."""
     mode: str = "auto"
     projects: list[str] = field(default_factory=list)
     max_open_sessions: int = DEFAULT_MAX_OPEN_SESSIONS
@@ -117,6 +110,10 @@ class AppSettings:
     own files is touched, and the conversation can be brought back."""
     session_titles: dict[str, str] = field(default_factory=dict)
     """The names the user gave conversations here (row id -> name). The engines keep their own titles."""
+    session_order: list[str] = field(default_factory=list)
+    """Sidebar row ids in the order the user dragged them; newly discovered sessions precede these."""
+    session_created: dict[str, float] = field(default_factory=dict)
+    """Stable creation times, including old rows without one and conversations that changed engine."""
 
     def add_project(self, folder: str | Path) -> bool:
         normalized = normalize_folder(folder)
@@ -218,9 +215,6 @@ def settings_from_dict(raw: object) -> AppSettings:
     low_w, high_w = SIDEBAR_WIDTH_RANGE
     if not isinstance(sidebar, int) or isinstance(sidebar, bool) or not low_w <= sidebar <= high_w:
         sidebar = defaults.sidebar_width
-    enabled = raw.get("codex_enabled")
-    if not isinstance(enabled, bool):
-        enabled = defaults.codex_enabled
     devin_enabled = raw.get("devin_enabled")
     if not isinstance(devin_enabled, bool):
         devin_enabled = defaults.devin_enabled
@@ -248,8 +242,8 @@ def settings_from_dict(raw: object) -> AppSettings:
     if isinstance(memory_engines, list):
         chosen = [name for name in MEMORY_ENGINES if name in memory_engines]
         version = raw.get("version")
-        if (not isinstance(version, int) or version < 2) and tuple(chosen) == LEGACY_MEMORY_ENGINES:
-            chosen.append("chatgpt")
+        if (not isinstance(version, int) or version < 2) and "chatgpt" not in chosen and "devin" in chosen:
+            chosen.append("chatgpt")  # (a file from before the own loop joined the memory, with every engine then known on)
         memory_engines = chosen
     else:
         memory_engines = list(defaults.memory_engines)
@@ -266,6 +260,12 @@ def settings_from_dict(raw: object) -> AppSettings:
     low_at, high_at = COMPACT_AT_RANGE
     if not isinstance(compact_at, int) or isinstance(compact_at, bool) or not low_at <= compact_at <= high_at:
         compact_at = defaults.chatgpt_compact_at
+    max_steps = raw.get("max_steps")
+    if not isinstance(max_steps, int) or isinstance(max_steps, bool) or not MAX_STEPS_RANGE[0] <= max_steps <= MAX_STEPS_RANGE[1]:
+        max_steps = defaults.max_steps
+    think_chinese = raw.get("think_chinese")
+    if not isinstance(think_chinese, bool):
+        think_chinese = defaults.think_chinese
 
     splitter = raw.get("splitter_sizes")
     if not (
@@ -287,10 +287,18 @@ def settings_from_dict(raw: object) -> AppSettings:
             if isinstance(key, str) and key and isinstance(name, str) and name.strip() and len(titles) < MAX_REMEMBERED_SESSIONS:
                 titles[key] = " ".join(name.split())[:MAX_SESSION_TITLE]
 
+    order: list[str] = []
+    raw_order = raw.get("session_order")
+    if isinstance(raw_order, list):
+        order = list(dict.fromkeys(item for item in raw_order if isinstance(item, str) and item))[:MAX_REMEMBERED_SESSIONS]
+    created: dict[str, float] = {}
+    raw_created = raw.get("session_created")
+    if isinstance(raw_created, dict):
+        for key, stamp in raw_created.items():
+            if isinstance(key, str) and key and isinstance(stamp, (int, float)) and not isinstance(stamp, bool) and 0 < stamp < 253402300800 and len(created) < MAX_REMEMBERED_SESSIONS:
+                created[key] = float(stamp)
+
     return AppSettings(
-        droid_path=text("droid_path"),
-        codex_path=text("codex_path"),
-        codex_enabled=enabled,
         devin_path=text("devin_path"),
         devin_enabled=devin_enabled,
         hidden_models=hidden,
@@ -305,14 +313,14 @@ def settings_from_dict(raw: object) -> AppSettings:
         sidebar_width=sidebar,
         default_model=text("default_model"),
         reasoning_effort=text("reasoning_effort"),
-        autonomy=text("autonomy", AUTONOMY_LEVELS),
-        codex_autonomy=text("codex_autonomy", CODEX_PERMISSIONS),
         devin_autonomy=text("devin_autonomy", DEVIN_PERMISSIONS),
         chatgpt_enabled=chatgpt_enabled,
         chatgpt_autonomy=text("chatgpt_autonomy", CHATGPT_PERMISSIONS),
         chatgpt_welcomed=chatgpt_welcomed,
         chatgpt_compact=chatgpt_compact,
         chatgpt_compact_at=compact_at,
+        max_steps=max_steps,
+        think_chinese=think_chinese,
         mode=text("mode", MODES),
         projects=projects,
         max_open_sessions=max_open,
@@ -321,6 +329,8 @@ def settings_from_dict(raw: object) -> AppSettings:
         last_project=text("last_project"),
         archived_sessions=archived,
         session_titles=titles,
+        session_order=order,
+        session_created=created,
     )
 
 

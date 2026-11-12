@@ -39,7 +39,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from desktop.core.attachments import DEFAULT_PROMPT, IMAGE, PDF, Attachment
-from desktop.core.codex.items import command_result
+from desktop.core.elicit import plan_of, reply_for
+from desktop.core.engine_items import command_result
 from desktop.core.context import ContextState
 from desktop.core.devin import items
 from desktop.core.devin.errors import DevinError, DevinProcessError, DevinRpcError, friendly_failure
@@ -59,9 +60,10 @@ from desktop.core.handoff import Handoff
 from desktop.core.hooks import PromptEvent
 from desktop.core.memory.launch import new_run
 from desktop.core.prompts import ActionView
-from desktop.core.session_manager import SESSION_STATE_LABELS, LiveSettings, SessionState, SteerOutcome
+from desktop.core.session_state import SESSION_STATE_LABELS, LiveSettings, SessionState, SteerOutcome
 from desktop.core.toolinfo import working_label as label_for_working_state
-from desktop.core.transcript import PromptStatus, ToolItem, Transcript, Turn, TurnStatus, UserBlock
+from desktop.core.harness.asking import answer_text
+from desktop.core.transcript import PromptStatus, ToolItem, ToolStatus, Transcript, Turn, TurnStatus, UserBlock
 from desktop.core.usage import Tokens, own_output
 
 if TYPE_CHECKING:
@@ -129,6 +131,9 @@ class DevinController:
     _recall_ids: frozenset[str] = frozenset()
     _model: str = ""
     _turn_usage: dict[str, Tokens] = field(default_factory=dict)
+    _turn_models: dict[str, str] = field(default_factory=dict)
+    _usage_model: str = ""
+    """The selected model of a live turn; unknown if it was changed mid-turn or is historical."""
     _client: Any = None
     _turn: Turn | None = None
     _turn_done: asyncio.Event | None = None
@@ -219,6 +224,26 @@ class DevinController:
         """One series per prompt, named by its user message: a figure never changes once it is reported, and the replay of
         the saved session reports the same ones, so reopening the session adds nothing twice."""
         return {f"turn:{message_id}": tokens for message_id, tokens in self._turn_usage.items()}
+
+    def usage_pending(self) -> Tokens | None:
+        """What the model calls of the running turn have cost so far (each ``usage_update``), before Devin gives the prompt's
+        own figure (``turn_stats``, when the turn ends). Shown in the total meanwhile, never booked: the final figure is."""
+        if self._turn is None or not self._calls:
+            return None
+        total = self._calls[0]
+        for more in self._calls[1:]:
+            total = total.plus(more)
+        return total
+
+    def usage_model_series(self) -> dict[str, tuple[str, Tokens]]:
+        return {
+            f"turn:{key}": (self._turn_models[key], tokens)
+            for key, tokens in self._turn_usage.items() if self._turn_models.get(key)
+        }
+
+    def usage_pending_models(self) -> dict[str, Tokens]:
+        pending = self.usage_pending()
+        return {self._usage_model: pending} if self._usage_model and pending is not None else {}
 
     def _output_so_far(self) -> int | None:
         return own_output(self.usage_series())
@@ -399,6 +424,8 @@ class DevinController:
             return
         model = current_value(options, "model")
         if model:
+            if self._turn is not None and model != self._usage_model:
+                self._usage_model = ""  # the turn may have used more than one model; its aggregate cannot tell which share
             self._model = model
             if adopt:
                 self.requested_model = model
@@ -605,6 +632,7 @@ class DevinController:
         sent += wrap_context(self.preface, context.text)  # (after the message: see core/context_envelope)
         self.transcript.output_probe = self._output_so_far
         turn = self.transcript.start_turn(text, attachments, handoff=carried)
+        self._usage_model = self.model
         if context.notice:
             self.transcript.add_notice(context.notice)
         self._handoff_turn = turn if handoff is not None else None
@@ -737,9 +765,13 @@ class DevinController:
             items.prompt_blocks(text, attachments)
         except ValueError as error:
             return SteerOutcome(False, message=f"附件无法发送：{error}")
+        context = self.manager.hooks.prompt(PromptEvent(self.engine, self.project, text, frozenset(self.recalled)))
+        sent = text + wrap_context(context.text)
         block = self.transcript.add_steer(turn, text, attachments, pending=False)
+        if context.notice:
+            self.transcript.add_notice(context.notice)
         self._changed()
-        self._spawn(self._run_prompt(turn, text, attachments, block))
+        self._spawn(self._run_prompt(turn, sent, attachments, block))
         return SteerOutcome(True)
 
     def take_unadopted(self) -> list[tuple[str, tuple[Attachment, ...]]]:
@@ -822,6 +854,10 @@ class DevinController:
             self._on_tool_call(update)
         elif kind == "tool_call_update":
             self._on_tool_update(update)
+        elif kind == "plan":
+            turn = self._live()
+            if turn is not None and self.transcript.set_plan(turn, update.get("entries")):
+                self._changed()
         elif kind == "session_info_update":
             title = _text(update.get("title")).strip()
             if title and title != self.transcript.title:
@@ -896,7 +932,10 @@ class DevinController:
         diffs = items.call_diffs(update.get("content"))
         if diffs:
             self.transcript.set_tool_diffs(turn, tool, diffs)
-        if not self._prompting(turn, call_id):
+        status = items.call_status(update.get("status"))
+        if tool.name == "TodoWrite" and status is not None:
+            self.transcript.finish_tool(turn, tool, items.content_text(update.get("content")), status=status)
+        elif not self._prompting(turn, call_id):
             self.transcript.tool_running(turn, tool)
         self.transcript.set_working_state("executing_tool")
         self._changed()
@@ -910,6 +949,10 @@ class DevinController:
             name, data = items.tool_spec(update)
             tool = self.transcript.ensure_tool(turn, call_id, name)
             self.transcript.set_tool_input(turn, tool, data, final=False)
+        if tool.name == "TodoWrite" and isinstance(update.get("rawInput"), Mapping):
+            self.transcript.set_tool_input(
+                turn, tool, {**tool.input, **update["rawInput"]}, final=True, accept_plan=items.call_status(update.get("status")) is not ToolStatus.ERROR
+            )
         shown = items.content_text([c for c in update.get("content") or () if not (isinstance(c, Mapping) and c.get("type") == "diff")])
         if shown:
             # (the output arrives as ever longer snapshots of the whole text: the latest one replaces the rest)
@@ -959,9 +1002,11 @@ class DevinController:
             tokens = self._calls[0]
             for more in self._calls[1:]:
                 tokens = tokens.plus(more)
-            self._calls.clear()
+        self._calls.clear()  # (covered by this figure now: they must not stay in what is shown as still counting)
         if tokens is not None:
             self._turn_usage[message_id] = tokens
+            if self._turn is not None and self._usage_model and message_id not in self._turn_models:
+                self._turn_models[message_id] = self._usage_model
             self._changed()
 
     # ------------------------------------------------------------------ requests (approvals)
@@ -969,7 +1014,39 @@ class DevinController:
     async def _on_server_request(self, method: str, params: Mapping[str, Any], request_id: Any) -> Any:
         if method == "session/request_permission":
             return await self._permission(params, request_id)
+        if method == "elicitation/create":
+            return await self._elicitation(params, request_id)
         raise DevinRpcError(METHOD_NOT_FOUND, f"WittyCode does not handle {method}")
+
+    async def _elicitation(self, params: Mapping[str, Any], request_id: Any) -> dict[str, Any]:
+        """Devin asks the user something (its ``ask_user_question``): ACP's ``elicitation/create``, the MCP data model (a
+        ``form`` with a flat schema, or a ``url`` to open). Shown with the question cards; answered ``accept`` (with the
+        values), ``decline`` or ``cancel``. What cannot be shown is declined, and the user is told."""
+        plan = plan_of({**params, "serverName": "Devin"})
+        if plan is None:
+            self.transcript.add_notice(f"Devin 发来一种 WittyCode 不会显示的提问（{_text(params.get('mode')) or '未知'}），已拒绝。")
+            self._changed()
+            return {"action": "decline"}
+        turn = self._live()
+        if turn is None:
+            return {"action": "decline"}
+        # (a question tied to one of Devin's tool calls sits on that call's row, and Devin reports how the call ended)
+        call_id = _text(params.get("toolCallId"))
+        item_id = call_id or f"elicitation-{request_id}"
+        prompt = self.transcript.add_question_prompt(item_id, plan.views, who="Devin")
+        self._changed()
+        if prompt is None or prompt.status is not PromptStatus.PENDING:
+            return {"action": "cancel"}
+        value = await self._wait(prompt.id, request_id)
+        reply = {key: value for key, value in reply_for(plan, value).items() if value is not None}
+        if plan.mode == "url" and reply["action"] == "accept":
+            self.manager.open_external(plan.url)
+        tool = turn.tools.get(item_id)
+        if tool is not None and not call_id and not tool.terminal:
+            done = {"accept": "已回答。", "decline": "已拒绝。", "cancel": "已跳过。"}[reply["action"]]
+            self.transcript.finish_tool(turn, tool, done, status=ToolStatus.DONE if reply["action"] == "accept" else ToolStatus.CANCELLED)
+            self._changed()
+        return reply
 
     def _action(self, call_id: str, call: Mapping[str, Any], tool: ToolItem) -> ActionView:
         meta = call.get("_meta") if isinstance(call.get("_meta"), Mapping) else {}
@@ -1034,8 +1111,16 @@ class DevinController:
         return True
 
     def answer_question(self, prompt_id: str, answers: Sequence[str | Sequence[str]] | None) -> bool:
-        """Devin asks no questions through the protocol (it has no such request)."""
-        return False
+        """Answer (or, with ``None``, skip) a question Devin asked (``elicitation/create``); each answer is a string or a list."""
+        future = self._pending.get(prompt_id)
+        if future is None:
+            return False
+        texts = None if answers is None else [answer_text(answer) for answer in answers]
+        if not self.transcript.answer_question(prompt_id, texts):
+            return False
+        if not future.done():
+            future.set_result(None if answers is None else [[answer] if isinstance(answer, str) else list(answer) for answer in answers])
+        return True
 
     def _expire_prompt(self, prompt_id: str) -> None:
         self.transcript.expire_prompt(prompt_id)

@@ -11,7 +11,7 @@ const SCENES: Record<string, string | null> = {
   approve: "s-approval",
   ask: "s-question",
   dead: "s-dead",
-  codex: "s-codex",
+  index: "s-index",
   devin: "s-devin",
   chatgpt: "s-chatgpt",
   api: "s-api",
@@ -26,13 +26,8 @@ export function applyUrlParams(): { width?: string; guide?: boolean } {
   if (theme === "light" || theme === "dark" || theme === "system") s.setTheme(theme as ThemeChoice);
   const fs = p.get("fs");
   if (fs === "sm" || fs === "md" || fs === "lg") s.setFontScale(fs);
-  // `codex=signed-out|missing|signing-in|api-key` and `providers=none` show the states that need no account to see.
-  const codex = p.get("codex");
-  if (codex === "signed-out") useStore.setState({ codex: { ...s.codex, auth: "signed-out", email: undefined, plan: undefined, limits: [] } });
-  if (codex === "signing-in") useStore.setState({ codex: { ...s.codex, auth: "signing-in" } });
-  if (codex === "api-key") useStore.setState({ codex: { ...s.codex, auth: "api-key", limits: [] } });
-  if (codex === "missing") useStore.setState({ codex: { ...s.codex, cli: "missing", auth: "signed-out", limits: [], cliPath: undefined, version: undefined } });
-  // `devin=signed-out|missing|signing-in` likewise
+  // `providers=none` and the account states below show what needs no account to see.
+  // `devin=signed-out|missing|signing-in`
   const devin = p.get("devin");
   if (devin === "signed-out") useStore.setState({ devin: { ...s.devin, auth: "signed-out", email: undefined, plan: undefined } });
   if (devin === "signing-in") useStore.setState({ devin: { ...s.devin, auth: "signing-in" } });
@@ -52,14 +47,13 @@ export function applyUrlParams(): { width?: string; guide?: boolean } {
   const queued = Number(p.get("queued"));
   const current = useStore.getState().currentId;
   if (queued > 0 && current) useStore.getState().patchSession(current, (x) => ({ ...x, queued: QUEUED_SAMPLE.slice(0, queued) }));
-  // `switch=codex` shows the open conversation right after it moved to a Codex model (and `switch=droid` the way back).
+  // `switch=devin` shows the open conversation right after it moved to a Devin model (and `switch=back` the way back).
   const swtch = p.get("switch");
-  if (swtch === "codex") s.choose("model", "codex:gpt-5.3-codex");
   if (swtch === "devin") s.choose("model", "devin:swe-2-high");
   if (swtch === "chatgpt") s.choose("model", "chatgpt:gpt-6.1-sol");
-  if (swtch === "droid") {
-    s.choose("model", "codex:gpt-5.3-codex");
-    useStore.getState().choose("model", "claude-sonnet-5-5");
+  if (swtch === "back") {
+    s.choose("model", "devin:swe-2-high");
+    useStore.getState().choose("model", "chatgpt:gpt-6-astra");
   }
   // `file=docs/handoff.md:3-8` opens that file in the side panel (the scene it is shown in is the open conversation).
   const file = p.get("file");

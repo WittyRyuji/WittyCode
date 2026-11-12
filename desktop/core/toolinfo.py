@@ -61,6 +61,7 @@ _TOOL_CATEGORIES: dict[str, Category] = {
     ),
     **dict.fromkeys(("Execute", "Bash", "Shell", "PowerShell"), Category.COMMAND),
     "TodoWrite": Category.PLAN,
+    "todo_write": Category.PLAN,
     "AskUser": Category.ASK,
 }
 _TOOL_CATEGORIES_LOWER = {name.lower(): category for name, category in _TOOL_CATEGORIES.items()}
@@ -72,8 +73,7 @@ MEMORY_TOOLS = ("memory_search", "memory_read", "memory_write", "memory_update",
 
 def memory_tool(name: str) -> str | None:
     """Which tool of the shared memory a call is (``memory_write`` …). The engines name an MCP tool each their own way:
-    Droid ``wittycode-memory___memory_write``, Codex ``wittycode-memory/memory_write``, Devin
-    ``mcp__wittycode-memory__memory_write``."""
+    ``wittycode-memory___memory_write``, ``wittycode-memory/memory_write``, ``mcp__wittycode-memory__memory_write`` (Devin)."""
     if MEMORY_SERVER not in name:
         return None
     return next((tool for tool in MEMORY_TOOLS if name.endswith(tool)), None)
@@ -166,7 +166,7 @@ WORKING_STATE_LABELS: dict[str, str] = {
 
 
 def working_label(state: str | None, *, stopping: bool = False) -> str:
-    """Chinese label for a Droid working state (``WorkingState.value``)."""
+    """Chinese label for an engine's working state."""
     if stopping:
         return "正在停止…"
     return WORKING_STATE_LABELS.get(state or "", "处理中…")
@@ -225,7 +225,7 @@ def display_path(path: str, limit: int = 64) -> str:
 
 
 _EXIT_CODE = re.compile(r"\[Process exited with code (-?\d+)\]|^Exit code: (-?\d+)[ \t]*$", re.MULTILINE)
-"""Droid's Execute result ends with the first form; WittyCode's own shell tool (``harness/shell``) with the second."""
+"""Some agents' shell results end with the first form; WittyCode's own shell tool (``harness/shell``) with the second."""
 
 
 def exit_code(output: str | None) -> int | None:
@@ -263,6 +263,25 @@ def parse_todos(value: Any) -> list[TodoEntry]:
                 text = item.get("content") or item.get("text") or item.get("title") or ""
                 entries.append(TodoEntry(str(item.get("status", "pending")).lower(), str(text)))
     return entries
+
+
+def plan_steps(value: Any) -> tuple[TodoEntry, ...] | None:
+    """A complete accepted snapshot, or None for partial/malformed data; only an explicit empty list clears a plan."""
+    if not isinstance(value, (str, list, tuple)):
+        return None
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            if not isinstance(item, Mapping):
+                return None
+            text = item.get("content") or item.get("text") or item.get("title")
+            if not isinstance(text, str) or not text.strip() or not isinstance(item.get("status"), str):
+                return None
+    entries = parse_todos(value)
+    if isinstance(value, str) and not entries:
+        return None
+    if any(not entry.text.strip() or entry.status not in ("pending", "in_progress", "completed") for entry in entries):
+        return None
+    return tuple(entries)
 
 
 _QUESTION = re.compile(r"\[question\]\s*(.+)")
@@ -331,7 +350,7 @@ def describe_input(name: str, data: Mapping[str, Any]) -> str:
         return f"{text} · {display_path(where, 48)}" if where else text
     if name == "Execute" or category is Category.COMMAND:
         return first_line(_string(data, "command"), 140) or _string(data, "summary")
-    if name == "TodoWrite":
+    if category is Category.PLAN:
         todos = parse_todos(data.get("todos"))
         if not todos:
             return ""

@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, ArrowRightLeft, RotateCw, X } from "lucide-react";
 import type { Block, Session, Turn } from "../types";
 import { useStore } from "../store";
@@ -8,6 +8,8 @@ import { Markdown } from "./blocks/Markdown";
 import { ActivityView } from "./blocks/Activity";
 import { PermissionCard, QuestionCard } from "./blocks/Prompts";
 import { SentAttachments } from "./Attachments";
+import { TurnNav } from "./TurnNav";
+import { activeTurnAt, turnLinks } from "../lib/turnNavigation";
 
 function UserView({ block }: { block: Extract<Block, { kind: "user" }> }) {
   const long = block.text.length > 520 || block.text.split("\n").length > 9;
@@ -124,7 +126,7 @@ function Footer({ turn, label }: { turn: Turn; label: string }) {
 
 export function TurnView({ turn, session }: { turn: Turn; session: Session }) {
   return (
-    <section className="turn">
+    <section className="turn" data-turn-id={turn.id}>
       {turn.blocks.map((b) => (
         <BlockView key={b.id} block={b} turn={turn} sessionId={session.id} />
       ))}
@@ -141,12 +143,40 @@ export function Transcript({ session }: { session: Session }) {
   const scroller = useRef<HTMLDivElement>(null);
   const inner = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
+  const jumpTarget = useRef<number | null>(null);
+  const scheduleActive = useRef(() => {});
+  const scrollTimer = useRef<number | undefined>(undefined);
   const [away, setAway] = useState(false);
+  const [scrolling, setScrolling] = useState(false);
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const links = useMemo(() => turnLinks(session.turns), [session.turns]);
   const setDraft = useStore((s) => s.setDraft);
 
+  const behavior = (smooth: boolean): ScrollBehavior => smooth && !window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "smooth" : "auto";
   const toEnd = (smooth = false) => {
     const el = scroller.current;
-    if (el) el.scrollTo({ top: el.scrollHeight, behavior: smooth ? "smooth" : "auto" });
+    jumpTarget.current = null;
+    if (el) el.scrollTo({ top: el.scrollHeight, behavior: behavior(smooth) });
+  };
+  const syncActive = useCallback(() => {
+    const el = scroller.current;
+    if (!el || !inner.current || jumpTarget.current !== null) return;
+    const turns = [...inner.current.querySelectorAll<HTMLElement>(":scope > .turn")];
+    const origin = el.getBoundingClientRect().top - el.scrollTop;
+    const tops = turns.map((turn) => turn.getBoundingClientRect().top - origin);
+    const index = activeTurnAt(tops, el.scrollTop + 40, el.scrollHeight - el.scrollTop - el.clientHeight < 4);
+    setActiveId(turns[index]?.dataset.turnId ?? null);
+  }, []);
+  const jumpTo = (id: string) => {
+    const el = scroller.current;
+    const turn = [...(inner.current?.querySelectorAll<HTMLElement>(":scope > .turn") ?? [])].find((item) => item.dataset.turnId === id);
+    if (!el || !turn) return;
+    const top = Math.max(0, Math.min(el.scrollHeight - el.clientHeight, el.scrollTop + turn.getBoundingClientRect().top - el.getBoundingClientRect().top - 28));
+    jumpTarget.current = Math.abs(el.scrollTop - top) < 2 ? null : top;
+    stick.current = jumpTarget.current === null && el.scrollHeight - top - el.clientHeight < 48;
+    setActiveId(id);
+    setAway(el.scrollHeight - top - el.clientHeight >= 48);
+    el.scrollTo({ top, behavior: behavior(true) });
   };
 
   // A different session starts at its end.
@@ -156,16 +186,35 @@ export function Transcript({ session }: { session: Session }) {
     toEnd();
   }, [session.id]);
 
-  // Content grows while text streams: follow it, unless the user scrolled up to read.
+  // Follow streaming only at the bottom. Re-measure the outline after scrolling, wrapping or resizing the pane.
   useEffect(() => {
     const el = inner.current;
-    if (!el) return;
+    const viewport = scroller.current;
+    if (!el || !viewport) return;
+    let frame = 0;
+    scheduleActive.current = () => {
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        syncActive();
+      });
+    };
     const ro = new ResizeObserver(() => {
       if (stick.current) toEnd();
+      scheduleActive.current();
     });
     ro.observe(el);
-    return () => ro.disconnect();
-  }, [session.id]);
+    ro.observe(viewport);
+    scheduleActive.current();
+    return () => {
+      ro.disconnect();
+      cancelAnimationFrame(frame);
+      window.clearTimeout(scrollTimer.current);
+    };
+  }, [session.id, syncActive]);
+
+  // Restored snapshots can replace turn IDs without changing any measured height.
+  useLayoutEffect(() => scheduleActive.current(), [session.turns]);
 
   // 跳到最新消息 (the app menu, Ctrl+End)
   useEffect(() => {
@@ -181,14 +230,20 @@ export function Transcript({ session }: { session: Session }) {
   const onScroll = () => {
     const el = scroller.current!;
     const atEnd = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
-    stick.current = atEnd;
+    if (jumpTarget.current !== null && Math.abs(el.scrollTop - jumpTarget.current) < 2) jumpTarget.current = null;
+    stick.current = atEnd && jumpTarget.current === null;
     setAway(!atEnd);
+    if (jumpTarget.current === null) scheduleActive.current();
+    setScrolling(true);
+    window.clearTimeout(scrollTimer.current);
+    scrollTimer.current = window.setTimeout(() => setScrolling(false), 800);
   };
 
   const empty = session.turns.length === 0 && !session.queued;
   return (
     <div className="stage">
-      <div ref={scroller} className="scroller" onScroll={onScroll}>
+      <TurnNav links={links} activeId={activeId} onSelect={jumpTo} />
+      <div ref={scroller} className={`scroller${scrolling ? " is-scrolling" : ""}`} onScroll={onScroll} onWheel={() => { jumpTarget.current = null; }} onPointerDown={() => { jumpTarget.current = null; }}>
         <div ref={inner} className="transcript">
           {empty ? (
             <div className="welcome">

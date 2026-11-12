@@ -7,7 +7,7 @@ import { CodeBlock } from "./Markdown";
 import { Diff } from "./Diff";
 
 const IMPACT: Record<string, string> = { low: "低", medium: "中", high: "高" };
-const WHO = { droid: "Droid", codex: "Codex", devin: "Devin", chatgpt: "ChatGPT Plan" } as const;
+const WHO = { devin: "Devin", chatgpt: "ChatGPT Plan" } as const;
 
 export function PermissionCard({ sessionId, prompt }: { sessionId: string; prompt: PermissionPrompt }) {
   const answer = useStore((s) => s.answerPermission);
@@ -32,7 +32,8 @@ export function PermissionCard({ sessionId, prompt }: { sessionId: string; promp
           )}
         </div>
       ))}
-      <div className="pbtns">
+      {/* the choices are answers, like a question's options: one per line, so a long one never squeezes the others */}
+      <div className="pbtns choices" role="group" aria-label="选择一个答复">
         {prompt.options.map((o) => (
           <button key={o.value} type="button" className={`btn${o.tone === "primary" ? " primary" : o.tone === "danger" ? " danger" : ""}`} onClick={() => answer(sessionId, prompt.id, o.value)}>
             {o.label}
@@ -46,8 +47,9 @@ export function PermissionCard({ sessionId, prompt }: { sessionId: string; promp
 export function QuestionCard({ sessionId, prompt }: { sessionId: string; prompt: QuestionPrompt }) {
   const answer = useStore((s) => s.answerQuestion);
   const who = useStore((s) => {
+    if (prompt.who) return prompt.who;
     const session = s.sessions[sessionId];
-    if (!session) return "Droid";
+    if (!session) return "模型";
     const model = findModel(s.models, session.settings.model);
     const label = model ? engineLabel(model.source) : WHO[engineOfSession(s.models, session)];
     return label === "API" ? "API 模型" : label;
@@ -68,7 +70,7 @@ export function QuestionCard({ sessionId, prompt }: { sessionId: string; prompt:
   const submit = () => {
     setTried(true);
     if (prompt.questions.some((_, i) => missing(i))) return;
-    // A multi-select answer goes as the list of choices (Droid joins them its own way).
+    // A multi-select answer goes as the list of choices (the engine joins them its own way).
     answer(sessionId, prompt.id, prompt.questions.map((q, i) => (q.multiSelect ? value(i) : value(i).join("、"))));
   };
 
@@ -80,7 +82,7 @@ export function QuestionCard({ sessionId, prompt }: { sessionId: string; prompt:
       </div>
       {prompt.questions.map((q, i) => (
         <div key={i} className={`q${tried && missing(i) ? " missing" : ""}`}>
-          <span className="qtopic">{q.topic}</span>
+          {q.topic && q.topic !== who && q.topic !== q.question && <span className="qtopic">{q.topic}</span>}
           <div className="qtext">
             {q.question} {q.multiSelect && <span className="qhint">（可多选）</span>}
           </div>

@@ -1,4 +1,5 @@
-"""Driving the real page in the real window like a user: Qt mouse and key events, DOM queries (offscreen Qt, fake droid)."""
+"""Driving the real page in the real window like a user: Qt mouse and key events, DOM queries (offscreen Qt; the own loop on
+the loopback ChatGPT Plan fake, no model is called)."""
 
 from __future__ import annotations
 
@@ -16,11 +17,8 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from desktop.core.app_core import AppCore
-from desktop.core.session_manager import SessionManager
-from desktop.core.settings import AppSettings
 from desktop.ui.shell import PAGE_FILE, MainWindow
-from tests.app_support import FakeCodexEngine, make_core
-from tests.fakes import FakeFactory
+from tests.app_support import Plan, make_core, save_conversation
 from tests.ui_support import outside_task, release, wait_for
 
 KEYS = {
@@ -44,14 +42,14 @@ def _runs(text: str) -> list[tuple[bool, str]]:
 
 
 class Rig:
-    """A window with the real page, an application core on fake Droid (and fake Codex) sessions."""
+    """A window with the real page, an application core whose own loop answers from ``plan`` (``plan.script(say(...))``)."""
 
-    def __init__(self, window: MainWindow, core: AppCore, factory: FakeFactory, project: Path, codex: Any) -> None:
+    def __init__(self, window: MainWindow, core: AppCore, plan: Plan, project: Path, engine: Any) -> None:
         self.window = window
         self.core = core
-        self.factory = factory
+        self.plan = plan
         self.project = project
-        self.codex = codex
+        self.engine = engine
 
     # ---- DOM
     async def js(self, source: str) -> Any:
@@ -187,44 +185,32 @@ def require_page() -> Path:
 async def open_rig(
     tmp_path: Path,
     *,
-    codex: bool = False,
-    codex_signed_in: bool = True,
     providers: Any = None,
     projects: bool = True,
     max_open: int = 4,
-    saved: list[Any] | None = None,
+    saved: list[tuple[str, str, float]] | None = None,
     size: tuple[int, int] = (1320, 860),
     frame: str = "",
     cache: Any = None,
-    open_delay: float = 0.0,
-    list_delay: float = 0.0,
-    codex_engine: Any = None,
     devin_engine: Any = None,
     chatgpt_engine: Any = None,
     chatgpt_welcomed: bool = True,
-    read_ahead: bool = False,
-    history: dict[str, Any] | None = None,
+    plan: bool = True,
     memory: Any = None,
 ) -> Rig:
     """``frame``: the window outline Python asks the page for (``winframe.frame_kind``); none under the offscreen platform.
-    ``open_delay`` / ``list_delay``: how slow the fake droid.exe is to start a session / to list models and sessions.
-    ``read_ahead``: the cache is filled with the saved sessions nobody has opened (off: it would race with the test).
-    ``history``: session id -> what droid answers for its saved history, there before the application starts."""
+    ``saved``: own-loop conversations (id, title, minutes ago) saved in the project before the application starts."""
     page = require_page()
-    core, factory, _events, _platform, engine = make_core(
-        tmp_path, codex=codex, codex_signed_in=codex_signed_in, providers=providers, max_open=max_open, projects=projects, cache=cache,
-        codex_engine=codex_engine, devin_engine=devin_engine, chatgpt_engine=chatgpt_engine, read_ahead=read_ahead, memory=memory,
+    core, service, _events, _platform, engine = make_core(
+        tmp_path, providers=providers, max_open=max_open, projects=projects, cache=cache,
+        devin_engine=devin_engine, chatgpt_engine=chatgpt_engine, plan=plan, memory=memory,
     )
     if devin_engine is not None:
         devin_engine.settings = core.settings  # (one settings object in the application)
-    if chatgpt_engine is not None:
-        chatgpt_engine.settings = core.settings
-        core.settings.chatgpt_welcomed = chatgpt_welcomed  # (the one-time note would otherwise cover the page of every test)
-    factory.saved = list(saved or [])
-    factory.history.update(history or {})
-    factory.list_delay = list_delay
-    if open_delay:
-        factory.default_options["open_delay"] = open_delay
+    core.settings.chatgpt_welcomed = chatgpt_welcomed  # (the one-time note would otherwise cover the page of every test)
+    for session_id, title, minutes in saved or ():
+        (tmp_path / "proj").mkdir(exist_ok=True)
+        save_conversation(engine, tmp_path / "proj", session_id, title, minutes_ago=minutes)
     settings = core.settings
     window = MainWindow(settings, persist=False, page_file=page)
     # the core made by make_core talks to a fake platform: give it the window's own
@@ -240,7 +226,7 @@ async def open_rig(
     window.view.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
     await wait_for(lambda: window.page_loaded, 15, "the page to load")
     await wait_for(lambda: window.backend.connected, 15, "the page to ask for its state")
-    rig = Rig(window, core, factory, (tmp_path / "proj").resolve(), engine)
+    rig = Rig(window, core, service, (tmp_path / "proj").resolve(), engine)
     await rig.wait_for(".titlebar")
     # The title bar is drawn at once, but the page ignores every shortcut (Ctrl+, ...) until app.init has answered: the
     # boot placeholder goes away then. Without this wait a key pressed at once was lost, in about one run of 600.

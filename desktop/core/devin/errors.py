@@ -1,23 +1,15 @@
 """Errors of the Devin engine, and how they are put into words for the user.
 
-The JSON-RPC client is the one the Codex engine uses (same line-delimited stdio framing), so what it raises are its
-``CodexError`` family; ``friendly_failure`` here words them with Devin's name.
+The JSON-RPC client is ``desktop.core.jsonrpc``, so what it raises are the ``EngineError`` family
+(``desktop.core.engine_errors``); ``friendly_failure`` here words them with Devin's name.
 """
 
 from __future__ import annotations
 
-from desktop.core.codex.errors import (
-    CodexError as DevinError,
-)
-from desktop.core.codex.errors import (
-    CodexProcessError as DevinProcessError,
-)
-from desktop.core.codex.errors import (
-    CodexRpcError as DevinRpcError,
-)
-from desktop.core.codex.errors import (
-    CodexTimeoutError as DevinTimeoutError,
-)
+from desktop.core.engine_errors import EngineError as DevinError
+from desktop.core.engine_errors import EngineProcessError as DevinProcessError
+from desktop.core.engine_errors import EngineRpcError as DevinRpcError
+from desktop.core.engine_errors import EngineTimeoutError as DevinTimeoutError
 
 
 class DevinNotFoundError(DevinError):

@@ -10,23 +10,29 @@
 //   await page.close();
 
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 const EDGE = process.env.EDGE_PATH ?? "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Save the PNG returned by CDP. Kept separate so filesystem behaviour can be checked without starting a browser. */
+export function writeScreenshot(file, data) {
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, Buffer.from(data, "base64"));
+}
 
 /** Every page reports what its Content-Security-Policy blocked as a console error, so "no console errors" also means
  *  "nothing was blocked". */
 const CSP_WATCH = `document.addEventListener("securitypolicyviolation", (e) => console.error("CSP violation: " + e.violatedDirective + " " + (e.blockedURI || "")));`;
 
 /** `init`: script sources evaluated in every new document before the page's own scripts. */
-export async function openPage(url, { width = 1500, height = 960, port = 9333 + Math.floor(Math.random() * 400), init = [] } = {}) {
+export async function openPage(url, { width = 1500, height = 960, port = 9333 + Math.floor(Math.random() * 400), init = [], hideScrollbars = true } = {}) {
   const profile = mkdtempSync(join(tmpdir(), "wc-cdp-"));
   const proc = spawn(
     EDGE,
-    ["--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-first-run", `--user-data-dir=${profile}`, `--remote-debugging-port=${port}`, `--window-size=${width},${height}`, "about:blank"],
+    ["--headless=new", "--disable-gpu", ...(hideScrollbars ? ["--hide-scrollbars"] : []), "--no-first-run", `--user-data-dir=${profile}`, `--remote-debugging-port=${port}`, `--window-size=${width},${height}`, "about:blank"],
     { stdio: "ignore" },
   );
   let targets;
@@ -145,7 +151,7 @@ export async function openPage(url, { width = 1500, height = 960, port = 9333 + 
     },
     async shot(file) {
       const r = await send("Page.captureScreenshot", { format: "png" });
-      writeFileSync(file, Buffer.from(r.data, "base64"));
+      writeScreenshot(file, r.data);
     },
     async close() {
       try {

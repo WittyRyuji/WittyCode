@@ -1,6 +1,6 @@
 """The API providers' models inside the application, end to end: the real ``AppCore``, the real engine with the real agent loop and
-tools, and the real ``ApiBackend``, talking to servers on this machine. Nobody is signed in to ChatGPT and no Droid is started: an
-API provider's model needs its key and nothing else."""
+tools, and the real ``ApiBackend``, talking to servers on this machine. Nobody is signed in to ChatGPT: an API provider's
+model needs its key and nothing else."""
 
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ async def api_core(tmp_path: Path, api: FakeApi, *, key: str | None = "sk-test-1
     path = tmp_path / "factory.json"
     base = {"model": "deep-chat", "displayName": "Deep", "baseUrl": api.base_url, "apiKey": "${TEST_API_KEY}", "provider": "generic-chat-completion-api", "maxContextLimit": 64_000}
     path.write_text(json.dumps({"customModels": [{**base, **entry}]}), encoding="utf-8")
-    store = ProviderStore(factory_settings=path, sidecar=tmp_path / "providers.json", environ={"TEST_API_KEY": key} if key else {}, registry_env=lambda: {})
+    store = ProviderStore(models_file=path, sidecar=tmp_path / "providers.json", environ={"TEST_API_KEY": key} if key else {}, registry_env=lambda: {})
     no_proxy = HttpClient(urllib.request.build_opener(urllib.request.ProxyHandler({})))
     engine = make_engine(tmp_path, None, signed_in=False, api=ApiBackend(store, http=no_proxy))
     core, factory, events, platform, _ = await ready_core(tmp_path, chatgpt_engine=engine, providers=store)
@@ -92,7 +92,7 @@ def api_model_id(events) -> str:
 # ------------------------------------------------------------------------------------------------ the list
 
 
-def test_the_providers_models_are_in_the_list_for_the_own_loop_without_any_sign_in_or_droid(tmp_path):
+def test_the_providers_models_are_in_the_list_for_the_own_loop_without_any_sign_in(tmp_path):
     async def scenario():
         with FakeApi() as api:
             core, factory, events, _, _ = await api_core(tmp_path, api, reasoningEffort="medium")
@@ -108,7 +108,7 @@ def test_the_providers_models_are_in_the_list_for_the_own_loop_without_any_sign_
 # ------------------------------------------------------------------------------------------------ a conversation
 
 
-def test_a_conversation_with_an_api_model_is_asked_at_the_provider_and_no_droid_is_started(tmp_path):
+def test_a_conversation_with_an_api_model_is_asked_at_the_provider(tmp_path):
     async def scenario():
         with FakeApi() as api:
             api.script(says("Four."))
@@ -120,10 +120,33 @@ def test_a_conversation_with_an_api_model_is_asked_at_the_provider_and_no_droid_
             ((path, headers, body),) = api.posts
             assert path == "/v1/chat/completions" and headers["authorization"] == "Bearer sk-test-1" and body["model"] == "deep-chat"
             assert body["messages"][0]["role"] == "system" and body["messages"][-1] == {"role": "user", "content": "what is 2+2"}
-            assert not [call for call in factory.calls if call[0] in ("create", "resume")], "Droid was not asked for anything"
             context = meta(events, cid)["context"]
             assert (context["window"], context["used"]) == (64_000, 220), "the window is the user's and the usage is what the provider counted"
             await core.shutdown()
+
+    run(scenario())
+
+
+def test_an_api_question_names_the_api_model_as_its_asker(tmp_path):
+    async def scenario():
+        with FakeApi() as api:
+            questions = {"questions": [{"header": "配置", "question": "采用哪种方案？", "options": ["先测试", "先实现"]}]}
+            api.script([
+                chunk({"tool_calls": [{"index": 0, "id": "ask1", "type": "function", "function": {"name": "ask_user", "arguments": json.dumps(questions)}}]}, finish="tool_calls"),
+                "[DONE]",
+            ], says("收到。"))
+            core, _, events, _, _ = await api_core(tmp_path, api)
+            try:
+                cid = await new_session(core, events, tmp_path, api_model_id(events))
+                await core.call("session.send", {"id": cid, "text": "先确认方案"})
+                controller = core._by_cid[cid].controller
+                await until(lambda: controller.transcript.pending_prompts())
+                (prompt,) = controller.transcript.pending_prompts()
+                assert prompt.who == "API 模型"
+                assert await core.call("session.answerQuestion", {"id": cid, "promptId": prompt.id, "answers": ["先测试"]}) == {"ok": True}
+                await until(lambda: meta(events, cid).get("mark") == "ready" and answer_of(events, cid) == "收到。")
+            finally:
+                await core.shutdown()
 
     run(scenario())
 
@@ -255,37 +278,6 @@ def test_what_was_said_to_an_api_model_is_never_offered_to_the_memory_curator(tm
             await until(lambda: answer_of(events, cid) == "Hi." and meta(events, cid).get("mark") == "ready")
             await asyncio.sleep(0.2)
             assert offered == [], "another company's model must not be asked to sort what was said to this one"
-            await core.shutdown()
-
-    run(scenario())
-
-
-def test_changing_from_a_droid_conversation_to_an_api_model_says_api_and_hands_the_text_over(tmp_path):
-    from desktop.core.session_manager import SessionState
-    from tests.support import complete, delta, success
-
-    async def scenario():
-        with FakeApi() as api:
-            api.script(says("Six."))
-            core, factory, events, _, _ = await api_core(tmp_path, api)
-            cid = (await core.call("session.new", {"projectId": str(tmp_path / "proj")}))["id"]
-            await until(lambda: meta(events, cid).get("mark") == "ready")
-            droid = factory.sessions[-1]
-            await core.call("session.send", {"id": cid, "text": "what is 2+2"})
-            await until(lambda: droid.active is not None)
-            droid.active.push(delta("It is four.", "m1"), complete("m1"), success("It is four."))
-            droid.active.end()
-            await until(lambda: core._by_cid[cid].controller.state is SessionState.READY)
-            result = await core.call("session.choose", {"id": cid, "field": "model", "value": api_model_id(events)})
-            assert result["switched"] is True and core._by_cid[cid].engine == "chatgpt"
-            notes = [n["text"] for n in events.of("notice") if "已换到" in n["text"]]
-            assert notes and "（API）" in notes[-1] and "ChatGPT Plan" not in notes[-1] and "Droid" not in notes[-1]
-            switches = [b for payload in events.of("turns") for turn in payload["turns"] for b in turn["blocks"] if b["kind"] == "switch"]
-            assert switches[-1]["from"]["engine"] == "Droid" and switches[-1]["to"]["engine"] == "API"
-            await core.call("session.send", {"id": cid, "text": "and 3+3?"})
-            await until(lambda: answer_of(events, cid) == "Six.")
-            first = api.posts[0][2]["messages"][-1]["content"]
-            assert "what is 2+2" in first and "It is four." in first and "and 3+3?" in first
             await core.shutdown()
 
     run(scenario())

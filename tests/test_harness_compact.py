@@ -251,9 +251,61 @@ def test_a_summary_that_comes_back_empty_or_cut_short_is_replaced_by_the_digest(
 
 
 def test_a_request_that_fails_does_not_end_the_conversation():
-    result = run(compact.compact(long_view(), stream=Script(fail("server_error", "overloaded")), model="m", reasoning=None, window=4000))
+    result = run(compact.compact(long_view(), stream=Script(fail("invalid_request_error", "overloaded")), model="m", reasoning=None, window=4000))
     assert result is not None and result.mechanical and "overloaded" in result.problem
     assert compact.is_summary(result.view[0])
+
+
+def _pauses(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    seconds: list[float] = []
+
+    async def pause(delay: float) -> None:
+        seconds.append(delay)
+
+    monkeypatch.setattr(compact, "_sleep", pause)
+    return seconds
+
+
+def test_a_summary_request_that_failed_in_a_way_that_may_pass_is_asked_again(monkeypatch):
+    pauses = _pauses(monkeypatch)
+    script = Script(fail("server_error", "overloaded"), fail("rate_limit_exceeded", "slow down"), say("The summary."))
+    result = run(compact.compact(long_view(), stream=script, model="m", reasoning=None, window=4000))
+    assert result is not None and not result.mechanical and result.summary == "The summary."
+    assert len(script.requests) == 3 and script.requests[0] == script.requests[2], "the same request, asked again"
+    assert pauses == list(compact.RETRY_DELAYS[:2])
+
+
+def test_a_summary_request_is_asked_again_a_few_times_at_most_and_never_for_a_failure_that_stays(monkeypatch):
+    pauses = _pauses(monkeypatch)
+    busy = Script(*[fail("server_error", "overloaded") for _ in range(len(compact.RETRY_DELAYS) + 1)])
+    result = run(compact.compact(long_view(), stream=busy, model="m", reasoning=None, window=4000))
+    assert result is not None and result.mechanical and "overloaded" in result.problem
+    assert len(busy.requests) == len(compact.RETRY_DELAYS) + 1 and pauses == list(compact.RETRY_DELAYS)
+    pauses.clear()
+    wrong = Script(fail("invalid_request_error", "bad request"), say("never"))
+    result = run(compact.compact(long_view(), stream=wrong, model="m", reasoning=None, window=4000))
+    assert result is not None and result.mechanical and len(wrong.requests) == 1 and pauses == []
+
+
+def test_a_summary_request_waits_as_long_as_the_server_asks_within_a_limit(monkeypatch):
+    pauses = _pauses(monkeypatch)
+    errors = [ChatGPTError("slow", status=429, retry_after=7.0), ChatGPTError("slow", status=429, retry_after=600.0)]
+    answers = Script(say("S"))
+
+    def stream(request: dict[str, Any]):
+        if not errors:
+            return answers(request)
+        error = errors.pop(0)
+
+        async def failing():
+            raise error
+            yield  # pragma: no cover
+
+        return failing()
+
+    result = run(compact.compact(long_view(), stream=stream, model="m", reasoning=None, window=4000))
+    assert result is not None and not result.mechanical and result.summary == "S"
+    assert pauses == [7.0, compact.RETRY_LONGEST]
 
 
 def test_a_stop_during_the_summary_is_not_swallowed():

@@ -6,7 +6,7 @@ import { KIND_INFO, PRESETS } from "../lib/vocab";
 import { envNameOf, envVarText } from "../lib/models";
 import { messageOf } from "../lib/errors";
 import { CHATGPT_USAGE_URL, chatgptState } from "../lib/chatgpt";
-import type { ApiProvider, CodexAccount, DevinAccount, EnvState, FactoryAccount } from "../types";
+import type { ApiProvider, DevinAccount, EnvState } from "../types";
 import { Switch } from "./formkit";
 import { ModelVisibility } from "./ModelVisibility";
 
@@ -25,137 +25,6 @@ function Card({ title, state, tone, children, actions }: { title: string; state:
       </header>
       {children}
     </section>
-  );
-}
-
-/** The real droid reports no account: the live app shows which droid.exe runs and its version. */
-function factoryState(f: FactoryAccount): string {
-  if (f.email) return `已登录 · ${f.email} · ${f.plan}`;
-  if (!f.signedIn) return f.droidPath === undefined ? "未登录" : "没有找到 droid.exe";
-  return f.version ? `已找到 droid ${f.version}` : "已找到 droid";
-}
-
-function FactoryCard() {
-  const f = useStore((s) => s.factory);
-  const recheck = useStore((s) => s.recheckDroid);
-  return (
-    <Card
-      title="Factory（Droid）"
-      state={factoryState(f)}
-      tone={f.signedIn ? "ok" : "warn"}
-      actions={
-        <button type="button" className="btn small" onClick={() => void recheck()}>
-          重新检测
-        </button>
-      }
-    >
-      <p className="pcard-note">Factory 自己的模型（Claude、GPT、Kimi 等），按 Factory 积分计费。登录在终端里用 <code>droid</code> 完成，这里只显示状态。</p>
-      {f.droidPath && (
-        <div className="pcard-meta">
-          <span className="selectable">{f.droidPath}</span>
-        </div>
-      )}
-      <ModelVisibility source="factory" />
-    </Card>
-  );
-}
-
-function LimitRow({ label, percent, resets }: { label: string; percent: number; resets: string }) {
-  const level = percent >= 95 ? " crit" : percent >= 80 ? " warn" : "";
-  return (
-    <div className="limrow">
-      <span className="lim-name">{label}</span>
-      <span className={`meter wide${level}`} aria-hidden>
-        <span className="meter-fill" style={{ width: `${percent}%` }} />
-      </span>
-      <span className="lim-pct num">{percent}%</span>
-      <span className="lim-reset">{resets}</span>
-    </div>
-  );
-}
-
-function codexState(c: CodexAccount): { text: string; tone: "ok" | "warn" | "off" | "busy" } {
-  if (c.auth === "checking") return { text: "正在检测…", tone: "busy" };
-  if (c.cli === "missing") return { text: "没有找到 codex 命令行", tone: "warn" };
-  if (c.auth === "signing-in") return { text: "正在等你在浏览器里完成登录…", tone: "busy" };
-  if (c.auth === "chatgpt") return { text: ["已登录", c.email, c.plan].filter(Boolean).join(" · "), tone: "ok" };
-  if (c.auth === "api-key") return { text: "Codex 正在使用 API Key", tone: "warn" };
-  return { text: "未登录", tone: "off" };
-}
-
-function CodexCard() {
-  const { codex: c, codexLogin, codexCancel, codexLogout, codexEnable, recheckCodex } = useStore();
-  const st = codexState(c);
-  return (
-    <Card
-      title="Codex 订阅（ChatGPT）"
-      state={st.text}
-      tone={st.tone}
-      actions={
-        // Still asking Codex whether it is signed in: nothing to offer yet.
-        c.auth === "checking" ? null : c.cli === "missing" ? (
-          <button type="button" className="btn small" onClick={() => void recheckCodex()}>
-            重新检测
-          </button>
-        ) : c.auth === "signed-out" ? (
-          <button type="button" className="btn primary small" onClick={codexLogin}>
-            用 ChatGPT 账号登录
-          </button>
-        ) : c.auth === "signing-in" ? (
-          <button type="button" className="btn small" onClick={codexCancel}>
-            取消
-          </button>
-        ) : c.auth === "chatgpt" ? (
-          <button type="button" className="btn small" onClick={codexLogout}>
-            退出登录
-          </button>
-        ) : (
-          <button type="button" className="btn small" onClick={codexLogin}>
-            改用 ChatGPT 登录
-          </button>
-        )
-      }
-    >
-      {c.cli === "missing" && (
-        <p className="pcard-note">
-          Codex 订阅由 OpenAI 的 Codex CLI 运行。先安装它：<code>npm i -g @openai/codex</code>，再回来登录。也可以在「Droid」页旁边指定它的路径。
-        </p>
-      )}
-      {c.cli === "found" && c.auth === "signed-out" && (
-        <p className="pcard-note">用 ChatGPT 订阅里的额度，不需要 API Key。点登录会打开浏览器；登录信息由 Codex 自己保存（<code>~/.codex/auth.json</code>），WittyCode 读不到令牌。</p>
-      )}
-      {c.auth === "signing-in" && (
-        <p className="pcard-note busy">
-          <Loader2 size={14} className="spin" /> 浏览器已经打开。登录完成后这里会自动更新。
-        </p>
-      )}
-      {c.auth === "chatgpt" && (
-        <>
-          <div className="limits">
-            {c.limits.map((l) => (
-              <LimitRow key={l.label} label={l.label} percent={l.usedPercent} resets={l.resetsIn} />
-            ))}
-          </div>
-          <div className="pcard-row">
-            <div>
-              <div className="field-label">在模型菜单里显示 Codex 模型</div>
-              <div className="field-hint">关掉后只是隐藏，不会退出登录。</div>
-            </div>
-            <Switch on={c.enabled} onChange={codexEnable} label="显示 Codex 模型" />
-          </div>
-        </>
-      )}
-      {c.auth === "api-key" && <p className="pcard-note">用 API Key 时没有订阅额度限制，按 API 计费。想用 ChatGPT 订阅，点右上角改用登录。</p>}
-      <ModelVisibility source="codex" />
-      {c.cli === "found" && (c.version || c.cliPath) && (
-        <div className="pcard-meta">
-          {c.version && `codex ${c.version}`}
-          {c.version && c.cliPath && " · "}
-          {c.cliPath && <span className="selectable">{c.cliPath}</span>}
-        </div>
-      )}
-      <p className="pcard-note faint">Codex 和 Droid 各自保存自己的会话，互相读不到对方的上下文。在同一个对话里换到另一边时，WittyCode 把之前的文字对话交给它（只带文字，不带工具调用和结果）。侧栏里 Codex 的会话会标「Codex」。</p>
-    </Card>
   );
 }
 
@@ -198,7 +67,7 @@ function DevinCard() {
     >
       {d.cli === "missing" && (
         <p className="pcard-note">
-          Devin 的模型由 Devin 命令行运行（<code>devin acp</code>）。安装 Devin 桌面版或 Devin CLI 后回来登录。也可以在「Droid」页旁边指定它的路径。
+          Devin 的模型由 Devin 命令行运行（<code>devin acp</code>）。安装 Devin 桌面版或 Devin CLI 后回来登录。也可以在「外部程序」页里指定它的路径。
         </p>
       )}
       {d.cli === "found" && d.auth === "signed-out" && (
@@ -263,7 +132,7 @@ function ChatGPTCard() {
     >
       {!signedIn && a.auth !== "signing-in" && (
         <p className="pcard-note">
-          用 ChatGPT 套餐（Plus、Pro）里的额度，由 WittyCode 自己的代理循环运行，不需要 API Key，也不需要装 Codex。点 Continue with ChatGPT 会打开浏览器，按 OpenAI 的「Sign in with ChatGPT」授权；令牌只保存在 WittyCode 自己的文件夹里。
+          用 ChatGPT 套餐（Plus、Pro）里的额度，由 WittyCode 自己的代理循环运行，不需要 API Key，也不需要装别的程序。点 Continue with ChatGPT 会打开浏览器，按 OpenAI 的「Sign in with ChatGPT」授权；令牌只保存在 WittyCode 自己的文件夹里。
         </p>
       )}
       {a.auth === "signing-in" && (
@@ -284,7 +153,7 @@ function ChatGPTCard() {
             <Switch on={a.enabled} onChange={chatgptEnable} label="显示 ChatGPT Plan 的模型" />
           </div>
           <p className="pcard-note">
-            用量算在你套餐已含的 Codex 额度里（Plus 的 5 小时额度由所有用套餐的应用共用）。可以在 ChatGPT 里给 WittyCode 单独设上限：
+            用量算在你套餐已含的额度里（Plus 的 5 小时额度由所有用套餐的应用共用）。可以在 ChatGPT 里给 WittyCode 单独设上限：
             <a className="inline-link" href={CHATGPT_USAGE_URL}>
               Manage usage
             </a>
@@ -317,7 +186,7 @@ function ChatGPTCard() {
       )}
       <ModelVisibility source="chatgpt" />
       <p className="pcard-note faint">
-        这个引擎不经过 Codex：WittyCode 直接请求 OpenAI，自己运行读写文件、搜索和命令（权限档：询问 / 写代码 / 完全访问，没有操作系统沙箱）。会话保存在 WittyCode 自己的文件夹里；在同一个对话里换到别的引擎时，只交接文字。侧栏里它的会话会标「ChatGPT Plan」。
+        这个引擎不经过别的程序：WittyCode 直接请求 OpenAI，自己运行读写文件、搜索和命令（权限档：询问 / 写代码 / 完全访问，没有操作系统沙箱）。会话保存在 WittyCode 自己的文件夹里；在同一个对话里换到别的引擎时，只交接文字。侧栏里它的会话会标「ChatGPT Plan」。
       </p>
     </Card>
   );
@@ -389,8 +258,6 @@ export function ProvidersPage() {
   const quick = PRESETS.filter((p) => ["openai", "anthropic", "openrouter", "ollama"].includes(p.id));
   return (
     <div className="providers">
-      <FactoryCard />
-      <CodexCard />
       <ChatGPTCard />
       <DevinCard />
       <section className="pcard">
@@ -405,7 +272,7 @@ export function ProvidersPage() {
             </button>
           </div>
         </header>
-        <p className="pcard-note">用你自己的 API Key，或本机、公司网关上的模型。<b>WittyCode 自己的代理循环直接请求你的接口</b>，不需要 Droid。配置保存在 <code>~/.factory/settings.json</code> 的 <code>customModels</code>（和 Droid 同一格式，装了 Droid CLI 的话它也能用）。<b>密钥只放在环境变量里</b>，不会写进配置文件；设置之后马上能用，不用重启。</p>
+        <p className="pcard-note">用你自己的 API Key，或本机、公司网关上的模型。<b>WittyCode 自己的代理循环直接请求你的接口</b>。配置保存在 WittyCode 自己的 <code>models.json</code> 里（<code>customModels</code> 格式）。<b>密钥只放在环境变量里</b>，不会写进配置文件；设置之后马上能用，不用重启。</p>
         {providers.length === 0 ? (
           <div className="prov-empty">
             <p>常用的可以直接开始：</p>

@@ -23,25 +23,58 @@ function useTick(every = 30_000) {
   }, [every]);
 }
 
-/** The id the engine itself knows (what `droid --resume` or Codex would take). */
+/** The id the engine itself knows (what the engine would take to resume the session). */
 const nativeIdOf = (s: Session) => s.nativeId || (s.id.startsWith("cx:") || s.id.startsWith("dv:") ? s.id.slice(3) : s.id);
 
-function SessionRow({ session, current, onMenu }: { session: Session; current: boolean; onMenu: (s: Session, a: Anchor) => void }) {
+const SESSION_DRAG = "application/x-wittycode-session";
+
+function SessionRow({ session, current, onMenu, dragging }: { session: Session; current: boolean; onMenu: (s: Session, a: Anchor) => void; dragging: { current: string | null } }) {
+  const [drop, setDrop] = useState<"before" | "after" | null>(null);
+  const reorder = useStore((s) => s.reorderSession);
   const select = useStore((s) => s.select);
   const openSaved = useStore((s) => s.openSaved);
   const models = useStore((s) => s.models);
   const providers = useStore((s) => s.providers);
   const open = !!session.mark;
-  // Sessions that are not Factory's say where they run: "已打开 · 刚刚 · Codex". A saved row does not know its model,
-  // only its engine.
-  const source = findModel(models, session.settings.model)?.source ?? (session.engine === "codex" || session.engine === "devin" || session.engine === "chatgpt" ? session.engine : "factory");
-  const from = sourceLabel(source, providers);
+  // Sessions say where they run: "已打开 · 刚刚 · Devin". A saved row of the own loop that does not know its model cannot
+  // tell the plan from an API provider, so it says nothing.
+  const source = findModel(models, session.settings.model)?.source ?? (session.engine === "devin" ? "devin" : "");
+  const from = source ? sourceLabel(source, providers) : "";
   // Measured from this moment, not from the last tick: a row that has just arrived is never a tick behind.
   const when = session.modifiedAt ? formatRelative(session.modifiedAt, Date.now()) : session.modified;
   const sub = [open ? MARK_TEXT[session.mark!] : "", when, from].filter(Boolean).join(" · ");
   return (
     <div
-      className={`srow${current ? " current" : ""}${open ? " open" : ""}${session.mark ? ` m-${session.mark}` : ""}`}
+      className={`srow${current ? " current" : ""}${open ? " open" : ""}${session.mark ? ` m-${session.mark}` : ""}${drop ? ` drop-${drop}` : ""}`}
+      data-session-id={session.id}
+      draggable
+      title="拖动可调整本项目内的会话顺序"
+      onDragStart={(e) => {
+        dragging.current = session.id;
+        e.dataTransfer.setData(SESSION_DRAG, session.id);
+        e.dataTransfer.effectAllowed = "move";
+      }}
+      onDragEnd={() => { dragging.current = null; setDrop(null); }}
+      onDragOver={(e) => {
+        if (!dragging.current || dragging.current === session.id || !e.dataTransfer.types.includes(SESSION_DRAG)) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        const r = e.currentTarget.getBoundingClientRect();
+        setDrop(e.clientY > r.top + r.height / 2 ? "after" : "before");
+      }}
+      onDragLeave={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDrop(null);
+      }}
+      onDrop={(e) => {
+        setDrop(null);
+        const id = e.dataTransfer.getData(SESSION_DRAG);
+        if (!id || id !== dragging.current || id === session.id) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const r = e.currentTarget.getBoundingClientRect();
+        reorder(session.projectId, id, session.id, e.clientY > r.top + r.height / 2);
+        dragging.current = null;
+      }}
       role="option"
       aria-selected={current}
       tabIndex={0}
@@ -78,6 +111,7 @@ function SessionRow({ session, current, onMenu }: { session: Session; current: b
 
 function ProjectGroup({ project, onSessionMenu, onProjectMenu }: { project: Project; onSessionMenu: (s: Session, a: Anchor) => void; onProjectMenu: (p: Project, a: Anchor) => void }) {
   const sessions = useStore((s) => s.sessions);
+  const dragging = useRef<string | null>(null);
   const currentId = useStore((s) => s.currentId);
   const toggle = useStore((s) => s.toggleProject);
   const newSession = useStore((s) => s.newSession);
@@ -117,7 +151,7 @@ function ProjectGroup({ project, onSessionMenu, onProjectMenu }: { project: Proj
       </div>
       {!project.collapsed && (
         <div className="slist" role="listbox">
-          {list.length === 0 ? <div className="snote">还没有会话</div> : list.map((s) => <SessionRow key={s.id} session={s} current={s.id === currentId} onMenu={onSessionMenu} />)}
+          {list.length === 0 ? <div className="snote">还没有会话</div> : list.map((s) => <SessionRow key={s.id} session={s} current={s.id === currentId} onMenu={onSessionMenu} dragging={dragging} />)}
         </div>
       )}
     </div>
@@ -237,7 +271,7 @@ export function Sidebar() {
         <ArchivedGroup />
       </div>
       <div className="side-foot">
-        <button type="button" className="foot-btn" onClick={() => openSettings("memory")} title="Droid、Codex、Devin 和 ChatGPT Plan 共享的笔记">
+        <button type="button" className="foot-btn" onClick={() => openSettings("memory")} title="所有引擎共享的笔记">
           <Brain size={15} />
           共享记忆
           {unseen > 0 && (

@@ -1,4 +1,4 @@
-// Stands in for Droid in the review page: answers a sent message with a thinking step, a read, an edit that may ask
+// Stands in for the engine in the review page: answers a sent message with a thinking step, a read, an edit that may ask
 // for approval, and a streamed answer, so the live states (spinner, pulsing dot, cursor, approval card) can be seen.
 
 import { useStore } from "../store";
@@ -189,10 +189,10 @@ function finish(sessionId: string, turnId: string, status: Turn["status"], secon
   st().patchSession(sessionId, (x) => {
     const used = (x.context.used ?? 14_000) + 3_400;
     // The first turn of a session, or of the new engine after a switch, starts with a cold cache: all of the input is
-    // new, none of it is read back. Codex and Devin report no cache writes at all.
+    // new, none of it is read back. Devin reports no cache writes at all.
     const cold = x.usage === null;
     const engine = engineOfSession(st().models, x);
-    const u = x.usage ?? { input: 0, output: 0, cacheWrite: engine === "droid" ? 0 : null, cacheRead: 0 };
+    const u = x.usage ?? { input: 0, output: 0, cacheWrite: engine === "devin" ? 0 : null, cacheRead: 0 };
     return {
       ...x,
       mark: "ready",

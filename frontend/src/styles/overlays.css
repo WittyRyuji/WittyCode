@@ -16,7 +16,7 @@
 .menu-head { display: flex; align-items: baseline; justify-content: space-between; gap: 14px; padding: 8px 8px 3px; font-size: 10.5px; font-weight: 700; letter-spacing: 0.08em; color: var(--muted); }
 .menu-head:not(:first-child) { margin-top: 3px; border-top: 1px solid var(--line-strong); padding-top: 9px; }
 .menu-head-sub { font-weight: 500; letter-spacing: 0; color: var(--faint); }
-/* the maker inside the FACTORY group: lined up with the item labels, quieter than a group title */
+/* the maker inside a group of models: lined up with the item labels, quieter than a group title */
 .menu-sub { padding: 6px 8px 2px 32px; font-size: 10.5px; font-weight: 500; color: var(--muted); }
 .menu-pinned { position: sticky; bottom: -3px; margin: 0 -3px -3px; padding: 0 3px 3px; background: var(--bg-raised); }
 .menu-item.active .menu-tag { border-color: currentColor; }
@@ -33,6 +33,16 @@
 .tip-row dt { opacity: 0.72; }
 .tip-row dd { margin: 0; font-weight: 700; }
 .tip-note { font-size: 11px; opacity: 0.65; margin-top: 4px; }
+
+/* The model shares use the same total as the table below, not just the uncached input or the latest turn. */
+.usage > .tip { width: 296px; max-height: calc(100vh - 80px); overflow-y: auto; pointer-events: auto; }
+.usage-models { display: flex; align-items: center; gap: 12px; padding: 2px 0 10px; margin-bottom: 8px; border-bottom: 1px solid currentColor; }
+.usage-pie { width: 96px; height: 96px; border-radius: 50%; flex: none; }
+.usage-legend { list-style: none; margin: 0; padding: 0; flex: 1; min-width: 0; }
+.usage-legend li { display: flex; align-items: center; gap: 5px; padding: 2px 0; }
+.usage-swatch { width: 8px; height: 8px; flex: none; }
+.usage-model-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.usage-percent { font: 11px var(--font-mono); font-weight: 700; flex: none; }
 
 /* ---------------------------------------------------------------- dialogs */
 .scrim { position: fixed; inset: 0; z-index: 1200; background: var(--scrim); display: flex; align-items: center; justify-content: center; animation: fade 0.12s; }
@@ -247,6 +257,8 @@
 .textin.invalid { border-color: var(--err); }
 .textin.area { height: auto; padding: 8px 10px; resize: vertical; line-height: 1.5; }
 .textin { min-width: 0; }
+.step-limit-setting { display: flex; align-items: center; gap: 8px; }
+.step-limit-setting .textin { width: 112px; }
 input[type="number"].textin { appearance: textfield; -moz-appearance: textfield; }
 input[type="number"].textin::-webkit-inner-spin-button { display: none; }
 

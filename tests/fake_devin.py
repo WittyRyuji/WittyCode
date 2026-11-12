@@ -24,7 +24,8 @@ What a prompt does depends on markers in its text:
 
 Environment: ``FAKE_DEVIN_ACCOUNT`` = signed-in | signed-out (until the state file has one); ``FAKE_DEVIN_LOGIN_DELAY``
 (seconds, default 0.2, or ``never``); ``FAKE_DEVIN_BROKEN=1`` (``acp`` exits 2 at once); ``FAKE_DEVIN_NO_MODELS_JSON=1``
-(``models list`` fails).
+(``models list`` fails); ``FAKE_DEVIN_OPEN_DELAY`` (seconds ``session/new`` and ``session/load`` take) and
+``FAKE_DEVIN_OPEN_FAIL=1`` (both answer with an error).
 """
 
 from __future__ import annotations
@@ -99,6 +100,7 @@ class Fake:
         self.loop = loop
         self.state = self.load()
         self.initialized = False
+        self.client_capabilities: dict[str, Any] = {}
         self.running: dict[str, dict[str, Any]] = {}
         self.waiting: dict[Any, asyncio.Future[Any]] = {}
         self.server_ids = itertools.count(1)
@@ -188,6 +190,8 @@ class Fake:
                 if self.initialized:
                     raise RpcError(-32600, "Already initialized")
                 self.initialized = True
+                capabilities = params.get("clientCapabilities")
+                self.client_capabilities = capabilities if isinstance(capabilities, dict) else {}
                 result: Any = {
                     "protocolVersion": 1,
                     "agentCapabilities": {
@@ -205,6 +209,12 @@ class Fake:
                 if result is None:
                     return  # answered later, with the turn
             else:
+                if method in ("session/new", "session/load"):
+                    delay = float(os.environ.get("FAKE_DEVIN_OPEN_DELAY") or 0)
+                    if delay:
+                        await asyncio.sleep(delay)
+                    if os.environ.get("FAKE_DEVIN_OPEN_FAIL") == "1":
+                        raise RpcError(-32603, "cannot open the session")
                 handler = getattr(self, "m_" + method.replace("/", "_"), None)
                 if handler is None:
                     raise RpcError(-32601, f"Method not found: {method}")
@@ -441,6 +451,8 @@ class Fake:
                 await self.scenario_full(sid, session, turn)
             elif "[approve]" in text:
                 await self.scenario_approve(sid, session, turn)
+            elif "[ask]" in text:
+                await self.scenario_ask(sid, session, turn)
             elif "[slow]" in text or "[stuck]" in text:
                 stop = await self.scenario_slow(sid, session, turn)
             else:
@@ -526,6 +538,29 @@ class Fake:
             reply = f"rejected: {chosen or outcome.get('outcome')}"
         self.call(sid, session, turn, 1100, 15, 100)
         self.update(sid, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": reply}})
+
+    async def scenario_ask(self, sid: str, session: dict[str, Any], turn: dict[str, Any]) -> None:
+        """Devin's ``ask_user_question``: an ``elicitation/create`` in form mode, made only of a client that advertised that
+        mode (ACP forbids asking in a mode the client did not name); otherwise the agent goes on without asking."""
+        elicitation = self.client_capabilities.get("elicitation")
+        if not isinstance(elicitation, dict) or elicitation.get("form") is None:
+            self.update(sid, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "no questions: the client cannot answer them"}})
+            return
+        answer = await self.ask("elicitation/create", {
+            "sessionId": sid,
+            "mode": "form",
+            "message": "Which way?",
+            "requestedSchema": {
+                "type": "object",
+                "properties": {
+                    "approach": {"type": "string", "title": "Approach", "enum": ["fast", "safe"]},
+                    "extras": {"type": "array", "title": "Extras", "items": {"type": "string", "enum": ["tests", "docs"]}},
+                },
+                "required": ["approach"],
+            },
+        })
+        self.call(sid, session, turn, 1000, 10, 100)
+        self.update(sid, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "answered: " + json.dumps(answer, sort_keys=True)}})
 
     async def scenario_slow(self, sid: str, session: dict[str, Any], turn: dict[str, Any]) -> str:
         self.update(sid, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Waiting."}})

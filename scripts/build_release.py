@@ -35,7 +35,7 @@ PYTHON_VERSION = "3.11.9"
 EMBED_URL = f"https://www.python.org/ftp/python/{PYTHON_VERSION}/python-{PYTHON_VERSION}-embed-amd64.zip"
 EMBED_MD5 = "6d9aa08531d48fcc261ba667e2df17c4"
 """From https://www.python.org/downloads/release/python-3119/ (the embeddable package, 64-bit)."""
-RUNTIME_ROOTS = ("droid-sdk", "PySide6", "qasync")
+RUNTIME_ROOTS = ("PySide6", "qasync")
 PRUNED = ("PySide6/examples/", "PySide6/include/", "PySide6/glue/", "PySide6/scripts/", "PySide6/typesystems/")
 """Parts of the PySide6 wheels that only developers of PySide6 programs use."""
 QT_LICENSED_AS_LGPL = ("pyside6", "pyside6-addons", "pyside6-essentials", "pyside6-pdf", "pyside6-webengine", "shiboken6")
@@ -126,8 +126,11 @@ def build_launcher(target: Path, work: Path) -> None:
     build_python = ROOT / ".venv-build" / "Scripts" / "python.exe"
     if not build_python.is_file():
         subprocess.run([sys.executable, "-m", "venv", str(ROOT / ".venv-build")], check=True)
-    if subprocess.run([str(build_python), "-m", "PyInstaller", "--version"], capture_output=True).returncode != 0:
-        subprocess.run([str(build_python), "-m", "pip", "install", "--quiet", "pyinstaller"], check=True)
+    pinned = ROOT / "requirements-build.txt"
+    wanted = next(line.split("==", 1)[1].strip() for line in pinned.read_text(encoding="utf-8").splitlines() if line.startswith("pyinstaller=="))
+    found = subprocess.run([str(build_python), "-m", "PyInstaller", "--version"], capture_output=True, text=True)
+    if found.returncode != 0 or found.stdout.strip() != wanted:
+        subprocess.run([str(build_python), "-m", "pip", "install", "--quiet", "-r", str(pinned)], check=True)
     subprocess.run(
         [
             str(build_python), "-m", "PyInstaller", "--noconfirm", "--clean", "--onedir", "--noconsole", "--name", "WittyCode",
@@ -203,7 +206,7 @@ Run: double-click WittyCode.exe. Nothing to install; keep the whole folder toget
 * 数据放在 %APPDATA%\\WittyCode\\（设置、日志 WittyCode.log、ChatGPT 登录凭据、会话、记忆）。删掉这个文件夹就等于重置。
 * 本包没有代码签名，Windows SmartScreen 第一次可能提示“未知发布者”。
 * 不要放进需要管理员权限才能写的位置（例如 C:\\Program Files）：程序要在自己的文件夹旁写缓存。
-* 可选：装了 Factory（droid）、Codex、Devin 的话，它们会自动出现在引擎列表里；只用 ChatGPT 套餐或 API Provider 的话都不需要。
+* 可选：装了 Devin 的话，它的模型会出现在引擎列表里；只用 ChatGPT 套餐或 API Provider 的话不需要任何别的程序。
 * 命令行参数原样传给程序：WittyCode.exe --project D:\\code\\myproject
 * 许可证：Apache-2.0（LICENSE、NOTICE）；第三方软件见 THIRD_PARTY_NOTICES.txt 和 licenses\\。
 * 源码和问题反馈：见仓库主页。
@@ -225,7 +228,7 @@ def zip_folder(folder: Path, target: Path) -> str:
 def smoke(folder: Path) -> None:
     python = folder / "python" / "python.exe"
     print("smoke: the release's own Python starts the application offscreen on a recorded conversation")
-    done = subprocess.run([str(python), str(ROOT / "scripts" / "smoke_release.py"), "--fixture", str(ROOT / "fixtures" / "stream_turn.jsonl")], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
+    done = subprocess.run([str(python), str(ROOT / "scripts" / "smoke_release.py")], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
     shown = [line for line in done.stdout.splitlines() if line.strip()]
     print("\n".join("    " + line for line in shown[-6:]))
     if done.returncode != 0 or not shown or shown[-1] != "OK":

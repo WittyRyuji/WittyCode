@@ -1,5 +1,6 @@
-"""``/compact``, ``/goal`` and Plan mode through the real ``AppCore``: a conversation on an API provider's model (WittyCode's own loop,
-a server on this machine) and one on Droid (a scripted session): what the page asks for, what Python answers, and what the model is sent."""
+"""``/compact``, ``/goal``, Plan mode, skills and custom commands through the real ``AppCore``: conversations on an API provider's
+model (WittyCode's own loop, a server on this machine) and on ChatGPT Plan (the loopback fake, for turns that must stay running):
+what the page asks for, what Python answers, and what the model is sent."""
 
 from __future__ import annotations
 
@@ -7,14 +8,13 @@ import asyncio
 from pathlib import Path
 
 import pytest
-from droid_sdk import DroidError
 
 from desktop.core.harness import compact, goal as goals, skills
-from desktop.core.session_manager import SessionController
 from desktop.core.transcript import TurnStatus
-from tests.fakes import FakeSession, until
+from tests.app_support import ready_core
+from tests.fake_responses import say
+from tests.fakes import until
 from tests.llm_support import FakeApi, http_error
-from tests.support import complete, delta, success
 from tests.test_app_api import answer_of, api_core, api_model_id, blocks, meta, new_session, reads, run, says
 
 
@@ -40,23 +40,18 @@ def all_blocks(events, cid: str) -> list[dict]:
     return [block for turn_blocks in latest.values() for block in turn_blocks]
 
 
-async def droid_session(core, events, tmp_path) -> str:
-    """A conversation on Droid (the default model), ready."""
-    cid = (await core.call("session.new", {"projectId": str(tmp_path / "proj")}))["id"]
+async def plan_core(tmp_path: Path):
+    """A core of its own on ChatGPT Plan (its fake can hold a turn running), and a conversation on it, ready."""
+    root = tmp_path / "plan"
+    root.mkdir(exist_ok=True)
+    core, plan, events, _, _ = await ready_core(root)
+    cid = (await core.call("session.new", {"projectId": str(root / "proj")}))["id"]
     await ready(events, cid)
-    return cid
-
-
-async def droid_answers(droid, number: int, text: str) -> None:
-    """The ``number``-th message sent to the scripted Droid session is answered with ``text``."""
-    await until(lambda: len(droid.streams) >= number)
-    stream = droid.streams[number - 1]
-    stream.push(delta(text, f"m{number}"), complete(f"m{number}"), success(text))
-    stream.end()
+    return core, plan, events, cid
 
 
 async def ready_again(core, cid: str) -> None:
-    from desktop.core.session_manager import SessionState
+    from desktop.core.session_state import SessionState
 
     await until(lambda: core._by_cid[cid].controller.state is SessionState.READY)
 
@@ -101,15 +96,6 @@ def test_compact_says_why_when_it_cannot(tmp_path, monkeypatch):
             nothing = await core.call("session.compact", {"id": cid})
             assert nothing["ok"] is False and "还没有对话" in nothing["text"]
             assert api.posts == []
-
-            droid = await droid_session(core, events, tmp_path)
-            empty = await core.call("session.compact", {"id": droid})
-            assert empty["ok"] is False and "还没有对话" in empty["text"], "an engine is not asked to compact a conversation with nothing in it"
-            assert factory.sessions[-1].compacts == 0
-
-            monkeypatch.delattr(SessionController, "start_compaction")
-            lacking = await core.call("session.compact", {"id": droid})
-            assert lacking["ok"] is False and "没有提供手动压缩" in lacking["text"] and "Droid" in lacking["text"]
             await core.shutdown()
 
     run(scenario())
@@ -135,100 +121,6 @@ def test_compact_waits_behind_messages_that_are_still_queued_and_behind_a_goal(t
     run(scenario())
 
 
-def test_compact_on_a_droid_conversation_is_droids_own_compaction_and_the_page_shows_it(tmp_path):
-    async def scenario():
-        with FakeApi() as api:
-            core, factory, events, _, _ = await api_core(tmp_path, api)
-            cid = await droid_session(core, events, tmp_path)
-            droid = factory.sessions[-1]
-            await core.call("session.send", {"id": cid, "text": "what is 2+2"})
-            await droid_answers(droid, 1, "It is four.")
-            await ready_again(core, cid)
-            result = await core.call("session.compact", {"id": cid})
-            assert result == {"ok": True, "text": ""}
-            await until(lambda: any(b["kind"] == "notice" and "Droid 压缩了上下文：较早的 4 条消息" in b["text"] for b in blocks(events, cid)))
-            await ready_again(core, cid)
-            assert droid.compacts == 1
-            assert any(b["kind"] == "user" and b["text"] == "/compact" for b in blocks(events, cid)), "the page shows the command"
-            assert meta(events, cid)["context"]["compacted"] is True
-            assert core._by_cid[cid].controller.transcript.turns[-1].status is TurnStatus.DONE
-            await core.call("session.send", {"id": cid, "text": "and 3+3?"})
-            await droid_answers(droid, 2, "Six.")
-            await core.shutdown()
-
-    run(scenario())
-
-
-def test_droid_cannot_be_asked_to_compact_while_a_turn_runs_and_the_session_it_hands_back_takes_over(tmp_path):
-    async def scenario():
-        with FakeApi() as api:
-            core, factory, events, _, _ = await api_core(tmp_path, api)
-            cid = await droid_session(core, events, tmp_path)
-            droid = factory.sessions[-1]
-            controller = core._by_cid[cid].controller
-            await core.call("session.send", {"id": cid, "text": "a slow one"})
-            await until(lambda: droid.active is not None)
-            assert "还在运行" in controller.start_compaction() and droid.compacts == 0
-            await droid_answers(droid, 1, "Done.")
-            await ready_again(core, cid)
-
-            successor = FakeSession(droid.interactions, session_id="after-the-compaction")
-            droid.compact_successor = successor
-            assert (await core.call("session.compact", {"id": cid}))["ok"] is True
-            await until(lambda: controller.session_id == "after-the-compaction")
-            await ready_again(core, cid)
-            await core.call("session.send", {"id": cid, "text": "and now?"})
-            await droid_answers(successor, 1, "Now this.")
-            assert len(droid.streams) == 1, "the next message goes to the session Droid made"
-            await core.shutdown()
-
-    run(scenario())
-
-
-def test_a_compaction_droid_refuses_is_told_as_one_not_as_an_internal_error(tmp_path):
-    async def scenario():
-        with FakeApi() as api:
-            core, factory, events, _, _ = await api_core(tmp_path, api)
-            cid = await droid_session(core, events, tmp_path)
-            droid = factory.sessions[-1]
-            await core.call("session.send", {"id": cid, "text": "hello"})
-            await droid_answers(droid, 1, "Hi.")
-            await ready_again(core, cid)
-            droid.compact_error = DroidError("no room")
-            assert (await core.call("session.compact", {"id": cid}))["ok"] is True
-            await until(lambda: any(b["kind"] == "error" and "没有压缩，对话没有改动：" in b.get("message", "") for b in blocks(events, cid)))
-            await core.shutdown()
-
-    run(scenario())
-
-
-def test_a_droid_compaction_that_fails_leaves_the_conversation_and_says_so_and_a_stop_ends_it(tmp_path):
-    async def scenario():
-        with FakeApi() as api:
-            core, factory, events, _, _ = await api_core(tmp_path, api)
-            cid = await droid_session(core, events, tmp_path)
-            droid = factory.sessions[-1]
-            await core.call("session.send", {"id": cid, "text": "hello"})
-            await droid_answers(droid, 1, "Hi.")
-            await ready_again(core, cid)
-
-            droid.compact_error = RuntimeError("no room")
-            assert (await core.call("session.compact", {"id": cid}))["ok"] is True
-            await until(lambda: any(b["kind"] == "error" and "no room" in b.get("message", "") for b in blocks(events, cid)))
-            await ready_again(core, cid)
-            assert core._by_cid[cid].controller.transcript.turns[-1].status is TurnStatus.FAILED
-
-            droid.compact_error, droid.compact_delay = None, 30.0
-            assert (await core.call("session.compact", {"id": cid}))["ok"] is True
-            await until(lambda: droid.compacts == 2)
-            await core.call("session.stop", {"id": cid})
-            await ready_again(core, cid)
-            assert core._by_cid[cid].controller.transcript.turns[-1].status is TurnStatus.INTERRUPTED
-            await core.shutdown()
-
-    run(scenario())
-
-
 # ------------------------------------------------------------------------------------------------ /goal, on any engine
 
 
@@ -249,26 +141,24 @@ def test_a_goal_goes_on_by_itself_until_the_model_says_it_is_done_and_each_round
             assert any(b["kind"] == "notice" and "目标完成了（用了 2 轮）" in b["text"] for b in shown)
             assert any(b["kind"] == "notice" and b["text"].startswith("目标已设定：make the tests pass") for b in all_blocks(events, cid))
             assert core._by_cid[cid].goal is None
+            assert meta(events, cid)["goal"] == "", "done: the page shows no goal any more"
             await core.shutdown()
 
     run(scenario())
 
 
-def test_a_goal_works_the_same_on_a_droid_conversation(tmp_path):
+def test_the_page_knows_a_goal_is_in_progress_and_when_it_is_called_off(tmp_path):
     async def scenario():
         with FakeApi() as api:
-            core, factory, events, _, _ = await api_core(tmp_path, api)
-            cid = await droid_session(core, events, tmp_path)
-            droid = factory.sessions[-1]
-            assert (await core.call("session.goal", {"id": cid, "text": "ship it"}))["ok"] is True
-            await droid_answers(droid, 1, "Working on it.")
-            await until(lambda: len(droid.streams) == 2)
-            assert droid.streams[0].prompt == goals.opening("ship it")
-            assert droid.streams[1].prompt == goals.Goal("ship it", rounds=1).next_message()
-            await droid_answers(droid, 2, "Checked it.\nGOAL: DONE")
-            await until(lambda: any(b["kind"] == "notice" and "目标完成了（用了 2 轮）" in b["text"] for b in blocks(events, cid)))
-            await asyncio.sleep(0.2)
-            assert len(droid.streams) == 2 and core._by_cid[cid].goal is None
+            core, _, events, _, _ = await api_core(tmp_path, api)
+            cid = await new_session(core, events, tmp_path, api_model_id(events))
+            conv = core._by_cid[cid]
+            conv.goal = goals.Goal("ship it")  # (between two rounds: the session is idle and the goal goes on)
+            conv.dirty = True
+            core._flush(conv)
+            assert meta(events, cid)["goal"] == "ship it", "closing the window warns about it"
+            assert await core.call("session.goal", {"id": cid, "text": "off"}) == {"ok": True, "text": "目标已取消。"}
+            await until(lambda: meta(events, cid).get("goal") == "")
             await core.shutdown()
 
     run(scenario())
@@ -295,17 +185,15 @@ def test_a_goal_stops_when_the_model_needs_the_user_or_only_talks_or_runs_out_of
 def test_a_goal_reads_the_last_message_of_a_turn_not_the_first(tmp_path):
     async def scenario():
         with FakeApi() as api:
+            (tmp_path / "proj").mkdir(exist_ok=True)
+            (tmp_path / "proj" / "a.txt").write_text("alpha\n", encoding="utf-8")
+            api.script(reads("a.txt", call_id="c1"), says("Checked.\nGOAL: DONE"))
             core, factory, events, _, _ = await api_core(tmp_path, api)
-            cid = await droid_session(core, events, tmp_path)
-            droid = factory.sessions[-1]
+            cid = await new_session(core, events, tmp_path, api_model_id(events), autonomy="full")
             await core.call("session.goal", {"id": cid, "text": "ship it"})
-            await until(lambda: len(droid.streams) == 1)
-            stream = droid.streams[0]
-            stream.push(delta("Let me check.", "m1"), complete("m1"), delta("Checked.\nGOAL: DONE", "m2"), complete("m2"), success("Checked."))
-            stream.end()
             await until(lambda: any("目标完成了（用了 1 轮）" in b.get("text", "") for b in blocks(events, cid)))
             await asyncio.sleep(0.2)
-            assert len(droid.streams) == 1 and core._by_cid[cid].goal is None
+            assert len(api.posts) == 2 and core._by_cid[cid].goal is None, "the first message of the turn (Let me look.) is not its end"
             await core.shutdown()
 
     run(scenario())
@@ -363,15 +251,17 @@ def test_stopping_or_a_failed_turn_ends_a_goal(tmp_path):
             await core.call("session.goal", {"id": cid, "text": "anything"})
             await until(lambda: any("目标先停下了" in b.get("text", "") and "出错" in b["text"] for b in blocks(events, cid)))
             assert core._by_cid[cid].goal is None
-
-            droid_cid = await droid_session(core, events, tmp_path)
-            droid = factory.sessions[-1]
-            await core.call("session.goal", {"id": droid_cid, "text": "slow"})
-            await until(lambda: droid.active is not None)
-            await core.call("session.stop", {"id": droid_cid})
-            await until(lambda: any("目标先停下了" in b.get("text", "") and "被停止" in b["text"] for b in blocks(events, droid_cid)))
-            assert core._by_cid[droid_cid].goal is None and len(droid.streams) == 1
             await core.shutdown()
+
+        held, plan, held_events, held_cid = await plan_core(tmp_path)
+        plan.script([("hold", "slow"), *say("late")])
+        await held.call("session.goal", {"id": held_cid, "text": "slow"})
+        await until(lambda: plan.requests)
+        await held.call("session.stop", {"id": held_cid})
+        plan.release("slow")
+        await until(lambda: any("目标先停下了" in b.get("text", "") and "被停止" in b["text"] for b in blocks(held_events, held_cid)))
+        assert held._by_cid[held_cid].goal is None and len(plan.requests) == 1
+        await held.shutdown()
 
     run(scenario())
 
@@ -410,18 +300,22 @@ def test_a_goal_that_cannot_start_or_is_cancelled_says_so(tmp_path):
             await core.call("session.choose", {"id": cid, "field": "mode", "value": "spec"})
             planned = await core.call("session.goal", {"id": cid, "text": "do it"})
             assert planned["ok"] is False and "Plan" in planned["text"]
-
-            droid_cid = await droid_session(core, events, tmp_path)
-            droid = factory.sessions[-1]
-            assert (await core.call("session.goal", {"id": droid_cid, "text": "first"}))["ok"] is True
-            running = await core.call("session.goal", {"id": droid_cid, "text": "second"})
-            assert running["ok"] is False and "还在运行" in running["text"]
-            assert core._by_cid[droid_cid].goal.text == "first", "a refused goal leaves the one in force"
-            for word in ("off", "STOP", "取消"):
-                core._by_cid[droid_cid].goal = goals.Goal("again")
-                assert await core.call("session.goal", {"id": droid_cid, "text": word}) == {"ok": True, "text": "目标已取消。"}
-                assert core._by_cid[droid_cid].goal is None
             await core.shutdown()
+
+        held, plan, _, held_cid = await plan_core(tmp_path)
+        plan.script([("hold", "slow"), *say("late")])
+        assert (await held.call("session.goal", {"id": held_cid, "text": "first"}))["ok"] is True
+        await until(lambda: plan.requests)
+        running = await held.call("session.goal", {"id": held_cid, "text": "second"})
+        assert running["ok"] is False and "还在运行" in running["text"]
+        assert held._by_cid[held_cid].goal.text == "first", "a refused goal leaves the one in force"
+        for word in ("off", "STOP", "取消"):
+            held._by_cid[held_cid].goal = goals.Goal("again")
+            assert await held.call("session.goal", {"id": held_cid, "text": word}) == {"ok": True, "text": "目标已取消。"}
+            assert held._by_cid[held_cid].goal is None
+        await held.call("session.stop", {"id": held_cid})
+        plan.release("slow")
+        await held.shutdown()
 
     run(scenario())
 
@@ -470,7 +364,7 @@ def test_the_page_is_given_the_skills_and_commands_of_the_conversations_project(
     async def scenario():
         with FakeApi() as api:
             core, _, events, _, _ = await api_core(tmp_path, api)
-            cid = await droid_session(core, events, tmp_path)
+            cid = await new_session(core, events, tmp_path, api_model_id(events))
             result = await core.call("skills.list", {"id": cid})
             by_name = {item["name"]: item for item in result["items"]}
             assert set(by_name) == {"deploy", "weekly-report", "local"}
@@ -486,7 +380,7 @@ def test_the_page_is_given_the_skills_and_commands_of_the_conversations_project(
     run(scenario())
 
 
-def test_a_message_that_names_a_skill_carries_it_on_every_engine_and_the_page_shows_what_was_typed(tmp_path, monkeypatch):
+def test_a_message_that_names_a_skill_carries_it_and_the_page_shows_what_was_typed(tmp_path, monkeypatch):
     home = tmp_path / "home"
     monkeypatch.setattr(skills, "USER_HOME", home)
     make_skill(home, "summarize-diff", "Summarizes the diff.", "Run git diff and list the risks.")
@@ -495,20 +389,12 @@ def test_a_message_that_names_a_skill_carries_it_on_every_engine_and_the_page_sh
         with FakeApi() as api:
             api.script(says("Summary."))
             core, factory, events, _, _ = await api_core(tmp_path, api)
-            droid_cid = await droid_session(core, events, tmp_path)
-            droid = factory.sessions[-1]
-            await core.call("session.send", {"id": droid_cid, "text": "/summarize-diff focus on the migration"})
-            await until(lambda: len(droid.streams) == 1)
-            sent = droid.streams[0].prompt
-            assert sent.startswith("/summarize-diff focus on the migration") and "Run git diff and list the risks." in sent and "<wittycode-context>" in sent
-            await until(lambda: any(b["kind"] == "user" and b["text"] == "/summarize-diff focus on the migration" for b in all_blocks(events, droid_cid)))
-            assert not any("Run git diff" in b.get("text", "") for b in all_blocks(events, droid_cid)), "the page shows what was typed, not the skill"
-            await droid_answers(droid, 1, "Done.")
-
             own = await new_session(core, events, tmp_path, api_model_id(events))
             await core.call("session.send", {"id": own, "text": "please /summarize-diff"})
             await until(lambda: len(api.posts) == 1)
             assert "Run git diff and list the risks." in last_words(api.posts[0])
+            await until(lambda: any(b["kind"] == "user" and b["text"] == "please /summarize-diff" for b in all_blocks(events, own)))
+            assert not any("Run git diff" in b.get("text", "") for b in all_blocks(events, own)), "the page shows what was typed, not the skill"
             assert "- summarize-diff: Summarizes the diff." in system_of(api.posts[0]), "and the model is told which skills there are"
             await core.shutdown()
 
@@ -524,12 +410,12 @@ def test_a_custom_command_runs_with_its_arguments_on_any_engine(tmp_path, monkey
 
     async def scenario():
         with FakeApi() as api:
+            api.script(says("Reviewed."))
             core, factory, events, _, _ = await api_core(tmp_path, api)
-            cid = await droid_session(core, events, tmp_path)
-            droid = factory.sessions[-1]
+            cid = await new_session(core, events, tmp_path, api_model_id(events))
             await core.call("session.send", {"id": cid, "text": "/code-review feature/login"})
-            await until(lambda: len(droid.streams) == 1)
-            assert "Review the branch `feature/login` for bugs." in droid.streams[0].prompt
+            await until(lambda: len(api.posts) == 1)
+            assert "Review the branch `feature/login` for bugs." in last_words(api.posts[0])
             await until(lambda: any("已载入命令 /code-review" in b.get("text", "") for b in all_blocks(events, cid)))
             await core.shutdown()
 
@@ -543,7 +429,7 @@ def test_the_skills_list_is_for_the_conversations_project_else_the_one_asked_for
     async def scenario():
         with FakeApi() as api:
             core, _, events, _, _ = await api_core(tmp_path, api)
-            cid = await droid_session(core, events, tmp_path)
+            cid = await new_session(core, events, tmp_path, api_model_id(events))
             core.settings.last_project = str(tmp_path / "last")
             await core.call("skills.list", {"id": cid})
             await core.call("skills.list", {"projectId": str(tmp_path / "asked")})

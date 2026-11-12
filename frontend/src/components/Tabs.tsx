@@ -1,9 +1,9 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { PanelLeft, PanelLeftClose, X } from "lucide-react";
 import { useStore } from "../store";
 import { StateDot } from "./ui";
 
-export function Tabs() {
+export function Tabs({ children }: { children?: ReactNode }) {
   const tabs = useStore((s) => s.tabs);
   const sessions = useStore((s) => s.sessions);
   const currentId = useStore((s) => s.currentId);
@@ -64,6 +64,7 @@ export function Tabs() {
           );
         })}
       </div>
+      {children}
     </div>
   );
 }

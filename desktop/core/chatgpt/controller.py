@@ -40,8 +40,7 @@ from desktop.core.attachments import DEFAULT_PROMPT, IMAGE, PDF, TEXT, Attachmen
 from desktop.core.chatgpt import history as saved_history
 from desktop.core.chatgpt.errors import AuthError, ChatGPTError, friendly_failure
 from desktop.core.chatgpt.responses import Usage
-from desktop.core.codex.items import attachment_block
-from desktop.core.codex.policy import APPROVAL_OPTIONS
+from desktop.core.engine_items import attachment_block
 from desktop.core.context import ContextState, format_tokens
 from desktop.core.context_envelope import wrap as wrap_context
 from desktop.core.handoff import Handoff
@@ -55,8 +54,8 @@ from desktop.core.harness.tools import ToolContext
 from desktop.core.harness.toolset import HarnessTools
 from desktop.core.hooks import PromptEvent
 from desktop.core.memory.launch import new_run
-from desktop.core.prompts import QuestionView
-from desktop.core.session_manager import SESSION_STATE_LABELS, LiveSettings, SessionState, SteerOutcome
+from desktop.core.prompts import APPROVAL_OPTIONS, QuestionView
+from desktop.core.session_state import SESSION_STATE_LABELS, LiveSettings, SessionState, SteerOutcome
 from desktop.core.toolinfo import working_label as label_for_working_state
 from desktop.core.transcript import PromptStatus, ToolStatus, Transcript, Turn, TurnStatus, UserBlock
 from desktop.core.usage import Tokens, own_output
@@ -137,6 +136,7 @@ class ChatGPTController:
     recalled: set[str] = field(default_factory=set)
     saved: SavedSession = field(init=False)
     _usage_total: Tokens | None = None
+    _usage_models: dict[str, Tokens] = field(default_factory=dict)
     _turn: Turn | None = None
     _turn_task: asyncio.Task[Any] | None = None
     _turn_done: asyncio.Event | None = None
@@ -244,6 +244,9 @@ class ChatGPTController:
         conversation reports where it was and adds nothing twice."""
         return {"self": self._usage_total} if self._usage_total is not None else {}
 
+    def usage_model_series(self) -> dict[str, tuple[str, Tokens]]:
+        return {f"model:{model}": (model, tokens) for model, tokens in self._usage_models.items()}
+
     def _output_so_far(self) -> int | None:
         return own_output(self.usage_series())
 
@@ -271,6 +274,7 @@ class ChatGPTController:
         self._ready()
 
     async def open_saved(self) -> None:
+        self._notify("state")  # announce the opening tab so its cached history can be shown before reading the archive
         saved = await asyncio.to_thread(self.manager.sessions.load, self.session_id)
         if saved is None:
             raise ChatGPTError("这个会话的存档找不到了。", code="missing_session")
@@ -286,6 +290,7 @@ class ChatGPTController:
         usage = saved.usage
         if usage:
             self._usage_total = Tokens(usage.get("input", 0), usage.get("output", 0), None, usage.get("cacheRead", 0))
+        self._usage_models = {model: tokens for model, raw in saved.usage_models.items() if (tokens := Tokens.of(raw)) is not None}
         self.context = ContextState(used=saved.context_used or None, window=self.manager.model_window(self.model), model=self.model)
         self.saved_settings = LiveSettings(model=self.model, reasoning=self.reasoning, autonomy=self.autonomy, mode=self.mode)
         if recovered:
@@ -487,7 +492,14 @@ class ChatGPTController:
             self.saved.mode = PLAN if self.mode == PLAN else ""
             notes: list[str] = []
             instructions = build_instructions(
-                self.project, model=model, level=self.autonomy, servers=tools.servers(), notes=notes, plan=plan, skills=found
+                self.project,
+                model=model,
+                level=self.autonomy,
+                servers=tools.servers(),
+                notes=notes,
+                plan=plan,
+                skills=found,
+                think_chinese=self.manager.settings.think_chinese,
             )
             if tuple(notes) != self._prompt_notes:
                 self._prompt_notes = tuple(notes)
@@ -502,6 +514,7 @@ class ChatGPTController:
                 instructions=instructions,
                 shape=self.manager.shape,
                 conversation=self.session_id,
+                max_steps=lambda: self.manager.settings.max_steps,
                 **self._carried_measure(model),
             )
             # The loop works on the view (what the model reads: the summary of the early part, then the rest); what it adds
@@ -529,7 +542,7 @@ class ChatGPTController:
         if end.reason == "incomplete":
             note = STOP_NOTES.get(end.detail, f"回答没有说完（{end.detail}）。")
         elif end.reason == "step_limit":
-            note = f"这一轮用了 {end.steps} 步还没结束，先停在这里；可以回复「继续」。"
+            note = f"这一轮用了 {end.steps} 步还没结束，先停在这里；可在设置 → 会话里调整「单轮步数上限」，或回复「继续」。"
         if note:
             self.transcript.add_notice(note)
         self._release_steers()
@@ -649,6 +662,7 @@ class ChatGPTController:
                 await asyncio.wait_for(done.wait(), INTERRUPT_GRACE_SECONDS)
         if self._turn is turn:
             log.warning("the turn did not end within %.0f s of the stop request", INTERRUPT_GRACE_SECONDS)
+            self._release_steers()  # (the loop never took them: back to the user, not into the next turn)
             self.transcript.abort_turn("停止超时：这里先停止显示。")
             self._record_turn("interrupted")
             # The loop of this turn is still winding down but no longer owns the conversation (``_Watch`` drops what it
@@ -743,6 +757,10 @@ class ChatGPTController:
     def _add_usage(self, usage: Usage, *, measures_context: bool = True) -> None:
         tokens = usage.tokens()
         self._usage_total = tokens if self._usage_total is None else self._usage_total.plus(tokens)
+        model = self.running_model
+        if model:
+            self._usage_models[model] = self._usage_models.get(model, Tokens()).plus(tokens)
+            self.saved.usage_models = {name: value.to_json() for name, value in self._usage_models.items()}
         total = self._usage_total
         self.saved.usage = {"input": total.input_tokens, "output": total.output_tokens, "cacheRead": total.cache_read_tokens}
         if not measures_context:  # (a summary request: it counts, but it says nothing about how full the conversation is)
@@ -933,7 +951,8 @@ class ChatGPTController:
         without them)."""
         if self._live() is None:
             return None
-        prompt = self.transcript.add_question_prompt(call.call_id, views)
+        who = "API 模型" if self.running_model.startswith("api:") else "ChatGPT Plan"
+        prompt = self.transcript.add_question_prompt(call.call_id, views, who=who)
         self._changed()
         if prompt is None or prompt.status is not PromptStatus.PENDING:
             return None

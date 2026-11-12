@@ -1,5 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { ListTodo } from "lucide-react";
 import { currentSession, useStore } from "./store";
+import { latestPlan } from "./lib/plan";
 import { Sidebar } from "./components/Sidebar";
 import { Tabs } from "./components/Tabs";
 import { Transcript } from "./components/Transcript";
@@ -7,6 +9,7 @@ import { AgentBar, AgentPanel } from "./components/Agents";
 import { FilePanel, PathMenuHost } from "./components/FilePanel";
 import { Composer } from "./components/Composer";
 import { StatusBar } from "./components/StatusBar";
+import { PlanPanel } from "./components/PlanPanel";
 import { ChatGPTWelcome, DialogHost, DropOverlay, EmptyPage, LightboxHost } from "./components/Overlays";
 import { ReviewBar, WIDTHS } from "./components/Review";
 import { TitleBar } from "./components/TitleBar";
@@ -35,10 +38,23 @@ function useTheme() {
 
 function Main() {
   const session = useStore(currentSession);
+  const inspectorOpen = useStore((s) => (s.agentPanel !== null && s.agentPanel.sessionId === s.currentId) || (s.filePanel !== null && s.filePanel.sessionId === s.currentId));
   const setDragging = useStore((s) => s.setDragging);
   const say = useStore((s) => s.say);
   const attachFiles = useStore((s) => s.attachFiles);
   const depth = useRef(0);
+  const plan = useMemo(() => latestPlan(session?.turns ?? []), [session?.turns]);
+  const [closedPlans, setClosedPlans] = useState<Set<string>>(() => new Set());
+  const planOpen = !!session && !!plan && !inspectorOpen && !closedPlans.has(session.id);
+  const setPlanOpen = (open: boolean) => {
+    if (!session) return;
+    setClosedPlans((previous) => {
+      const next = new Set(previous);
+      if (open) next.delete(session.id);
+      else next.add(session.id);
+      return next;
+    });
+  };
 
   const hasFiles = (e: React.DragEvent) => [...e.dataTransfer.types].includes("Files");
   return (
@@ -71,11 +87,24 @@ function Main() {
         void attachFiles(sess.id, files);
       }}
     >
-      <Tabs />
-      {/* keyed: Python numbers turns and blocks per conversation, so two conversations share ids */}
-      {session ? <Transcript key={session.id} session={session} /> : <EmptyPage />}
-      {session && <AgentBar session={session} />}
-      <Composer />
+      <Tabs>
+        {plan && !inspectorOpen && (
+          <button type="button" className={`plan-toggle${planOpen ? " open" : ""}`} aria-label={planOpen ? "关闭计划栏" : "打开计划栏"} aria-expanded={planOpen} aria-controls={planOpen ? "conversation-plan" : undefined} onClick={() => setPlanOpen(!planOpen)}>
+            <ListTodo size={16} aria-hidden />
+            <span>计划</span>
+            <span className="num">{plan.completed}/{plan.steps.length}</span>
+          </button>
+        )}
+      </Tabs>
+      <div className="conversation-body">
+        <div className="conversation-column">
+          {/* keyed: Python numbers turns and blocks per conversation, so two conversations share ids */}
+          {session ? <Transcript key={session.id} session={session} /> : <EmptyPage />}
+          {session && <AgentBar session={session} />}
+          <Composer />
+        </div>
+        {planOpen && plan && <PlanPanel key={`plan:${session.id}`} plan={plan} onClose={() => setPlanOpen(false)} />}
+      </div>
       <DropOverlay />
     </main>
   );

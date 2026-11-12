@@ -32,8 +32,8 @@ export const PROJECTS = [
 const TITLES = {
   preference: ["回答用中文，代码标识符保持英文", "先给结论，再给理由", "提交信息用英文祈使句", "不要在回复里用表情符号", "解释改动时带上文件路径和行号", "命名用完整单词，不用缩写", "改代码前先读 AGENTS.md", "测试失败时贴出完整输出", "界面文字一律中文", "长命令拆成几步说明", "能用标准库就不引入新依赖", "图表优先用深色背景"],
   convention: ["改了 frontend 要先 npm run build:app", "单元测试：npm run unit", "样式类名加组件前缀", "新文件用 LF 换行", "公开仓库里不写真实路径和邮箱", "Python 只用 3.11 的 .venv", "提交前看一遍 git status", "截图放在 sandbox/shots", "设置在 %APPDATA%\\WittyCode", "每个任务结束更新 docs/handoff.md", "e2e 用 Rig 驱动真实窗口", "组件只用 tokens.css 的变量"],
-  pitfall: ["PowerShell 5.1 不支持 && 和 ||", "Edit 工具改文件前要重新读一遍", "qasync 的定时器在 loop 关闭后不会被杀", "here-string 里的中文会变成问号", "offscreen 平台下窗口不激活", "runJavaScript 只带得回标量", "类名撞了会把别的组件弄乱", "QDragEnterEvent 用 QPointF 会崩溃", "file:// 下 ES module 脚本加载不了", "Droid 对未知模型 id 会静默替换"],
-  fact: ["Codex 数据目录是 E:\\tools\\codex", "每个 droid.exe 约 300 MB", "Node 24 能直接运行 .ts", "Windows 11 窗口圆角半径 8px", "Haiku 5.5 的窗口是 872000", "提示缓存空闲约 5 分钟失效", "Codex 的 rollout 时间戳是 UTC", "ChatGPT Plan 的访问令牌 1 小时过期", "Devin 走 devin acp", "页面构建成单文件 index.html"],
+  pitfall: ["PowerShell 5.1 不支持 && 和 ||", "Edit 工具改文件前要重新读一遍", "qasync 的定时器在 loop 关闭后不会被杀", "here-string 里的中文会变成问号", "offscreen 平台下窗口不激活", "runJavaScript 只带得回标量", "类名撞了会把别的组件弄乱", "QDragEnterEvent 用 QPointF 会崩溃", "file:// 下 ES module 脚本加载不了", "引擎对未知模型 id 会静默替换"],
+  fact: ["缓存目录是 D:\\cache\\inventory", "每个 Devin 进程约 300 MB", "Node 24 能直接运行 .ts", "Windows 11 窗口圆角半径 8px", "GPT-6.1-Sol 的窗口是 400000", "提示缓存空闲约 5 分钟失效", "会话文件的时间戳是 UTC", "ChatGPT Plan 的访问令牌 1 小时过期", "Devin 走 devin acp", "页面构建成单文件 index.html"],
 };
 const SENTENCES = [
   "这条是在一次真实的会话里记下的。",
@@ -43,7 +43,7 @@ const SENTENCES = [
   "如果不确定，先在 sandbox 里试一下。",
   "改动以后跑一遍单元测试和界面检查。",
   "用户明确要求过，不要自作主张地改掉。",
-  "这个问题第一次出现是在接入 Codex 的时候。",
+  "这个问题第一次出现是在接入 Devin 的时候。",
   "相关代码在 core/memory/store.py。",
   "旧的做法已经不再适用，别照着旧文档做。",
 ];
@@ -89,7 +89,7 @@ export function synthNotes(n, { seed = 11, now = NOW, projects = PROJECTS, globa
     let text = "";
     while (text.length < length) text += SENTENCES[Math.floor(rnd() * SENTENCES.length)];
     text = text.slice(0, Math.max(12, length));
-    const who = pick(rnd, ["user", "droid", "codex", "devin", "chatgpt", "cursor", "unknown"], [3, 3, 2.2, 1, 1.4, 0.35, 0.3]);
+    const who = pick(rnd, ["user", "chatgpt", "devin", "earlier-agent", "cursor", "unknown"], [3, 3, 2.2, 1.4, 0.35, 0.3]);
     const conversation = rnd() < 0.6 ? { title: CONVERSATIONS[Math.floor(rnd() * CONVERSATIONS.length)], rowId: `s-${seed}-${i}`, projectId: project?.path ?? "" } : undefined;
     const source = who === "user" ? { kind: "user" } : who === "unknown" ? { kind: "unknown" } : { kind: "agent", engine: who, ...(conversation ? { conversation } : {}) };
     const age = Math.exp(Math.log(2 * MIN) + rnd() * (Math.log(90 * DAY) - Math.log(2 * MIN)));
@@ -120,8 +120,8 @@ export function fewNotes(now = NOW) {
   const user = { kind: "user" };
   return [
     { ...base, id: "m1", title: "回答用中文，代码标识符保持英文", text: "和我说话用中文；变量名、函数名、命令、报错原文保持英文，不要翻译。", scope: "global", project: "", projectName: "", kind: "preference", created: now - 72 * HOUR, updated: now - 72 * HOUR, source: user, editor: user },
-    { ...base, id: "m3", title: "PowerShell 5.1 不支持 && 和 ||", text: "这台机器的 shell 是 Windows PowerShell 5.1：用分号串联命令，用 $LASTEXITCODE 判断结果。", scope: "global", project: "", projectName: "", kind: "pitfall", created: now - 26 * HOUR, updated: now - 26 * HOUR, source: { kind: "agent", engine: "droid", conversation: { title: "整理测试", rowId: "s-tests", projectId: PROJECTS[0].path } }, editor: { kind: "agent", engine: "droid" } },
-    { ...base, id: "m5", title: "改了 frontend 要先 npm run build:app", text: "界面是单文件页面，不构建的话应用和 e2e 跑的都是旧页面。构建后再跑 node scripts/check.mjs。", scope: "project", project: PROJECTS[0].path, projectName: "wittycode", kind: "convention", created: now - 40 * MIN, updated: now - 40 * MIN, source: { kind: "agent", engine: "codex", conversation: { title: "修复缓存", rowId: "s-file-ops", projectId: PROJECTS[0].path } }, editor: { kind: "agent", engine: "codex" } },
+    { ...base, id: "m3", title: "PowerShell 5.1 不支持 && 和 ||", text: "这台机器的 shell 是 Windows PowerShell 5.1：用分号串联命令，用 $LASTEXITCODE 判断结果。", scope: "global", project: "", projectName: "", kind: "pitfall", created: now - 26 * HOUR, updated: now - 26 * HOUR, source: { kind: "agent", engine: "chatgpt", conversation: { title: "整理测试", rowId: "s-tests", projectId: PROJECTS[0].path } }, editor: { kind: "agent", engine: "chatgpt" } },
+    { ...base, id: "m5", title: "改了 frontend 要先 npm run build:app", text: "界面是单文件页面，不构建的话应用和 e2e 跑的都是旧页面。构建后再跑 node scripts/check.mjs。", scope: "project", project: PROJECTS[0].path, projectName: "wittycode", kind: "convention", created: now - 40 * MIN, updated: now - 40 * MIN, source: { kind: "agent", engine: "devin", conversation: { title: "修复缓存", rowId: "s-file-ops", projectId: PROJECTS[0].path } }, editor: { kind: "agent", engine: "devin" } },
   ];
 }
 

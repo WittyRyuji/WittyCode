@@ -1,5 +1,5 @@
-"""The Devin engine: the Devin account (Cognition's agent) through ``devin acp``, next to Droid's ``SessionManager`` and the
-Codex engine.
+"""The optional Devin engine: the user's Devin account (Cognition's agent) through ``devin acp``, next to WittyCode's own
+loop (``core/chatgpt``).
 
 One long-lived ``devin acp`` process serves everything: the model list, the session list and every open session (every
 notification and request carries ``sessionId``; two sessions at once on one connection were exercised on the real
@@ -24,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import webbrowser
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -31,7 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from desktop import __version__
-from desktop.core.codex.rpc import CREATE_NO_WINDOW
+from desktop.core.jsonrpc import CREATE_NO_WINDOW
 from desktop.core.devin import items
 from desktop.core.devin.account import DevinStatus, account_json, parse_status
 from desktop.core.devin.controller import DevinController
@@ -50,7 +51,7 @@ from desktop.core.devin.rpc import AcpClient
 from desktop.core.handoff import Handoff
 from desktop.core.hooks import Hooks
 from desktop.core.memory.launch import MemoryLaunch
-from desktop.core.session_manager import SessionState
+from desktop.core.session_state import SessionState
 from desktop.core.settings import AppSettings, normalize_folder
 from desktop.core.transcript import Transcript
 
@@ -77,7 +78,7 @@ def default_client_factory(binary: DevinBinary, **handlers: Any) -> AcpClient:
 
 @dataclass(frozen=True, slots=True)
 class DevinSavedSession:
-    """A saved session for the sidebar, with the attributes the backend reads from Droid's ``SavedSession``."""
+    """A saved session for the sidebar, with the attributes the backend reads of every engine's saved sessions."""
 
     id: str
     title: str
@@ -157,10 +158,12 @@ class DevinEngine:
         clock: Callable[[], float] = time.time,
         login_timeout: float = LOGIN_TIMEOUT_SECONDS,
         cli_env: Mapping[str, str] | None = None,
+        open_url: Callable[[str], Any] | None = None,
     ) -> None:
         self.settings = settings
         self._locate: Locate = locate if locate is not None else locate_devin
         self._client_factory: ClientFactory = client_factory if client_factory is not None else default_client_factory
+        self._open_url = open_url if open_url is not None else webbrowser.open
         self._clock = clock
         self.login_timeout = login_timeout
         self._cli_env = dict(cli_env) if cli_env is not None else None
@@ -275,7 +278,13 @@ class DevinEngine:
                     "initialize",
                     {
                         "protocolVersion": 1,
-                        "clientCapabilities": {"fs": {"readTextFile": False, "writeTextFile": False}, "terminal": False},
+                        # ``elicitation``: Devin asks the user questions (its ``ask_user_question``) only of a client that
+                        # says it can show them (ACP: each mode named explicitly); without it Devin never asks.
+                        "clientCapabilities": {
+                            "fs": {"readTextFile": False, "writeTextFile": False},
+                            "terminal": False,
+                            "elicitation": {"form": {}, "url": {}},
+                        },
                         "clientInfo": dict(CLIENT_INFO),
                     },
                     timeout=INITIALIZE_SECONDS,
@@ -464,6 +473,11 @@ class DevinEngine:
         folder.mkdir(parents=True, exist_ok=True)
         return str(folder)
 
+    def open_external(self, url: str) -> None:
+        """Open a page in the user's browser, after the user agreed to (a URL-mode elicitation: a sign-in Devin asks for)."""
+        if url.lower().startswith(("http://", "https://")):
+            self._open_url(url)
+
     async def list_models(self, *, refresh: bool = False) -> list[DevinModel]:
         """The account's models, with the thought levels each offers (cached; ``refresh`` asks again).
 
@@ -572,7 +586,7 @@ class DevinEngine:
     ) -> DevinController:
         """Start a session in ``project``. ``transcript`` / ``handoff`` continue a conversation from another engine.
 
-        A failure leaves the controller CLOSED with ``last_error`` (and an error block in the transcript), like Droid's."""
+        A failure leaves the controller CLOSED with ``last_error`` (and an error block in the transcript), like the own loop's."""
         controller = DevinController(
             manager=self,
             project=Path(normalize_folder(project)),

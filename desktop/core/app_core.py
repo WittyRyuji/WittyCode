@@ -5,9 +5,9 @@ through a ``Platform`` object, and the page's side is a plain ``emit(event, payl
 this behind QWebChannel; the tests drive it directly with fakes.
 
 Concepts
-- A *conversation* is what one tab shows. Its controller is the engine's session (Droid, or Codex); when the user picks a
-  model of the other engine the conversation gets a new controller that continues the same transcript, and the earlier text
-  is handed over with the next message (``core/handoff``). The conversation id (``cid``) stays.
+- A *conversation* is what one tab shows. Its controller is the engine's session (WittyCode's own loop, or Devin); when
+  the user picks a model of the other engine the conversation gets a new controller that continues the same transcript,
+  and the earlier text is handed over with the next message (``core/handoff``). The conversation id (``cid``) stays.
 - Sidebar rows are saved sessions (native ids) plus open conversations (cids); a saved session that is open is shown once.
 
 Calls (page -> here) are ``call(method, params)``; events (here -> page) are listed in ``frontend/src/protocol.ts``.
@@ -33,8 +33,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
-from droid_sdk import Autonomy, Mode, ReasoningEffort
-
 from desktop.core.attachments import (
     HARD_ATTACHMENTS,
     HARD_TOTAL_BYTES,
@@ -51,40 +49,30 @@ from desktop.core.attachments import (
 from desktop.core.cache import Cache
 from desktop.core.catalog import API_PREFIX, Catalog, Target, build_catalog, settings_for_model
 from desktop.core.chatgpt.errors import ChatGPTError
-from desktop.core.droid_limits import DroidLimits
+from desktop.core.hooks import Hooks
 from desktop.core.llm.backend import is_api_model
-from desktop.core.droid_locator import ENV_OVERRIDE, DroidNotFoundError, locate_droid
 from desktop.core import files as filetools
 from desktop.core.handoff import AS_TEXT, CarryOption, attachment_text, build_handoff, carry_options, carry_overage, conversation_messages
 from desktop.core.harness import goal as goals
+from desktop.core import language
 from desktop.core.harness import skills
 from desktop.core.import_bridge import ImportBridge
 from desktop.core.chatgpt import side as chatgpt_side
-from desktop.core.codex import side as codex_side
 from desktop.core.devin import side as devin_side
 from desktop.core.memory.bridge import MemoryBridge, explain
 from desktop.core.memory.curator import Curator, Exchange
 from desktop.core.memory.review import migrate_proposals
 from desktop.core.memory.launch import MemoryLaunch
 from desktop.core.memory.store import MemoryRejected
-from desktop.core.session_manager import (
-    SESSION_LIST_LIMIT,
-    Peek,
-    SessionLimitError,
-    SessionManager,
-    SessionState,
-    eviction_message,
-    friendly_failure,
-)
+from desktop.core.session_state import SessionLimitError, SessionState, eviction_message
 from desktop.core.settings import (
-    AUTONOMY_LEVELS,
     CHATGPT_PERMISSIONS,
-    CODEX_PERMISSIONS,
     DEVIN_PERMISSIONS,
     FOLLOW_UPS,
     FONT_SCALES,
     COMPACT_AT_RANGE,
     MAX_OPEN_SESSIONS_RANGE,
+    MAX_STEPS_RANGE,
     MAX_SESSION_TITLE,
     MEMORY_ENGINES,
     SIDEBAR_WIDTH_RANGE,
@@ -110,39 +98,34 @@ SNAPSHOT_SECONDS = 2.0
 """A session is written to the cache this long after it last changed (and when it closes)."""
 MEMORY_POLL_SECONDS = 1.0
 """How often the application looks whether the shared memory was written (by an agent, through its own memory server)."""
-WARM_ROWS = 8
-"""How many of a project's newest saved sessions are read into the cache in the background when they are not in it yet."""
-WARM_DELAY_SECONDS = 1.5
-"""The background reading starts this long after the sidebar has its rows (the window and the models come first)."""
-WARM_PAUSE_SECONDS = 0.05
-"""And rests this long between two sessions, so the page and the user's own clicks are never behind it."""
 QUEUE_SECONDS = 180.0
 """How long a message typed while a session connects waits for it."""
 ACTIVITY_STEP = 10.0
-"""A running turn moves its session's activity time (sidebar order and age) at most this often, in seconds: output
-arrives many times a second, and every move re-sorts the list and patches the row."""
+"""A running turn updates its displayed activity age at most this often, in seconds. Activity never changes row order."""
 EVICTION_NOTICE = "已自动关闭最久未使用的会话"
 RETRY_NOTICE = "这条消息没有发送成功：附件已放回输入框，可以直接重试。"
 RETRY_OVER_NOTICE = "这条消息没有发送成功：附件已放回输入框。"
-CODEX_PREFIX = "cx:"
-"""Row ids of saved Codex threads in the sidebar (a Droid session id has no such prefix)."""
+SESSION_LIST_LIMIT = None
+"""List all sessions: an activity-based cutoff would still make manually ordered rows appear and disappear."""
 DEVIN_ROW_PREFIX = "dv:"
 """Row ids of saved Devin sessions in the sidebar."""
 CHATGPT_ROW_PREFIX = "cg:"
-"""Row ids of saved ChatGPT Plan conversations in the sidebar."""
-ROW_PREFIXES = {"codex": CODEX_PREFIX, "devin": DEVIN_ROW_PREFIX, "chatgpt": CHATGPT_ROW_PREFIX}
-ENGINE_NAMES = {"droid": "Droid", "codex": "Codex", "devin": "Devin", "chatgpt": "ChatGPT Plan"}
+"""Row ids of saved conversations of WittyCode's own loop (ChatGPT Plan and the API providers) in the sidebar."""
+ROW_PREFIXES = {"devin": DEVIN_ROW_PREFIX, "chatgpt": CHATGPT_ROW_PREFIX}
+ENGINE_NAMES = {"devin": "Devin", "chatgpt": "ChatGPT Plan"}
+OWN_ENGINE = "chatgpt"
+"""WittyCode's own agent loop: ChatGPT Plan's models and the API providers' (``core/chatgpt``, ``core/harness``)."""
 
 
 def engine_label(engine: str, model: Mapping[str, Any] | None) -> str:
-    """What the page calls the place a model runs. An API provider's model is run by a droid process, but to the user it is
-    "API" (the word on the model chip), not Factory's Droid."""
+    """What the page calls the place a model runs: an API provider's model runs in WittyCode's own loop, but to the user
+    it is "API" (the word on the model chip)."""
     source = str((model or {}).get("source") or "")
-    return "API" if source.startswith(API_PREFIX) else ENGINE_NAMES[engine]
+    return "API" if source.startswith(API_PREFIX) else ENGINE_NAMES.get(engine, engine)
 
 
 def row_id(engine: str, native: str) -> str:
-    """The sidebar row id of a saved session: Droid's own id, the others' behind their prefix."""
+    """The sidebar row id of a saved session: the engine's own id behind the engine's prefix."""
     return ROW_PREFIXES.get(engine, "") + native
 WINDOW_WAIT_STEPS = 20
 WINDOW_WAIT_STEP = 0.05
@@ -231,8 +214,12 @@ class Conversation:
     dirty: bool = True
     switching: bool = False
     """A change of engine is under way: the new controller failing to open must not close the conversation."""
+    created_at: float = field(default_factory=time.time)
+    sidebar_key: str = ""
+    """Stable sidebar identity, migrated to the native row id once it is known (also across engine changes)."""
     preview: bool = False
     """The page shows the cached conversation while the real history is still being loaded."""
+    cached_turns: list[dict[str, Any]] = field(default_factory=list)
     cached_meta: dict[str, Any] = field(default_factory=dict)
     """Settings, token use and context size as they were when the session was last cached: shown until the live ones are known."""
     json_cache: dict[str, tuple[int, dict[str, Any]]] = field(default_factory=dict)
@@ -257,7 +244,7 @@ class Conversation:
 
     @property
     def engine(self) -> str:
-        return getattr(self.controller, "engine", "droid")
+        return getattr(self.controller, "engine", OWN_ENGINE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,6 +257,7 @@ class SavedRow:
     count: int = 0
     model: str = ""
     """The page's id of the model, where the engine's list of conversations says which one it was on (the own loop's does)."""
+    created: datetime | None = None
 
 
 def _aware(stamp: datetime | None) -> datetime:
@@ -284,7 +272,7 @@ def json_copy(value: Any) -> Any:
 
 
 def _row_to_cache(row: SavedRow) -> dict[str, Any]:
-    return {"id": row.id, "native": row.native, "engine": row.engine, "title": row.title, "modified": row.modified.timestamp(), "count": row.count, "model": row.model}
+    return {"id": row.id, "native": row.native, "engine": row.engine, "title": row.title, "modified": row.modified.timestamp(), "count": row.count, "model": row.model, "created": row.created.timestamp() if row.created else None}
 
 
 def _row_from_cache(raw: Any) -> SavedRow | None:
@@ -297,6 +285,7 @@ def _row_from_cache(raw: Any) -> SavedRow | None:
             datetime.fromtimestamp(float(raw["modified"]), timezone.utc),
             int(raw.get("count") or 0),
             str(raw.get("model") or ""),
+            datetime.fromtimestamp(float(raw["created"]), timezone.utc) if raw.get("created") else None,
         )
     except (KeyError, TypeError, ValueError, OSError, OverflowError, AttributeError):
         return None
@@ -319,20 +308,12 @@ def _is_complete(snapshot: Mapping[str, Any]) -> bool:
     return bool(meta.get("settings")) and bool(meta.get("usage")) and isinstance(context, Mapping) and context.get("used") is not None
 
 
-def _enum(kind: type, value: str) -> Any:
-    try:
-        return kind(value) if value else None
-    except ValueError:
-        return None
-
-
 class AppCore:
     def __init__(
         self,
-        manager: SessionManager,
+        settings: AppSettings,
         platform: Platform,
         *,
-        codex: Any = None,
         devin: Any = None,
         chatgpt: Any = None,
         providers: Any = None,
@@ -340,35 +321,30 @@ class AppCore:
         emit: Callable[[str, dict[str, Any]], None] | None = None,
         offline: bool = False,
         cache: Cache | None = None,
-        read_ahead: bool = True,
         memory: MemoryLaunch | None = None,
     ) -> None:
-        self.manager = manager
-        self.settings: AppSettings = manager.settings
+        self.settings: AppSettings = settings
         self.platform = platform
-        self.codex = codex
         self.devin = devin
         self.chatgpt = chatgpt
+        self.hooks = Hooks()
+        """The application's own hooks (``core/hooks``), one set for every engine."""
         self.memory: MemoryBridge | None = None
         """The shared memory (``core/memory``), when the application has one: every engine's sessions are given it."""
         if memory is not None:
             self.memory = MemoryBridge(memory, row_id=row_id, review_mode=True)
-            manager.memory = memory
-            # One set of the application's hooks for all three engines (core/hooks): the memory's is the first.
-            manager.hooks.on_prompt(memory.prompt_hook)
-            if codex is not None and hasattr(codex, "memory"):
-                codex.memory = memory
-                codex.hooks = manager.hooks
-            if devin is not None and hasattr(devin, "memory"):
-                devin.memory = memory
-                devin.hooks = manager.hooks
-            if chatgpt is not None and hasattr(chatgpt, "memory"):
-                chatgpt.memory = memory
+            # the memory's hook is the first
+            self.hooks.on_prompt(memory.prompt_hook)
+            for engine in (devin, chatgpt):
+                if engine is not None and hasattr(engine, "memory"):
+                    engine.memory = memory
         # Skills and custom commands (harness/skills): the same hook for every engine, with or without the memory.
-        manager.hooks.on_prompt(skills.prompt_hook)
-        for engine in (codex, devin, chatgpt):
+        self.hooks.on_prompt(skills.prompt_hook)
+        # The language of the models' thinking (core/language): the own loop has it in its instructions.
+        self.hooks.on_prompt(language.prompt_hook(lambda: self.settings.think_chinese))
+        for engine in (devin, chatgpt):
             if engine is not None and hasattr(engine, "hooks"):
-                engine.hooks = manager.hooks
+                engine.hooks = self.hooks
         self.curator: Curator | None = None
         """Asks, after a turn, what is worth keeping and writes what is sure enough into the memory itself; the user looks
         at the week's notes once, on the memory page (``core/memory/review``)."""
@@ -398,8 +374,6 @@ class AppCore:
         self._memory_handle: asyncio.TimerHandle | None = None
         self._runs_handle: asyncio.TimerHandle | None = None
         self.providers = providers
-        if providers is not None and hasattr(providers, "limits_of"):
-            manager.limits = DroidLimits(providers)  # (Droid does not know the windows of the API providers' models)
         self.persist = persist
         self.offline = offline
         self.cache = cache if cache is not None else Cache(None)
@@ -410,13 +384,6 @@ class AppCore:
         self._windows: dict[str, int] = {}
         """Context window of each model (page model id) as a live session last reported it: kept in the cache so that
         a session shown from the cache, or read without being opened, has its ``Context 38K/872K`` at once."""
-        self.read_ahead = read_ahead
-        self._warm_queue: list[str] = []
-        self._warm_task: asyncio.Future[Any] | None = None
-        self._warmed: dict[str, float] = {}
-        self._touched: set[str] = set()
-        """Rows that an open conversation has written to the cache during this run: what it wrote is newer than anything
-        read ahead, so reading ahead leaves them alone."""
         page = emit or (lambda event, payload: None)
 
         def emit_and_remember(event: str, payload: dict[str, Any]) -> None:
@@ -441,9 +408,9 @@ class AppCore:
         self._select_next = False
         self._opening_meta: dict[str, str] | None = None
         self._saved: dict[str, list[SavedRow]] = {}
-        # row id -> when a session closed during this run last had a message. Codex stamps a thread with the start of
-        # its turn, sometimes the end (measured: up to the turn's length apart), so a row that has just closed would
-        # otherwise move from the time shown while it was open.
+        # row id -> when a session closed during this run last had a message. An engine may stamp a saved session with
+        # the start of its turn, sometimes the end, so a row that has just closed would otherwise move from the time shown
+        # while it was open.
         self._spoken: dict[str, float] = {}
         self._tasks: set[asyncio.Future[Any]] = set()
         self._flush_handle: asyncio.TimerHandle | None = None
@@ -454,14 +421,7 @@ class AppCore:
         self._thumbs: weakref.WeakKeyDictionary[Attachment, Thumbnail | None] = weakref.WeakKeyDictionary()
         self._models_loaded = False
         self._shutting_down = False
-        self._droid_version = ""
 
-        manager.add_listener(self._on_event)
-        if codex is not None:
-            codex.add_listener(self._on_event)
-            add_account_listener = getattr(codex, "add_account_listener", None)
-            if add_account_listener is not None:
-                add_account_listener(self._on_codex_account)
         if devin is not None:
             devin.add_listener(self._on_event)
             devin.add_account_listener(self._on_devin_account)
@@ -508,20 +468,14 @@ class AppCore:
             log.warning("could not save settings: %s", error)
             self.say(f"无法保存设置：{error}")
 
-    def _droid_path(self) -> str:
-        try:
-            return str(locate_droid(self.settings.droid_path or None).path)
-        except (DroidNotFoundError, OSError):
-            return ""
-
     def _levels_of(self, engine: str) -> tuple[str, ...]:
         """The permission scale of an engine."""
-        return {"codex": CODEX_PERMISSIONS, "devin": DEVIN_PERMISSIONS, "chatgpt": CHATGPT_PERMISSIONS}.get(engine, AUTONOMY_LEVELS)
+        return DEVIN_PERMISSIONS if engine == "devin" else CHATGPT_PERMISSIONS
 
     def _autonomy_of(self, engine: str) -> str:
         """The permission level new sessions of an engine start with."""
         s = self.settings
-        return {"codex": s.codex_autonomy, "devin": s.devin_autonomy, "chatgpt": s.chatgpt_autonomy}.get(engine, s.autonomy)
+        return s.devin_autonomy if engine == "devin" else s.chatgpt_autonomy
 
     def _engine_defaults(self, page_model: str) -> dict[str, str]:
         engine = self.catalog.engine_of(page_model)
@@ -541,23 +495,14 @@ class AppCore:
             # menu: not a model to start with (the setting stays, so unhiding it brings it back)
             model = ""
         if not model:
-            first = next(
-                (m for m in self.catalog.models if m["source"] == "factory" and not m.get("disabled") and m["id"] not in hidden),
-                None,
-            )
-            if first is None and not any(m["source"] == "factory" for m in self.catalog.models):
-                # Factory is not installed (or not signed in): the first model of whatever is there, in the menu's order.
-                # (Factory's models all hidden is a choice: Droid picks then, see above.)
-                first = next((m for m in self.catalog.models if not m.get("disabled") and m["id"] not in hidden), None)
+            # the first model of whatever there is, in the menu's order
+            first = next((m for m in self.catalog.models if not m.get("disabled") and m["id"] not in hidden), None)
             model = first["id"] if first else ""
         return self._engine_defaults(model)
 
     def settings_view(self) -> dict[str, Any]:
         return {
             "maxOpen": self.settings.max_open_sessions,
-            "droidPath": self.settings.droid_path,
-            "droidFound": self._droid_path(),
-            "codexPath": self.settings.codex_path,
             "devinPath": self.settings.devin_path,
             "hiddenModels": list(self.settings.hidden_models),
             "memoryEnabled": self.settings.memory_enabled,
@@ -572,6 +517,8 @@ class AppCore:
             "lastProject": self.settings.last_project,
             "compactAuto": self.settings.chatgpt_compact,
             "compactAt": self.settings.chatgpt_compact_at,
+            "maxSteps": self.settings.max_steps,
+            "thinkChinese": self.settings.think_chinese,
         }
 
     def project_rows(self) -> list[dict[str, Any]]:
@@ -597,16 +544,51 @@ class AppCore:
             if native:
                 taken.add(native)
                 taken.update(prefix + native for prefix in ROW_PREFIXES.values())
-        rows: list[tuple[datetime, dict[str, Any]]] = []
+        rows: list[tuple[str, float, dict[str, Any]]] = []
         for saved in self._saved.get(normalize_folder(folder), []):
             if saved.native in taken or saved.id in taken or saved.id in self.settings.archived_sessions:
                 continue
-            rows.append((saved.modified, self._saved_json(saved, folder)))
+            created = self.settings.session_created.get(saved.id, _aware(saved.created).timestamp())
+            rows.append((saved.id, created, self._saved_json(saved, folder)))
         for conv in open_here:
-            stamp = datetime.fromtimestamp(getattr(conv.controller, "active_at", time.time()), timezone.utc)
-            rows.append((stamp, {"id": conv.cid}))
-        rows.sort(key=lambda pair: pair[0], reverse=True)
-        return [row for _, row in rows]
+            rows.append((conv.sidebar_key, conv.created_at, {"id": conv.cid}))
+        ranks = {key: i for i, key in enumerate(self.settings.session_order)}
+        rows.sort(key=lambda row: (1, ranks[row[0]], row[0]) if row[0] in ranks else (0, -row[1], row[0]))
+        return [row for _, _, row in rows]
+
+    def _sync_sidebar_key(self, conv: Conversation) -> None:
+        key = self._row_of(conv) or conv.cid
+        if key == conv.sidebar_key:
+            return
+        previous = conv.sidebar_key
+        conv.sidebar_key = key
+        if previous in self.settings.session_order:
+            self.settings.session_order = list(dict.fromkeys(key if item == previous else item for item in self.settings.session_order))
+        if previous:
+            self.settings.session_created.pop(previous, None)
+        self.settings.session_created[key] = conv.created_at
+        self._save()
+
+    async def _m_session_reorder(self, params: dict[str, Any]) -> dict[str, Any]:
+        folder = params.get("projectId")
+        ident, target, after = params.get("id"), params.get("targetId"), params.get("after", False)
+        if not isinstance(folder, str) or not any(same_folder(folder, p) for p in self.settings.projects):
+            raise AppError("找不到这个项目。")
+        if not isinstance(ident, str) or not isinstance(target, str) or not isinstance(after, bool):
+            raise AppError("会话顺序不合法。")
+        rows = self._rows_for(folder)
+        ids = [row["id"] for row in rows]
+        if ident not in ids or target not in ids:
+            raise AppError("只能在同一个项目内拖动仍在列表中的会话。")
+        if ident == target:
+            return {"ok": True}
+        ids.remove(ident)
+        ids.insert(ids.index(target) + int(after), ident)
+        keys = [self._by_cid[item].sidebar_key if item in self._by_cid else item for item in ids]
+        self.settings.session_order = keys + [item for item in self.settings.session_order if item not in keys]
+        self._save()
+        self._emit_sidebar()
+        return {"ok": True}
 
     def _saved_json(self, saved: SavedRow, folder: str) -> dict[str, Any]:
         return {
@@ -665,57 +647,27 @@ class AppCore:
 
     async def _reload_project(self, folder: str) -> None:
         rows: list[SavedRow] = []
-        for item in await self.manager.list_sessions(folder):
-            if item.message_count == 0:  # (Droid keeps a file for a session nobody wrote to; there is nothing to reopen)
-                continue
-            rows.append(SavedRow(item.id, item.id, "droid", item.title or "", self._latest(item.id, item.modified_at), item.message_count or 0))
-        if self.codex is not None and self.settings.codex_enabled:
-            with contextlib.suppress(Exception):
-                for item in await self.codex.list_sessions(folder, SESSION_LIST_LIMIT):
-                    row_id = CODEX_PREFIX + item.id
-                    rows.append(SavedRow(row_id, item.id, "codex", item.title or "", self._latest(row_id, item.modified_at), item.message_count or 0))
         if self.devin is not None and self.settings.devin_enabled:
             with contextlib.suppress(Exception):
                 for item in await self.devin.list_sessions(folder, SESSION_LIST_LIMIT):
                     devin_row = DEVIN_ROW_PREFIX + item.id
-                    rows.append(SavedRow(devin_row, item.id, "devin", item.title or "", self._latest(devin_row, item.modified_at), item.message_count or 0))
+                    rows.append(SavedRow(devin_row, item.id, "devin", item.title or "", self._latest(devin_row, item.modified_at), item.message_count or 0, created=_aware(item.created_at)))
         if self.chatgpt is not None and (self.settings.chatgpt_enabled or self._has_api_models()):
             with contextlib.suppress(Exception):
                 for item in await self.chatgpt.list_sessions(folder, SESSION_LIST_LIMIT):
                     chatgpt_row = CHATGPT_ROW_PREFIX + item.id
                     stamp = datetime.fromtimestamp(item.modified_at, timezone.utc)
                     page_model = self.catalog.page_id("chatgpt", item.model) if item.model and self.catalog is not None else ""
-                    rows.append(SavedRow(chatgpt_row, item.id, "chatgpt", item.title or "", self._latest(chatgpt_row, stamp), item.messages, page_model))
+                    created = datetime.fromtimestamp(item.created_at, timezone.utc)
+                    rows.append(SavedRow(chatgpt_row, item.id, "chatgpt", item.title or "", self._latest(chatgpt_row, stamp), item.messages, page_model, created))
         self._saved[normalize_folder(folder)] = rows
         self._remember_rows(folder, rows)
         self._schedule_sidebar(folder)
-        self._schedule_warm(folder)
 
     # ------------------------------------------------------------------ models and accounts
 
     async def _load_models(self) -> None:
         folder = self.settings.projects[0] if self.settings.projects else str(Path.home())
-
-        async def from_droid() -> list[Any]:
-            try:
-                return list(await self.manager.list_models(folder, refresh=self._models_loaded))
-            except Exception as error:
-                log.warning("could not list models: %s", error)
-                # No Factory on this computer, and nobody asked for one: the application works with the other engines,
-                # so this is not worth a message. A path that was named and is wrong is a mistake to say so about.
-                named = bool(self.settings.droid_path.strip() or os.environ.get(ENV_OVERRIDE, "").strip())
-                if not (isinstance(error, DroidNotFoundError) and not named):
-                    self.say(f"读取模型列表失败：{friendly_failure(error)}")
-                return []
-
-        async def from_codex() -> list[Any]:
-            if self.codex is None or not self.settings.codex_enabled:
-                return []
-            with contextlib.suppress(Exception):
-                account = await self.codex.account()
-                if account.get("auth") in ("chatgpt", "api-key"):
-                    return list(await self.codex.list_models())
-            return []
 
         async def from_devin() -> list[Any]:
             if self.devin is None or not self.settings.devin_enabled:
@@ -736,8 +688,8 @@ class AppCore:
             return []
 
         async def from_providers() -> list[Any]:
-            """The API providers' models: read from settings.json, which takes no program to start. They are run by the
-            application's own loop, so without it (and without a provider store) there are none."""
+            """The API providers' models: read from the application's own file, which takes no program to start. They are
+            run by the application's own loop, so without it (and without a provider store) there are none."""
             lister = getattr(self.providers, "api_models", None)
             if self.chatgpt is None or lister is None:
                 return []
@@ -747,22 +699,18 @@ class AppCore:
                 log.warning("could not read the API providers' models: %s", error)
                 return []
 
-        # All take seconds (a droid.exe to start; the Codex and Devin accounts): asked together, not one after the other.
-        droid_models, codex_models, devin_models, chatgpt_models, api_models = await asyncio.gather(
-            from_droid(), from_codex(), from_devin(), from_chatgpt(), from_providers()
-        )
+        # Some take seconds (the Devin account and its process): asked together, not one after the other.
+        devin_models, chatgpt_models, api_models = await asyncio.gather(from_devin(), from_chatgpt(), from_providers())
         provider_of = getattr(self.providers, "provider_of", None)
         window_of = getattr(self.providers, "window_of", None)
         self.catalog = build_catalog(
-            droid_models,
-            codex_models=codex_models,
             devin_models=devin_models,
             chatgpt_models=chatgpt_models,
             api_models=api_models,
             provider_of=provider_of,
             window_of=window_of,
         )
-        self._models_loaded = bool(droid_models)
+        self._models_loaded = True
         self._remember_models()
         self.emit("models", {"models": self.catalog.models, "defaults": self.defaults()})
         for conv in self.order:
@@ -771,45 +719,6 @@ class AppCore:
 
     def _schedule_models(self) -> None:
         self._spawn(self._load_models(), quiet=True)
-
-    async def _droid_version_text(self) -> str:
-        path = self._droid_path()
-        if not path:
-            return ""
-
-        def run() -> str:
-            flags = 0x08000000 if sys.platform == "win32" else 0
-            try:
-                done = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=10, creationflags=flags)
-            except (OSError, subprocess.SubprocessError):
-                return ""
-            return (done.stdout or "").strip().splitlines()[0] if done.stdout.strip() else ""
-
-        return await asyncio.to_thread(run)
-
-    async def _factory(self) -> dict[str, Any]:
-        path = self._droid_path()
-        if not self._droid_version and path:
-            self._droid_version = await self._droid_version_text()
-        return {"signedIn": bool(path), "droidPath": path, "version": self._droid_version}
-
-    def _on_codex_account(self, account: Mapping[str, Any]) -> None:
-        """The engine noticed a change of the account (signed in elsewhere, a login finished, the limits moved)."""
-        if self._shutting_down:
-            return
-        self.emit("accounts", {"codex": {**account, "enabled": self.settings.codex_enabled}})
-
-    async def _codex_account(self) -> dict[str, Any]:
-        if self.codex is None:
-            data: dict[str, Any] = {"cli": "missing", "auth": "signed-out", "limits": []}
-        else:
-            try:
-                data = dict(await self.codex.account())
-            except Exception as error:
-                log.warning("codex account failed: %s", error)
-                data = {"cli": "found", "auth": "signed-out", "limits": []}
-        data["enabled"] = self.settings.codex_enabled
-        return data
 
     def _on_devin_account(self, account: Mapping[str, Any]) -> None:
         """The engine noticed a change of the account (a sign-in finished, a sign-out)."""
@@ -863,17 +772,17 @@ class AppCore:
             return []
         try:
             return list(self.providers.list())
-        except Exception as error:  # e.g. an unreadable ~/.factory/settings.json: say so, keep the rest of the app
+        except Exception as error:  # e.g. an unreadable providers file: say so, keep the rest of the app
             log.warning("could not read the API providers: %s", error)
             self.say(f"读取 API Provider 失败：{error_text(error)}")
             return []
 
     async def _refresh_accounts(self) -> None:
-        """The slow part of the accounts (``droid --version``, the Codex app-server) once the page is up."""
-        factory, codex, devin = await asyncio.gather(self._factory(), self._codex_account(), self._devin_account())
-        # Read when it is sent, not while the slow ones were awaited: the user may have dismissed the one-time note or
+        """The slow part of the accounts (``devin auth status``) once the page is up."""
+        devin = await self._devin_account()
+        # Read when it is sent, not while the slow one was awaited: the user may have dismissed the one-time note or
         # signed in meanwhile, and a late event with the old values would bring it all back.
-        self.emit("accounts", {"factory": factory, "codex": codex, "devin": devin, "chatgpt": self._chatgpt_now()})
+        self.emit("accounts", {"devin": devin, "chatgpt": self._chatgpt_now()})
 
     # ------------------------------------------------------------------ the cache
 
@@ -893,9 +802,6 @@ class AppCore:
             items = [m for m in models if isinstance(m, dict) and isinstance(m.get("id"), str)]
             if items:
                 self.catalog = Catalog.from_items(items)
-        factory = self._index.get("factory")
-        if isinstance(factory, dict) and not self._droid_version:
-            self._droid_version = str(factory.get("version") or "")
         windows = self._index.get("windows")
         if isinstance(windows, dict):
             self._windows = {str(k): int(v) for k, v in windows.items() if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0}
@@ -915,15 +821,9 @@ class AppCore:
         self._spawn(asyncio.to_thread(self.cache.save_index, json_copy(self._index)), quiet=True)
 
     def _remember_accounts(self, payload: Mapping[str, Any]) -> None:
-        codex = payload.get("codex")
-        if isinstance(codex, Mapping) and codex.get("auth") in ("chatgpt", "api-key", "signed-out"):
-            self._index["codex"] = {key: codex[key] for key in ("cli", "auth", "email", "plan", "limits") if key in codex}
         devin = payload.get("devin")
         if isinstance(devin, Mapping) and devin.get("auth") in ("signed-in", "signed-out"):
             self._index["devin"] = {key: devin[key] for key in ("cli", "auth", "email", "plan") if key in devin}
-        factory = payload.get("factory")
-        if isinstance(factory, Mapping) and factory.get("version"):
-            self._index["factory"] = {"version": factory["version"]}
         self._schedule_index()
 
     def _remember_rows(self, folder: str, rows: Sequence[SavedRow]) -> None:
@@ -960,17 +860,11 @@ class AppCore:
         if not model_id or model_id in self._windows or isinstance(window, bool) or not isinstance(window, (int, float)) or window <= 0:
             return
         served = context.get("model")
-        if served and self.catalog.page_id(str(snapshot.get("engine") or "droid"), str(served)) != model_id:
+        if served and self.catalog.page_id(str(snapshot.get("engine") or OWN_ENGINE), str(served)) != model_id:
             return
         self._windows[str(model_id)] = int(window)
         self._index["windows"] = self._windows
         self._schedule_index()
-
-    def _cached_codex(self) -> dict[str, Any] | None:
-        cached = self._index.get("codex")
-        if self.codex is None or not isinstance(cached, dict) or cached.get("auth") not in ("chatgpt", "api-key", "signed-out"):
-            return None
-        return {**cached, "cli": "found", "enabled": self.settings.codex_enabled}
 
     def _cached_devin(self) -> dict[str, Any] | None:
         cached = self._index.get("devin")
@@ -983,8 +877,8 @@ class AppCore:
         controller = conv.controller
         native = getattr(controller, "session_id", None)
         turns = controller.transcript.turns
-        if not native or not turns:
-            return None
+        if not native or not turns or conv.preview or not getattr(controller, "_history_loaded", True):
+            return None  # a failed/incomplete load must never overwrite the last usable local history
         listed = []
         for turn in turns:
             entry = conv.json_cache.get(turn.id)
@@ -993,7 +887,6 @@ class AppCore:
                 conv.json_cache[turn.id] = entry
             listed.append(entry[1])
         meta = self._session_meta(conv)
-        self._touched.add(row_id(conv.engine, native))
         return self._snapshot_data(
             conv.engine,
             native,
@@ -1001,7 +894,7 @@ class AppCore:
             controller.title,
             controller.active_at,
             listed,
-            {name: meta[name] for name in ("settings", "usage", "speed", "context")},
+            {name: meta[name] for name in ("settings", "usage", "usageModels", "speed", "context")},
             conv.ledger,
         )
 
@@ -1031,7 +924,7 @@ class AppCore:
         if not self.cache.enabled:
             return
         conv.cache_dirty = True
-        if conv.cache_handle is None and not self._shutting_down and conv.controller.state in (SessionState.READY, SessionState.DEAD):
+        if conv.cache_handle is None and not self._shutting_down and conv.controller.state in (SessionState.READY, SessionState.RUNNING, SessionState.DEAD):
             conv.cache_handle = asyncio.get_running_loop().call_later(SNAPSHOT_SECONDS, self._write_snapshot, conv)
 
     def _write_snapshot(self, conv: Conversation) -> None:
@@ -1049,7 +942,7 @@ class AppCore:
             if conv.cache_handle is not None:
                 conv.cache_handle.cancel()
                 conv.cache_handle = None
-            if conv.cache_dirty and conv.controller.state is not SessionState.RUNNING:
+            if conv.cache_dirty:
                 built = self._snapshot(conv)
                 conv.cache_dirty = False
                 if built is not None:
@@ -1060,100 +953,10 @@ class AppCore:
         if self.cache.enabled and self._index:
             self.cache.save_index(json_copy(self._index))
 
-    # ------------------------------------------------------------------ filling the cache of sessions nobody has opened
-
-    def _schedule_warm(self, folder: str) -> None:
-        if not (self.read_ahead and self.cache.enabled) or self.offline or self._shutting_down:
-            return
-        key = normalize_folder(folder)
-        if key not in self._warm_queue:
-            self._warm_queue.append(key)
-        if self._warm_task is None or self._warm_task.done():
-            self._warm_task = self._spawn(self._warm_all(), quiet=True)
-
-    async def _warm_all(self) -> None:
-        await asyncio.sleep(WARM_DELAY_SECONDS)
-        while self._warm_queue and not self._shutting_down:
-            folder = self._warm_queue.pop(0)
-            try:
-                await self._warm_project(folder)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                log.exception("filling the cache for %s failed", folder)
-
-    def _open_rows(self) -> set[str]:
-        return {row_id(c.engine, native) for c in self.order for native in [getattr(c.controller, "session_id", None)] if native}
-
-    async def _warm_project(self, folder: str) -> None:
-        """Read the newest saved sessions of a project that the cache does not hold (or holds out of date, or without
-        their token figures), so that the first time one is clicked is as quick as the next: the conversation, the four
-        settings and the numbers at the bottom right are on the page at once. One droid process reads all of Droid's;
-        Codex's come through its app-server. Devin's are not read ahead (its sessions can only be loaded by opening them)."""
-        rows = sorted(self._saved.get(folder, []), key=lambda row: row.modified, reverse=True)[:WARM_ROWS]
-        wanted: list[tuple[SavedRow, dict[str, Any] | None]] = []
-        peek_codex = getattr(self.codex, "peek_saved", None) if self.settings.codex_enabled else None
-        for row in rows:
-            stamp = row.modified.timestamp()
-            if row.engine not in ("droid", "codex") or self._warmed.get(row.id) == stamp or row.id in self._open_rows() | self._touched:
-                continue
-            if row.engine == "codex" and peek_codex is None:
-                continue
-            old = await asyncio.to_thread(self.cache.load_session, row.id)
-            if old is not None:
-                self._learn_window_from(old)
-            if old is not None and _is_complete(old) and _is_fresh(old, stamp):
-                self._warmed[row.id] = stamp
-                continue
-            wanted.append((row, old))
-        by_native = {row.native: (row, old) for row, old in wanted if row.engine == "droid"}
-        if by_native:
-            async with contextlib.aclosing(self.manager.peek_saved(folder, list(by_native))) as peeks:
-                async for native, peek in peeks:
-                    row, old = by_native[native]
-                    await self._store_peek(folder, row, old, peek)
-        for row, old in wanted:
-            if row.engine == "codex" and peek_codex is not None:
-                await self._store_peek(folder, row, old, await peek_codex(row.native))
-
-    async def _store_peek(self, folder: str, row: SavedRow, old: dict[str, Any] | None, peek: Peek | None) -> None:
-        stamp = row.modified.timestamp()
-        self._warmed[row.id] = stamp  # (one try per change of the session: a thread that cannot be read is not asked again at once)
-        if peek is not None and row.id not in self._open_rows() | self._touched and not self._shutting_down:
-            built = self._peek_snapshot(folder, row, old, peek)
-            if built is not None:
-                await asyncio.to_thread(self.cache.save_session, *built)
-        await asyncio.sleep(WARM_PAUSE_SECONDS)
-
-    def _peek_snapshot(self, folder: str, row: SavedRow, old: dict[str, Any] | None, peek: Peek) -> tuple[str, dict[str, Any]] | None:
-        turns = peek.transcript.turns
-        if not turns:
-            return None
-        settings = {name: value for name, value in (self._settings_of(row.engine, peek.settings) if peek.settings else {}).items() if value}
-        ledger = self._ledger_of(old) if old else UsageLedger()
-        if peek.usage is not None:
-            ledger.feed({"self": peek.usage})
-        model_id = settings.get("model", "")
-        window = peek.window or self._windows.get(model_id) or int((self.catalog.find(model_id) or {}).get("window") or 0)
-        context = {"used": peek.context_used, "window": window, "model": peek.settings.model if peek.settings else "", "compacted": False}
-        try:
-            kept_active = float(old.get("activeAt") or 0) if old else 0.0
-        except (TypeError, ValueError):
-            kept_active = 0.0
-        return self._snapshot_data(
-            row.engine,
-            row.native,
-            folder,
-            peek.title or row.title,
-            max(row.modified.timestamp(), kept_active),
-            [turn_json(turn, self._thumb) for turn in turns],
-            {"settings": settings or dict((old or {}).get("meta", {}).get("settings") or {}), "usage": usage_json(ledger.total), "context": context},
-            ledger,
-        )
-
     def _show_preview(self, conv: Conversation, snapshot: Mapping[str, Any]) -> None:
-        """The conversation as it was last time, at once; the real history replaces it when Droid / Codex has loaded it."""
+        """The conversation as it was last time, at once; the real history replaces it when the engine has loaded it."""
         conv.preview = True
+        conv.cached_turns = list(snapshot["turns"])
         conv.cached_meta = dict(snapshot.get("meta") or {})
         conv.sent_ids = ["preview"]  # whatever is sent next replaces the list instead of adding to it
         patch = {
@@ -1178,12 +981,6 @@ class AppCore:
             self._spawn(self._reload_project(folder), quiet=True)
         self._schedule_models()
         self._spawn(self._refresh_accounts(), quiet=True)
-        codex = self._cached_codex() or {
-            "cli": "found" if self.codex is not None else "missing",
-            "auth": "checking" if self.codex is not None else "signed-out",
-            "limits": [],
-            "enabled": self.settings.codex_enabled,
-        }
         devin = self._cached_devin() or {
             "cli": "found" if self.devin is not None else "missing",
             "auth": "checking" if self.devin is not None else "signed-out",
@@ -1206,8 +1003,6 @@ class AppCore:
             "models": self.catalog.models,
             "defaults": self.defaults(),
             "settings": self.settings_view(),
-            "factory": {"signedIn": bool(self._droid_path()), "droidPath": self._droid_path(), "version": self._droid_version},
-            "codex": codex,
             "devin": devin,
             "chatgpt": self._chatgpt_now(),
             "providers": self._provider_rows(),
@@ -1241,12 +1036,14 @@ class AppCore:
         if controller.state is SessionState.CLOSED:
             self._drop(conv, controller)
             return
+        self._sync_sidebar_key(conv)
         conv.dirty = True
         if kind == "state":
             self._schedule_sidebar(conv.project, reload=controller.state is SessionState.READY)
+            if conv.preview and controller.state is SessionState.DEAD:
+                self.say(f"{controller.last_error}；仍显示本地缓存，可以重新连接。")
         elif controller.state is SessionState.RUNNING and time.time() - controller.active_at >= ACTIVITY_STEP:
-            # A long turn is conversation too: its time follows the latest output (as the saved file's time does for
-            # Droid), or a session still working for ten minutes would sink below one that said a word meanwhile.
+            # A long turn is conversation too: keep its displayed activity age current without changing its position.
             controller.active_at = time.time()
             self._schedule_sidebar(conv.project)
         if kind == "steer":
@@ -1275,6 +1072,12 @@ class AppCore:
             project=normalize_folder(controller.project),
             requested=dict(self._opening_meta or {}),
         )
+        key = self._row_of(conv)
+        saved = next((row for row in self._saved.get(conv.project, []) if row.id == key), None)
+        conv.created_at = self.settings.session_created.get(key) or (
+            _aware(saved.created).timestamp() if saved is not None and saved.created else conv.created_at
+        )
+        self._sync_sidebar_key(conv)
         if self._ledger_seed is not None:
             conv.ledger = self._ledger_of(self._ledger_seed)
         self.order.append(conv)
@@ -1399,6 +1202,12 @@ class AppCore:
             counted = Tokens.of(getattr(controller, "usage", None))
             series = {} if counted is None else {"self": counted}
         conv.ledger.feed(series)
+        models_of = getattr(controller, "usage_model_series", None)
+        if models_of is not None:
+            conv.ledger.feed_models({
+                key: (self.catalog.page_id(conv.engine, model), tokens)
+                for key, (model, tokens) in models_of().items()
+            })
 
     def _row_of(self, conv: Conversation) -> str:
         """The sidebar row of an open conversation ("" until the engine has given it an id of its own)."""
@@ -1428,8 +1237,23 @@ class AppCore:
         handoff = getattr(controller, "handoff", None)
         active = datetime.fromtimestamp(controller.active_at, timezone.utc)
         self._feed_usage(conv)
+        # What the running turn has cost so far but the engine has not booked yet (Devin gives a prompt's figure only when
+        # it ends): shown with the total, so the number moves while the turn runs, but never fed to the ledger.
+        total = conv.ledger.total
+        pending_of = getattr(controller, "usage_pending", None)
+        pending = pending_of() if pending_of is not None else None
+        if pending is not None:
+            total = pending if total is None else total.plus(pending)
+        usage_models = dict(conv.ledger.by_model)
+        pending_models = getattr(controller, "usage_pending_models", None)
+        if pending_models is not None:
+            for native, tokens in pending_models().items():
+                key = self.catalog.page_id(conv.engine, native)
+                usage_models[key] = usage_models.get(key, 0) + tokens.total
         # Until the live session reports its own, the page keeps what was known when it was last cached.
-        usage = usage_json(conv.ledger.total) or cached.get("usage")
+        usage = usage_json(total) or cached.get("usage")
+        if total is None and not usage_models:
+            usage_models = cached.get("usageModels") or {}
         found = speed_of(controller.transcript.turns)
         speed = found.to_json() if found is not None else cached.get("speed")
         self._learn_window(conv, model_id)
@@ -1441,17 +1265,19 @@ class AppCore:
             "projectId": conv.project,
             "title": self._title_of(conv),
             "mark": self._mark(conv),
-            "workingLabel": controller.working_label,
+            "workingLabel": ("本地缓存 · " if conv.preview else "") + controller.working_label,
             "modified": format_relative(active),
             "modifiedAt": int(controller.active_at * 1000),
             "engine": conv.engine,
             "nativeId": controller.session_id or "",
             "settings": settings,
             "usage": usage,
+            "usageModels": usage_models,
             "speed": speed,
             "context": context,
             "queued": self._queued_json(conv),
             "agents": self._agents_json(conv),
+            "goal": conv.goal.text if conv.goal is not None else "",
             "handoff": (
                 {
                     "carried": handoff.carried,
@@ -1469,10 +1295,14 @@ class AppCore:
         controller = conv.controller
         transcript = controller.transcript
         turns = transcript.turns
-        # The cached conversation stays up until the real history has arrived (or the session is open without any).
-        hold = conv.preview and not turns and controller.state is SessionState.OPENING
+        # Keep the local history through connection failures as well as loading. An error turn is not loaded history.
+        hold = conv.preview and (controller.state is SessionState.OPENING or not getattr(controller, "_history_loaded", True))
+        if hold and not conv.sent_ids:  # a reloaded page needs the local history again, even while still offline
+            self.emit("turns", {"id": conv.cid, "turns": conv.cached_turns, "all": True})
+            conv.sent_ids = ["preview"]
         if conv.preview and not hold:
             conv.preview = False
+            conv.cached_turns = []
         ids = [turn.id for turn in turns]
         replace = ids[: len(conv.sent_ids)] != conv.sent_ids
         if replace:
@@ -1599,18 +1429,16 @@ class AppCore:
         return normalize_folder(folder)
 
     def _target(self, page_model: str) -> Target:
-        """Which engine opens a page model, and under which id. An API provider's model is run by the application's own loop;
-        in a build without it Droid runs it, as it did before the loop existed."""
-        target = self.catalog.target(page_model)
-        droid = self.catalog.droid_id(page_model)
-        if target.engine == "chatgpt" and self.chatgpt is None and droid is not None:
-            return Target("droid", droid)
-        return target
+        """Which engine opens a page model, and under which id (an API provider's model is run by the own loop)."""
+        return self.catalog.target(page_model)
 
     def _open_settings(self, page_model: str, base: Mapping[str, str] | None = None) -> dict[str, str]:
         start = dict(base) if base is not None else self.defaults()
         engine = self._target(page_model).engine
-        if start.get("autonomy") not in self._levels_of(engine):
+        # The defaults carry the level of the default model's engine; the scales share names (``code``, ``full``), so a
+        # session of another engine starts from that engine's own level, not from a same-named one.
+        other = base is None and self._target(start.get("model", "")).engine != engine
+        if other or start.get("autonomy") not in self._levels_of(engine):
             start["autonomy"] = self._autonomy_of(engine)
         settings, _ = settings_for_model(self.catalog, start, page_model)
         return settings
@@ -1628,17 +1456,8 @@ class AppCore:
         """``replacing``: the session takes the place of another one in the same tab (an engine change): the limit on
         open sessions does not apply to it (the tab was counted already), so it closes no other conversation."""
         target = self._target(page_model)
-        if target.engine == "codex":
-            if self.codex is None:
-                raise AppError("没有找到 Codex 命令行：先在「设置 → 账号与模型」里安装并登录。")
-            return await self.codex.open_new(
-                folder,
-                model=target.model,
-                reasoning=settings.get("reasoning", ""),
-                autonomy=settings.get("autonomy", self.settings.codex_autonomy),
-                transcript=transcript,
-                handoff=handoff,
-            )
+        if not target.model:
+            raise AppError("还没有可用的模型：先在「设置 → 账号与模型」里登录 ChatGPT、添加一个 API Provider，或登录 Devin。")
         if target.engine == "devin":
             if self.devin is None:
                 raise AppError("没有找到 Devin 命令行：先在「设置 → 账号与模型」里安装并登录。")
@@ -1650,31 +1469,20 @@ class AppCore:
                 transcript=transcript,
                 handoff=handoff,
             )
-        if target.engine == "chatgpt":
-            if self.chatgpt is None:
-                raise AppError("ChatGPT Plan 在这个版本里不可用。")
-            try:
-                return await self.chatgpt.open_new(
-                    folder,
-                    model=target.model,
-                    reasoning=settings.get("reasoning", ""),
-                    autonomy=settings.get("autonomy", self.settings.chatgpt_autonomy),
-                    mode=settings.get("mode", self.settings.mode),
-                    transcript=transcript,
-                    handoff=handoff,
-                )
-            except ChatGPTError as error:
-                raise AppError(chatgpt_error_text(error)) from error
-        return await self.manager.open_new(
-            folder,
-            model=target.model,
-            reasoning=settings.get("reasoning", ""),
-            autonomy=settings.get("autonomy", self.settings.autonomy),
-            mode=settings.get("mode", self.settings.mode),
-            transcript=transcript,
-            handoff=handoff,
-            replacing=replacing,
-        )
+        if self.chatgpt is None:
+            raise AppError("WittyCode 自己的代理循环在这个版本里不可用。")
+        try:
+            return await self.chatgpt.open_new(
+                folder,
+                model=target.model,
+                reasoning=settings.get("reasoning", ""),
+                autonomy=settings.get("autonomy", self.settings.chatgpt_autonomy),
+                mode=settings.get("mode", self.settings.mode),
+                transcript=transcript,
+                handoff=handoff,
+            )
+        except ChatGPTError as error:
+            raise AppError(chatgpt_error_text(error)) from error
 
     async def _m_session_new(self, params: dict[str, Any]) -> dict[str, Any]:
         folder = self._project_for(params)
@@ -1713,13 +1521,7 @@ class AppCore:
         self._preview = preview
         self._ledger_seed = seed
         try:
-            if row_id.startswith(CODEX_PREFIX):
-                if self.codex is None:
-                    raise AppError("没有找到 Codex 命令行。")
-                controller = await self.codex.open_saved(
-                    folder, row_id[len(CODEX_PREFIX) :], title=params.get("title") or None, modified=modified
-                )
-            elif row_id.startswith(DEVIN_ROW_PREFIX):
+            if row_id.startswith(DEVIN_ROW_PREFIX):
                 if self.devin is None:
                     raise AppError("没有找到 Devin 命令行。")
                 controller = await self.devin.open_saved(
@@ -1735,7 +1537,7 @@ class AppCore:
                 except ChatGPTError as error:
                     raise AppError(chatgpt_error_text(error)) from error
             else:
-                controller = await self.manager.open_saved(folder, row_id, title=params.get("title") or None, modified=modified)
+                raise AppError("这个会话属于一个 WittyCode 已不再支持的引擎，打不开了。")
         finally:
             self._opening_meta = None
             self._select_next = False
@@ -1749,9 +1551,8 @@ class AppCore:
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         """The cached copy of a saved session: ``(the copy, the copy if it is also fit to be shown)``.
 
-        It is shown only when it is as new as the session itself (one that was used elsewhere since would be replaced a
-        moment later by a very different one). Its token ledger is used whatever its age: the engine's figure includes
-        what happened elsewhere, and only the part after the ledger's last figure is added."""
+        Even an older copy is useful while offline; the status label says it is local, and loaded history replaces it.
+        Its token ledger is used whatever its age: only the part after the ledger's last figure is added."""
         if not self.cache.enabled:
             return None, None
         snapshot = await asyncio.to_thread(self.cache.load_session, row_id)
@@ -1759,7 +1560,8 @@ class AppCore:
             return None, None
         if not snapshot.get("turns"):
             return snapshot, None
-        return snapshot, (snapshot if _is_fresh(snapshot, modified) else None)
+        self._learn_window_from(snapshot)
+        return snapshot, snapshot
 
     @staticmethod
     def _ledger_of(snapshot: Mapping[str, Any]) -> UsageLedger:
@@ -1860,8 +1662,8 @@ class AppCore:
     # ------------------------------------------------------------------ commands typed with a slash
 
     async def _m_session_compact(self, params: dict[str, Any]) -> dict[str, Any]:
-        """``/compact``: the conversation so far becomes a summary now, by the engine's own means (the own loop writes it, Droid
-        and Codex have an operation for it); the controller runs it as a turn the page shows."""
+        """``/compact``: the conversation so far becomes a summary now, by the engine's own means (the own loop writes it);
+        the controller runs it as a turn the page shows."""
         conv = self._conversation(params["id"])
         start = getattr(conv.controller, "start_compaction", None)
         if start is None:
@@ -1887,6 +1689,8 @@ class AppCore:
             if conv.goal is None:
                 return {"ok": True, "text": "现在没有进行中的目标。"}
             conv.goal = None
+            conv.dirty = True  # (the page shows no goal any more: closing the window need not warn about it)
+            self._schedule_flush()
             return {"ok": True, "text": "目标已取消。"}
         controller = conv.controller
         if not text:
@@ -2036,11 +1840,11 @@ class AppCore:
             await asyncio.sleep(0.05)
 
     def _agents_json(self, conv: Conversation) -> list[dict[str, Any]]:
-        """The sub-agents the conversation's thread has started (Codex only), oldest first."""
+        """The sub-agents the conversation's thread has started (an engine that has them), oldest first."""
         agents = getattr(conv.controller, "agents", None) or {}
         out = []
         for agent in agents.values():
-            model = self.catalog.find(CODEX_PREFIX + agent.agent_model) if agent.agent_model else None
+            model = self.catalog.find(self.catalog.page_id(conv.engine, agent.agent_model)) if agent.agent_model else None
             out.append(
                 {
                     "id": agent.session_id,
@@ -2475,14 +2279,10 @@ class AppCore:
             settings.reasoning_effort = value
         elif field_name == "autonomy":
             current = engine or self.catalog.engine_of(settings.default_model)
-            if current == "codex" and value in CODEX_PERMISSIONS:
-                settings.codex_autonomy = value
-            elif current == "devin" and value in DEVIN_PERMISSIONS:
+            if current == "devin" and value in DEVIN_PERMISSIONS:
                 settings.devin_autonomy = value
             elif current == "chatgpt" and value in CHATGPT_PERMISSIONS:
                 settings.chatgpt_autonomy = value
-            elif current == "droid" and value in AUTONOMY_LEVELS:
-                settings.autonomy = value
         elif field_name == "mode" and value in ("auto", "spec"):
             settings.mode = value
         self._save()
@@ -2492,14 +2292,7 @@ class AppCore:
         controller = conv.controller
         if controller.state not in (SessionState.READY, SessionState.RUNNING):
             return False
-        kwargs: dict[str, Any] = {}
-        for name, value in changes.items():
-            if conv.engine == "droid":
-                kinds = {"reasoning": ReasoningEffort, "autonomy": Autonomy, "mode": Mode}
-                kwargs[name] = value if name == "model" else _enum(kinds[name], value)
-            else:
-                kwargs[name] = value
-        ok = await controller.update_settings(**kwargs)
+        ok = await controller.update_settings(**changes)
         if not ok:
             self.say("设置没有生效，已恢复为当前使用的值。")
         conv.dirty = True
@@ -2530,8 +2323,8 @@ class AppCore:
         return {"ok": ok}
 
     async def _window_of(self, controller: Any, page_model: str) -> int:
-        """The context window (tokens) of the model a session was just opened with: the model list's own figure (Codex,
-        API providers), else what the session reports, which Droid reads a moment after opening it. 0: not known."""
+        """The context window (tokens) of the model a session was just opened with: the model list's own figure, else what
+        the session reports a moment after opening it. 0: not known."""
         known = int((self.catalog.find(page_model) or {}).get("window") or 0)
         for _ in range(0 if known else WINDOW_WAIT_STEPS):
             known = int(getattr(getattr(controller, "context", None), "window", 0) or 0)
@@ -2543,29 +2336,16 @@ class AppCore:
     def _images_problem(self, page_model: str) -> str:
         """Why the model cannot take pictures (empty: it can, or nothing is known against it)."""
         target = self.catalog.target(page_model)
-        if target.engine == "codex":
-            lookup = getattr(self.codex, "model_info", None)
-            info = lookup(target.model) if lookup is not None else None
-            if info is not None and not info.supports_images:
-                return f"「{info.display_name}」不支持图片输入。"
-            return ""
-        if target.engine in ("devin", "chatgpt"):
-            lookup = getattr(getattr(self, target.engine), "model_info", None)
-            info = lookup(target.model) if lookup is not None else None
-            if info is not None and not info.supports_images:
-                return f"「{info.display_name}」不支持图片输入。"
-            return ""
-        info = self.manager.model_info(target.model)
-        if info is not None and info.no_image_support:
+        lookup = getattr(getattr(self, target.engine, None), "model_info", None)
+        info = lookup(target.model) if lookup is not None else None
+        if info is not None and not info.supports_images:
             return f"「{info.display_name}」不支持图片输入。"
         return ""
 
     def _scans_problem(self, page_model: str) -> str:
-        """Why a PDF without words cannot go to this model (empty: it can)."""
+        """Why a PDF without words cannot go to this model (empty: it can). Every engine reads only a PDF's words."""
         engine = self.catalog.engine_of(page_model)
-        if engine in ("codex", "devin", "chatgpt"):
-            return f"{engine_label(engine, self.catalog.find(page_model))} 只能读 PDF 里的文字，这个 PDF 里没有提取到文字。"
-        return ""
+        return f"{engine_label(engine, self.catalog.find(page_model))} 只能读 PDF 里的文字，这个 PDF 里没有提取到文字。"
 
     @staticmethod
     def _carry_json(option: CarryOption) -> dict[str, Any]:
@@ -2596,7 +2376,7 @@ class AppCore:
         """Continue this conversation with the other engine: a new native session, the earlier text handed over.
 
         The new session is opened first; only when it is ready does it replace the old one, so a failure (not signed
-        in, no Codex CLI ...) leaves the conversation exactly as it was.
+        in, no Devin CLI ...) leaves the conversation exactly as it was.
 
         Attachments go along only when the user picks them, one by one. When the conversation holds any, nothing
         happens until the page says which (``carry_ids``): the answer is ``{"ok": False, "choose": {...}}`` listing every
@@ -2633,9 +2413,9 @@ class AppCore:
             raise AppError(too_many(held))
         if held.over and not over_ok:
             raise AppError(f"{held.describe()}：要这样带过去，请在清单里确认。")
-        # What goes along depends on the new model's window. The model list knows it for Codex and API models; for
-        # Droid's own it is only reported once the session is open, so the session opens with a hand-over for the
-        # figure known now (nothing may be sent without one) and gets the final one when the window arrives.
+        # What goes along depends on the new model's window. The model list usually knows it; where it does not, it is
+        # only reported once the session is open, so the session opens with a hand-over for the figure known now
+        # (nothing may be sent without one) and gets the final one when the window arrives.
         window = int(model.get("window") or 0)
         sent_as_files = any(not attachment_text(item).strip() for item in chosen)
         handoff = (
@@ -2648,10 +2428,10 @@ class AppCore:
         previous_requested = conv.requested
         before = transcript.snapshot()
         # What the old session counted is final: the total keeps it, and the new session's figures (it counts from zero)
-        # are new ones. The shared transcript's Droid figure goes too, or a Droid session opened now would start from
-        # the one an earlier Droid session left there.
+        # are new ones. A figure the shared transcript keeps goes too, or the new session would start from the one an
+        # earlier session left there.
         self._feed_usage(conv)
-        ledger_before = (conv.ledger.total, dict(conv.ledger.seen))
+        ledger_before = (conv.ledger.total, dict(conv.ledger.seen), dict(conv.ledger.model_seen))
         usage_before = transcript.usage
         conv.ledger.restart()
         transcript.usage = None
@@ -2668,7 +2448,7 @@ class AppCore:
         except BaseException as error:
             self._rollback_switch(conv, old, controller)
             transcript.restore(before)  # a failed open writes its error into the shared transcript
-            conv.ledger.total, conv.ledger.seen = ledger_before
+            conv.ledger.total, conv.ledger.seen, conv.ledger.model_seen = ledger_before
             transcript.usage = usage_before
             conv.requested = previous_requested
             if isinstance(error, (AppError, asyncio.CancelledError)):
@@ -2870,11 +2650,7 @@ class AppCore:
     def _can_ask(self, engine: str) -> bool:
         """Whether this engine can be asked outside its conversations at all (``_extract_for_memory``). A turn of an engine
         that cannot is not offered to the curator: it would take the hour's allowance and return nothing."""
-        return (
-            (engine == "chatgpt" and self.chatgpt is not None)
-            or (engine == "codex" and self.codex is not None)
-            or (engine == "devin" and self.devin is not None)
-        )
+        return (engine == "chatgpt" and self.chatgpt is not None) or (engine == "devin" and self.devin is not None)
 
     async def _extract_for_memory(self, engine: str, project: str, prompt: str) -> str | None:
         """One question to the engine of the conversation, outside it. Only an engine that can be asked without leaving a
@@ -2882,8 +2658,6 @@ class AppCore:
         provider than the one the user chose for that conversation)."""
         if engine == "chatgpt" and self.chatgpt is not None:
             return await chatgpt_side.ask(self.chatgpt, prompt)
-        if engine == "codex" and self.codex is not None:
-            return await codex_side.ask(self.codex, project, prompt)
         if engine == "devin" and self.devin is not None:
             return await devin_side.ask(self.devin, project, prompt)
         return None
@@ -2958,20 +2732,14 @@ class AppCore:
             s.chatgpt_compact = value
         elif key == "compactAt" and _is_int(value) and COMPACT_AT_RANGE[0] <= value <= COMPACT_AT_RANGE[1]:
             s.chatgpt_compact_at = value
+        elif key == "maxSteps" and _is_int(value) and MAX_STEPS_RANGE[0] <= value <= MAX_STEPS_RANGE[1]:
+            s.max_steps = value
+        elif key == "thinkChinese" and isinstance(value, bool):
+            s.think_chinese = value
         elif key == "maxOpen" and _is_int(value) and MAX_OPEN_SESSIONS_RANGE[0] <= value <= MAX_OPEN_SESSIONS_RANGE[1]:
             s.max_open_sessions = value
         elif key == "sidebarWidth" and _is_int(value) and SIDEBAR_WIDTH_RANGE[0] <= value <= SIDEBAR_WIDTH_RANGE[1]:
             s.sidebar_width = value
-        elif key == "droidPath" and isinstance(value, str):
-            s.droid_path = value.strip()
-            self._droid_version = ""
-            self._schedule_models()
-            self._spawn(self._refresh_accounts(), quiet=True)  # the shown version still belongs to the previous path
-        elif key == "codexPath" and isinstance(value, str):
-            changed = value.strip() != s.codex_path
-            s.codex_path = value.strip()
-            if changed and self.codex is not None:
-                self._spawn(self._codex_path_changed(), quiet=True)
         elif key == "devinPath" and isinstance(value, str):
             changed = value.strip() != s.devin_path
             s.devin_path = value.strip()
@@ -2983,16 +2751,6 @@ class AppCore:
         view = self.settings_view()
         self.emit("settings", {"settings": view})
         return view
-
-    async def _codex_path_changed(self) -> None:
-        """A new Codex program: read its account and models again (like droidPath does for Droid), and drop the old
-        app-server unless sessions are using it."""
-        path_changed = getattr(self.codex, "path_changed", None)
-        stopped = await path_changed() if path_changed is not None else True
-        if not stopped:
-            self.say("Codex 的路径已改：已打开的 Codex 会话还在用原来的程序，把它们关掉之后新路径才会生效。")
-        self.emit("accounts", {"codex": await self._codex_account()})
-        self._schedule_models()
 
     async def _devin_path_changed(self) -> None:
         """A new Devin program: read its account and models again, and drop the old process unless sessions use it."""
@@ -3022,39 +2780,6 @@ class AppCore:
 
     # ------------------------------------------------------------------ accounts and providers
 
-    async def _m_factory_account(self, params: dict[str, Any]) -> dict[str, Any]:
-        return await self._factory()
-
-    async def _m_codex_account(self, params: dict[str, Any]) -> dict[str, Any]:
-        return await self._codex_account()
-
-    async def _codex_call(self, name: str) -> dict[str, Any]:
-        if self.codex is None:
-            raise AppError("没有找到 Codex 命令行：先安装 Codex CLI（npm i -g @openai/codex）。")
-        await getattr(self.codex, name)()
-        account = await self._codex_account()
-        self.emit("accounts", {"codex": account})
-        self._schedule_models()
-        return account
-
-    async def _m_codex_login(self, params: dict[str, Any]) -> dict[str, Any]:
-        return await self._codex_call("login")
-
-    async def _m_codex_cancelLogin(self, params: dict[str, Any]) -> dict[str, Any]:
-        return await self._codex_call("cancel_login")
-
-    async def _m_codex_logout(self, params: dict[str, Any]) -> dict[str, Any]:
-        return await self._codex_call("logout")
-
-    async def _m_codex_setEnabled(self, params: dict[str, Any]) -> dict[str, Any]:
-        self.settings.codex_enabled = bool(params["on"])
-        self._save()
-        account = await self._codex_account()
-        self.emit("accounts", {"codex": account})
-        self._schedule_models()
-        for folder in self.settings.projects:
-            self._spawn(self._reload_project(folder), quiet=True)
-        return account
 
     async def _m_devin_account(self, params: dict[str, Any]) -> dict[str, Any]:
         return await self._devin_account()
@@ -3152,7 +2877,7 @@ class AppCore:
         provider_id = str(params["id"])
         await asyncio.to_thread(self._providers().remove, provider_id)
         if self.settings.default_model.startswith(f"{API_PREFIX}{provider_id}:"):
-            self.settings.default_model = ""  # the model is gone with its provider: defaults() falls back to a factory one
+            self.settings.default_model = ""  # the model is gone with its provider: defaults() falls back to the first one
             self._save()
         self._schedule_models()
 
@@ -3210,9 +2935,6 @@ class AppCore:
             task.cancel()
         if self._tasks:
             await asyncio.gather(*list(self._tasks), return_exceptions=True)
-        await self.manager.close_all()
-        if self.codex is not None:
-            await self.codex.close_all()
         if self.devin is not None:
             await self.devin.close_all()
         if self.chatgpt is not None:
@@ -3230,7 +2952,7 @@ def chatgpt_error_text(error: BaseException) -> str:
 
 
 def devin_error_text(error: BaseException) -> str:
-    """Like ``error_text``, for what the Devin engine raised (its errors are the Codex client's, worded with Devin's name)."""
+    """Like ``error_text``, for what the Devin engine raised (the JSON-RPC client's errors, worded with Devin's name)."""
     if isinstance(error, (AppError, SessionLimitError)) and error.args:
         return str(error.args[0])
     from desktop.core.devin.errors import friendly_failure as devin_failure
@@ -3249,8 +2971,8 @@ def error_text(error: BaseException) -> str:
         return str(error)
     if isinstance(error, ChatGPTError):
         return chatgpt_error_text(error)
-    try:
-        from desktop.core.codex.errors import CodexError, friendly_failure as codex_failure
-    except ImportError:  # the Codex engine is not part of this build
-        return friendly_failure(error)
-    return codex_failure(error) if isinstance(error, CodexError) else friendly_failure(error)
+    from desktop.core.engine_errors import EngineError
+
+    if isinstance(error, EngineError):
+        return devin_error_text(error)
+    return f"{type(error).__name__}: {error}"

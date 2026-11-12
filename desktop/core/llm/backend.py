@@ -24,7 +24,7 @@ from desktop.core.llm.anthropic import VERSION, anthropic_body, read_anthropic
 from desktop.core.llm.chat import chat_body, read_chat
 from desktop.core.llm.responses_api import responses_body
 from desktop.core.llm.wire import ANTHROPIC, CHAT, RESPONSES, Route
-from desktop.core.providers import BEDROCK, ApiModelSpec, BedrockPlan, ProviderError
+from desktop.core.providers import BEDROCK, EFFORTS, ApiModelSpec, BedrockPlan, ProviderError
 
 log = logging.getLogger("desktop.llm")
 
@@ -32,7 +32,7 @@ PREFIX = "api:"
 """What every model id of an API provider starts with (the page's model ids are ``api:<provider id>:<custom id>``)."""
 
 KIND_OF = {"anthropic": ANTHROPIC, "openai": RESPONSES, "generic-chat-completion-api": CHAT}
-LEVELS = ("off", "low", "medium", "high")
+LEVELS = EFFORTS
 """What the reasoning menu offers a model whose entry sets a level (the editor says so too)."""
 
 
@@ -159,6 +159,8 @@ class ApiBackend:
         spec = self.spec(model_id)
         if spec is None:
             raise ChatGPTError("这个模型已经不在 API Provider 的设置里了：在设置里把它加回去，或换一个模型。", code="api")
+        if spec.window is None:
+            raise ChatGPTError(f"不知道「{spec.native}」的上下文上限：服务端数据和内置规格表都没有提供。请在设置 › 账号与模型中填写这个模型的上下文窗口后再发送。", code="api")
         if spec.bedrock is not None:
             async for event in self._bedrock(spec, request):
                 yield event

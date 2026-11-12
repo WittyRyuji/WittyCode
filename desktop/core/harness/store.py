@@ -87,6 +87,8 @@ class SavedSession:
     """Tokens of the whole conversation: ``input``, ``output``, ``cacheRead``."""
     context_used: int = 0
     recalled: list[str] = field(default_factory=list)
+    usage_models: dict[str, dict[str, Any]] = field(default_factory=dict)
+    """Known cumulative usage per configured model; absent in older files (do not infer it from the latest model)."""
     origin: dict[str, Any] = field(default_factory=dict)
     """Where a conversation imported from another app came from: ``{"app", "native", "at"}`` (``core/importers``); empty
     for one made here. Written to the file only when set, so files without it read as before."""
@@ -109,6 +111,7 @@ class SavedRow:
     messages: int
     model: str = ""
     """The model the conversation was last on (empty in an index written before it was kept)."""
+    created_at: float = 0.0
 
 
 def diff_to_json(diff: FileDiff) -> dict[str, Any]:
@@ -151,6 +154,8 @@ def _session_json(session: SavedSession) -> dict[str, Any]:
         "recalled": session.recalled,
         "items": session.items,
     }
+    if session.usage_models:
+        data["usage_models"] = session.usage_models
     if session.origin:
         data["origin"] = session.origin
     if session.compaction:
@@ -192,6 +197,7 @@ def _session_from(raw: Any) -> SavedSession | None:
             turns=turns,
             tools={str(k): dict(v) for k, v in (raw.get("tools") or {}).items() if isinstance(v, Mapping)},
             usage={str(k): int(v) for k, v in (raw.get("usage") or {}).items() if isinstance(v, (int, float))},
+            usage_models={str(k): dict(v) for k, v in raw.get("usage_models", {}).items() if isinstance(v, Mapping)} if isinstance(raw.get("usage_models"), Mapping) else {},
             context_used=int(raw.get("context_used") or 0),
             recalled=[str(x) for x in raw.get("recalled") or ()],
             origin=dict(raw["origin"]) if isinstance(raw.get("origin"), Mapping) else {},
@@ -402,7 +408,7 @@ class SessionStore:
             rows.append(
                 SavedRow(
                     session_id, str(raw.get("project") or ""), str(raw.get("title") or ""), float(raw.get("modified_at") or 0.0),
-                    int(raw.get("messages") or 0), str(raw.get("model") or ""),
+                    int(raw.get("messages") or 0), str(raw.get("model") or ""), float(raw.get("created_at") or 0.0),
                 )
             )
         rows.sort(key=lambda row: row.modified_at, reverse=True)
@@ -412,7 +418,7 @@ class SessionStore:
 
     @staticmethod
     def _row_json(session: SavedSession) -> dict[str, Any]:
-        return {"project": session.project, "title": session.title, "modified_at": session.modified_at, "messages": session.messages, "model": session.model}
+        return {"project": session.project, "title": session.title, "created_at": session.created_at, "modified_at": session.modified_at, "messages": session.messages, "model": session.model}
 
     def _index(self) -> dict[str, dict[str, Any]]:
         path = self.root / INDEX
@@ -426,6 +432,8 @@ class SessionStore:
         return self._rebuild()
 
     def _consistent(self, index: Mapping[str, Any]) -> bool:
+        if any(isinstance(row, Mapping) and "created_at" not in row for row in index.values()):
+            return False  # rebuild old indices from the archives' real creation times, not their latest activity
         folder = self.root / SESSIONS
         try:
             names = {entry.stem for entry in folder.glob("*.json")}

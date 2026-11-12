@@ -352,15 +352,13 @@ def test_a_finished_file_of_the_earlier_version_opens_as_before_and_is_not_rewri
 # ----------------------------------------------------------------------------------------------- turns that ended early
 
 
-def test_a_turn_that_ran_out_of_steps_is_saved_as_such_and_says_so_again_when_reopened(tmp_path, monkeypatch):
-    real = controller_module.AgentLoop
-    monkeypatch.setattr(controller_module, "AgentLoop", lambda *args, **kwargs: real(*args, max_steps=2, **kwargs))
-
+def test_a_turn_that_ran_out_of_steps_is_saved_as_such_and_says_so_again_when_reopened(tmp_path):
     async def go() -> None:
         with FakeResponses(token=ACCESS_TOKEN) as fake:
             where = str(tmp_path / "project")
             fake.script(*[call("list_dir", {"directory_path": where}, call_id=f"c{i}") for i in range(3)])
             engine, controller = await opened(tmp_path, fake)
+            engine.settings.max_steps = 2
             controller.send_prompt("keep going")
             await finish_turn(controller)
             live = [b.text for b in controller.transcript.turns[0].blocks if b.kind == "notice"]

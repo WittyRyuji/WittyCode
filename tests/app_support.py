@@ -1,23 +1,26 @@
-"""Fakes for driving ``AppCore`` without a window: a platform, an event collector and a second 'engine'."""
+"""Fakes for driving ``AppCore`` without a window: a platform, an event collector, and the application's own loop signed in
+to a ChatGPT Plan service on this machine (``tests/fake_responses``)."""
 
 from __future__ import annotations
 
 import asyncio
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from droid_sdk import ModelInfo, ModelProvider, ReasoningEffort
-
 from desktop.core.app_core import AppCore
 from desktop.core.attachments import Attachment, Rejection, Thumbnail, image_attachment, pdf_attachment, sniff_image, text_attachment
 from desktop.core.files import FileProblem
-from desktop.core.handoff import Handoff
-from desktop.core.session_manager import SessionController, SessionManager, SessionState
 from desktop.core.settings import AppSettings
-from desktop.core.transcript import Transcript
-from tests.fakes import FakeFactory, until
+from tests.chatgpt_support import make_engine
+from tests.fake_responses import FakeResponses
+from tests.fakes import until
+
+MODEL = "chatgpt:gpt-6.1-sol"
+"""The page id of the model a new test session starts with (the first of ``fake_responses.DEFAULT_MODELS``)."""
+OTHER_MODEL = "chatgpt:gpt-6-luna"
 
 
 class FakePlatform:
@@ -126,162 +129,110 @@ class Events:
         self.items.clear()
 
 
-class CodexLikeController(SessionController):
-    """A controller of the 'other engine': the real controller logic on a fake session, labelled ``codex``."""
+@dataclass
+class Plan:
+    """The ChatGPT Plan service of a test core: script its answers (``fake.script(say(...))``, ``("hold", name)``)."""
 
-    engine = "codex"  # type: ignore[assignment]
+    fake: FakeResponses | None
+    engine: Any
 
+    def script(self, *turns: Any) -> None:
+        assert self.fake is not None, "this core has no ChatGPT Plan service of its own"
+        self.fake.script(*turns)
 
-class FakeCodexEngine:
-    """What ``AppCore`` needs from the Codex engine, built on a second fake factory (so both engines can be driven)."""
-
-    def __init__(self, settings: AppSettings, *, signed_in: bool = True) -> None:
-        self.factory = FakeFactory()
-        self.manager = SessionManager(settings, self.factory)
-        self.signed_in = signed_in
-        self.fail_open: BaseException | None = None
-        self.opened: list[dict[str, Any]] = []
-        self.threads: list[Any] = []
-        self.peeks: dict[str, Any] = {}
-        self.peeked: list[str] = []
-        self.logins = 0
-        self.models = [
-            SimpleNamespace(id="gpt-5.3-codex", display_name="GPT-5.3 Codex", efforts=("low", "medium", "high"), default_effort="medium", context_window=400_000)
-        ]
-        self.supports_images = True
-        self.path_changes = 0
-        self.keep_server = False
-        """A session is using the app-server of the old path: it is not stopped."""
-        self._listeners: list[Any] = []
-
-    # the same surface as ``CodexEngine``
-    def add_listener(self, callback: Any) -> None:
-        self.manager.add_listener(callback)
-
-    def remove_listener(self, callback: Any) -> None:
-        self.manager.remove_listener(callback)
+    def release(self, name: str) -> None:
+        assert self.fake is not None
+        self.fake.release(name)
 
     @property
-    def controllers(self) -> list[Any]:
-        return self.manager.controllers
+    def requests(self) -> list[dict[str, Any]]:
+        return self.fake.requests if self.fake is not None else []
 
-    async def account(self) -> dict[str, Any]:
-        if not self.signed_in:
-            return {"cli": "found", "auth": "signed-out", "limits": []}
-        return {"cli": "found", "auth": "chatgpt", "email": "a@b.c", "plan": "Pro", "limits": [{"label": "5 小时", "short": "5h", "usedPercent": 17, "resetsIn": "x"}]}
-
-    async def login(self) -> dict[str, Any]:
-        self.logins += 1
-        self.signed_in = True
-        return await self.account()
-
-    async def cancel_login(self) -> dict[str, Any]:
-        return await self.account()
-
-    async def logout(self) -> dict[str, Any]:
-        self.signed_in = False
-        return await self.account()
-
-    async def list_models(self) -> list[Any]:
-        return list(self.models)
-
-    async def path_changed(self) -> bool:
-        self.path_changes += 1
-        return not self.keep_server
-
-    def model_info(self, model_id: str) -> Any:
-        found = next((m for m in self.models if m.id == model_id), None)
-        return None if found is None else SimpleNamespace(display_name=found.display_name, supports_images=self.supports_images)
-
-    async def list_sessions(self, project: Any, limit: int = 50) -> list[Any]:
-        return list(self.threads)
-
-    async def peek_saved(self, thread_id: str) -> Any:
-        """A thread read ahead for the cache: whatever the test put in ``peeks`` (nothing: the thread cannot be read)."""
-        self.peeked.append(thread_id)
-        return self.peeks.get(thread_id)
-
-    async def open_new(
-        self, project: Any, *, model: str, reasoning: str, autonomy: str, transcript: Transcript | None = None, handoff: Handoff | None = None
-    ) -> SessionController:
-        self.opened.append({"model": model, "reasoning": reasoning, "autonomy": autonomy, "handoff": handoff})
-        self.factory.next_session = {"model": model, **({"fail_open": self.fail_open} if self.fail_open is not None else {})}
-        controller = CodexLikeController(manager=self.manager, project=Path(project), handoff=handoff)
-        if transcript is not None:
-            controller.transcript = transcript
-        await self.manager._register(controller)
-        await self.manager._opened(controller, controller.open_new(model=model, reasoning=reasoning, autonomy="off", mode="auto"))
-        if controller.state is SessionState.CLOSED:
-            self.manager._forget(controller)
-        return controller
-
-    async def open_saved(
-        self, project: Any, thread_id: str, *, title: str | None = None, modified: float | None = None
-    ) -> SessionController:
-        return await self.manager.open_saved(project, thread_id, title=title, modified=modified)
-
-    async def close_all(self) -> None:
-        await self.manager.close_all()
+    def stop(self) -> None:
+        if self.fake is not None and self.fake._server is not None:
+            self.fake.__exit__(None, None, None)
+            self.fake._server.shutdown()
+            self.fake._server.server_close()
+            self.fake._server = None
 
 
 def make_core(
     tmp_path: Path,
     *,
-    codex: bool = False,
-    codex_signed_in: bool = True,
     providers: Any = None,
     max_open: int = 4,
     projects: bool = True,
     cache: Any = None,
-    factory: FakeFactory | None = None,
-    codex_engine: Any = None,
     devin_engine: Any = None,
     chatgpt_engine: Any = None,
-    read_ahead: bool = False,
+    plan: bool = True,
+    signed_in: bool = True,
+    models: list[dict[str, Any]] | None = None,
     memory: Any = None,
-) -> tuple[AppCore, FakeFactory, Events, FakePlatform, Any]:
-    factory = factory if factory is not None else FakeFactory()
-    factory.models = [
-        ModelInfo(
-            id="claude-haiku-5-5",
-            display_name="Haiku 5.5",
-            short_display_name="Haiku 5.5",
-            model_provider=ModelProvider.ANTHROPIC,
-            supported_reasoning_efforts=(ReasoningEffort.LOW, ReasoningEffort.HIGH),
-            default_reasoning_effort=ReasoningEffort.LOW,
-        ),
-        ModelInfo(
-            id="gpt-5.4",
-            display_name="GPT-5.4",
-            short_display_name="GPT-5.4",
-            model_provider=ModelProvider.OPENAI,
-            supported_reasoning_efforts=(ReasoningEffort.MEDIUM,),
-            default_reasoning_effort=ReasoningEffort.MEDIUM,
-        ),
-    ]
-    settings = AppSettings(max_open_sessions=max_open, default_model="claude-haiku-5-5", reasoning_effort="low")
+    settings: AppSettings | None = None,
+) -> tuple[AppCore, Plan, Events, FakePlatform, Any]:
+    """``plan``: the own loop, signed in to a ChatGPT Plan service of its own (unless ``chatgpt_engine`` is given). Returns
+    (core, plan, events, platform, the own loop's engine)."""
+    # (``think_chinese`` off: its sentence would ride along with every message these tests compare word for word; the tests
+    # of the language turn it on themselves)
+    if settings is None:
+        settings = AppSettings(max_open_sessions=max_open, default_model=MODEL if plan else "", reasoning_effort="medium", think_chinese=False)
     if projects:
         (tmp_path / "proj").mkdir(exist_ok=True)
         settings.add_project(tmp_path / "proj")
-    manager = SessionManager(settings, factory)
+    fake = None
+    engine = chatgpt_engine
+    if engine is None and plan:
+        fake = FakeResponses(models=models).__enter__()
+        engine = make_engine(tmp_path, fake, signed_in=signed_in, settings=settings)
+    elif engine is not None:
+        engine.settings = settings
+    service = Plan(fake, engine)
     platform = FakePlatform()
     events = Events()
-    engine = codex_engine if codex_engine is not None else (FakeCodexEngine(settings, signed_in=codex_signed_in) if codex else None)
     core = AppCore(
-        manager, platform, codex=engine, devin=devin_engine, chatgpt=chatgpt_engine, providers=providers, persist=False, emit=events, cache=cache,
-        read_ahead=read_ahead, memory=memory,
+        settings, platform, devin=devin_engine, chatgpt=engine, providers=providers, persist=False, emit=events, cache=cache, memory=memory
     )
-    return core, factory, events, platform, engine
+    shutdown = core.shutdown
+
+    async def shutdown_and_stop() -> None:
+        try:
+            await shutdown()
+        finally:
+            service.stop()
+
+    core.shutdown = shutdown_and_stop  # type: ignore[method-assign]
+    return core, service, events, platform, engine
 
 
-async def ready_core(tmp_path: Path, **options: Any) -> tuple[AppCore, FakeFactory, Events, FakePlatform, Any]:
+def save_conversation(engine: Any, project: Path, session_id: str, title: str, *, minutes_ago: float = 5, model: str = "gpt-6.1-sol") -> str:
+    """A conversation of the own loop saved ``minutes_ago`` (one question, one answer), as the engine lists it; returns its
+    sidebar row id."""
+    import time
+
+    from desktop.core.harness.store import SavedSession, SavedTurn
+    from desktop.core.settings import normalize_folder
+
+    stamp = time.time() - minutes_ago * 60
+    items = [
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": f"about {title}"}]},
+        {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": f"{title}: done."}]},
+    ]
+    engine.sessions.save(
+        SavedSession(id=session_id, project=normalize_folder(project), title=title, model=model, created_at=stamp, modified_at=stamp,
+                     items=items, turns=[SavedTurn(start=0, at=stamp, finished=stamp)])
+    )
+    return "cg:" + session_id
+
+
+async def ready_core(tmp_path: Path, **options: Any) -> tuple[AppCore, Plan, Events, FakePlatform, Any]:
     """A core after ``app.init`` with the model list loaded."""
-    core, factory, events, platform, engine = make_core(tmp_path, **options)
+    core, service, events, platform, engine = make_core(tmp_path, **options)
     await core.call("app.init")
     await until(lambda: bool(events.of("models")))
-    return core, factory, events, platform, engine
+    return core, service, events, platform, engine
 
 
-async def settled(events: Events, predicate: Any, timeout: float = 2.0) -> None:
+async def settled(events: Events, predicate: Any, timeout: float = 5.0) -> None:
     await until(predicate, timeout)
     await asyncio.sleep(0)

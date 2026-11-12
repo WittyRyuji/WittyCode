@@ -283,7 +283,7 @@ test("odd notes do not trip the layout: no title, a huge title, unknown engines 
   assert.ok(huge.name.length > 1000 && huge.r <= 5, "the whole title is kept for the tooltip, the star stays in its size range");
   const kind = ofType(layout, "kind").find((k) => k.kind === "workflow");
   assert.equal(kind.label.text, "其他", "a kind the page does not know is drawn as 其他");
-  assert.equal(layout.nodes.find((n) => n.id === "o-engine").source, "unknown");
+  assert.equal(layout.nodes.find((n) => n.id === "o-engine").source, "other", "an agent the page does not know is another agent");
   const folder = ofType(layout, "scope").find((s) => s.id === scopeIdOf({ scope: "project", project: "", projectName: "" }));
   assert.equal(folder.label.text, "项目", "a project note without a folder hangs from 项目");
 });
@@ -329,25 +329,25 @@ test("forgotten notes are stars flagged forgotten", () => {
   assert.equal(layout.nodes.find((n) => n.id === "a").forgotten, false);
 });
 
-test("who wrote a note: the user, the four engines, or unknown", () => {
+test("who wrote a note: the user, an engine, another agent, or unknown", () => {
   assert.deepEqual(
-    [{ kind: "user" }, { kind: "agent", engine: "droid" }, { kind: "agent", engine: "codex" }, { kind: "agent", engine: "devin" }, { kind: "agent", engine: "chatgpt" }, { kind: "agent", engine: "cursor" }, { kind: "unknown" }, undefined].map(sourceKey),
-    ["user", "droid", "codex", "devin", "chatgpt", "unknown", "unknown", "unknown"],
+    [{ kind: "user" }, { kind: "agent", engine: "chatgpt" }, { kind: "agent", engine: "devin" }, { kind: "agent", engine: "cursor" }, { kind: "unknown" }, undefined].map(sourceKey),
+    ["user", "chatgpt", "devin", "other", "unknown", "unknown"],
   );
 });
 
-test("colours: four hues for the kinds, six for the sources, silver for the branches", () => {
+test("colours: four hues for the kinds, five for the sources, silver for the branches", () => {
   const kinds = ["preference", "convention", "pitfall", "fact"].map((kind) => starColor({ type: "note", kind, source: "user" }, "kind"));
   assert.equal(new Set(kinds).size, 4);
-  const sources = ["user", "droid", "codex", "devin", "chatgpt", "unknown"].map((source) => starColor({ type: "note", kind: "fact", source }, "source"));
-  assert.equal(new Set(sources).size, 6);
+  const sources = ["user", "chatgpt", "devin", "other", "unknown"].map((source) => starColor({ type: "note", kind: "fact", source }, "source"));
+  assert.equal(new Set(sources).size, 5);
   assert.equal(colorKey({ type: "scope", kind: null, source: null }, "kind"), "branch");
   assert.equal(colorKey({ type: "kind", kind: "pitfall", source: null }, "kind"), "k-pitfall", "a kind node in its kind's hue");
   assert.equal(colorKey({ type: "kind", kind: "pitfall", source: null }, "source"), "branch", "…and silver when the colours tell the source");
   assert.equal(colorKey({ type: "note", kind: "workflow", source: "user" }, "kind"), "k-other");
   const legend = legendItems(fewNotes(), "kind").map((i) => i.label);
   assert.deepEqual(legend, ["偏好", "约定", "坑"], "only the kinds there are, in their usual order");
-  assert.deepEqual(legendItems(fewNotes(), "source").map((i) => i.label), ["我", "Droid", "Codex"]);
+  assert.deepEqual(legendItems(fewNotes(), "source").map((i) => i.label), ["我", "ChatGPT Plan", "Devin"]);
 });
 
 // ---------------------------------------------------------------------------------- search, selection, titles

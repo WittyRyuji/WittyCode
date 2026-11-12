@@ -18,7 +18,7 @@ from desktop.core.harness.prompt import PLAN_RULES, build_instructions
 from desktop.core.harness.store import SavedSession, SavedTurn, SessionStore
 from desktop.core.harness.tools import ToolContext, ToolRegistry
 from desktop.core.harness.toolset import PLAN_REFUSAL, HarnessTools
-from desktop.core.session_manager import SessionState
+from desktop.core.session_state import SessionState
 from desktop.core.transcript import TurnStatus
 from tests.chatgpt_support import ACCESS_TOKEN, finish_turn, until
 from tests.fake_responses import FakeResponses, call, cut, http_error, say, usage
@@ -337,7 +337,7 @@ def test_asking_again_when_the_conversation_is_a_summary_already_changes_nothing
 def test_a_summary_that_fails_leaves_the_conversation_as_it_was_and_says_so(tmp_path):
     async def go() -> None:
         with FakeResponses(token=ACCESS_TOKEN) as fake:
-            fake.script(http_error(500, {"error": {"code": "server_error", "message": "overloaded"}}), say("fine now"))
+            fake.script(http_error(400, {"error": {"code": "invalid_request_error", "message": "refused"}}), say("fine now"))
             engine, controller = await opened(tmp_path, fake)
             fill(controller)
             logged = len(controller.saved.items)

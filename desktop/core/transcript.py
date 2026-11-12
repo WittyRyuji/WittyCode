@@ -1,8 +1,7 @@
-"""Transcript view model and the reducer that builds it.
+"""Transcript view model and the builder API every engine's controller writes it with.
 
-Live turns feed the reducer with Droid SDK stream events plus the permission
-and AskUser requests seen by the interaction handlers; saved sessions go
-through ``desktop.core.history``. The reducer is pure (no Qt, no I/O).
+Each engine's controller turns what its engine reports (live, or a saved session read back) into calls of the builder API
+here (``start_turn``, ``add_text`` …, ``add_permission_prompt``, ``add_question_prompt``). Pure: no Qt, no I/O.
 
 Layout of a turn: the user message, then assistant text blocks, with everything
 the agent did between two texts (thinking + tool calls) folded into one
@@ -22,55 +21,29 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any, ClassVar
 
-from droid_sdk import (
-    AssistantMessage,
-    ErrorEvent,
-    HookExecution,
-    PermissionRequest,
-    PermissionResolved,
-    QuestionRequest,
-    RedactedThinkingBlock,
-    RunFailure,
-    RunInterrupted,
-    RunSuccess,
-    SessionTitleUpdated,
-    SettingsUpdated,
-    TextBlock,
-    TextComplete,
-    TextDelta,
-    ThinkingBlock,
-    ThinkingComplete,
-    ThinkingDelta,
-    TokenUsageUpdate,
-    ToolCall,
-    ToolCallDelta,
-    ToolProgress,
-    ToolResult,
-    ToolUseBlock,
-    Usage,
-    UserMessage,
-    WorkingState,
-    WorkingStateChanged,
-)
 
-from desktop.core.attachments import Attachment, attachments_from_content, typed_text
+from desktop.core.attachments import Attachment
 from desktop.core.diffs import FileDiff, input_diffs, result_diff
-from desktop.core.prompts import (
-    ActionView,
-    OptionView,
-    QuestionView,
-    action_view,
-    option_views,
-    question_views,
-)
-from desktop.core.toolinfo import Category, describe_input, tool_category
+from desktop.core.prompts import ActionView, OptionView, QuestionView
+from desktop.core.toolinfo import Category, TodoEntry, describe_input, plan_steps, tool_category
+
+class WorkingState(str, Enum):
+    """What a running turn is doing (the page's labels are in ``toolinfo.working_label``)."""
+
+    IDLE = "idle"
+    THINKING = "thinking"
+    STREAMING_ASSISTANT_MESSAGE = "streaming_assistant_message"
+    WAITING_FOR_TOOL_CONFIRMATION = "waiting_for_tool_confirmation"
+    EXECUTING_TOOL = "executing_tool"
+    COMPACTING_CONVERSATION = "compacting_conversation"
+
 
 HIDDEN_MESSAGE_PREFIXES = ("context-", "todo-sug", "__internal__")
 PROGRESS_TAIL_CHARS = 4000
 _CANCEL_MARKERS = ("tool execution cancelled", "cancelled by user", "batch cancelled", "interrupted by user")
 _ERROR_TRANSLATIONS = {
-    "Permission interaction handler failed": "审批处理出错，Droid 已按「拒绝」处理这一步。",
-    "Question interaction handler failed": "提问处理出错，Droid 已按「取消」处理这个问题。",
+    "Permission interaction handler failed": "审批处理出错，已按「拒绝」处理这一步。",
+    "Question interaction handler failed": "提问处理出错，已按「取消」处理这个问题。",
 }
 
 
@@ -97,7 +70,7 @@ class PromptStatus(str, Enum):
     PENDING = "pending"
     ANSWERED = "answered"
     RESOLVED = "resolved"
-    """Settled by Droid (PermissionResolved / tool result) without an answer from us."""
+    """Settled by the engine (the call ended) without an answer from us."""
     EXPIRED = "expired"
     """The turn ended, was interrupted, or the session closed while the prompt was open."""
 
@@ -214,7 +187,7 @@ class UserBlock:
     steer: bool = False
     """Said while the turn was running, to steer it: not the message that started the turn."""
     pending: bool = False
-    """A steer the engine has not taken in yet (droid does so after the step it is on)."""
+    """A steer the engine has not taken in yet (an engine does so after the step it is on)."""
     kind: ClassVar[str] = "user"
 
 
@@ -306,7 +279,7 @@ class NoticeBlock:
 
 @dataclass(eq=False)
 class SwitchBlock:
-    """The line where a conversation changed engine (Droid <-> Codex): what carries over to the new one."""
+    """The line where a conversation changed engine (the own loop <-> Devin): what carries over to the new one."""
 
     id: str
     from_model: str
@@ -344,10 +317,18 @@ class QuestionPrompt:
     status: PromptStatus = PromptStatus.PENDING
     answers: tuple[str, ...] | None = None
     version: int = 0
+    who: str = ""
+    """The actual asker, captured when asked rather than inferred from a later model selection."""
     kind: ClassVar[str] = "question"
 
 
 Prompt = PermissionPrompt | QuestionPrompt
+
+
+@dataclass(frozen=True)
+class PlanSnapshot:
+    id: str
+    steps: tuple[TodoEntry, ...]
 
 
 @dataclass(eq=False)
@@ -359,7 +340,7 @@ class Turn:
     started_at: float | None = None
     finished_at: float | None = None
     duration: float | None = None
-    usage: Usage | None = None
+    usage: Any = None
     model: str | None = None
     from_history: bool = False
     working_state: str | None = None
@@ -381,6 +362,8 @@ class Turn:
     texts: dict[tuple[str, int], TextBlockView] = field(default_factory=dict, repr=False)
     thinking: dict[tuple[str, int], ThinkingEntry] = field(default_factory=dict, repr=False)
     group_of: dict[str, ActivityBlock] = field(default_factory=dict, repr=False)
+    plan: PlanSnapshot | None = None
+    """Latest accepted plan in event order, independent of historical tool row positions; empty steps explicitly clear it."""
 
     @property
     def running(self) -> bool:
@@ -409,7 +392,7 @@ class Transcript:
         self.turns: list[Turn] = []
         self.version = 0
         self.title: str | None = None
-        self.usage: Usage | None = None
+        self.usage: Any = None
         self.working_state: WorkingState | None = None
         self.model: str | None = None
         self.output_probe: Callable[[], int | None] | None = None
@@ -420,28 +403,6 @@ class Transcript:
         self._attachments: dict[str, Attachment] = {}
         self._items: dict[str, ToolItem] = {}
         self._prompts: dict[str, tuple[Turn, Prompt]] = {}
-        self._handlers: dict[type, Callable[[Any], None]] = {
-            WorkingStateChanged: self._on_working_state,
-            UserMessage: self._on_user_message,
-            TextDelta: self._on_text_delta,
-            TextComplete: self._on_text_complete,
-            ThinkingDelta: self._on_thinking_delta,
-            ThinkingComplete: self._on_thinking_complete,
-            ToolCallDelta: self._on_tool_call_delta,
-            ToolCall: self._on_tool_call,
-            AssistantMessage: self._on_assistant_message,
-            ToolProgress: self._on_tool_progress,
-            ToolResult: self._on_tool_result,
-            PermissionResolved: self._on_permission_resolved,
-            ErrorEvent: self._on_error,
-            TokenUsageUpdate: self._on_usage,
-            SettingsUpdated: self._on_settings_updated,
-            SessionTitleUpdated: self._on_title,
-            HookExecution: self._on_hook,
-            RunSuccess: self._on_run_result,
-            RunInterrupted: self._on_run_result,
-            RunFailure: self._on_run_result,
-        }
 
     # ---------------------------------------------------------------- queries
 
@@ -510,13 +471,6 @@ class Transcript:
         turn.blocks.append(group)
         return group
 
-    def _content_turn(self) -> Turn:
-        turn = self.active_turn
-        if turn is None:
-            # Events without a turn started by start_turn(); keep them visible anyway.
-            turn = Turn(id=self.new_id("t"), started_at=self._clock())
-            self.turns.append(turn)
-        return turn
 
     def _own(self, attachments: Iterable[Attachment]) -> tuple[Attachment, ...]:
         """The transcript's copies of attachments (slimmed, with ids the page can refer to)."""
@@ -526,6 +480,18 @@ class Transcript:
         return owned
 
     # ---------------------------------------------------------------- builder API (live + history)
+
+    def set_plan(self, turn: Turn, value: Any, *, source_id: str = "") -> bool:
+        steps = plan_steps(value)
+        if steps is None or (turn.plan is not None and turn.plan.steps == steps):
+            return False
+        turn.plan = PlanSnapshot(source_id or self.new_id("p"), steps)
+        self._touch(turn)
+        return True
+
+    def _accept_tool_plan(self, turn: Turn, item: ToolItem) -> None:
+        if item.category is Category.PLAN and item.status is ToolStatus.DONE and item.input_final:
+            self.set_plan(turn, item.input.get("todos"), source_id=item.id)
 
     def ensure_tool(self, turn: Turn, tool_use_id: str, name: str, *, message_id: str | None = None) -> ToolItem:
         item = turn.tools.get(tool_use_id)
@@ -549,10 +515,12 @@ class Transcript:
             item.message_id = message_id
         return item
 
-    def set_tool_input(self, turn: Turn, item: ToolItem, data: Mapping[str, Any], *, final: bool) -> None:
+    def set_tool_input(self, turn: Turn, item: ToolItem, data: Mapping[str, Any], *, final: bool, accept_plan: bool = True) -> None:
         if item.input_final and not final:
             return
-        item.input = plain(data)
+        incoming = plain(data)
+        changed = item.input != incoming
+        item.input = incoming
         if final:
             item.input_final = True
             if item.diff_source not in ("result", "permission"):
@@ -560,6 +528,8 @@ class Transcript:
                 if diffs:
                     item.diffs = diffs
                     item.diff_source = "input"
+        if changed and final and accept_plan:
+            self._accept_tool_plan(turn, item)
         self._touch_item(turn, item)
 
     def text_block(self, turn: Turn, message_id: str, block_index: int) -> TextBlockView:
@@ -601,6 +571,7 @@ class Transcript:
                 item.diffs = (diff,)
                 item.diff_source = "result"
         self._settle_prompts_for(turn, item)
+        self._accept_tool_plan(turn, item)
         self._touch_item(turn, item)
 
     def new_history_turn(
@@ -624,7 +595,7 @@ class Transcript:
         status: TurnStatus,
         *,
         duration: float | None = None,
-        usage: Usage | None = None,
+        usage: Any = None,
         finished_at: float | None = None,
     ) -> None:
         self._tick(turn)  # (while it still runs: the last stretch of waiting is counted)
@@ -659,7 +630,7 @@ class Transcript:
         self._touch(turn)
 
     def _turn_output(self, turn: Turn, usage: Any) -> int | None:
-        """What the model wrote in the turn: the turn's own figure when the engine gives one (Droid's run result), else what
+        """What the model wrote in the turn: the turn's own figure when the engine gives one (a run result), else what
         the session counted since the turn began (only when that start is known: a session that had counted nothing yet
         but already had turns would put its whole past into this one)."""
         written = getattr(usage, "output_tokens", None)
@@ -723,18 +694,6 @@ class Transcript:
     def pending_steers(turn: Turn | None) -> list[UserBlock]:
         return [] if turn is None else [b for b in turn.blocks if isinstance(b, UserBlock) and b.steer and b.pending]
 
-    def apply(self, event: object) -> None:
-        handler = self._handlers.get(type(event))
-        if handler is not None:
-            handler(event)
-
-    def load_history(self, messages: Sequence[Any]) -> int:
-        from desktop.core.history import build_history_turns
-
-        turns = build_history_turns(self, messages)
-        self.turns[0:0] = turns
-        self.version += 1
-        return len(turns)
 
     def mark_stopping(self) -> None:
         turn = self.active_turn
@@ -843,59 +802,6 @@ class Transcript:
 
     # ---------------------------------------------------------------- prompts
 
-    def add_permission(self, request: PermissionRequest) -> PermissionPrompt | None:
-        turn = self.active_turn
-        if turn is None:
-            return None
-        tool_ids: list[str] = []
-        for action in request.actions:
-            tool_use = action.tool_use
-            item = self.ensure_tool(turn, tool_use.id, tool_use.name)
-            if not item.input_final and tool_use.input:
-                self.set_tool_input(turn, item, tool_use.input, final=True)
-            tool_ids.append(tool_use.id)
-        views = tuple(action_view(action) for action in request.actions)
-        prompt = PermissionPrompt(
-            id=self.new_id("p"),
-            tool_use_ids=tuple(tool_ids),
-            actions=views,
-            options=option_views(request.options),
-        )
-        stale = bool(tool_ids) and all(turn.tools[tool_id].terminal for tool_id in tool_ids)
-        if stale:
-            prompt.status = PromptStatus.EXPIRED
-        for tool_id, view in zip(tool_ids, views):
-            item = turn.tools[tool_id]
-            if view.diffs and item.diff_source != "result":
-                item.diffs = view.diffs
-                item.diff_source = "permission"
-            if not stale and not item.terminal:
-                item.status = ToolStatus.AWAITING_PERMISSION
-            self._touch_item(turn, item)
-        turn.prompts.append(prompt)
-        self._prompts[prompt.id] = (turn, prompt)
-        self._touch(turn, prompt)
-        return prompt
-
-    def add_question(self, request: QuestionRequest) -> QuestionPrompt | None:
-        turn = self.active_turn
-        if turn is None:
-            return None
-        item = self.ensure_tool(turn, request.tool_call_id, "AskUser")
-        prompt = QuestionPrompt(
-            id=self.new_id("p"),
-            tool_call_id=request.tool_call_id,
-            questions=question_views(request.questions),
-        )
-        if item.terminal:
-            prompt.status = PromptStatus.EXPIRED
-        else:
-            item.status = ToolStatus.AWAITING_PERMISSION
-        self._touch_item(turn, item)
-        turn.prompts.append(prompt)
-        self._prompts[prompt.id] = (turn, prompt)
-        self._touch(turn, prompt)
-        return prompt
 
     def answer_permission(self, prompt_id: str, value: str) -> bool:
         found = self._prompts.get(prompt_id)
@@ -980,146 +886,6 @@ class Transcript:
 
     # ---------------------------------------------------------------- event handlers
 
-    def _on_working_state(self, event: WorkingStateChanged) -> None:
-        self.working_state = event.state
-        turn = self.active_turn
-        if turn is not None:
-            turn.working_state = event.state.value
-            self._touch(turn)
-        else:
-            self.version += 1
-
-    def _on_user_message(self, event: UserMessage) -> None:
-        if is_hidden_message(event.id):
-            return
-        turn = self.active_turn
-        if turn is None:
-            return
-        steered = next((b for b in self.pending_steers(turn) if b.message_id and b.message_id == event.id), None)
-        if steered is not None:
-            self.settle_steer(turn, steered)  # droid has taken it in: from here on the model has read it
-            return
-        user = turn.user_block
-        text = typed_text(event.content, event.text)
-        if user is not None and user.message_id is None:
-            user.message_id = event.id
-            changed = False
-            if text and text != user.text:
-                user.text = text
-                changed = True
-            if not user.attachments:
-                echoed = attachments_from_content(event.content)
-                if echoed:
-                    user.attachments = self._own(echoed)
-                    changed = True
-            if changed:
-                self._touch(turn, user)
-        elif user is None:
-            echoed = attachments_from_content(event.content)
-            if text.strip() or echoed:
-                block = UserBlock(id=self.new_id("b"), text=text, message_id=event.id)
-                block.attachments = self._own(echoed)
-                turn.blocks.insert(0, block)
-                self._touch(turn)
-
-    def _on_text_delta(self, event: TextDelta) -> None:
-        turn = self._content_turn()
-        block = self.text_block(turn, event.message_id, event.block_index)
-        block.text += event.text
-        block.streaming = True
-        self._touch(turn, block)
-
-    def _on_text_complete(self, event: TextComplete) -> None:
-        turn = self._content_turn()
-        block = turn.texts.get((event.message_id, event.block_index))
-        if block is not None and block.streaming:
-            block.streaming = False
-            self._touch(turn, block)
-
-    def _on_thinking_delta(self, event: ThinkingDelta) -> None:
-        turn = self._content_turn()
-        entry = self.thinking_entry(turn, event.message_id, event.block_index)
-        entry.text += event.text
-        self._touch_item(turn, entry)
-
-    def _on_thinking_complete(self, event: ThinkingComplete) -> None:
-        turn = self._content_turn()
-        entry = turn.thinking.get((event.message_id, event.block_index))
-        if entry is None:
-            return
-        entry.complete = True
-        if event.duration is not None:
-            entry.duration = event.duration.total_seconds()
-        self._touch_item(turn, entry)
-
-    def _on_tool_call_delta(self, event: ToolCallDelta) -> None:
-        turn = self._content_turn()
-        tool_use = event.tool_use
-        item = self.ensure_tool(turn, tool_use.id, tool_use.name)
-        self.set_tool_input(turn, item, tool_use.input, final=False)
-
-    def _on_tool_call(self, event: ToolCall) -> None:
-        turn = self._content_turn()
-        item = self.ensure_tool(turn, event.tool_use_id, event.name)
-        self.set_tool_input(turn, item, event.input, final=True)
-
-    def _on_assistant_message(self, event: AssistantMessage) -> None:
-        turn = self._content_turn()
-        message_id = event.id
-        content = list(event.content)
-        for index, block in enumerate(content):
-            if isinstance(block, TextBlock):
-                existing = turn.texts.get((message_id, index))
-                if existing is not None:
-                    if existing.text != block.text or existing.streaming:
-                        existing.text = block.text or existing.text
-                        existing.streaming = False
-                        self._touch(turn, existing)
-                elif block.text.strip():
-                    later = [b.id for b in content[index + 1 :] if isinstance(b, ToolUseBlock)]
-                    self._insert_unstreamed_text(turn, message_id, index, block.text, later)
-            elif isinstance(block, (ThinkingBlock, RedactedThinkingBlock)):
-                entry = turn.thinking.get((message_id, index))
-                redacted = isinstance(block, RedactedThinkingBlock)
-                if entry is None:
-                    if not redacted and not block.thinking.strip():
-                        continue
-                    entry = self.thinking_entry(turn, message_id, index)
-                if redacted:
-                    entry.redacted = True
-                else:
-                    entry.text = block.thinking or entry.text
-                    if block.duration is not None and entry.duration is None:
-                        entry.duration = block.duration.total_seconds()
-                entry.complete = True
-                self._touch_item(turn, entry)
-            elif isinstance(block, ToolUseBlock):
-                item = self.ensure_tool(turn, block.id, block.name, message_id=message_id)
-                if not item.input_final:
-                    self.set_tool_input(turn, item, block.input, final=True)
-                else:
-                    self._touch_item(turn, item)
-
-    def _insert_unstreamed_text(self, turn: Turn, message_id: str, index: int, text: str, later_tool_ids: list[str]) -> None:
-        """Place text that never streamed before the tools that followed it in the same message."""
-        block = TextBlockView(id=self.new_id("b"), text=text, message_id=message_id, block_index=index)
-        turn.texts[(message_id, index)] = block
-        location = self._first_location(turn, later_tool_ids)
-        if location is None:
-            self._append_block(turn, block)
-            return
-        group, position = location
-        group_index = turn.blocks.index(group)
-        if position == 0:
-            turn.blocks.insert(group_index, block)
-        else:
-            tail = ActivityBlock(id=self.new_id("b"), entries=group.entries[position:])
-            del group.entries[position:]
-            for entry in tail.entries:
-                turn.group_of[entry.id] = tail
-            turn.blocks[group_index + 1 : group_index + 1] = [block, tail]
-            self._touch(turn, group, tail)
-        self._touch(turn, block)
 
     def _first_location(self, turn: Turn, tool_ids: list[str]) -> tuple[ActivityBlock, int] | None:
         wanted = {turn.tools[tool_id].id for tool_id in tool_ids if tool_id in turn.tools}
@@ -1132,104 +898,6 @@ class Transcript:
                         return block, position
         return None
 
-    def _on_tool_progress(self, event: ToolProgress) -> None:
-        turn = self._content_turn()
-        item = self.ensure_tool(turn, event.tool_use_id, event.tool_name)
-        update = event.update
-        output = (update.full_output if update is not None else None) or event.content
-        if output:
-            item.progress = output[-PROGRESS_TAIL_CHARS:]
-        if not item.terminal:
-            item.status = ToolStatus.RUNNING
-            if item.started_at is None:
-                item.started_at = self._clock()
-        self._touch_item(turn, item)
-
-    def _on_tool_result(self, event: ToolResult) -> None:
-        turn = self._content_turn()
-        item = self.ensure_tool(turn, event.tool_use_id, event.tool_name)
-        self.record_result(turn, item, event.content, event.is_error)
-
-    def _on_permission_resolved(self, event: PermissionResolved) -> None:
-        turn = self.active_turn
-        if turn is None:
-            return
-        outcome = getattr(event.selected_option, "value", str(event.selected_option))
-        ids = set(event.tool_use_ids)
-        affected: list[PermissionPrompt] = []
-        for prompt in turn.prompts:
-            if not isinstance(prompt, PermissionPrompt):
-                continue
-            if ids:
-                if ids.intersection(prompt.tool_use_ids):
-                    affected.append(prompt)
-            elif prompt.status is PromptStatus.PENDING:
-                # An empty id list (interrupt / handler failure) settles whatever is still open.
-                affected.append(prompt)
-        for prompt in affected:
-            if prompt.status is PromptStatus.PENDING:
-                prompt.status = PromptStatus.RESOLVED
-            prompt.selected = outcome
-            self._touch(turn, prompt)
-        tool_ids = ids or {tool_id for prompt in affected for tool_id in prompt.tool_use_ids}
-        for tool_id in tool_ids:
-            item = turn.tools.get(tool_id)
-            if item is None:
-                continue
-            item.decision = outcome
-            if not item.terminal:
-                item.status = ToolStatus.CANCELLED if outcome == "cancel" else ToolStatus.RUNNING
-            self._touch_item(turn, item)
-        self._touch(turn)
-
-    def _on_error(self, event: ErrorEvent) -> None:
-        turn = self._content_turn()
-        self._append_block(turn, ErrorBlock(id=self.new_id("b"), message=friendly_error(event.message)))
-
-    def _on_usage(self, event: TokenUsageUpdate) -> None:
-        self.usage = event
-        self.version += 1
-
-    def _on_settings_updated(self, event: SettingsUpdated) -> None:
-        model = event.settings.model
-        if model and model != self.model:
-            previous, self.model = self.model, model
-            turn = self.active_turn
-            if turn is not None:
-                turn.model = model
-                if previous is not None:
-                    self._append_block(
-                        turn,
-                        NoticeBlock(id=self.new_id("b"), text=f"Droid 已把模型切换为 {model}（之前是 {previous}）。"),
-                    )
-        self.version += 1
-
-    def _on_title(self, event: SessionTitleUpdated) -> None:
-        self.title = event.title
-        self.version += 1
-
-    def _on_hook(self, event: HookExecution) -> None:
-        failed = event.status == "error" or (event.status == "completed" and event.exit_code not in (None, 0))
-        if not failed:
-            return
-        turn = self._content_turn()
-        code = f"，退出码 {event.exit_code}" if event.exit_code is not None else ""
-        name = event.event_name or "hook"
-        self._append_block(turn, NoticeBlock(id=self.new_id("b"), text=f"钩子 {name} 未成功{code}。"))
-
-    def _on_run_result(self, result: RunSuccess | RunInterrupted | RunFailure) -> None:
-        turn = self.active_turn
-        if turn is None:
-            return
-        if isinstance(result, RunSuccess):
-            status = TurnStatus.DONE
-        elif isinstance(result, RunInterrupted):
-            status = TurnStatus.INTERRUPTED
-        else:
-            status = TurnStatus.FAILED
-            message = result.error.message if result.error is not None else f"本轮失败（{result.subtype}）"
-            self._append_block(turn, ErrorBlock(id=self.new_id("b"), message=friendly_error(message)))
-        self.finish_turn(turn, status, duration=result.duration.total_seconds(), usage=result.usage)
 
     # ---------------------------------------------------------------- builder API for engines without SDK events (Codex)
 
@@ -1279,7 +947,7 @@ class Transcript:
         return entry
 
     def tool_running(self, turn: Turn, item: ToolItem, output: str | None = None) -> None:
-        """The tool is at work; ``output`` is everything it printed so far (the tail is kept, like Droid's progress)."""
+        """The tool is at work; ``output`` is everything it printed so far (the tail is kept)."""
         if output:
             item.progress = output[-PROGRESS_TAIL_CHARS:]
         if not item.terminal:
@@ -1294,7 +962,7 @@ class Transcript:
         self._touch_item(turn, item)
 
     def finish_tool(self, turn: Turn, item: ToolItem, text: str, *, status: ToolStatus, at: float | None = None) -> None:
-        """The tool ended the way the engine says (``record_result`` infers the outcome from a Droid result instead)."""
+        """The tool ended the way the engine says (``record_result`` infers the outcome from a result's text instead)."""
         if item.result is not None:
             item.duplicate_results += 1
             self._touch_item(turn, item)
@@ -1304,6 +972,7 @@ class Transcript:
         item.is_error = item.status is ToolStatus.ERROR
         item.finished_at = self._clock() if at is None else at
         self._settle_prompts_for(turn, item)
+        self._accept_tool_plan(turn, item)
         self._touch_item(turn, item)
 
     def add_permission_prompt(
@@ -1333,13 +1002,13 @@ class Transcript:
         self._touch(turn, prompt)
         return prompt
 
-    def add_question_prompt(self, tool_call_id: str, questions: Sequence[QuestionView]) -> QuestionPrompt | None:
+    def add_question_prompt(self, tool_call_id: str, questions: Sequence[QuestionView], *, who: str = "") -> QuestionPrompt | None:
         """``add_question`` from display data; the questions belong to an ``AskUser`` item of the active turn."""
         turn = self.active_turn
         if turn is None:
             return None
         item = self.ensure_tool(turn, tool_call_id, "AskUser")
-        prompt = QuestionPrompt(id=self.new_id("p"), tool_call_id=tool_call_id, questions=tuple(questions))
+        prompt = QuestionPrompt(id=self.new_id("p"), tool_call_id=tool_call_id, questions=tuple(questions), who=who)
         if item.terminal:
             prompt.status = PromptStatus.EXPIRED
         else:

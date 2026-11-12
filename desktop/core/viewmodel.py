@@ -103,9 +103,9 @@ def tool_json(item: ToolItem) -> dict[str, Any]:
         "status": item.status.value,
     }
     command = item.input.get("command")
-    if item.name == "TodoWrite":
+    if item.category is Category.PLAN:
         todos = parse_todos(item.input.get("todos"))
-        if todos:
+        if todos or item.input.get("todos") == []:
             out["todos"] = [{"text": todo.text, "state": todo.status} for todo in todos]
         else:
             out["meta"] = _meta(item)
@@ -225,7 +225,10 @@ def prompt_json(prompt: Prompt) -> dict[str, Any]:
             out["selected"] = prompt.selected
         return out
     assert isinstance(prompt, QuestionPrompt)
-    return {"kind": "question", "id": prompt.id, "status": status, "questions": [_question_json(q) for q in prompt.questions]}
+    out = {"kind": "question", "id": prompt.id, "status": status, "questions": [_question_json(q) for q in prompt.questions]}
+    if prompt.who:
+        out["who"] = prompt.who
+    return out
 
 
 _TURN_STATUS = {
@@ -243,6 +246,8 @@ def turn_json(turn: Turn, thumbnail: Thumbnailer | None = None) -> dict[str, Any
         "blocks": [block_json(block, thumbnail) for block in turn.blocks],
         "prompts": [prompt_json(prompt) for prompt in turn.prompts if prompt.status is PromptStatus.PENDING],
     }
+    if turn.plan is not None:
+        out["plan"] = {"id": turn.plan.id, "steps": [{"text": step.text, "state": step.status} for step in turn.plan.steps]}
     if turn.duration is not None:
         out["seconds"] = round(turn.duration, 1)
     steps = turn.stats().steps

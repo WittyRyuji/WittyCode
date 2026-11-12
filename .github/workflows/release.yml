@@ -1,0 +1,72 @@
+# Builds the Windows release when a version tag (v0.1.0-alpha.1 …) is pushed and publishes it on GitHub with its SHA-256 and a
+# build provenance attestation. A tag with a "-" (alpha, beta, rc) is published as a prerelease. Not code-signed yet (ROADMAP.md).
+# Same pinned image, Python, Node and actions as CI; the tests run first and a failure publishes nothing.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: windows-2025
+    timeout-minutes: 90
+    permissions:
+      contents: write # create the release
+      id-token: write # sign the attestation
+      attestations: write
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: 3.11.9
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.20.0
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install the pinned dependencies
+        run: python -m pip install -r requirements-dev.txt -c constraints.txt
+      - name: The tag names the version in pyproject.toml
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          python -c "import os, tomllib; from packaging.version import Version; v = tomllib.load(open('pyproject.toml', 'rb'))['project']['version']; t = os.environ['TAG'].removeprefix('v'); assert Version(t) == Version(v), f'tag {t} is not version {v}'; print('version', v)"
+      - name: Build the page
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build:app
+      - name: Tests (without the whole-window ones)
+        run: python -m pytest tests -q -p no:cacheprovider --ignore-glob="tests/test_app*e2e*.py" --ignore=tests/test_shell.py
+      - name: Build the release (with its offscreen smoke test)
+        run: python scripts/build_release.py
+      - name: Attest the build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/WittyCode-*.zip
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          $zip = Get-ChildItem dist -Filter "WittyCode-*-win-x64.zip" | Select-Object -First 1
+          if (-not $zip) { throw "no zip in dist" }
+          $notes = "docs/releases/$env:TAG.md"
+          $flags = @("--verify-tag", "--title", "WittyCode $env:TAG")
+          if (Test-Path $notes) { $flags += @("--notes-file", $notes) } else { $flags += "--generate-notes" }
+          if ($env:TAG -match "-") { $flags += "--prerelease" }
+          gh release create $env:TAG $zip.FullName "$($zip.FullName).sha256" @flags

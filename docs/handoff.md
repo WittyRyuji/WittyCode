@@ -4,6 +4,27 @@
 
 ## 当前状态
 
+- 2026-11-12（柔和不重色饼图与计划实时更新）：模型用量改用低亮度、低饱和度配色，按固定模型集合确定性分配、RGB 避碰，超过基础色板也不直接循环重用；Token 排序变化不换色。右栏改为优先读取按事件顺序维护的已接受计划快照，补齐 Devin 原生计划、工具新输入和历史重放；同 ID、改文字／数量、完成及清空都实时更新，关闭／折叠状态保留。前端已重建；全量 **2863 通过／2 跳过／2 条既有管道清理警告（501.05 秒）**，typecheck、unit **91**、两套完整页面检查及三项 Qt 计划回归通过。隔离真实可见窗口核对进度 0/3→3/3，并对深浅主题的饼图截图取样，确认三个模型实际绘成不同柔和 RGB；窗口已关闭。真实模型 0 次、未触碰用户设置；人工主观观感与真实 Devin 服务未验证。只本地提交，不推送，需重启应用；不混入已有 PR／推送交接记录。
+
+- 2026-11-12（对话布局、回合导航与计划关闭）：按用户截图反馈改成统一阅读列，正文与输入框两侧严格对齐；宽窗口的计划独立占右列，窄窗口用浮层，不再只挤正文。左侧新增每轮一个的轻量导航，支持消息预览、点击、方向键及 Home／End；阅读历史时输出不抢滚动。右侧使用空闲淡出的圆角细滚动条，修复窗口缩放热区拦截拖动。计划 `×` 会释放整列，顶部「计划」可重开；进度和切标签不强行重开。前端已重建；最终全量 **2850 通过／2 跳过／2 条既有管道清理警告（494.04 秒）**，前端类型检查、unit **87**、两套完整页面检查和真实窗口深浅／宽窄检查通过；唯一一次正式审查无阻塞问题，隐私及乱码检查无异常。无真实模型调用，不读写用户设置；人工截图观感未验证，本批只本地提交、不推送，需重启应用。
+
+- 2026-11-12（CI 截图目录缺失）：用户提供的失败运行对应 `f8ef0cf`，与后续 README Wiki 徽章无关；GitHub 显示 Python、前端构建与 unit 成功，设计页检查失败。匿名完整日志下载返回 403；在该提交的干净副本中明确复现保存 `shots/i-attach.png` 时目录不存在的 `ENOENT`，后续 `../sandbox/api-efforts-light.png` 同样依赖未入库目录。已让 `cdp.mjs` 的截图写入器递归创建父目录并保留真正的写入错误；新增三项回归接入前端 unit。只叠本次修复的干净副本：构建、unit **74**、设计检查 **337**、连接检查 **264** 全通过，两处图片均确实写成有效尺寸 PNG；共享工作树 unit **83** 通过。一次正式审查无阻塞问题。仅本地提交，不推送；GitHub 重跑结果未验证，未改业务代码或跳过检查。
+
+- 2026-11-12（右侧计划、按模型 Token 与可调步数）：任务清单有结构化子步骤时才在右侧出现，显示当前会话最新进度，输入框不缩窄；历史计划默认折叠。Token 悬停顶部加入按整个对话合计计算的模型饼图，未知旧用量明确列为「未归属」；删除模型菜单每行重复的交接说明，切换行为不变。设置 → 会话新增「单轮步数上限」，默认 80、可调高，保存后在自有循环下一步读取，当前工具不被打断；Devin 的外部限制不受它控制。前端已重建，全量 pytest（含 Qt 整机）**2849 通过／2 跳过／2 条既有 Windows 管道清理警告（486.46 秒）**，运行前后源码哈希一致；前端类型检查、unit 80 和两套页面检查通过。唯一一次正式审查未发现阻塞问题，已完成隐私自查，仅本地提交。本批未推送，不含其他任务留下的推送交接记录；真实模型与人工截图观感未验证，需要重启应用。
+
+- 2026-11-12（README Wiki 入口）：中英文 README 顶部都新增用户提供的 DeepWiki 链接，并在 CI／CodeQL 后加入可点击的官方 Ask DeepWiki 徽章。两份 Markdown 的链接、徽章地址、顺序和重复项检查通过；一次正式审查未发现阻塞问题。DeepWiki 页面与徽章接口在线检查均返回 HTTP 429，在线可用性和 GitHub 渲染效果未验证。仅文档变更，未重跑业务测试；只在 `dev` 本地提交本批片段，不推送，不混入其他未提交改动。
+
+- 2026-11-12（会话静态排序与本地缓存）：侧栏默认按 Session 创建时间倒序，活动时间只更新文案、不再重排；同项目内支持原生拖拽，顺序保存，打开／关闭／刷新／重启及换引擎时沿用。缓存即使稍旧也先显示，真实历史加载完才替换；连接失败或页面重载不清空，未完成加载不覆盖原缓存，长回合运行中也定期落盘。前端已重建。共享工作树全量 pytest（含 Qt 整机）**2841 通过／2 跳过／2 条既有 Windows 管道清理警告**；类型检查、unit 75、`check.mjs`、`check-live.mjs`、原生鼠标拖拽及隔离真实窗口检查通过。一次正式审查未发现阻塞问题。真实模型 0 次，未读写用户真实数据；人工截图观感与真实 Devin 连接未验证。只提交本批片段，保留其他任务改动，在 `dev` 本地提交、不推送；需要重启应用。
+
+- 2026-11-12（API Context 与 XHigh / Max）：API 模型缺窗口时改为按完整模型 ID 查内置官方规格表，不设统一猜测值；已有配置或获取到的服务端窗口优先，仍未知的模型在编辑器要求填写，发送层也拦截。截图中的 `gpt-6.1-sol` / `gpt-6.1-terra` / `gpt-6-astra` 已从 OpenAI 官方模型页核实为 1,050,000 tokens（网关可能更小，可手动覆盖）。设置页、目录与引擎补齐 Minimal / XHigh / Max，选中的值会原样发送。前端已重建；以当前提交加本次改动的隔离副本验证：全量 pytest（含 Qt 整机）**2822 通过 / 2 跳过 / 2 条既有管道清理警告**，前端类型检查、unit 71、`check.mjs` 337 项通过。共享工作树混有其他任务改动，首次全量 3 项侧栏失败；未回退其他任务。`check-live.mjs` 在共享记忆／侧栏交互失败，不计通过；截图人工观感、真实网关上限与 XHigh / Max 的服务端接受情况未验证。真实模型 0 次，只本地提交，不推送。
+
+- 2026-11-12（GitHub Actions 失败排查）：逐一读取截图中六次 CI / CodeQL 的公开运行页，均因仓库策略仅允许仓库所有者名下的 Action 而 `startup_failure`；官方 `actions/*` 和 `github/codeql-action/*` 被拦截。最新两次运行的 jobs / check-runs 都为 0，尚未执行 runner 或测试。工作流已固定完整 SHA，无需改代码或取消 SHA 要求；维护者需在 Settings → Actions → General 放行所用 GitHub 官方 Action，保存后重新运行 CI / CodeQL。未改远端设置，放行后的运行结果未验证；本批只记录诊断，不包含工作树中其他任务的改动，不推送。
+
+- 2026-11-12（中文进度与 Devin 提问显示）：修复 Devin 运行中引导漏带中文要求；语言规则明确覆盖工具调用之后、续作和每一步，同一条进度直接用中文表达一次，不先英文再翻译。提问适配器对 `message` / 字段标题 / 字段说明里的相同文字去重（只统一连续空白，不合并单词，不猜语义）；问题记录实际提问者 `who`，Devin 卡片明确写 Devin，旧缓存保留按会话推断的兼容逻辑。已补单元、协议和 Qt 整机回归；前端已重建。全量 pytest（含整机）**2810 通过 / 2 跳过 / 2 条 Windows 子进程管道清理警告**；前端 typecheck、unit 69、`check.mjs`、`check-live.mjs` 通过。一次正式审查未发现阻塞问题。没有调用真实模型，不能保证外部模型会全程遵守语言指令；截图人工观感未验证。本批在 `dev` 仅本地提交，不推送。
+- 2026-11-12（独立化：去掉 Droid / Factory / Codex；提交 `e993ba7`，已推到 `dev`）：WittyCode 只剩自有循环（ChatGPT Plan、API Provider，引擎名 `chatgpt`）和可选的 Devin。删了 `desktop/core/codex/`、`session_manager.py`、`droid_locator.py`、`droid_limits.py`、`history.py`、`devtools/replay.py` 和 `droid-sdk` 依赖；前端去掉 Factory / Codex 卡片和 Plan 额度来源，设置里「Droid」页改成「外部程序」（只有 Devin 路径）；API Provider 的模型存在 WittyCode 自己的 `models.json`，**不再读也不复制 `~/.factory/settings.json`**（用户定）；技能目录 `.wittycode` 优先，其他代理的目录只读兼容（`~/.factory/settings.json` 里的 `disabledSkills`、插件仍在读，Roadmap 里写了要去掉）。测试底座换成 `tests/app_support.make_core`（真 ChatGPTEngine + 本机假 Responses 服务，`Plan.script` / `("hold", key)` / `release`）、`save_conversation`、假 Devin 的 `FAKE_DEVIN_OPEN_DELAY` / `FAKE_DEVIN_OPEN_FAIL`、e2e 的 `Model` 帮手。**事故**：一个旧测试用默认路径建 `ProviderStore`，把 `~/.factory/settings.json` 的 `customModels` 复制进了用户真实的 `%APPDATA%\WittyCode\models.json`；已按用户意见删除该文件、删掉迁移逻辑，并在 `tests/conftest.py` 加了 autouse 的 `_no_files_of_the_real_user`（每个测试的 `WITTYCODE_SETTINGS` 指向临时目录）。新增 `README.md`（英文）/ `README.zh-CN.md`、`ROADMAP.md` / `ROADMAP.zh-CN.md`、`SECURITY.md`、`CONTRIBUTING.md`。验证：全量 pytest（不含 e2e）2743 通过 / 2 跳过（之后又修了一个时序断言），整机 e2e 54 通过，前端 typecheck、unit 69、星图单测 26、`check.mjs` 332、`check-live.mjs` 261，冒烟脚本 OK；版本号 `0.1.0a1`、`release.yml`（推 `v*` tag 时构建发布）、发布说明 `docs/releases/v0.1.0-alpha.1.md` 都做了。提交前最后一次全量 pytest（含整机测试）2798 通过 / 2 跳过。**GitHub 上 CI / CodeQL 仍是启动失败**：仓库的 Actions 策略只允许本人名下的 action，要用户在 Settings → Actions → General 放宽。**等用户**：放宽策略、开 PR `main...dev` 并批准合并；合并后再打 tag `v0.1.0-alpha.1`。`fixtures/` 里的 Droid 录像已没有测试在用，留给用户定（`fixtures/long_session/` 不许动）。
+- 2026-11-11（深夜，第三批：答复选项一行一个）：用户：「提问回答的选项应该一行一个，包括权限审批」。权限卡的答复按钮改成竖排、占满卡片宽、文字靠左（`.pbtns.choices`，类名 `.pbtns` / `.btn` 不变，测试的选择器照旧）；提问卡的选项本来就一行一个，没改。没有提交。细节见批次记录最上面一条。
+- 2026-11-11（深夜，第二批：用户九条里能直接做的）：`AGENTS.md` 再缩成只有硬约束（16 行：语言、沟通、验证、边界、公开仓库、Git、交接），命令和环境搬到 `docs/development.md`，产品原则进 `docs/project.md`。**Devin 会问问题了**（声明 ACP elicitation，`elicitation/create` 画成提问卡）；**Devin 的 token 合计实时动**（本轮已有调用先显示、不记账）；**思考用中文**（设置开关，默认开）；压缩摘要请求失败会重试；停止超时不再把旧引导塞进下一轮；退出确认提醒排队消息和 `/goal`；提问卡等回答时回车不再悄悄排队。**没做、等用户定**：去掉 Droid / Factory（747 个测试建在 Droid 的假引擎上，要先重写测试底座）、设置里「删除 Codex 的 ACP 模式，只保留 Plan」（理解成去掉「Codex 订阅」引擎，待确认）、Codex 的提问（随上一条定）。没有提交。细节见批次记录最上面一条。
+- 2026-11-11（深夜：`AGENTS.md` 瘦身）：用户：「仓库下的 Agents.md 明显太臃肿……这个应该是对于 Agent 运行的定义。项目信息不应该混入」。`AGENTS.md` 现在只放代理的工作约定（先读什么、规则、命令、版本控制、交接），207 KB → 9 KB；项目概况、模块图、发布包结构和「版本控制」里仓库 / 许可证 / 隐私的原文搬到 `docs/project.md`，原「SDK 已确认的事实」一节（65 条）原样搬到 `docs/knowledge.md`（开头加了索引）。**下面各条和批次记录里说「见 `AGENTS.md` 的「某某」一条」的，现在都在 `docs/knowledge.md`。** 没有提交（等用户说）。细节见批次记录最上面一条。
 - 2026-11-11（深夜：清掉仓库里的私人信息）：用户：「仓库文档里面要清理干净我本地的信息、授权等等私人信息」。**已做**：全库审计后清理。(1) 本机信息：真实绝对路径（开发目录、Codex 数据目录）换成 `<项目根>` / `%CODEX_HOME%` / `C:\Users\me\…`；`fixtures/` 里录下来的 `cwd`（45 个文件，含被流式输出拆成三段的一处）换成 `C:\Users\me\code\wittycode`；「这台机器…」和用户设置里的具体数值改成通用说法。(2) 授权与身份：文档里的 SSH 密钥文件名、git 邮箱、机器上有哪些令牌环境变量、另一把 GitLab 密钥名、ChatGPT 套餐等级、Codex 沙盒密钥路径全删。(3) 用户的其他项目和个人内容：另一个本地项目及其私有仓库的叙述、另一个同类客户端的名字、个人技能名（演示 / 测试里换成 `weekly-report`）。(4) `sandbox/` 探针不再写死开发目录。顺带：`check.mjs` 里 Codex 开关三处没等状态就断言（偶发失败），补了等待。规则写进了 `AGENTS.md`「版本控制」一节。**验证**：全量 pytest **3315 通过 / 1 跳过**；前端 typecheck、unit 68、`check.mjs` 连跑 3 次、`check-live.mjs`、星图单测通过；重新审计无命中（剩下的是旧产品名 `droid-desk`、公开的 GitHub 用户名和测试里的假数据）。**已推送**：用户最后在 GitHub 上删库重建（同名同地址），本地历史压成一个根提交后普通推送到新仓库（没有强推）；旧提交号在新仓库里不存在（提交页是空仓库占位页、旧 raw 文件 404）；本地备份分支 `backup-before-squash` 和旧对象已删（reflog expire + gc prune）。
 - 2026-11-11（夜：包改名 `desktop/`、README 精简、演示数据脱敏）：用户三条：README 废话多；开发目录 `droid_desk/` 要改成 `app/` 或 `desktop/`（程序已改名，不该有遗留）；README 里的对话列表有涉密信息要打马赛克。**已做**：(1) 包 `droid_desk` → `desktop`，环境变量 `DROID_DESK_*` → `WITTYCODE_*`，删 `droid-desk.pyw`，`pyproject` 名 `wittycode`；(2) README 重写，约 100 行；(3) 演示数据里用户自己项目的名字、本机路径和真实提交号全换成中性的 `wittycode` / `inventory-api` / `C:\Users\me\…`，README 五张截图重拍（没有打马赛克，原因见 `AGENTS.md`）；(4) 删 17 张旧界面截图（其中一张露着真实用户名）和文档里对它们的引用。**验证**：全量 pytest **3315 通过 / 1 跳过**（比之前少 1 个：旧启动器那条参数化用例随文件删了）；前端 typecheck、`unit` 68、`check.mjs`、`check-live.mjs` 通过；发布包重建（包内是 `app\desktop`，里面没有旧名字和旧演示数据），离屏冒烟 OK，sha256 `ed171f2a…cea126`。**历史**：仓库是公开的，用户要求清理后最终删库重建，GitHub 上 `main` 是一个根提交（普通推送，没有强推），旧提交号在新仓库里不存在。**注意**：需要重启 WittyCode（包目录名变了），桌面快捷方式要指向 `WittyCode.pyw` 或 `-m desktop`。
 - 2026-11-11（晚：Bedrock 走自有循环、循环审阅、已推送到 GitHub）：用户把 SSH 公钥加到了 GitHub，也给了 git 身份，说 **「Bedrock 必须走我们自己的循环，要做出来」**，并要对现在的循环和本地 harness 做 review。**已做**：(1) 设好 `origin`（SSH 地址）和仓库本地的 `core.sshCommand`，`ssh -T git@github.com` 认证成功（主机指纹与 GitHub 公布的一致）；用户随后自己在仓库里配了身份（我不能代写），提交了全部代码（`b3efd0a`），合并了远端只含 `LICENSE` 的 `Initial commit`（`424f24d`，`-X ours`，普通合并、没有强推），`main` 已推送，远端与本地一致。**这台机器的环境变量 `GIT_SSH_COMMAND` 会盖过仓库的 `core.sshCommand`，在 Droid 的 shell 里推送要先在同一条命令里重设它**（用户自己的终端里没有这个变量）。(2) **Bedrock**：`core/llm/aws.py`（SigV4 + 凭据链 + SSO + 凭据命令 + Bearer）、`core/llm/bedrock.py`（Converse / InvokeModel 请求体 + AWS 事件流解码）、`ProviderStore.bedrock_plan`、`backend._bedrock`；签名用 botocore 的结果逐位对照过；对**真实** `bedrock-runtime.us-east-1.amazonaws.com` 发了带 AWS 示例密钥的签名请求和一个编造的 API Key，得到预期的 403 `UnrecognizedClientException` / 「Invalid API Key format」（说明端点、路径、头和 SigV4 的形状 AWS 认得；**没有真凭据，没验证过一次成功的补全**）。(3) **请求失败重试**（循环的 L1）：429 / 5xx / 连接断 / 回答还没开始就被截断，按 1.5 / 4 / 10 / 25 秒重发，听 `Retry-After`，在对话里告诉用户。(4) **循环 / harness 审阅**：`docs/loop-review-2026-11-11.md`，12 条发现（L1 已修，L2–L12 待决定）。(5) **斜杠菜单**：去掉 `/new`，页面自己的三个命令和用户的技能 / 命令之间加一条分隔线（`.slash-sep`）；顺手查清并修了 e2e 连跑 10 次时的一次偶发失败（`open_rig` 要等 `.boot` 消失，页面在 `app.init` 回答前不处理快捷键）。(6) 发布包 `dist/WittyCode-0.1.0-win-x64.zip` 已在这些改动之后**重建**（冒烟 OK，sha256 `5b9e300e…5255d`）。(7) 交接文档给用户：`outputs/HANDOFF-WittyCode-2026-11-11.md`（不进库）。**还差**：GitHub 令牌环境变量（`GITHUB_TOKEN`）或用户在网页上传 zip → 建 Release `v0.1.0`；一个 Bedrock API Key 或能用的 AWS profile → 真机验证。
@@ -56,6 +77,223 @@
 - 尚未提交到 git；用户之后要推到自己的 GitHub。
 
 ## 批次记录（新的在最上面）
+
+### 2026-11-12 修复模型饼图重色、降低亮度并同步实时计划
+
+**结果**：修复用户截图中 Sol／Terra 同色的问题，改用低亮度、低饱和度的柔和配色；计划右栏按已接受的最新状态更新，不再仅靠历史工具行的位置判断。保留旧历史兼容、子步骤按需显示、折叠与真正关闭的行为，不改用量统计口径。
+
+**配色改动**：旧实现只把模型 ID 哈希到 8 个颜色槽，存在确定性的碰撞。新分配先按模型 ID 排序、在基础色中避碰，用尽后生成同样柔和的扩展色，并对最终 RGB 去重；未归属保留独立灰色。模型集合不变时，Token 数量／排序、对象键顺序和目录标签改变均不会换色；新模型加入时个别冲突色可能重新避让，不承诺全局永久绑定。测试覆盖截图中的三个模型、超过基础色板的 52 个图例和 64 模型的亮度／饱和度约束，真实 Chromium 另查 32 模型的最终渲染 RGB 不重色。
+
+**计划改动与原因**：代码中已复现的漏接路径包括 Devin 工具更新忽略 `rawInput`、原生 `plan` 事件未分发，以及历史行更新次序不等于工具行位置。新增不可变 `PlanSnapshot` 与 `Turn.plan`，成功计划调用或已成功行输入确实改变时更新，并增加回合版本；AppCore 原有增量推送／缓存直接携带可选 `{id, steps}`。Devin 实时和历史重放都接原生计划、新工具输入及起始即 completed 的调用；原生事件不伪造工具调用或步数。React 优先用明确快照，旧缓存才扫描 `todos`；同 ID 内容／数量／状态变化均重算，空列表明确清除，失败、部分数据、重复完成和相同旧输入不能覆盖新状态。更新不打断折叠或主动关闭，关闭期间仍更新顶部完成数，重开就是最新清单。
+
+**验证**：先新增回归在旧逻辑复现前端三项失败（颜色碰撞、亮度、快照优先级），后端计划回归也先红灯，再修复。最终后端定向 **158 通过**，含自己的循环和 Devin 适配器在真实 Qt 页面中保持回合运行、连续 0/3→3/3 的整机验证；另测同一工具行更新、原生计划不增工具数、失败不覆盖、关闭期间改计划、显式清空及迟到事件。前端 typecheck、`build:app`、unit **91**、`check.mjs` 与 `check-live.mjs` 完整通过，没有控制台／CSP 错误。全量（含 Qt）**2863 通过／2 跳过／2 条既有 Windows 管道清理警告（501.05 秒）**，运行前后受监控源码哈希一致。另开 `sandbox/` 隔离设置的真实可见 Qt 窗口，实跑计划进度并对深／浅主题截图取三块扇区像素，分别匹配三种不同的柔和图例 RGB，窗口均已关闭。
+
+**审查与边界**：完成唯一一次正式审查，核对配色避碰与排序稳定性、灰色余额、可选协议字段兼容、计划版本／增量推送、同 ID 输入变化、失败／重复事件处理、实时与历史一致、清空语义、既有关闭状态及测试隔离，未发现阻塞问题。提交前 `git grep` 对本批 17 个文件检查真实路径、密钥形状和非演示邮箱，均无命中；乱码扫描 3664 文件无异常，`git diff --check` 无空白错误。页面检查的演示用量已统一为中性数值，相关深浅色回归再次通过。真实模型调用 0 次，未读取用户截图对应的真实会话或用户设置；真实 Devin 服务、人工主观观感、发布包未验证。只在本地提交本批改动，不推送，保留其他任务已有的 PR／推送交接记录；需重启应用。
+
+### 2026-11-12 对话阅读列对齐、左侧回合导航和可关闭计划栏
+
+**结果**：回应用户「布局太丑、未对齐，滚动条死板，每个 Turn 应在左侧快速切换，右侧计划无法关闭」。保留现有引擎、工具折叠、附件、排队及文件预览功能，只调整对话阅读布局与相关交互；不接入 Codex 的引擎或程序。
+
+**改动与决定**：`Main` 的正文、子任务条与输入框进入同一阅读列，计划位于另一列；两侧留白包含真实滚动条的对称槽位，宽／窄、深／浅都按元素两侧边界验收。窄窗口的计划改为可关闭浮层，避免正文和模型控件被挤到过窄。用户消息、思考组和输入框弱化粗边框、硬阴影，改为更安静的圆角表面。计划同时保留「收起步骤」和真正的 `×` 关闭，后者移除整栏，顶部按钮可重新打开；关闭状态仅按当前标签保留在页面内，更新进度、切换标签不会强行重开，重载／重启不持久化。文件／子任务预览仍优先显示，关闭后不复活被用户主动关闭的计划。
+
+**回合导航**：一轮一个短标记，悬停／聚焦显示原始消息摘要和状态，点击跳到该轮起点；方向键和 Home／End 可操作，当前阅读轮自动高亮。同轮工具和引导消息不重复列为新轮；附件和系统独立轮有可识别的替代标题。长会话导航自身滚动，减少动态效果偏好下不使用平滑跳转；查看历史时最新输出不抢位置，点「跳到最新」恢复跟随。
+
+**发现与修正**：真实鼠标拖动暴露无边框窗口右边的缩放热区挡住滚动条，已给整列留外侧间距并加命中对象与拖动回归。旧 CDP 默认隐藏滚动条，新增参数让专门检查显式开启，不能用隐藏后的截图声称验证拖动。另补「相同高度的新历史快照替换 Turn ID」用例，先复现活动标记超时，再让数据变化也触发同步，避免只依赖 ResizeObserver 导致无高亮及键盘入口丢失。
+
+**验证**：前端类型检查、构建、unit **87**，两套完整页面检查及两个新增／扩展 Qt 回归通过；页面覆盖 1500／1100／900 宽、深浅主题、计划折叠／关闭／重开、切标签、文件预览互斥、真实滚动条拖动与淡出、80 轮导航、键盘和减弱动态效果。另开隔离设置的真实可见 Qt 窗口检查宽窄／深浅布局并保存三张截图，窗口已关闭。首次全量 **2850 通过／2 跳过／2 条既有管道清理警告（495.52 秒）**；补历史替换边界后的最终全量仍为 **2850 通过／2 跳过／2 条既有警告（494.04 秒）**，两次运行前后受监控源码均未变。收尾并行检查时，旧的 Token 悬停检查曾在固定等待 700ms 后断言失败；仅将测试改为等待实际提示行出现，保留原断言、不改 Token 业务，完整设计页重新运行通过，连接检查也通过。
+
+**正式审查（一次）**：验证完成后核对共用阅读列和滚动条槽、宽窄布局、计划关闭与文件预览优先级、会话 key 隔离、导航的轮粒度与标签、平滑跳转和历史阅读不抢滚动、同高度历史替换、键盘可达性、观察器和定时器释放、整机测试隔离及提交边界，未发现阻塞问题。`git grep` 检查本批 19 个变更文件，未发现真实路径、密钥形状或非演示邮箱；全库乱码扫描 3662 个文件无异常，`git diff --check` 无空白错误。
+
+**未解决与交付**：真实模型 0 次，未触碰用户真实设置和数据；人工截图观感、真实服务与发布包未验证。计划的主动关闭状态仅在本次页面生命周期保留，重载／重启后重新按是否有步骤显示。不混入工作区已有的 PR／推送交接记录；仅本地提交、不推送，需重启应用。
+
+### 2026-11-12 修复干净 CI 环境保存截图时目录不存在
+
+**结果**：图片相关，但不是图片模型调用、外链请求或 Wiki 徽章问题，而是检查脚本保存截图时依赖本地已经存在的目录。`frontend/scripts/cdp.mjs` 的 `page.shot` 现在委托可独立测试的 `writeScreenshot`，写 PNG 前用递归 `mkdirSync` 建父目录；不吞掉磁盘、权限或路径阻塞错误，不删除截图或跳过检查。
+
+**证据与边界**：公开 Actions API 确认用户给定运行对应 `f8ef0cf`、第二次尝试仍在 `Page checks (design page, headless Edge)` 失败，Python、构建和 unit 均成功，后续连接检查未执行。匿名完整日志接口返回 403，网页要求登录，因此没有声称读到了远端异常正文。在该提交的全新前端副本运行原检查，粘贴图片用例先通过，之后在 `writeFileSync` 保存 `shots/i-attach.png` 时明确得到 `ENOENT`；`shots/` 不在该干净副本内，后面的 `../sandbox/api-efforts-light.png` 也指向被忽略目录。README 徽章提交晚于该失败提交，不是本次原因。
+
+**验证**：新增三项单测覆盖缺少多级父目录、已有文件覆盖时字节不变、父路径被文件占用时抛错且原文件不变。先沿用旧写入逻辑运行，缺目录用例红灯（2 通过／1 失败），补创建目录后 3／3 通过；接入 `scripts/unit.mjs` 后共享工作树 unit **83** 通过。再次从 `f8ef0cf` 建干净副本，只叠本次截图修复及回归，开始时确认 `shots/` 和副本根的 `sandbox/` 都不存在：前端类型检查／构建、unit **74**、`check.mjs` **337 项**和 `check-live.mjs` **264 项**全通过。两条原本易失败路径均生成 1500×960 PNG，核对了文件签名与尺寸。未修改 Python 业务，未重跑 Python 全量；本次引用的远端 Python job 本身已成功。不调用真实模型，不访问用户配置。
+
+**正式审查（一次）**：核对所有截图调用沿用原 API、父目录首次创建与已有目录兼容、Base64 解码后的字节完整性、实际文件系统错误仍向上传递、测试临时目录清理、单测导入 CDP 模块不会启动浏览器，以及与本次无关的并行改动隔离，未发现阻塞问题。
+
+**未解决与交付**：需要推送后重新运行 GitHub CI 才能确认远端结果；目前没有执行推送或远端重跑。完整远端日志正文未取得，以上根因由公开失败步骤和同提交的干净本地复现支持。截图人工观感未验证。只在 `dev` 本地提交本批文件与文档片段，保留其他任务改动及上一轮未提交的推送记录。
+
+### 2026-11-12 按需右侧计划、模型 Token 饼图与可调执行步数
+
+**结果**：完成用户连续提出的三项界面需求：任务 Plan 清单移到右侧按需展示；用量悬停顶部按模型画当前对话 Token 合计百分比，删掉模型菜单逐行重复的说明；把原本写死的 80 步上限放进 App 的「设置 → 会话」，允许复杂任务自行调高。
+
+**改动与决定**：计划只读取当前会话最新有效的结构化 `todos`，没有子步骤不占栏，不把 Plan 权限模式当作任务计划；完成数、进行中步骤与进度实时更新，清单可折叠，旧的输入／输出仍可在「计划更新记录」里查。计划栏仅分走对话区横向空间，输入框仍为原宽；文件与子任务预览优先显示，关闭后恢复计划。模型用量独立于总账记增量，跟随运行时实际模型，跨重开与换引擎保留；Devin 的临时用量只用于显示，不提前入账。无法还原的旧模型归属不猜，分类异常也退为未归属。步数键为 `max_steps`／`maxSteps`，默认 80，正整数校验；保存或 Enter 才提交数字草稿，避免输入 200 时先把 2 应用到运行中的任务。自有循环每步重新取设置，不中断已在执行的模型请求或工具；达到设置上限仍保存 limit 状态、配对结果及可恢复提示，不默认无限运行，也不伪装能控制 Devin 的限制。
+
+**发现与修正**：页面完整回归发现 Transcript 与 PlanPanel 共用会话 ID 作同级 React key，切标签后会残留旧正文；已改成独立 key，并补「当前正文只能一份、空会话不能带上旧消息」的真实 Qt 与页面断言。重载测试必须先允许测试控制的一次导航，并确认页面标记重置，否则 ShellPage 会拒绝 reload，原 DOM 仍在。步数设置接入后，一个旧恢复测试仍用构造器重复注入 `max_steps`，已和控制器测试一起改为设置真实的 AppSettings 字段，保留对 limit 存档和重开的验证。
+
+**验证**：后端定向 **99 通过**，新增空计划视图 JSON、Token 账本／应用与计划面板相关测试 **37 通过**；设置实时生效、计划切换／重载／重开及双模型用量三项真实 Qt 回归通过。循环单测实际执行 82 个模型决策，验证超过旧的 80 上限；覆盖运行中提高和降低上限、工具结果配对及非法输入。前端 unit **80**、类型检查、`build:app`、`check.mjs`（含浅／深色计划和设置、窄窗口布局）、`check-live.mjs` 通过；整机测试按既有约定只在本地运行，CI／发布的忽略项改成覆盖所有 app e2e 模块的 glob。此前全量两次分别 2841、2843 通过；步数接入后的全量暴露上述旧测试问题，修正后最终全量为 **2849 通过／2 跳过／2 条既有 Windows 管道清理警告（486.46 秒）**；运行前后全部受监控的 Python、前端源码与测试文件哈希一致。CI 的 collect-only 确认排除所有 app 整机模块、保留新增核心测试；没有把远端 CI 或发布流程计为验证通过。
+
+**未解决与交付**：真实模型调用 0 次；没有读写用户真实设置。真实服务的独立预算、外部引擎步数策略与截图人工观感未验证，旧用量无法恢复的模型仍显示未归属。唯一一次正式审查已核对动态预算与停止语义、模型归属与旧缓存兼容、标签隔离、历史可查及提交范围，未发现阻塞问题；`git grep` 隐私自查无命中、乱码扫描无异常。在 `dev` 仅本地提交、不推送，不混入其他任务留下的推送交接片段，需重启应用。
+
+### 2026-11-12 中英文 README 新增 DeepWiki 链接与徽章
+
+**结果与改动**：`README.md` 和 `README.zh-CN.md` 的语言导航旁增加 Wiki 文本入口，目标为用户给定的 `https://deepwiki.com/WittyRyuji/WittyCode`；在原有 CI／CodeQL 徽章后添加官方 `https://deepwiki.com/badge.svg`（Ask DeepWiki），点击进入同一 Wiki。没有额外堆砌无关徽章，也不改动原有链接或其他内容。
+
+**验证与审查**：Python 本地断言确认两份文档各有一个 Wiki 文本入口及一个可点击徽章，地址准确、徽章顺序一致；`git diff --check` 通过。一次正式审查核对中英文一致性、链接目标、Markdown 嵌套图片语法与改动范围，未发现阻塞问题。实际访问 Wiki 页面与官方徽章接口均得到 HTTP 429，未绕过或反复重试限流，在线可用性与 GitHub 实际渲染未验证。仅修改文档，没有重跑业务测试或调用模型。
+
+**未解决与交付**：需待 DeepWiki 解除限流后查看在线效果。仓库仍有其他任务的未提交改动及上一轮推送交接记录，本批只暂存两个 README 和本条交接，不混入其他片段。在 `dev` 本地提交，不推送。
+
+### 2026-11-12 会话按创建时间静态排序、拖拽持久化与离线缓存
+
+**结果**：会话不再因发消息、输出或完成回合跳到顶部。默认按创建时间倒序，同一个项目内拖到另一行上／下半部可调整先后，插入线提示位置；顺序在打开、关闭、刷新、归档后恢复、重启和切换引擎时保留。新会话放在已有手动顺序之前。连接前先展示本地消息、设置、Context 和 Token，状态注明「本地缓存」；连接失败及页面重载仍可看，成功加载的完整历史一次替换预览，不重复追加。
+
+**改动**：`AppCore.SavedRow`／缓存索引携带创建时间；自有会话索引读取归档里的真实 `created_at`，旧索引自动重建。设置新增 `session_order` 和 `session_created`，保存原生行 ID，控制器 ID 及引擎变化时迁移身份；后端 `session.reorder` 校验同项目、仍可见的源与目标及布尔插入方向。列表去掉「最近活动的 50 条」截断，避免长列表仍随活动进出。React 侧栏用自有 MIME 的原生拖拽，文件拖入不会变成排序。自有循环先通知 opening 再读归档；缓存不再因比列表时间旧而被拒绝，预览保留到历史加载完成。失败产生的错误回合不能覆盖本地历史；运行中的会话也每隔约两秒写快照，关闭应用时保留尚未落盘的内容。
+
+**发现与决定**：旧侧栏排序确实使用 `active_at`；旧缓存只在空闲时写，长回合首次运行期间可能没有任何快照，且稍旧缓存被新鲜度门槛挡住。Devin 加载失败会产生错误回合，不能据「有回合」判断真实历史已加载。保留旧缓存而不伪造新内容；从未缓存过的外部会话，第一次仍须连接才能取得历史，不后台打开外部会话或调用模型。
+
+**验证**：定向 130 通过；新增／修订 Qt 整机与缓存测试后，第一次共享工作树全量为 2835 通过／2 失败／2 跳过（漏改的旧排序整机断言、并行 Token 测试的关闭超时），更新旧断言后相关 7 项通过。最后全量 **2841 通过／2 跳过／2 条既有 Windows 子进程管道清理警告，468.36 秒**。类型检查、前端构建、unit **75**、`check.mjs` 和最终 `check-live.mjs` 通过；连接检查曾因整组命令超时中止，增加单命令时限后完整完成。`frontend/scripts/sidebar.test.mjs` 用真实 Chromium 鼠标启动原生拖拽，验证自有 MIME、插入线和实际顺序，无控制台错误。Qt 整机验证前后端排序持久化、页面重载及失败后保留历史；另开隔离真实窗口，验证页面确实绘制排序和连接／失败缓存，窗口均关闭。截图仅用中性演示数据，人工观感未验证。提交前又将暂存内容导出到隔离副本，不带并行任务：相关 Python 与 Qt 整机 **134 通过**，前端类型检查／构建、unit **71** 和原生拖拽检查通过，确认本批不依赖其他未提交改动。真实模型调用 **0 次**；没有访问用户真实目录。
+
+**正式审查（一次）**：核对默认顺序与活动时间分离、原生／控制器身份迁移、同项目边界、重启兼容、旧索引升级、真实历史整批替换、离线页面重载、加载失败不覆写缓存、定时快照及测试隔离，未发现本批阻塞问题。
+
+**未解决**：真实 Devin 服务连接未验证；历史上从未写下的缓存无法离线补出，第一次成功加载后才有。两个跳过仍为 ripgrep 和 POSIX 只读语义条件；两条既有管道清理警告未处理。共享工作树同时有 API、Token 与计划面板任务，本批只提交自身片段，不包含其余改动。需要重启载入新前后端，仅本地提交，不推送。提交后的交付核对补齐 CI 对新增 `test_app_sidebar_e2e.py` 的忽略，沿用整机测试只本地跑的约定；收集检查确认本批两个整机用例不进入 CI，核心回归仍收集。
+
+### 2026-11-12 API 模型上下文规格兜底、XHigh / Max
+
+**结果**：修复 API 模型 Context 上限缺失时完全未知、只等超限才压缩的行为；补齐 API 编辑器、模型目录与运行引擎中漏掉的 Minimal / XHigh / Max。设置默认推理档位后，会话菜单提供完整可配置档位；实际支持仍由服务商决定。
+
+**原因与决定**：现有模型列表解析已支持多种服务端窗口字段，但 OpenAI 格式不保证返回窗口。服务端有限制不等于公开了限制。用户明确选择「按模型规格表补全已知模型；未知模型要求填写，不设统一猜测值」。优先级为明确配置（含用户获取列表后保存的服务端数据）高于内置规格；不按型号前缀、同系列或任意网关别名猜窗口。官方规格不是中转服务的保证。推理问题则是三处菜单写死四档，配置校验本来已接受 xhigh / max。
+
+**改动**：`core/llm/model_specs.json` 存 16 个直接核对过的 OpenAI 完整模型 ID、窗口、来源链接和核对日期，Python 与 React 共用；读取无网络、无凭据，也不改写用户模型文件。已知窗口进入引擎预算、模型目录和会话状态；编辑器用占位数字显示自动规格，悬停可见出处，避免把自动规格保存成手动覆盖。获取列表分别标记 server / catalog，保留手填值；新增 max_context_window / maxContextLimit 的服务端字段兼容。未知窗口阻止编辑器保存和 API 请求，不能静默抓瞎。三处推理档位对齐，新增元数据优先级、文件不变、未知窗口请求不触网、实际请求档位和会话 Context 回归；Qt 整机用真实点击验证未知窗口提示、填值、Max 选择及保存。
+
+**验证**：定向测试最初 217 通过 / 2 失败（新测试误用 session.new 的 reasoning 参数；旧 Bedrock 缺区域样本未提供窗口），修正测试输入后相关 37 通过。共享工作树全量为 2821 通过 / 3 项侧栏失败 / 2 跳过，且有并行修改持续进入；因此隔离当前提交，仅叠本批文件和共享文件中的本批片段，默认 pytest 临时目录不变：**2822 通过 / 2 跳过 / 2 条既有 Windows 管道清理警告（463.11 秒）**。隔离前端类型检查、unit **71**、构建及 `check.mjs` **337 项**通过，生成 API 推理菜单截图；当前工具不能人工查看图片，视觉观感未验证。`check-live.mjs` 多次未完成，最后在侧栏重命名找不到 `.srow[-1]`，没有把它计为通过或扩大范围去修。真实模型调用 0 次；只读取公开官方模型文档，没有访问或改写用户设置。
+
+**正式审查（一次）**：核对手动值／服务端数据／规格兜底优先级、完整 ID 匹配、两端共享数据、自动规格不持久为覆盖、未知窗口请求先于取密钥被阻止、Max / XHigh 请求不降档、保存兼容及测试隔离，未发现本批阻塞问题。
+
+**未解决**：不保证代理网关按官方窗口开放，也不能保证任意模型接受 Max / XHigh；均需真实服务验证。本批未改已有默认推理选择逻辑，不会自动替用户打开思考。`check-live.mjs` 未通过；并行侧栏与 Token 统计任务不在本提交内。需要重启应用载入后端；官方规格表随模型更新仍需维护。仅本地提交，不推送。
+
+### 2026-11-12 GitHub Actions 六次启动失败的原因确认
+
+**结果**：不是 runner 环境或测试断言失败；截图中的三次 CI 和三次 CodeQL 全部被仓库 Actions 允许列表在启动前拒绝。
+
+**证据与验证**：GitHub REST API 显示六次运行均为 `startup_failure`；逐一读取六个公开运行页，均明确报错只允许仓库所有者名下且固定完整 SHA 的 Action。最新 CI / CodeQL 的 jobs 和 check-runs 数均为 0。核对三个本地工作流，所用 Action 已固定完整 SHA；CI 的 Windows 镜像不是本次启动失败原因。仅诊断和文档变更，未重跑业务测试。
+
+**关键决定与修复方式**：不为绕过策略改写工作流，也不取消完整 SHA 要求。由维护者在 Settings → Actions → General 的 Actions permissions 中允许 GitHub 官方 Action（或精确放行工作流所用条目），保存后重跑。发布流程还使用 `actions/attest-build-provenance`，允许列表也需覆盖它。
+
+**改动与审查**：只更新交接和知识库；一次正式审查核对了六次运行的共同报错、本地 SHA 固定状态和验证边界，不包含其他任务尚未提交的代码。
+
+**未解决**：匿名读取 Actions 权限设置接口返回 HTTP 401，未更改仓库安全设置；策略放行后的 CI、CodeQL 和 Release 结果未验证。没有调用真实模型，不推送。
+
+### 2026-11-12 中文进度只说一次、Devin 问题去重与提问者归属
+
+**结果**：Devin 普通消息、后续回合和运行中引导都会带上开启的中文要求；要求整轮各步骤直接用中文表达一次，不先英文再中文复述。重复的提问正文已修复，卡片由实际提问者署名（Devin / ChatGPT Plan / API 模型），不是应用自己在问。
+
+**改动**：`core/language.py` 加强整轮语言规则；`devin/controller.py` 的 `steer` 补调用 prompt hooks，页面仍只显示用户输入；`core/elicit.py` 合并相同的 `message` / 标题 / 说明，字段名保留为题目标签。`QuestionPrompt.who` 经 `transcript` / `viewmodel` 送到 React，两个控制器在提问时记录来源，自有循环按正在运行的模型而非下一轮所选模型署名；`Prompts.tsx` 优先用它、兼容没有该字段的旧卡片，不再画重复的来源或正文标签。新增 `test_elicit.py`，补语言、引导、协议、API、ChatGPT Plan、Qt 整机和 `check-live.mjs` 回归。
+
+**关键决定**：不通过删除英文段落或在页面自动翻译来假装修好模型输出（会误删代码、引用或有用信息）；只增强模型收到的指令，并如实说明外部引擎不保证遵守。表单去重只比对统一连续空白后的完全相同文字，不把 `a b` 和 `ab` 或近似问题当成重复，不改字段键和返回答案的数据形状。
+
+**发现**：普通 Devin 消息早已逐条运行语言 hook，但 `steer` 绕过了 hooks；原 `elicit.plan_of` 则把总说明和字段说明无条件拼接，Devin 在二者填同一句问题就会重复。截图中的双语内容无法仅凭截图判定来自引擎哪一阶段，不据此声称模型效果已修复。
+
+**验证**：定向 Python 110 通过；新增 API / ChatGPT Plan / Qt 整机用例 3 通过；补了单词间空白保护后，相关定向 79 通过。前端 typecheck、unit 69、构建、`check.mjs`、`check-live.mjs` 通过。第一次全量因把 `--basetemp` 放进仓库而失败（34 失败 / 2775 通过 / 2 跳过 / 2 警告），测试目录继承了本仓库的 Git 配置和 AGENTS；已改回 pytest 原本的仓库外临时目录重跑：**2810 通过 / 2 跳过 / 2 条 Windows 子进程管道清理警告（451.65 秒）**，没有删测试或放宽断言。两个跳过分别依赖 ripgrep 和 POSIX 只读语义；管道清理警告出现在共享记忆整理测试中，本批未处理。`check-live.mjs` 生成深浅色 Devin 提问卡截图，Qt 整机实际校验了提问者、正文出现次数和答复回传；截图人工观感未验证（当前工具不提供图片查看）。
+
+**正式审查（一次）**：未发现阻塞问题；核对了不同字段细节与原答案键的保留、提问者按正在运行的来源固定、缺 `who` 的旧卡片兼容、引导不显示隐藏指令、关闭时等待中的请求能释放、测试只用临时设置和本机模拟服务。没有因测试为绿就声称真实模型已全程遵守中文要求。
+
+**未解决**：真实 Devin / 模型的整轮中文遵守情况未验证（真实模型 0 次）；既有双语历史不会自动改写，已经运行的外部回合也不会被追发隐形引导。需要重启应用载入新前端和后端。本批在 `dev` 仅本地提交，不推送；提交号见 git log。
+
+### 2026-11-12 独立化：去掉 Droid / Factory / Codex，公开发布的准备（Devin 会话）
+
+**用户**：「WittyCode 不应含有 Droid、Factory 等外部产品信息，也不应依赖其他程序」「能让用户使用这两个订阅和 CLI，但是我们的 App 不能依赖他们的 CLI 或者框架」；首个 Release `0.1.0 alpha`、公开 CI（固定 `windows-2025`）、Roadmap（不写日期）、英文 README 可切中文、`SECURITY.md` / `CONTRIBUTING.md`（外部 PR 要审计）、先推 `dev` 再由用户在 GitHub 批准合并到 `main`。
+
+**结果**：引擎只剩 `chatgpt`（自有循环：ChatGPT Plan + API Provider）和可选的 `devin`。中间版本 `e9b6bdf`、CI 配置 `0d5637f` 和这一批 `e993ba7` 都已推到 `dev`（普通推送）。
+
+**改动**：
+- 后端：删 `core/codex/`、`session_manager.py`、`droid_locator.py`、`droid_limits.py`、`history.py`、`devtools/replay.py`，删依赖 `droid-sdk` 和 pydantic；共用部分搬进 `session_state.py`、`jsonrpc.py`、`elicit.py`、`engine_items.py`、`engine_errors.py`、`side_helpers.py`；`AppCore(settings, platform, devin=, chatgpt=)`。`ProviderStore` 的参数 `factory_settings` 改名 `models_file`，删了 `migrate_models`（从 `~/.factory/settings.json` 复制）和 `factory_compaction`。技能目录加 `SKILL_FOLDERS` / `COMMAND_FOLDERS`，`.wittycode` 第一。`scripts/smoke_release.py` 不再靠 `--replay`（临时设置目录，等输入框画出）。
+- 前端：类型、协议、store、模型菜单、设置（「Droid」页 → 「外部程序」，只有 Devin 路径）、账号页（ChatGPT Plan / Devin / API Provider 三张卡）、状态栏（ChatGPT Plan 没有额度数据就是灰环）、演示数据、`check.mjs`、`check-live.mjs` 和 `fake-backend.mjs`（主模型是 API Provider「Gateway」，第二引擎是 Devin）。侧栏：不知道模型的自有循环已保存会话不再标「ChatGPT Plan」。
+- 测试：底座换成 `tests/app_support.make_core`（真 `ChatGPTEngine` + 本机假 Responses 服务）、`save_conversation`、假 Devin 的 `FAKE_DEVIN_OPEN_DELAY` / `FAKE_DEVIN_OPEN_FAIL`；整机测试 54 个全部移植（`Model` 帮手）；`test_catalog.py`、`test_settings.py`、`test_shell.py` 按新规则重写。只测已删引擎的测试删掉了；「缓存先显示、未打开会话预读」两个整机测试随 Droid 的慢加载一起删了，子代理整机测试（只有 Codex 有）也删了。
+- 文档：`README.md`（英文）/ `README.zh-CN.md`、`ROADMAP.md` / `ROADMAP.zh-CN.md`、`SECURITY.md`、`CONTRIBUTING.md`；`docs/project.md` 模块图、`docs/development.md`、`docs/knowledge.md` 第 67 条。
+
+**事故**：移植中跑到一个旧测试，它用默认参数建 `ProviderStore`，`migrate_models` 把 `~/.factory/settings.json` 的 `customModels` 复制进了用户真实的 `%APPDATA%\WittyCode\models.json`（新建，1026 字节）。发现后先停下问用户，用户：「不应该依赖这个文件我认为，如非必须，删除」。已删除该文件（只删这一个），删掉迁移逻辑，`tests/conftest.py` 加 autouse `_no_files_of_the_real_user`（`WITTYCODE_SETTINGS` 指向临时目录），测默认位置的测试改成临时 home。
+
+**验证**：全量 pytest（不含 e2e）2743 通过 / 2 跳过，唯一的失败是时序断言（换引擎失败后页面要等下一次 flush），改成 `until` 后连跑 6 次通过；`test_app_e2e.py` 54 个整文件通过；前端 typecheck 0 错、unit 69、星图单测 26、`check.mjs` 332、`check-live.mjs` 261；冒烟脚本 OK；账号页、外部程序页、模型菜单截图看过（发现演示数据的权限芯片显示 `off`，已改成 `code`）。
+
+**未解决**：GitHub 上 Actions 策略要用户放宽才能跑起来（CI 还没在 GitHub 上真正跑过一次，`release.yml` 也没跑过）；`sandbox/scan_mojibake.py` 在已推送的 `e9b6bdf` 里写死了开发目录的路径（这一批已改成相对路径，历史里还在，要清除只能改写 `dev` 的历史并强推，等用户定）；`fixtures/` 里没人用的 Droid 录像；`~/.factory/settings.json` 的 `disabledSkills` 和 `~/.factory/plugins` 仍在读；`providers.py` / `skills.py` 的文档字符串和部分注释还有旧名字；`context.py` 和 `devtools/samples.py` 的旧帮手；README 截图要重拍；AppCore 的子代理管道没有引擎提供（写进 Roadmap）。
+
+### 2026-11-11（深夜，第三批）答复选项一行一个（Devin 会话）
+
+- **结果**：权限卡（`components/blocks/Prompts.tsx` 的 `PermissionCard`，含子任务面板里的）答复按钮竖排，每个占一行、和卡片一样宽、文字靠左；主按钮仍是反色，「拒绝」仍是红框。提问卡的单选 / 多选项原本就是一行一个（截图确认），没改；「提交回答 / 跳过」是动作不是选项，仍并排。
+- **改动**：`Prompts.tsx`（`pbtns choices`，加 `role="group"`）、`styles/transcript.css`（`.pbtns.choices`）；`check.mjs` 加两条（提问卡选项一行一个；权限卡答复一行一个、等宽、靠左），`check-live.mjs` 加一条。先在旧页面上跑，新断言失败，确认它能抓到旧布局。
+- **验证**：页面重建；`check.mjs`、`check-live.mjs`、`unit` 69 通过；`test_app_e2e.py` 59 个通过（点按钮用的 `.prompt.perm .pbtns .btn` 选择器不变）；浅色和深色主题截图看过。
+- **未解决**：没有提交。
+
+### 2026-11-11（深夜，第二批）Devin 提问、实时 token、思考用中文、几处修复（Devin 会话）
+
+**1. 结果**
+
+- `AGENTS.md` 只剩硬约束；命令、测试的坑、环境、Git 细节在 `docs/development.md`；「工具调用显示」这条产品原则在 `docs/project.md`。
+- Devin 引擎能在运行中提问（ACP elicitation）；Devin 会话的 token 合计在回合中实时更新；新设置「思考过程用中文」；压缩摘要请求遇到可能过去的失败会重试；自有循环停止超时时把没送达的引导放回输入框；退出确认提醒排队的消息和进行中的 `/goal`；提问卡等回答时回车给提示、不排队。
+- 文档：`docs/project.md` 三处过时的说法改了；`sandbox/scan_mojibake.py`、`repair_mojibake.py` 在 `.gitignore` 里放行（文档要求用它们）；`docs/knowledge.md` 更正「模型会问问题」并加了第 66 条。
+- **没做**：去掉 Droid / Factory、Codex 的去留与提问、`outputs/` 交接文档之外的发布动作。
+
+**2. 改动**
+
+- `desktop/core/devin/engine.py`（`clientCapabilities.elicitation`、`open_url` / `open_external`）、`devin/controller.py`（`_elicitation`、`answer_question`、`usage_pending`、`_on_stats` 清 `_calls`）。
+- `desktop/core/app_core.py`（显示的合计加 `usage_pending`；会话数据加 `goal`；语言 hook；设置 `thinkChinese`）、`core/language.py`（新）、`core/settings.py`（`think_chinese`）、`harness/prompt.py`（`build_instructions(think_chinese=)`）、`chatgpt/controller.py`（传设置；`interrupt()` 超时分支 `_release_steers()`）、`harness/compact.py`（`ask` 的重试）。
+- 前端：`lib/quit.ts`（新）、`store.ts`、`live.ts`（提问卡守卫、设置）、`liveReducer.ts`、`protocol.ts`、`types.ts`、`components/Settings.tsx`；页面已重建。
+- 测试：`test_devin_turns.py` +3、`test_app_devin.py` +2、`test_language.py`（新，3）、`test_harness_compact.py` +3、`test_chatgpt_compaction.py` +2、`test_app_commands.py`（goal 字段）、`unit.mjs` +1；`fake_devin.py` 的 `[ask]` 场景；`devin_support` 记录打开的网页；`make_core` 等三个测试核心关掉 `think_chinese`；`test_devin_engine` 的握手断言、三个用 500 当「写不出摘要」的测试改成 400。
+
+**3. 关键决定和原因**
+
+- Devin 提问复用 `codex/elicit.py`：ACP 的 elicitation 就是 MCP 的数据模型，同一张提问卡。
+- 实时 token 只显示不记账：Devin 的 `turn_stats` 才是一轮的准数，账本只记它，所以不会重复计算。
+- 思考语言用一句说明：自有循环写进系统提示；外部引擎的系统提示不归我们管，就随每条消息放在页面看不到的上下文块里。
+- 提问卡守卫选「提示并保留文字」，没有把输入框的字当成卡片的答案（多题卡片会答错）。
+
+**4. 新发现的事实或坑**（已写进 `docs/knowledge.md` 第 66 条）
+
+- Devin 的 `ask_user_question` 走标准 ACP elicitation，要客户端声明能力；以前的「Devin 没有提问请求」不对。
+- 本机 Codex 0.167：默认模式的 `request_user_input` 要开 `default_mode_request_user_input`（开发中，默认关）；`collaborationMode` 要 `experimentalApi`。
+
+**5. 验证**
+
+- 相关测试文件逐个跑过并通过；前端 typecheck、`unit` 69、`check.mjs`、`check-live.mjs` 通过；页面重建。
+- 全量 pytest 最后一次：**3328 passed / 2 skipped**（两个跳过是环境条件：PATH 上要有 ripgrep、POSIX 的只读语义）。之前两次各有 1 个失败，都已修：`test_app_follow_up` 里一个自建核心没关语言开关；`/goal` 测试里我加的「页面收到过目标」断言有时序竞争（两轮在一次刷新间隔内做完就看不到），改成确定性的新测试，顺带发现并修了 `/goal off` 不通知页面（没有 `dirty` + 刷新）。`test_app_devin` 的一个等待 2 秒的测试在并发跑时偶发超时，单独跑两次都通过。
+- 没有调用真实模型，Devin 提问和中文思考都**没在真实引擎上验证**。
+
+**6. 未解决和建议**
+
+- 等用户定：去掉 Droid / Factory 的范围（引擎、`droid-sdk`、Factory 导入、`.factory` 技能目录、API Provider 存在 Factory 设置里）；「删除 Codex 的 ACP 模式」的意思；Codex 的提问。
+- 没有提交。
+
+### 2026-11-11（深夜）`AGENTS.md` 只留代理约定，项目信息搬进 `docs/`（Devin 会话）
+
+**1. 结果**
+
+- `AGENTS.md` 只剩代理的工作约定：开工前先读、规则、命令、版本控制、交接（207,045 → 9,274 字节）。
+- 项目信息原样搬走，没有删任何内容：简介三段、模块图、发布包结构、「版本控制」里仓库 / 许可证 / 隐私规则的原文 → `docs/project.md`；「SDK 已确认的事实」整节 65 条 → `docs/knowledge.md`（顺序不变，条目里的「上一条」「下一条」仍成立；开头加了条目索引）。
+
+**2. 改动**
+
+- `AGENTS.md`（重写）；新增 `docs/project.md`、`docs/knowledge.md`。
+- `docs/shared-memory-plan.md`、`docs/chatgpt-plan-sign-in.md`、`docs/harness-review-2026-11-06.md`、`docs/harness-rereview-2026-11-06.md`：8 处「见 `AGENTS.md` 的某条」改指 `docs/knowledge.md`；审阅当时对 `AGENTS.md` 的测量叙述（字数、截断位置）是历史，没动。
+
+**3. 关键决定和原因**
+
+- 为什么必须拆：Codex（`project_doc_max_bytes` 默认 32 KiB，超出部分静默截掉）和 Devin CLI（每个常驻规则文件 32 KiB）只读得到开头 32 KiB，而「规则」「版本控制」「交接」三节在原文件第 200,447 字节之后，这两个引擎在本仓库干活时从来看不到它们；自有循环也要按章节缩到 24,000 字。现在三家都整份读入。
+- 搬运用一次性脚本按行号原样复制，并断言每个被搬的行（102 行）都逐字出现在新文件里。`AGENTS.md` 里只留规则；新写的只有指路和两处补充（全量 pytest 约 8 分钟、放后台跑；`npm run typecheck`）。
+- 「版本控制」里规则和事实混在一起的几条：规则在 `AGENTS.md` 里写成短句，原文整段放进 `docs/project.md`「仓库与许可证」，并注明以 `AGENTS.md` 为准。
+- 保留 `## 规则` 标题和「不推送」三个字：`test_this_repositorys_own_rules_reach_the_prompt` 断言这两样。
+- 只搬位置，不改内容（包括已经过时的说法，见「未解决」），方便逐行核对。
+
+**4. 新发现的事实或坑**
+
+- Codex 和 Devin CLI 的 32 KiB 上限（见上）：`AGENTS.md` 以后要保持在这个大小以内，项目事实写进 `docs/knowledge.md`（「交接」第 4 条已写明）。
+- `sandbox/scan_mojibake.py`、`sandbox/repair_mojibake.py` 被 `.gitignore` 忽略、没有进库，但 `AGENTS.md` 要求用它们：克隆下来的人没有这两个脚本。
+
+**5. 验证**
+
+- `tests/test_harness_prompt.py` 13 passed；`prompt.load_agents(<项目根>)` 整份读入、没有缩减；`sandbox/scan_mojibake.py` 无可疑；`git diff --check` 干净；`AGENTS.md` 里点名的路径和 `docs/knowledge.md` 条目都在。
+- 拆分前跑过一次全量 pytest：3313 passed / 2 skipped / 1 failed（`test_a_summary_asks_for_the_lowest_reasoning_whatever_the_user_chose`，日志里是 `WinError 10055`（套接字缓冲区耗尽），单独重跑、整个文件重跑都通过）。拆分只动了文档。
+
+**6. 未解决和建议**
+
+- 搬过去的文字里有过时的地方，这次没改：`docs/project.md` 简介里「API Provider（Droid 的 `customModels`）」（现在走自有循环）；模块图的 `core/llm/` 没列 `bedrock.py` / `aws.py`；模块图两处指向的「共享记忆的自动更新」一条不存在（内容在本文件 2026-11-06 的批次记录里）。
+- 上面两个乱码脚本要不要进库（在 `.gitignore` 里放行）。
+- `docs/knowledge.md` 仍是一个 185 KB 的文件，以后可以按主题（引擎 / 自有循环 / 记忆 / 界面 / 测试）再拆。
+- 没有提交：等用户确认。
 
 ### 2026-11-11（深夜）清掉仓库里的私人信息（主会话）
 

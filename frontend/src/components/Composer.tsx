@@ -37,12 +37,12 @@ function Chip({ label, value, items, disabled, tag, title, extra, bare }: { labe
 
 /** `live`: the open session's state, or null when the controls edit the defaults for new sessions. */
 function Controls({ values, disabled, live, onChoose }: { values: SessionSettings; disabled: boolean; live: { running: boolean; fresh: boolean; engine?: Engine } | null; onChoose: (f: keyof SessionSettings, v: string) => void }) {
-  const { models, providers, codex, devin, chatgpt, factory, hiddenModels } = useStore();
+  const { models, providers, devin, chatgpt, hiddenModels } = useStore();
   const openSettings = useStore((s) => s.openSettings);
   const chatgptLogin = useStore((s) => s.chatgptLogin);
   const model = models.find((m) => m.id === values.model);
   // An open session knows its engine even before the model list has arrived.
-  const engine = live?.engine ?? engineOfSource(model?.source ?? "factory");
+  const engine = live?.engine ?? engineOfSource(model?.source ?? "chatgpt");
   const levels = permissionsFor(engine);
   // No level chosen: the model's own default is what runs.
   const reasoning = values.reasoning || model?.defaultEffort || "";
@@ -63,10 +63,8 @@ function Controls({ values, disabled, live, onChoose }: { values: SessionSetting
         items={buildModelMenu({
           models,
           providers,
-          codex,
           devin,
           chatgpt,
-          factory,
           current: values.model,
           hidden: hiddenModels,
           engine: live ? engine : undefined,
@@ -96,7 +94,6 @@ function Controls({ values, disabled, live, onChoose }: { values: SessionSetting
  *  the line under the box, not among the controls: there it widened the row until the send button fell onto a line of its own. */
 function PlanBadge() {
   const chatgpt = useStore((s) => s.chatgpt);
-  const codex = useStore((s) => s.codex);
   const running = useStore((s) => currentSession(s)?.mark === "running");
   const refresh = useStore((s) => s.refreshPlanUsage);
   const ready = chatgptReady(chatgpt);
@@ -104,7 +101,7 @@ function PlanBadge() {
   useEffect(() => {
     if (ready && !running) refresh();
   }, [ready, running, refresh]);
-  const usage = planUsage(chatgpt, codex);
+  const usage = planUsage(chatgpt);
   return (
     <span className={`plan-badge${ready ? "" : " off"}`} onMouseEnter={ready ? refresh : undefined}>
       <span className="pdot" />
@@ -140,7 +137,7 @@ function UsageTip({ usage }: { usage: PlanUsage }) {
       <div className="tip-lines">
         <b>ChatGPT Plan 额度</b>
         <div>现在读不到：{usage.why}</div>
-        <div className="tip-note">OpenAI 目前没有给「用 ChatGPT 登录」的应用开放用量接口。用同一个 ChatGPT 账号登录 Codex 后，这里会显示套餐的 5 小时和每周额度；也可以点 Manage usage 去看。</div>
+        <div className="tip-note">OpenAI 目前没有给「用 ChatGPT 登录」的应用开放用量接口，这里看不到额度；点 Manage usage 去 ChatGPT 的用量页面看。</div>
       </div>
     );
   return (
@@ -159,7 +156,6 @@ function UsageTip({ usage }: { usage: PlanUsage }) {
           {l.label}窗口：{l.resetsIn}
         </div>
       ))}
-      <div className="tip-note">数字来自同一个账号在 Codex 里的登录。</div>
     </div>
   );
 }
@@ -331,9 +327,9 @@ export function Composer() {
   // An open session knows its engine even before the model list has arrived (the demo's sessions do not say: their model does).
   const modelSource = useStore((s) => s.models.find((m) => m.id === values.model)?.source);
   // (the own loop also runs the API providers' models: the plan's badge and usage are for the plan's models only)
-  const onPlan = !!session && (session.engine ?? engineOfSource(modelSource ?? "factory")) === "chatgpt" && !modelSource?.startsWith("api:");
+  const onPlan = !!session && (session.engine ?? engineOfSource(modelSource ?? "chatgpt")) === "chatgpt" && !modelSource?.startsWith("api:");
 
-  const scene: Scene = { session: !!session, engine: session?.engine ?? engineOfSource(modelSource ?? "factory"), running, plan: values.mode === "spec" };
+  const scene: Scene = { session: !!session, engine: session?.engine ?? engineOfSource(modelSource ?? "chatgpt"), running, plan: values.mode === "spec" };
   // The skills and commands of the user's come from the files, read again whenever a slash is started (one made a moment ago is there).
   const userSkills = useStore((s) => s.skills);
   const extra = useMemo(() => fromSkills(userSkills), [userSkills]);

@@ -10,7 +10,7 @@ from desktop.core.devin.engine import DevinEngine, cwd_variants, saved_session
 from desktop.core.devin.errors import DevinNotFoundError, DevinProcessError, DevinRpcError, DevinSignedOutError, friendly_failure
 from desktop.core.devin.locate import DevinBinary, devin_candidates, locate_devin, probe_version
 from desktop.core.devin.models import FamilyInfo, build_models, cli_info, known_about, model_entries, thought_levels
-from desktop.core.session_manager import SessionState
+from desktop.core.session_state import SessionState
 from desktop.core.settings import AppSettings
 from tests.devin_support import FAKE, fake_binary, finish_turn, make_engine, run, until
 
@@ -286,6 +286,10 @@ def test_every_message_to_the_process_names_the_protocol_version(tmp_path):
         assert all('"jsonrpc"' in line for line in raw) and raw
         (init,) = harness.requests("initialize")
         assert init["protocolVersion"] == 1 and init["clientInfo"]["name"] == "wittycode"
-        assert init["clientCapabilities"] == {"fs": {"readTextFile": False, "writeTextFile": False}, "terminal": False}
+        assert init["clientCapabilities"] == {
+            "fs": {"readTextFile": False, "writeTextFile": False},
+            "terminal": False,
+            "elicitation": {"form": {}, "url": {}},
+        }, "no files or terminal of ours; questions (elicitation) in both modes"
 
     run(scenario())

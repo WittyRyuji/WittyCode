@@ -19,16 +19,6 @@ export function liveCall<M extends Method>(method: M, ...args: Args<M>): Promise
 }
 
 export const liveBridge: Bridge = {
-  factory: {
-    account: () => liveCall("factory.account"),
-  },
-  codex: {
-    account: () => liveCall("codex.account"),
-    login: () => liveCall("codex.login"),
-    cancelLogin: () => liveCall("codex.cancelLogin"),
-    logout: () => liveCall("codex.logout"),
-    setEnabled: (on) => liveCall("codex.setEnabled", { on }),
-  },
   devin: {
     account: () => liveCall("devin.account"),
     login: () => liveCall("devin.login"),

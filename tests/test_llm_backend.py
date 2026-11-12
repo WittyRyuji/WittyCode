@@ -23,7 +23,7 @@ from tests.llm_support import FakeApi, http_error
 def settings_with(tmp_path: Path, base_url: str, **entry: Any) -> Path:
     """A settings.json with one custom model; a key in ``entry`` set to ``None`` is left out."""
     path = tmp_path / "factory.json"
-    base = {"model": "m-1", "displayName": "Model One", "baseUrl": base_url, "apiKey": "${TEST_API_KEY}", "provider": "generic-chat-completion-api"}
+    base = {"model": "m-1", "displayName": "Model One", "baseUrl": base_url, "apiKey": "${TEST_API_KEY}", "provider": "generic-chat-completion-api", "maxContextLimit": 64_000}
     merged = {**base, **entry}
     path.write_text(json.dumps({"customModels": [{k: v for k, v in merged.items() if v is not None}], "other": 1}), encoding="utf-8")
     return path
@@ -31,7 +31,7 @@ def settings_with(tmp_path: Path, base_url: str, **entry: Any) -> Path:
 
 def store_for(path: Path, environ: dict[str, str] | None = None, registry: dict[str, str] | None = None, run_command=None) -> ProviderStore:
     return ProviderStore(
-        factory_settings=path, sidecar=path.with_name("providers.json"), environ={"TEST_API_KEY": "sk-test-1"} if environ is None else environ,
+        models_file=path, sidecar=path.with_name("providers.json"), environ={"TEST_API_KEY": "sk-test-1"} if environ is None else environ,
         registry_env=lambda: registry or {}, run_command=run_command,
     )
 
@@ -65,13 +65,13 @@ def test_the_providers_entries_are_the_models_with_the_window_the_room_and_the_l
     backend = ApiBackend(store_for(path))
     (model,) = backend.models()
     assert is_api_model(model.id) and model.id.startswith("api:") and model.id.endswith(":custom:Model-One-0")
-    assert (model.display_name, model.context_window, model.default_effort, model.efforts, model.supports_images) == ("Model One", 1_024_000, "high", ("off", "low", "medium", "high"), True)
+    assert (model.display_name, model.context_window, model.default_effort, model.efforts, model.supports_images) == ("Model One", 1_024_000, "high", ("off", "minimal", "low", "medium", "high", "xhigh", "max"), True)
     spec = backend.spec(model.id)
     assert spec is not None and spec.native == "m-1" and spec.max_output == 128_000 and spec.kind == "generic-chat-completion-api"
 
 
 def test_without_a_level_there_is_no_reasoning_menu_and_a_chat_model_takes_no_pictures_unless_told(tmp_path):
-    (chat,) = ApiBackend(store_for(settings_with(tmp_path, "https://a.example/v1"))).models()
+    (chat,) = ApiBackend(store_for(settings_with(tmp_path, "https://a.example/v1", maxContextLimit=None))).models()
     assert (chat.efforts, chat.default_effort, chat.context_window, chat.supports_images) == ((), "", None, False)
     claude = ApiBackend(store_for(settings_with(tmp_path, "https://a.example", provider="anthropic"))).models()[0]
     assert claude.supports_images is True

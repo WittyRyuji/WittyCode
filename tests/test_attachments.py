@@ -1,4 +1,4 @@
-"""Attachments without a window: what each kind of file becomes, the limits, and how they reach the SDK."""
+"""Attachments without a window: what each kind of file becomes and the limits."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ import os
 from pathlib import Path
 
 import pytest
-from droid_sdk import Document, Image, InvalidAttachmentError, PdfDocumentSource, TextDocumentSource
 from PySide6.QtCore import QMimeData, QUrl
 from PySide6.QtGui import QColor, QImage
 
@@ -36,9 +35,7 @@ from desktop.core.attachments import (
     pdf_attachment,
     too_many,
     sniff_image,
-    stream_options,
     text_attachment,
-    to_sdk,
     unique_name,
 )
 from desktop.devtools.samples import make_pdf, sample_picture
@@ -92,13 +89,13 @@ def refused(path: Path) -> Rejection:
     ("name", "fmt", "media_type"),
     [("a.png", "PNG", "image/png"), ("b.jpg", "JPEG", "image/jpeg"), ("c.webp", "WEBP", "image/webp")],
 )
-def test_pictures_in_the_formats_droid_accepts_are_sent_as_they_are(tmp_path, name, fmt, media_type):
+def test_pictures_in_the_formats_models_accept_are_sent_as_they_are(tmp_path, name, fmt, media_type):
     path = picture_file(tmp_path, name, fmt)
     item = loaded(path)
     assert (item.kind, item.media_type, item.name, item.note) == (IMAGE, media_type, name, "")
     assert item.data == path.read_bytes() and item.size == len(item.data)
     assert item.path == str(path.absolute())
-    Image.from_bytes(item.data, media_type=item.media_type)  # the SDK accepts exactly these bytes
+    assert core.sniff_image(item.data) == item.media_type  # a picture the models take, as its signature says
 
 
 def test_a_gif_is_sent_as_it_is(tmp_path):
@@ -120,7 +117,7 @@ def test_the_kind_of_picture_comes_from_the_bytes_not_from_the_name(tmp_path):
     assert sniff_image(b"RIFF\x00\x00\x00\x00WEBPVP8 ") == "image/webp" and sniff_image(b"plain text") is None
 
 
-def test_image_size_reads_the_header_of_every_format_droid_accepts(tmp_path):
+def test_image_size_reads_the_header_of_every_format_models_accept(tmp_path):
     assert image_size(tiny_png(40, 30)) == (40, 30)
     assert image_size(ONE_PIXEL_GIF) == (1, 1)
     for name, fmt in (("a.jpg", "JPEG"), ("b.webp", "WEBP"), ("c.png", "PNG")):
@@ -135,7 +132,7 @@ def test_other_pictures_are_converted_to_png(tmp_path, name):
     item = loaded(path)
     assert (item.kind, item.media_type, item.note) == (IMAGE, "image/png", "已转为 PNG")
     assert item.data.startswith(PNG_MAGIC) and item.name == name
-    Image.from_bytes(item.data, media_type=item.media_type)
+    assert core.sniff_image(item.data) == item.media_type  # a picture the models take, as its signature says
 
 
 def test_a_pdf_goes_with_the_text_it_contains(tmp_path):
@@ -252,7 +249,7 @@ def test_a_picture_with_a_side_beyond_the_model_limit_is_scaled_down(tmp_path):
     size = imaging.probe_size(item.data)
     assert max(size.width(), size.height()) <= imaging.MAX_SIDE
     assert item.note == "已压缩" and item.media_type == "image/png"
-    Image.from_bytes(item.data, media_type=item.media_type)
+    assert core.sniff_image(item.data) == item.media_type  # a picture the models take, as its signature says
 
 
 @pytest.mark.parametrize(
@@ -269,7 +266,7 @@ def test_a_picture_above_the_size_limit_is_shrunk_until_it_fits(tmp_path, monkey
     assert item.note == "已压缩" and item.media_type == "image/jpeg"
     size = imaging.probe_size(item.data)
     assert (size.width() == 600) is keeps_its_size
-    Image.from_bytes(item.data, media_type=item.media_type)
+    assert core.sniff_image(item.data) == item.media_type  # a picture the models take, as its signature says
 
 
 def test_a_picture_that_cannot_be_made_small_enough_is_refused(tmp_path, monkeypatch):
@@ -406,45 +403,7 @@ def test_text_decoding_is_strict_unless_the_name_says_it_is_text():
     assert decode_text(cut, partial=True) == ("多字", "UTF-8"), "but it is for the head of a bigger file"
 
 
-# --------------------------------------------------------------------------- what the SDK gets
-
-
-def test_attachments_become_the_sdks_images_and_files(tmp_path):
-    png = loaded(picture_file(tmp_path, "a.png", "PNG"))
-    note = text_attachment("notes.md", "# 标题\nbody")
-    pdf_path = tmp_path / "invoice.pdf"
-    pdf_path.write_bytes(make_pdf([SECRET]))
-    pdf = loaded(pdf_path)
-
-    options = stream_options([png, note, pdf])
-    assert set(options) == {"images", "files"}
-    (image,) = options["images"]
-    assert isinstance(image, Image) and base64.b64decode(image.source.data) == png.data
-    text_file, pdf_file = options["files"]
-    assert isinstance(text_file, Document) and isinstance(text_file.source, TextDocumentSource)
-    assert (text_file.source.data, text_file.source.name, text_file.source.mime) == ("# 标题\nbody", "notes.md", "text/plain")
-    assert isinstance(pdf_file.source, PdfDocumentSource)
-    assert base64.b64decode(pdf_file.source.data) == pdf.data and pdf_file.source.name == "invoice.pdf"
-    assert SECRET in (pdf_file.source.parsed_data or "") and pdf_file.source.path == str(pdf_path.absolute())
-
-
-def test_only_the_options_in_use_are_passed_so_plain_prompts_call_stream_as_before(tmp_path):
-    assert stream_options([]) == {}
-    only_text = stream_options([text_attachment("a.txt", "hello")])
-    assert list(only_text) == ["files"]
-    only_image = stream_options([loaded(picture_file(tmp_path, "a.png", "PNG"))])
-    assert list(only_image) == ["images"]
-    images, documents = to_sdk([])
-    assert (images, documents) == ([], [])
-
-
-def test_data_the_sdk_refuses_raises_its_own_error():
-    with pytest.raises(InvalidAttachmentError):
-        to_sdk([image_attachment("fake.png", b"this is not a picture", "image/png")])
-    with pytest.raises(InvalidAttachmentError):
-        to_sdk([pdf_attachment("fake.pdf", b"not a pdf")])
-    with pytest.raises(InvalidAttachmentError):
-        to_sdk([text_attachment("big.txt", "x" * (6 * MIB))])
+# --------------------------------------------------------------------------- what a message gets
 
 
 def test_a_message_with_only_attachments_gets_the_default_prompt():

@@ -3,14 +3,14 @@
 
 import type { AttachmentView } from "../types";
 
-/** Reads dropped, pasted or picked files into attachment cards (the limits are Droid's: 5 MiB pictures, 3 MiB PDFs). */
+/** Reads dropped, pasted or picked files into attachment cards (the limits are WittyCode's: 5 MiB pictures, 3 MiB PDFs). */
 export async function readFiles(files: File[], say: (text: string) => void): Promise<AttachmentView[]> {
   const out: AttachmentView[] = [];
   for (const file of files) {
     const id = `att-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     if (file.type.startsWith("image/")) {
       if (!/^image\/(png|jpeg|gif|webp)$/.test(file.type)) {
-        say(`「${file.name}」不是 Droid 接受的图片格式（PNG / JPEG / GIF / WebP）。`);
+        say(`「${file.name}」不是模型接受的图片格式（PNG / JPEG / GIF / WebP）。`);
         continue;
       }
       if (file.size > 5 * 1024 * 1024) {

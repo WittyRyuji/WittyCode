@@ -15,7 +15,7 @@ const ENGINE_NAMES: Record<string, string> = { droid: "Droid", codex: "Codex", d
 
 export const engineName = (engine: string) => ENGINE_NAMES[engine] ?? (engine || "代理");
 
-/** "我" / "Codex" / "应用整理" / "未知": who wrote or changed a note ("应用整理": WittyCode itself, after a turn). */
+/** "我" / "Devin" / "应用整理" / "未知": who wrote or changed a note ("应用整理": WittyCode itself, after a turn). */
 export function whoName(who: MemoryWho): string {
   if (who.kind === "user") return "我";
   if (who.kind === "app") return "应用整理";
@@ -38,7 +38,7 @@ export const isUnseen = (change: Pick<MemoryChange, "seq">, seen: number) => cha
 /** Where a note applies: "全局", or the project folder's name. */
 export const scopeLabel = (entry: Pick<MemoryEntry, "scope" | "projectName">) => (entry.scope === "global" ? "全局" : entry.projectName || "项目");
 
-/** "Codex 写入" / "我写入" / "Codex 写入，我改过": the source line under a note's title. */
+/** "Devin 写入" / "我写入" / "Devin 写入，我改过": the source line under a note's title. */
 export function sourceLine(entry: Pick<MemoryEntry, "source" | "editor" | "rev">): string {
   const wrote = `${named(entry.source)}写入`;
   if (entry.rev <= 1) return wrote;
@@ -46,7 +46,7 @@ export function sourceLine(entry: Pick<MemoryEntry, "source" | "editor" | "rev">
   return sameEditor ? wrote : `${wrote}，${named(entry.editor)}改过`;
 }
 
-/** A Latin name in front of Chinese gets a space (`Codex 写入`), 我 does not (`我写入`). */
+/** A Latin name in front of Chinese gets a space (`Devin 写入`), 我 does not (`我写入`). */
 const named = (who: MemoryWho) => {
   const name = whoName(who);
   return /[A-Za-z]$/.test(name) ? `${name} ` : name;

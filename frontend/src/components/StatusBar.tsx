@@ -1,8 +1,9 @@
 import { currentSession, useStore } from "../store";
-import type { CodexAccount, ContextState, Speed, Usage } from "../types";
+import type { ContextState, Speed, Usage } from "../types";
 import { cacheHitRate, formatCount, formatSpeed, formatTokens, usageTotal } from "../lib/format";
-import { engineOfSession } from "../lib/models";
 import { StateDot, Tip } from "./ui";
+import { usagePercent, usageSlices } from "../lib/usage";
+import type { ModelChoice } from "../types";
 
 const UNKNOWN = "—";
 
@@ -39,7 +40,32 @@ function ContextMeter({ c }: { c: ContextState }) {
   );
 }
 
-function UsageTip({ u }: { u: Usage }) {
+function ModelUsageChart({ total, byModel, models }: { total: number; byModel?: Record<string, number>; models: ModelChoice[] }) {
+  const slices = usageSlices(total, byModel, models);
+  if (!slices.length) return null;
+  let end = 0;
+  const stops = slices.map((s) => {
+    const start = end;
+    end += s.share;
+    return `${s.color} ${start}turn ${end}turn`;
+  });
+  return (
+    <div className="usage-models">
+      <div className="usage-pie" role="img" aria-label={`模型 Token 占比：${slices.map((s) => `${s.label} ${usagePercent(s.share)}`).join("，")}`} style={{ background: `conic-gradient(${stops.join(",")})` }} />
+      <ul className="usage-legend">
+        {slices.map((s) => (
+          <li key={s.id} data-model={s.id} title={`${s.label} · ${s.tokens.toLocaleString()} token`}>
+            <span className="usage-swatch" style={{ background: s.color }} aria-hidden />
+            <span className="usage-model-name">{s.label}</span>
+            <span className="usage-percent">{usagePercent(s.share)}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function UsageTip({ u, byModel, models }: { u: Usage; byModel?: Record<string, number>; models: ModelChoice[] }) {
   const rate = cacheHitRate(u);
   // A service that does not report cache writes (OpenAI's, Devin's) has no such row, rather than a row of dashes.
   const rows: [string, string][] = [
@@ -51,7 +77,8 @@ function UsageTip({ u }: { u: Usage }) {
     ["Cache 命中率", rate === null ? UNKNOWN : `${(rate * 100).toFixed(1)}%`],
   ];
   return (
-    <div className="tip-lines">
+    <div className="tip-lines usage-tip">
+      <ModelUsageChart total={usageTotal(u)} byModel={byModel} models={models} />
       <b>Token 用量（整个对话累计）</b>
       <dl className="tip-table">
         {rows.map(([k, v]) => (
@@ -108,7 +135,8 @@ function SpeedText({ s }: { s: Speed | null | undefined }) {
 }
 
 /** `Token 合计 69K In 0.4K Out 4K`: the whole conversation's cumulative use; hover for the whole breakdown. */
-function UsageText({ u }: { u: Usage | null }) {
+function UsageText({ u, byModel }: { u: Usage | null; byModel?: Record<string, number> }) {
+  const models = useStore((s) => s.models);
   if (!u) {
     return (
       <span className="usage">
@@ -117,7 +145,7 @@ function UsageText({ u }: { u: Usage | null }) {
     );
   }
   return (
-    <Tip text={<UsageTip u={u} />} className="usage">
+    <Tip text={<UsageTip u={u} byModel={byModel} models={models} />} className="usage" interactive>
       <span className="k">Token 合计</span>
       <span className="v">{formatCount(usageTotal(u))}</span>
       <span className="k">In</span>
@@ -128,52 +156,9 @@ function UsageText({ u }: { u: Usage | null }) {
   );
 }
 
-/** `Limit 5h 17% 1w 41%`: how much of the ChatGPT subscription's windows is used. Only in Codex sessions. */
-function LimitText({ codex }: { codex: CodexAccount }) {
-  if (codex.auth !== "chatgpt" || codex.limits.length === 0) return null;
-  const level = (p: number) => (p >= 95 ? " crit" : p >= 80 ? " warn" : "");
-  return (
-    <>
-      <span className="st-sep" aria-hidden />
-      <Tip
-        className="usage"
-        text={
-          <div className="tip-lines">
-            <b>Codex 订阅额度（{codex.plan}）</b>
-            <dl className="tip-table">
-              {codex.limits.map((l) => (
-                <div key={l.label} className="tip-row">
-                  <dt>{l.label}</dt>
-                  <dd>已用 {l.usedPercent}%</dd>
-                </div>
-              ))}
-            </dl>
-            {codex.limits.map((l) => (
-              <div key={l.label} className="tip-note">
-                {l.label}窗口：{l.resetsIn}
-              </div>
-            ))}
-          </div>
-        }
-      >
-        <span className="k">Limit</span>
-        {codex.limits.map((l) => (
-          <span key={l.short} className={`lim${level(l.usedPercent)}`}>
-            <span className="k">{l.short}</span>
-            <span className="v">{l.usedPercent}%</span>
-          </span>
-        ))}
-      </Tip>
-    </>
-  );
-}
-
 export function StatusBar() {
   const session = useStore(currentSession);
   const notice = useStore((s) => s.notice);
-  const codex = useStore((s) => s.codex);
-  const models = useStore((s) => s.models);
-  const isCodex = !!session && engineOfSession(models, session) === "codex";
   return (
     <footer className="statusbar" role="status">
       <div className="st-left">
@@ -196,8 +181,7 @@ export function StatusBar() {
           <span className="st-sep" aria-hidden />
           <SpeedText s={session.speed} />
           <span className="st-sep" aria-hidden />
-          <UsageText u={session.usage} />
-          {isCodex && <LimitText codex={codex} />}
+          <UsageText u={session.usage} byModel={session.usageModels} />
         </div>
       )}
     </footer>

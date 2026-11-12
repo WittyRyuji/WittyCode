@@ -1,18 +1,16 @@
 """The ChatGPT Plan engine inside the application: the account, the models, the sessions, the sidebar, settings, an engine
-change. The engine is the real one (real agent loop, real tools) talking to the loopback fake of OpenAI's Responses API;
-Droid's side is the usual fake."""
+change. The engine is the real one (real agent loop, real tools) talking to the loopback fake of OpenAI's Responses API."""
 
 from __future__ import annotations
 
 import asyncio
 
 from desktop.core.cache import Cache
-from desktop.core.session_manager import SessionState
+from desktop.core.session_state import SessionState
 from tests.app_support import make_core, ready_core
 from tests.chatgpt_support import ACCESS_TOKEN, make_engine
 from tests.fake_responses import FakeResponses, call, say, usage
 from tests.fakes import until
-from tests.support import complete, delta, success
 
 
 def run(coro):
@@ -95,7 +93,7 @@ def test_the_account_is_told_at_init_with_no_waiting_and_what_it_may_do(tmp_path
 
 def test_without_the_engine_the_account_is_unavailable_and_nothing_else_changes(tmp_path):
     async def scenario():
-        core, _, events, _, _ = await ready_core(tmp_path)
+        core, _, events, _, _ = await ready_core(tmp_path, plan=False)
         init = await core.call("app.init")
         assert init["chatgpt"]["available"] is False and init["chatgpt"]["auth"] == "signed-out"
         assert not chatgpt_models(events)
@@ -156,20 +154,20 @@ def test_the_one_time_note_is_remembered(tmp_path):
 
 
 def test_a_slow_account_refresh_does_not_bring_back_what_the_user_just_did(tmp_path):
-    """The accounts are refreshed a few seconds after start (``droid --version`` and the like): the one-time note dismissed
+    """The accounts are refreshed a few seconds after start (``devin auth status`` and the like): the one-time note dismissed
     and the switch turned off in that time must not be undone by the refresh that was already on its way."""
 
     async def scenario():
         with FakeResponses(token=ACCESS_TOKEN) as fake:
             core, _, events, _ = await chatgpt_core(tmp_path, fake)
             gate = asyncio.Event()
-            real = core._factory
+            real = core._devin_account
 
             async def slow():
                 await gate.wait()
                 return await real()
 
-            core._factory = slow
+            core._devin_account = slow
             refresh = asyncio.ensure_future(core._refresh_accounts())
             await asyncio.sleep(0.1)
             await core.call("chatgpt.welcomed", {})
@@ -236,7 +234,7 @@ def test_a_new_session_starts_with_the_default_permission_of_this_engine_and_rem
             cid = await new_chatgpt(core, events, tmp_path)
             assert await core.call("session.choose", {"id": cid, "field": "autonomy", "value": "full"}) == {"ok": True}
             await until(lambda: meta(events, cid)["settings"]["autonomy"] == "full")
-            assert core.settings.chatgpt_autonomy == "full" and core.settings.autonomy == "off", "Droid's own level is not touched"
+            assert core.settings.chatgpt_autonomy == "full" and core.settings.devin_autonomy == "code", "Devin's own level is not touched"
             cid2 = await new_chatgpt(core, events, tmp_path)
             assert meta(events, cid2)["settings"]["autonomy"] == "full"
             # a level of another engine's scale is not a level of this one
@@ -408,36 +406,6 @@ def test_a_session_without_a_signed_in_account_says_so_instead_of_opening(tmp_pa
 # ---------------------------------------------------------------------------------------------- engine changes
 
 
-def test_a_droid_conversation_moves_to_chatgpt_plan_with_its_earlier_text_and_back(tmp_path):
-    async def scenario():
-        with FakeResponses(token=ACCESS_TOKEN) as fake:
-            fake.script(say("Six."))
-            core, factory, events, engine = await chatgpt_core(tmp_path, fake)
-            cid = (await core.call("session.new", {"projectId": str(tmp_path / "proj")}))["id"]
-            await until(lambda: meta(events, cid).get("mark") == "ready")
-            droid = factory.sessions[-1]
-            await core.call("session.send", {"id": cid, "text": "what is 2+2"})
-            await until(lambda: droid.active is not None)
-            droid.active.push(delta("It is four.", "m1"), complete("m1"), success("It is four."))
-            droid.active.end()
-            await until(lambda: core._by_cid[cid].controller.state is SessionState.READY)
-            result = await core.call("session.choose", {"id": cid, "field": "model", "value": "chatgpt:gpt-6.1-sol"})
-            assert result["switched"] is True
-            assert core._by_cid[cid].engine == "chatgpt" and meta(events, cid)["engine"] == "chatgpt"
-            assert any("已换到 GPT-6.1-Sol（ChatGPT Plan）" in p["text"] for p in events.of("notice"))
-            assert meta(events, cid)["handoff"]["carried"] == 2
-            await core.call("session.send", {"id": cid, "text": "and 3+3?"})
-            await until(lambda: meta(events, cid).get("mark") == "ready" and answer_of(events, cid) == "Six.")
-            first = "".join(part["text"] for part in fake.requests[0]["input"][0]["content"])
-            assert "what is 2+2" in first and "It is four." in first and "and 3+3?" in first
-            assert meta(events, cid)["handoff"] is None
-            assert (await core.call("session.choose", {"id": cid, "field": "model", "value": "claude-haiku-5-5"}))["switched"] is True
-            assert core._by_cid[cid].engine == "droid"
-            await core.shutdown()
-
-    run(scenario())
-
-
 def test_a_chatgpt_plan_session_cannot_change_engine_while_it_runs(tmp_path):
     async def scenario():
         with FakeResponses(token=ACCESS_TOKEN) as fake:
@@ -447,7 +415,7 @@ def test_a_chatgpt_plan_session_cannot_change_engine_while_it_runs(tmp_path):
             await core.call("session.send", {"id": cid, "text": "wait"})
             await until(lambda: core._by_cid[cid].controller.state is SessionState.RUNNING and fake.requests)
             try:
-                await core.call("session.choose", {"id": cid, "field": "model", "value": "claude-haiku-5-5"})
+                await core.call("session.choose", {"id": cid, "field": "model", "value": "devin:swe-1-5"})
             except Exception as error:
                 assert "本轮还在运行" in str(error)
             else:
@@ -501,6 +469,7 @@ def test_a_question_of_the_model_reaches_the_page_as_a_card_and_the_answer_goes_
             assert await core.call("session.send", {"id": cid, "text": "set up storage"}) == {"ok": True}
             await until(lambda: pending_card(events, cid) is not None)
             card = pending_card(events, cid)
+            assert card["who"] == "ChatGPT Plan"
             assert card["questions"] == [{"topic": "Storage", "question": "Which database?", "options": ["SQLite", "Postgres"], "multiSelect": False}]
             assert meta(events, cid)["mark"] == "attention", "the tab says the session is waiting for the user"
             assert await core.call("session.answerQuestion", {"id": cid, "promptId": card["id"], "answers": ["Postgres"]}) == {"ok": True}

@@ -4,11 +4,9 @@ import type {
   AttachmentView,
   Block,
   ChatGPTAccount,
-  CodexAccount,
   DevinAccount,
   Effort,
   Engine,
-  FactoryAccount,
   ModelChoice,
   PermissionPrompt,
   Project,
@@ -18,22 +16,6 @@ import type {
   ToolItem,
   Turn,
 } from "../types";
-
-/** The models Factory serves (billed in Factory credits). `source: "factory"`. */
-export const FACTORY_MODELS: ModelChoice[] = [
-  { id: "claude-haiku-5-5", label: "Haiku 5.5", note: "快", source: "factory", efforts: ["off", "low", "medium", "high"], defaultEffort: "low", window: 872_000 },
-  { id: "claude-sonnet-5-5", label: "Sonnet 5.5", source: "factory", efforts: ["low", "medium", "high", "xhigh", "max"], defaultEffort: "medium", window: 872_000 },
-  { id: "claude-opus-5-5", label: "Opus 5.5", note: "最强", source: "factory", efforts: ["low", "medium", "high", "xhigh", "max"], defaultEffort: "high", window: 872_000 },
-  { id: "gpt-5.4-mini", label: "GPT-5.4 mini", source: "factory", efforts: ["low", "medium", "high", "xhigh"], defaultEffort: "medium", window: 400_000 },
-  { id: "kimi-k3", label: "Kimi K3", source: "factory", efforts: ["low", "high"], defaultEffort: "low", window: 196_608 },
-];
-
-/** The models of a ChatGPT subscription, run by Codex. Ids carry a `codex:` prefix so they never collide with Factory's. */
-export const CODEX_MODELS: ModelChoice[] = [
-  { id: "codex:gpt-5.3-codex", label: "GPT-5.3 Codex", note: "写代码", source: "codex", efforts: ["low", "medium", "high", "xhigh"], defaultEffort: "medium", window: 400_000 },
-  { id: "codex:gpt-5.4", label: "GPT-5.4", source: "codex", efforts: ["low", "medium", "high", "xhigh"], defaultEffort: "medium", window: 400_000 },
-  { id: "codex:gpt-5.4-mini", label: "GPT-5.4 mini", note: "快", source: "codex", efforts: ["low", "medium", "high"], defaultEffort: "low", window: 400_000 },
-];
 
 /** The models of a Devin account, run by `devin acp`. Ids carry a `devin:` prefix; the levels are the model's own. */
 export const DEVIN_MODELS: ModelChoice[] = [
@@ -51,7 +33,7 @@ export const CHATGPT_MODELS: ModelChoice[] = [
 ];
 
 /** A model entry of an API provider as the model menu needs it. Unknown models have a reasoning control only when the
- *  entry sets `reasoningEffort` (Droid then offers Off / Low / Medium / High); a known `baseModelId` would bring its own. */
+ *  entry sets `reasoningEffort` (the menu then offers Off / Low / Medium / High); a known `baseModelId` would bring its own. */
 export function modelsOfProvider(p: ApiProvider): ModelChoice[] {
   return p.models.map((m) => ({
     id: `api:${p.id}:${m.id}`,
@@ -63,21 +45,6 @@ export function modelsOfProvider(p: ApiProvider): ModelChoice[] {
   }));
 }
 
-export const FACTORY_ACCOUNT: FactoryAccount = { signedIn: true, email: "demo@example.com", plan: "Max", version: "0.251.0" };
-
-export const CODEX_ACCOUNT: CodexAccount = {
-  cli: "found",
-  cliPath: "C:\\Users\\me\\AppData\\Roaming\\npm\\codex.cmd",
-  version: "0.58.0",
-  auth: "chatgpt",
-  email: "demo@example.com",
-  plan: "ChatGPT Pro",
-  limits: [
-    { label: "5 小时", short: "5h", usedPercent: 17, resetsIn: "3 小时 12 分后重置" },
-    { label: "每周", short: "1w", usedPercent: 41, resetsIn: "4 天 6 小时后重置" },
-  ],
-  enabled: true,
-};
 
 export const DEVIN_ACCOUNT: DevinAccount = {
   cli: "found",
@@ -143,16 +110,10 @@ export const API_PROVIDERS: ApiProvider[] = [
 
 /** Whether a turn stops for the user's approval at this permission level (the simulator only). */
 export const asksFirst = (engine: Engine, level: string) =>
-  engine === "codex"
-    ? level !== "full"
-    : engine === "devin"
-      ? level === "code" || level === "plan"
-      : engine === "chatgpt"
-        ? level !== "full"
-        : level === "off";
+  engine === "devin" ? level === "code" || level === "plan" : level !== "full";
 
 const WINDOWS: Record<string, { window: number }> = Object.fromEntries(
-  [...FACTORY_MODELS, ...CODEX_MODELS, ...DEVIN_MODELS, ...CHATGPT_MODELS, ...API_PROVIDERS.flatMap(modelsOfProvider)].map((m) => [m.id, { window: m.window }]),
+  [...DEVIN_MODELS, ...CHATGPT_MODELS, ...API_PROVIDERS.flatMap(modelsOfProvider)].map((m) => [m.id, { window: m.window }]),
 );
 
 // ------------------------------------------------------------------------------------------------ small builders
@@ -278,7 +239,7 @@ export const QUEUED_SAMPLE: QueuedMessage[] = [
 
 const baseUsage = (n: number) => ({ input: 394 * n, output: 498 * n, cacheWrite: 3_207 * n, cacheRead: 68_300 * n });
 
-function settings(model = "claude-haiku-5-5", autonomy = "off", reasoning: Effort | "" = "low") {
+function settings(model = "chatgpt:gpt-6.1-sol", autonomy = "code", reasoning: Effort | "" = "low") {
   return { model, reasoning, autonomy, mode: "auto" };
 }
 
@@ -287,7 +248,7 @@ function ctx(model: string, used: number | null, compacted = false) {
 }
 
 function session(p: Partial<Session> & Pick<Session, "id" | "projectId" | "title">): Session {
-  const model = p.settings?.model ?? "claude-haiku-5-5";
+  const model = p.settings?.model ?? "chatgpt:gpt-6.1-sol";
   return {
     modified: "刚刚",
     turns: [],
@@ -308,7 +269,8 @@ const fileOps: Session = session({
   speed: { tps: 42.3, tokens: 1_840, seconds: 43.5, first: 1.4, genTps: 43.7 },
   mark: "ready",
   usage: baseUsage(1),
-  context: ctx("claude-haiku-5-5", 18_000),
+  usageModels: { "chatgpt:gpt-6.1-sol": 50_000, "devin:claude-opus-5-5-medium": 15_000 },
+  context: ctx("chatgpt:gpt-6.1-sol", 18_000),
   turns: [
     turn(
       [
@@ -367,8 +329,8 @@ const liveRefactor: Session = session({
   modified: "刚刚",
   usage: baseUsage(3),
   workingLabel: "正在运行：编辑 desktop/core/context.py",
-  context: ctx("claude-sonnet-5-5", 41_200),
-  settings: settings("claude-sonnet-5-5", "medium", "high"),
+  context: ctx("chatgpt:gpt-6.1-sol", 41_200),
+  settings: settings("chatgpt:gpt-6-astra", "code", "high"),
   turns: [
     turn(
       [
@@ -387,7 +349,7 @@ const liveRefactor: Session = session({
           }),
         ),
         text(
-          "找到了：Droid 的 `last_call_compaction_tokens` 记的是**最后结束的那次模型调用**，而会话标题由另一次约 360 token 的小调用生成，常常比第一轮晚结束。",
+          "找到了：引擎记的 `last_call_compaction_tokens` 是**最后结束的那次模型调用**，而会话标题由另一次约 360 token 的小调用生成，常常比第一轮晚结束。",
         ),
         group(
           tool("TodoWrite", "plan", "3 项", {
@@ -438,8 +400,8 @@ const approvalSession: Session = session({
   modified: "刚刚",
   workingLabel: "等待你的确认",
   usage: baseUsage(2),
-  context: ctx("claude-opus-5-5", 96_400),
-  settings: settings("claude-opus-5-5", "off", "max"),
+  context: ctx("chatgpt:gpt-6.1-sol", 96_400),
+  settings: settings("chatgpt:gpt-6.1-sol", "ask", "max"),
   turns: [
     {
       id: nid("turn"),
@@ -488,8 +450,8 @@ const deadSession: Session = session({
   modified: "5 分钟前",
   workingLabel: "连接已断开",
   usage: baseUsage(1),
-  context: ctx("claude-sonnet-5-5", 52_900),
-  settings: settings("claude-sonnet-5-5"),
+  context: ctx("chatgpt:gpt-6.1-sol", 52_900),
+  settings: settings("chatgpt:gpt-6.1-sol"),
   turns: [
     turn(
       [
@@ -503,7 +465,7 @@ const deadSession: Session = session({
           }),
         ),
         text("每次请求都在重建连接池，而且用的是 `pool_size=1`，这在"),
-        { kind: "error", id: nid("err"), message: "Droid process exited unexpectedly (exit code 1)", recoverable: true },
+        { kind: "error", id: nid("err"), message: "The engine process exited unexpectedly (exit code 1)", recoverable: true },
       ],
       { status: "failed", seconds: 31, steps: 2 },
     ),
@@ -517,8 +479,8 @@ const reviewSession: Session = session({
   mark: "ready",
   modified: "12 分钟前",
   usage: baseUsage(4),
-  context: ctx("claude-opus-5-5", 128_600),
-  settings: settings("claude-opus-5-5", "low", "xhigh"),
+  context: ctx("chatgpt:gpt-6.1-sol", 128_600),
+  settings: settings("chatgpt:gpt-6.1-sol", "ask", "xhigh"),
   turns: [
     turn(
       [
@@ -585,8 +547,8 @@ const questionSession: Session = session({
   modified: "刚刚",
   workingLabel: "等待你的确认",
   usage: baseUsage(1),
-  context: ctx("claude-opus-5-5", 37_800),
-  settings: settings("claude-opus-5-5"),
+  context: ctx("chatgpt:gpt-6.1-sol", 37_800),
+  settings: settings("chatgpt:gpt-6.1-sol"),
   turns: [
     {
       id: nid("turn"),
@@ -602,17 +564,17 @@ const questionSession: Session = session({
   ],
 });
 
-/** A session run by Codex on the ChatGPT subscription: its own models, permission scale and token figures (no cache writes). */
-const codexSession: Session = session({
-  id: "s-codex",
+/** A second ChatGPT Plan session: another model of the plan, its own token figures (no cache writes). */
+const indexSession: Session = session({
+  id: "s-index",
   projectId: "p-inventory",
-  title: "Codex：重写索引构建",
+  title: "重写索引构建",
   mark: "ready",
   modified: "8 分钟前",
   usage: { input: 5_210, output: 3_880, cacheWrite: null, cacheRead: 61_400 },
   speed: { tps: 63.4, tokens: 3_880, seconds: 61.2, first: 2.1, genTps: 65.6 },
-  context: ctx("codex:gpt-5.3-codex", 38_400),
-  settings: settings("codex:gpt-5.3-codex", "workspace", "high"),
+  context: ctx("chatgpt:gpt-6-astra", 38_400),
+  settings: settings("chatgpt:gpt-6-astra", "code", "high"),
   turns: [
     turn(
       [
@@ -731,12 +693,12 @@ const apiSession: Session = session({
   usage: { input: 2_130, output: 960, cacheWrite: 0, cacheRead: 0 },
   speed: { tps: 27.5, tokens: 960, seconds: 34.9, first: 4.8, genTps: 31.9 },
   context: ctx("api:openrouter:qwen/qwen3-coder", 3_100),
-  settings: settings("api:openrouter:qwen/qwen3-coder", "off", ""),
+  settings: settings("api:openrouter:qwen/qwen3-coder", "ask", ""),
   turns: [
     turn(
       [
         user("把 notes.txt 里的待办整理成一个清单。"),
-        text("好的，已整理：\n\n- [ ] 核对命中率的口径\n- [ ] 确认密钥只放环境变量\n- [ ] 接入 Codex 登录"),
+        text("好的，已整理：\n\n- [ ] 核对命中率的口径\n- [ ] 确认密钥只放环境变量\n- [ ] 接入 Devin 登录"),
       ],
       { seconds: 6.2, steps: 0 },
     ),
@@ -755,7 +717,7 @@ export const SESSIONS: Session[] = [
   saved("s-rename", "p-wittycode", "改名为 WittyCode", "3 天前"),
   reviewSession,
   approvalSession,
-  codexSession,
+  indexSession,
   devinSession,
   chatgptSession,
   deadSession,
@@ -777,7 +739,7 @@ export const PROJECTS: Project[] = [
     name: "inventory-api",
     path: "C:\\Users\\me\\code\\inventory-api",
     collapsed: false,
-    sessionIds: ["s-review", "s-approval", "s-codex", "s-devin", "s-chatgpt", "s-dead", "s-batch"],
+    sessionIds: ["s-review", "s-approval", "s-index", "s-devin", "s-chatgpt", "s-dead", "s-batch"],
   },
   {
     id: "p-demo",
@@ -788,7 +750,7 @@ export const PROJECTS: Project[] = [
   },
 ];
 
-export const OPEN_TABS = ["s-file-ops", "s-live", "s-question", "s-review", "s-approval", "s-codex", "s-dead", "s-empty", "s-api", "s-devin", "s-chatgpt"];
+export const OPEN_TABS = ["s-file-ops", "s-live", "s-question", "s-review", "s-approval", "s-index", "s-dead", "s-empty", "s-api", "s-devin", "s-chatgpt"];
 
 /** The canned answer the simulator streams when you send a message. */
 export const SIM_ANSWER = `我看了一下，改动分两步：

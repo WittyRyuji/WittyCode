@@ -1,0 +1,59 @@
+# WittyCode 项目概况
+
+2026-11-11 从 `AGENTS.md` 拆出来的项目信息，文字照原样搬过来，没有改写。代理的硬约束在 `AGENTS.md`，命令和环境在 `docs/development.md`；文中「某某」一条指 `docs/knowledge.md` 里的条目。
+
+## 产品原则
+
+- 助手文字和阶段结果始终醒目；工具调用保持用户选定的显示：每个活动组收成一行（可展开），回答文字在组之间，轮末显示用时和步数。
+
+## 是什么
+
+WittyCode：Windows 上的编程代理桌面应用，Python 3.11 + PySide6 + Qt WebEngine + React，所有模型共用一套界面和一份记忆。它是独立的产品：**自己的代理循环**跑 ChatGPT Plan 和 API Provider，**不依赖任何别的代理程序的 CLI、SDK 或设置文件**；Devin 是可选的外部引擎，装了才有。核心目标：助手文字和阶段结果始终醒目，工具调用折叠成可展开的一行。README 有英文（`README.md`）和中文（`README.zh-CN.md`）两份，Roadmap 同样（`ROADMAP.md` / `ROADMAP.zh-CN.md`）；截图用 `cd frontend; npm run build; node scripts/readme-shots.mjs` 重拍，演示数据，不含真实对话。
+
+界面是一个 React 单页（`frontend/`，Vite 构建成单文件 `desktop/ui_dist/index.html`），放在一个无边框 Qt 窗口里，标题栏也由页面绘制；Python 只做后端，经一条 QWebChannel（`backend.call/reply/event`）和页面对话。引擎两个：`chatgpt`（`core/chatgpt/` + `core/harness/` + `core/llm/`：WittyCode 自己的代理循环，模型来自用户的 ChatGPT 套餐（`chatgpt:<id>`，直连 OpenAI 的 Responses API）或用户的 API Provider（`api:<provider>:<id>`，配置在 WittyCode 自己的 `models.json`，`core/providers.py`））和 `devin`（`core/devin/`，可选，走 `devin acp`）；同一对话里可以换模型和引擎（文字交接，`core/handoff.py`）。
+
+应用名是 **WittyCode**（窗口标题、设置目录 `%APPDATA%\WittyCode\`、`WittyCode.log`、`WittyCode.pyw`、AppUserModelID `WittyCode.app`）；Python 包是 `desktop/`。应用原名 droid-desk，改名前的设置在 `%APPDATA%\droid-desk\settings.json`，第一次启动时复制（不移动、不删除）到新位置（`core/settings.py` 的 `LEGACY_APP_DIR`）。
+
+## 模块图
+
+| 位置 | 作用 |
+| --- | --- |
+| `frontend/` | 界面的全部：React 19 + TS + Vite + zustand。所有用户动作在 `src/store.ts`，对 Python 的契约在 `src/bridge.ts` / `src/transport.ts`，数据结构在 `src/types.ts`（camelCase，和 `core/viewmodel.py` 对应） |
+| `desktop/ui/app.py` | 入口：命令行（`--settings` / `--project` / `--page` / `--debug`）、QApplication、qasync 事件循环、日志 |
+| `desktop/ui/pdfview.py` | 侧栏预览 PDF：`PdfReader` 用 QtPdf 从内存读文档、逐页画成 PNG 的 `data:` 图（`pages` 尺寸、`page_image(路径, 页, 宽)`），只缓存最后一个文档，不锁文件；失败是一句中文 `FileProblem` |
+| `desktop/ui/shell.py` | 无边框主窗口 `MainWindow` 和 QWebChannel 桥（页面 → Python `backend.call`，回答 `backend.reply`，推送 `backend.event`）；`QtPlatform`：文件对话框、无边框窗口的移动 / 缩放（`startSystemMove/Resize`）、缩略图、系统浏览器；页面锁定（OTR profile、禁跳转、链接交给系统浏览器） |
+| `desktop/ui/winframe.py` | Windows 上无边框窗口的阴影（`WS_THICKFRAME` + `DwmExtendFrameIntoClientArea`）、Windows 11 的圆角和自带边框的关闭；`frame_kind` 告诉页面画哪种圆角的描边 |
+| `desktop/ui/{attachments,imaging,theme,tasks}.py` | 剪贴板图片 / 拖放数据 → `Attachment`（含 `claim_drag`）；图片缩放压缩、缩略图；深浅色判断；后台任务收尾和 qasync 挂起定时器的清理（`kill_pending_timers`） |
+| `desktop/core/app_core.py` | 桥后面的全部逻辑：`AppCore(settings, platform, devin=, chatgpt=, …)`，`call(method, params)` 分派（`app.*`、`session.*`、`models.setVisible`、`chatgpt.*`、`devin.*`、`providers.*`、`memory.*`、`window.*` 等），状态经 `emit(name, payload)` 推给页面 |
+| `desktop/core/session_state.py` | 各引擎共用的会话状态（`SessionState`、`LiveSettings`、`SteerOutcome` 等）；`core/{jsonrpc,elicit,engine_items,engine_errors,side_helpers}.py` 是引擎间共用的 JSON-RPC 客户端、MCP 表单映射、条目和错误帮手 |
+| `desktop/core/devin/` | 可选的 Devin 引擎（走 `devin acp`，Agent Client Protocol）：`engine.py`（账号 / 模型 / 会话列表 / 打开 / 关闭）、`rpc.py`（`AcpClient`）、`controller.py`（一个会话，含引导 / 停止 / 审批 / 提问）、`items.py`、`history.py`（`session/load` 的重放 → 对话）、`models.py`、`policy.py`（权限档 = Devin 的模式）、`account.py`、`locate.py`、`side.py`（旁路提问：临时会话，问完 `session/delete`）、`errors.py` |
+| `desktop/core/chatgpt/` | 自有循环的引擎（ChatGPT Plan 和 API Provider 都由它跑）：`engine.py`（账号 / 登录 / 模型 / 会话列表 / 打开 / 关闭；没有进程）、`controller.py`（一个会话 = 代理循环的观察者：转成界面的回合、审批、提问、引导 / 排队、停止、存档）、`oauth.py`（「Sign in with ChatGPT」：回环监听 + PKCE + 动态注册 + 校验）、`accounts.py`（凭据文件和续期）、`jwt.py`、`http.py`、`responses.py`（请求构造 + SSE → 中立事件）、`models.py`、`history.py`、`side.py`、`errors.py`；见 `docs/chatgpt-plan-harness.md` |
+| `desktop/core/harness/` | WittyCode 自己的代理循环（和提供方无关）：`loop.py`（循环：调模型 → 执行工具 → 把结果交回，直到没有工具调用；`Tools` / `Observer` 两个接口）、`tools.py` + `fs_tools.py` + `shell.py`（`read_file / list_dir / glob / grep / create_file / edit_file / shell`，另有 `todo_write`、`skill`；PowerShell）、`permissions.py`（`ask / code / full`、只读命令白名单、保护路径、审批动作）、`toolset.py`（内置工具 + MCP 工具 + 权限，合成循环要的 `Tools`）、`asking.py`（模型的 `ask_user` 工具，见「模型会问问题」一条）、`todo.py`（模型的 `todo_write` 清单工具，见「借 DeepSeek Harness 的」一条）、`goal.py`（`/goal` 的规则：开场白、续轮消息、最后一行标记、轮数、空转；由 `AppCore` 驱动，见「斜杠命令」一条）、`skills.py` + `skill_tool.py`（技能、自定义命令、插件的发现与点名 hook，和模型的 `skill` 工具，见「技能、自定义命令、插件」一条）、`mcp.py`（最小 stdio MCP 客户端，接共享记忆）、`prompt.py`（系统提示 + 从工作目录到仓库根的多层 `AGENTS.md`，合并后按章节缩到 24K）、`compact.py`（上下文窗口：估算、切点、摘要、服务器说太长的识别；见「上下文窗口与压缩」一条）、`store.py`（会话存档，导入的会话带 `origin`，压缩带 `compaction`）；**没有操作系统沙箱** |
+| `desktop/core/llm/` | 自有 harness 对各家 API 的连接（见「API Provider 由自有 harness 直接请求」一条）：每种接口一个适配器（`chat.py` Chat Completions、`anthropic.py` Messages、`responses_api.py` OpenAI Responses、`bedrock.py` Bedrock 的 Converse / InvokeModel 请求体和 AWS 事件流），请求翻成各自的线格式、响应流翻回循环的中立事件；`aws.py` 是标准库实现的 SigV4 签名和 AWS 凭据链；`backend.py` 的 `ApiBackend` 按模型找配置、读密钥、发请求；`wire.py` 放 `Route` 和 SSE |
+| `desktop/core/importers/`、`core/import_bridge.py` | 从别的应用导入（只读它们的文件，这是导入功能，不是依赖）：`base.py`、`split.py`、`claude.py / codex.py / devin.py / factory.py`（四个来源）、`convert.py`（会话 → `harness.store.SavedSession`）、`zstd.py`；`import_bridge.py` 是页面要的形状：预览、确认、撤销；导入的会话进自有循环的存档（`origin` 记来源） |
+| `desktop/core/memory/` | 各引擎共用的长期记忆（笔记）：`store.py`（`MemoryStore`：Markdown 笔记 + `journal.jsonl` + SQLite FTS5 索引，进程间用字节锁，不物理删除）、`safety.py`（密钥过滤）、`server.py`（手写 stdio MCP 服务，5 个工具，**每个会话一个子进程**）、`launch.py`（`MemoryLaunch`：服务命令 + 新会话开头的标题清单）、`bridge.py`（`MemoryBridge`：页面要的形状、run → 会话的来源映射、「已看过」、建议的接受 / 忽略）、`capture.py`（消息里明确说「记住…」时应用自己写笔记，不用模型）、`review.py`（`ReviewStore`：应用自己写的笔记等每周回顾，`review.json`）、`learn.py`（`Learner`：从用户的保留 / 丢弃学习的朴素贝叶斯，`learned.json`）、`proposals.py`（旧的逐条建议，只剩迁移用）、`curator.py`（`Curator`：每轮结束后问引擎一次，把握够大的直接写成笔记，限频）；**这个包要保持轻量，子进程要 import 它**；细节见「共享记忆」「自动记笔记，每周回顾一次」两条和 `docs/handoff.md` 里「2026-11-06 共享记忆的自动更新…」那条批次记录 |
+| `desktop/core/{hooks,context_envelope}.py`、`core/memory/recall.py` | 应用自己的 hook 层（各引擎共用，目前只有「发送前」一处：`Hooks.prompt`）、加在用户文字后面的 `<wittycode-context>` 块（`wrap` / `strip`）、判断哪些笔记和这条消息有关（纯函数）；见「共享记忆」一条的 (f) (f2) |
+| `desktop/core/cache.py` | 应用自己的缓存（`%APPDATA%\WittyCode\cache\`）：会话行、模型目录、每个会话的对话 + 用量，让窗口在连上任何东西之前就是满的；`Cache(None)` 什么也不缓存（测试） |
+| `desktop/core/files.py` | 对话里的文件链接：`parse_ref`（`path:行[-止行][:列]`，盘符的冒号不当行号）、`resolve(原文, 项目)`（相对路径按会话的项目文件夹、`~`、`file:` 地址；找不到 / 是文件夹 / 在别处的错误都是 `FileProblem`，一句中文）、`is_runnable`（`.exe .bat .ps1 .py .js` 这类程序和脚本）、`read_for_panel`（≤ 1.5 MB、识别 UTF-8 / BOM / UTF-16 / GB18030、二进制拒绝）、`preview_kind / preview_size / image_data_url`（PDF 和图片不读文本，由页面逐页要，见「侧栏预览 PDF 和图片」一条）；细节见「对话里的文件链接」一条 |
+| `desktop/core/speed.py` | 状态栏的 TPS：一轮的输出 token ÷ 模型用时，`speed_of(turns)` 取最近一轮能测的；计时在 `transcript.py`（`Turn.blocked_seconds` / `first_output_at` / `model_seconds` / `output_tokens`）；细节见「TPS」一条 |
+| `desktop/core/usage.py` | 整个对话的 token 总和：`Tokens`（各引擎的用量归一成同一个形状）和 `UsageLedger`（总和 + 每个序列上次报的数，进缓存）；细节见「整个对话的 token 总和」一条 |
+| `desktop/core/providers.py` | API Provider：WittyCode 自己的 `models.json`（设置文件旁边，`WITTYCODE_MODELS_FILE` 可改）里的 `customModels` 按 (kind, baseUrl) 分组，`ProviderStore(models_file=…)` 是桥后面的表面；不读别的程序的设置；密钥只写 `${变量名}`，界面拿不到密钥（编辑器的「环境变量」栏只写变量名本身） |
+| `desktop/core/{transcript,viewmodel}.py` | 引擎的中立事件归约成轮 / 块 / 活动组（transcript）；视图模型转页面要的 JSON（viewmodel） |
+| `desktop/core/{attachments,handoff,catalog,context,diffs,toolinfo,prompts,settings,language,timefmt,winproc}.py` | 附件（无 Qt）、换引擎的文字交接、模型目录（`chatgpt:` / `api:` / `devin:` 前缀）、上下文用量、diff、工具摘要、审批 / 提问、设置（含改名迁移）、思考用中文、时间格式、CREATE_NO_WINDOW |
+| `desktop/devtools/` | `samples.py`（样例文件） |
+| `desktop/ui_dist/` | 构建产物（`index.html` 单文件），不进 git |
+| `tests/`、`fixtures/` | 按模块分的单元 / 集成测试 + `test_app_e2e.py` 整机测试（`e2e_support.py` 的 `Rig` 像用户一样用真 Qt 事件驱动真页面）；`app_support.make_core` 是真的自有循环接本机假 Responses 服务（`fake_responses.py`），`fake_devin.py` 是假的 `devin acp`；`conftest.py` 让每个测试的设置目录指向临时目录 |
+
+## 发布包
+
+- 发布包（Windows，2026-11-11）：先 `cd frontend; npm run build:app`，再 `.\.venv\Scripts\python.exe scripts\build_release.py`（`--no-smoke` / `--no-zip` / `--keep-work`）。产物在 `dist/`（已忽略）：`WittyCode-<版本>-win-x64\` 和同名 `.zip` + `.sha256`（约 730 MB / 压缩后 265 MB）。**结构**：`python\`（python.org 的 3.11.9 内嵌版，下载后核对 python.org 公布的 MD5；3.11.9 是 3.11 最后一个有 Windows 二进制的版本）、`site-packages\`（从 `.venv` 按 `RECORD` 复制 `requirements.txt` 的包和它们的依赖，共 13 个，去掉 PySide6 的 `examples/include/glue/scripts/typesystems` 和 `.pyi`）、`app\`（`desktop` + `WittyCode.pyw`）、`WittyCode.exe` + `launcher\`（`scripts/launcher.py` 用 `.venv-build` 里的 PyInstaller onedir 冻结，只负责找到 `python\pythonw.exe` 和 `app\WittyCode.pyw` 并带着参数启动）、`LICENSE` / `NOTICE` / `THIRD_PARTY_NOTICES.txt` / `licenses\` / `README.txt`。**为什么不把整个应用冻结成一个 exe**：应用会用 `sys.executable` 起子进程（记忆 MCP 服务器 `python -m desktop.core.memory`、搜索工作进程 `python -c …`），冻结后 `sys.executable` 是应用自己，会再开一个窗口；内嵌 Python 保持了和测试时完全一样的运行方式。`python311._pth` 写死 `..\site-packages` 和 `..\app`（内嵌版会忽略 PYTHONPATH 和注册表）。字节码用 `compileall --invalidation-mode unchecked-hash` 预编译（zip 会丢文件时间，按时间戳校验的 .pyc 会全部作废）。**验证**：构建脚本最后用发布包自己的 `python.exe` 跑 `scripts/smoke_release.py`（离屏、回放一段录像：页面加载、通道连上、标题栏画出、回放的对话画出来，不调用模型、不写 `%APPDATA%`）；手工解压 zip 后双击 `WittyCode.exe` 的情形用同样参数 `--replay … --settings <临时>` 查过：启动器退出，`pythonw.exe` 和 `QtWebEngineProcess.exe` 在解压目录里跑，日志空。**没做**：代码签名（SmartScreen 会提示未知发布者）；自动更新；32 位 / ARM64。
+
+## 仓库与许可证
+
+下面是原 `AGENTS.md`「版本控制」一节的原文；其中的规则以 `AGENTS.md` 为准。
+
+- 仓库就是工程根目录（`git init` 已做，分支 `main`，远端 `origin` = `git@github.com:WittyRyuji/WittyCode.git`，**公开仓库**；2026-11-11 第一次推送（普通合并了远端只含 `LICENSE` 的 `Initial commit`），当晚用户要求清掉历史里的旧截图和旧名字，最后用户删库重建，历史是一个根提交（见「包改名 `desktop/`…」一条的 (e)）。以后推送仍然只在用户说推的时候做，且要先在同一条命令里重设 `GIT_SSH_COMMAND`（见「斜杠菜单去掉 `/new`…」一条的 (d)））。每个任务结束、测试通过后本地提交一次：标题用英文一行祈使句（如 `Add file links in the conversation`），正文写做了什么和为什么，结尾带 `Co-authored-by: factory-droid[bot] <138933559+factory-droid[bot]@users.noreply.github.com>`。提交前看一遍 `git status` 和暂存的差异，不要把无关文件带进去。
+- `.gitignore`：`.venv`、`frontend/node_modules`、`frontend/dist`、`desktop/ui_dist/`（生成物，克隆后先 `cd frontend; npm install; npm run build:app` 才能启动）、日志都不进库；`sandbox/` 是对真实程序做探针的草稿区（Codex CLI 副本约 460 MB、录像、截图），整个忽略，只放行文档里要求跑的脚本（`mutate_*.py`、`e2e_loop.ps1`、`real_window_smoke.py`、`chatgpt_real_probe.py`、`chatgpt_probe_dryrun.py`、`followup_real_probe.py`、`probe_review_links.py`）。新脚本如果文档要求别人跑，要在 `.gitignore` 里加放行。`.gitattributes` 是 `* text=auto`（库里统一 LF；Windows 工作区检出时是 CRLF，提示里的「LF will be replaced by CRLF」不是问题）。
+- **仓库是公开的，不要把个人信息写进去**：演示数据和测试里的邮箱用 `demo@example.com`、用户名用 `me`（`C:\Users\me\…`）；真实路径、令牌、会话内容不要进测试和录像。已经替换过一次（2026-11-06）。
+- **公开仓库里不许出现的东西（2026-11-11，用户：「仓库文档里面要清理干净我本地的信息、授权等等私人信息」）**：(1) **本机信息**：真实的绝对路径（开发目录、`CODEX_HOME` 的真实目录、`C:\Users\<真名>\…`）、本机文件夹名、机器名、「这台机器有 / 没有什么」的叙述（写「测试时没有」，不写「这台机器没有」）、用户设置里的具体数值；(2) **授权与身份**：令牌、密钥、SSH 密钥的文件名、git 邮箱、机器上有哪些令牌环境变量（连变量名都不写）、账号邮箱、套餐等级（`Pro` / `Plus`）、会话 / 账号 id；(3) **用户的其他项目、私有仓库、个人技能名和个人学习内容**：演示数据和测试里一律用中性名字（项目 `wittycode`、`inventory-api`，技能 `weekly-report`，路径 `C:\Users\me\…`）；(4) 这些同样不许出现在截图、`fixtures/` 的录像、测试数据、代码注释、提交说明和文档里。文档里需要路径时写 `<项目根>`、`%CODEX_HOME%`、`<私钥路径>` 这类占位。**进库前自查**：用 `git grep` 查用户的其他项目名、Windows 用户名、本机开发目录的路径、邮箱、`id_rsa`、`TOKEN`；截图要看一遍；新录的 `fixtures/` 先把 `cwd` 和路径换掉（含被流式输出拆成几段的路径）。2026-11-11 全库清过一遍：文档里的本机路径和 Codex 数据目录、SSH 密钥名、git 邮箱、令牌环境变量名、套餐等级、Codex 沙盒密钥路径、另一个本地项目和私有仓库的叙述、另一个同类客户端的名字、个人技能名，`fixtures/` 里 45 个文件的 `cwd`，`sandbox/` 探针里写死的开发目录。剩下的旧产品名 `droid-desk`（设置迁移和历史叙述）、公开的 GitHub 用户名和测试里的假数据是有意留的。
+- **许可证（2026-11-11）**：Apache-2.0，版权人 `NiuXiao@WittyLoong Studio`（用户给的名字，原样写）。`LICENSE` 是 apache.org 的原文（构建时逐字核对过，不要改）；`NOTICE` 写版权行、DS Harness 的想法来源（MIT，没用它的代码）和第三方说明；`pyproject.toml` 有 `license` / `authors`；README 末尾有「许可证」一节。发布包额外带 `THIRD_PARTY_NOTICES.txt` 和 `licenses\`（PySide6 / Qt 按 LGPL-3.0 用，文本在 `scripts/third_party/`；包里 Qt 是独立的 DLL，可替换）。新增源文件不要求加文件头。`.gitignore` 还忽略 `dist/`、`build/`、`.venv-build/`（发布构建的产物和打包用的虚拟环境）和 `outputs/`（交给用户的报告和导出，不属于项目）。

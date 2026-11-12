@@ -5,12 +5,8 @@ import {
   API_PROVIDERS,
   CHATGPT_ACCOUNT,
   CHATGPT_MODELS,
-  CODEX_ACCOUNT,
-  CODEX_MODELS,
   DEVIN_ACCOUNT,
   DEVIN_MODELS,
-  FACTORY_ACCOUNT,
-  FACTORY_MODELS,
   OPEN_TABS,
   PROJECTS,
   SESSIONS,
@@ -22,6 +18,7 @@ import { cancelRun, runTurn, settlePrompt } from "./mock/simulator";
 import { bridge } from "./bridge-instance";
 import { engineLabel, engineOfSource, findModel } from "./lib/models";
 import { handoffOf } from "./lib/handoff";
+import { quitWarning } from "./lib/quit";
 import { effortLabel, permissionsFor, startingLevel } from "./lib/vocab";
 import { COMPACT_AT_DEFAULT, clampCompactAt, emptyLiveData, type LiveData } from "./liveReducer";
 import { LIVE, liveSeed } from "./mode";
@@ -32,9 +29,9 @@ const DEMO_SKILLS: SkillItem[] = [
   { name: "code-review", description: "按清单审一遍这个分支（演示）", hint: "<分支>", kind: "command", source: "personal" },
 ];
 
-/** Factory's models, Codex's, Devin's, the ChatGPT plan's, and those of the user's API providers: the one list the model menu and the settings use. */
+/** The ChatGPT plan's models, Devin's, and those of the user's API providers: the one list the model menu and the settings use. */
 export function buildModels(providers: ApiProvider[]): ModelChoice[] {
-  return [...FACTORY_MODELS, ...CODEX_MODELS, ...CHATGPT_MODELS, ...DEVIN_MODELS, ...providers.flatMap(modelsOfProvider)];
+  return [...CHATGPT_MODELS, ...DEVIN_MODELS, ...providers.flatMap(modelsOfProvider)];
 }
 
 /** The settings a session (or the defaults) end up with when the model changes: whatever the new model and its engine
@@ -115,6 +112,8 @@ export interface Store extends LiveData {
   quit: () => void;
   select: (id: string | null) => void;
   openSaved: (id: string) => void;
+  /** move a sidebar row within its project; the live backend persists the order */
+  reorderSession: (projectId: string, id: string, targetId: string, after: boolean) => void;
   /** show the first message box (in `projectId` when given); the conversation itself is made when the first message goes */
   newSession: (projectId?: string) => void;
   setLandingDraft: (draft: string) => void;
@@ -145,7 +144,7 @@ export interface Store extends LiveData {
   /** open a file the conversation named (`ref` as the model wrote it): in the side panel, or outside the window with the
    *  default program / the system's "open with" / its folder */
   openFile: (ref: string, how?: "panel" | "default" | "choose" | "reveal") => void;
-  /** read the Codex account again (its limits are what the ChatGPT Plan badge shows); at most once in a while */
+  /** read the ChatGPT account again (what the ChatGPT Plan badge shows); at most once in a while */
   refreshPlanUsage: () => void;
   /** a page of the PDF (or the picture) in the file panel, as a `data:` URI; null when it could not be drawn */
   filePage: (ref: string, page: number, width: number) => Promise<string | null>;
@@ -170,7 +169,7 @@ export interface Store extends LiveData {
   /** `how`, while a turn runs: `queue` holds the message until the turn is over, `steer` gives it to the running turn now */
   send: (id: string, how?: FollowUp) => void;
   stop: (id: string) => void;
-  /** `/compact`: summarise the conversation now (the own loop, Droid and Codex do; Devin manages its own context) */
+  /** `/compact`: summarise the conversation now (the own loop does; Devin manages its own context) */
   compact: (id: string) => Promise<void>;
   /** `/goal`: a goal the model goes on with, round after round, until it is done or needs the user (any engine) */
   startGoal: (id: string, text: string) => Promise<void>;
@@ -191,10 +190,6 @@ export interface Store extends LiveData {
   saveProvider: (draft: ProviderDraft) => Promise<boolean>;
   removeProvider: (id: string) => void;
   testProvider: (id: string) => Promise<void>;
-  codexLogin: () => Promise<void>;
-  codexCancel: () => Promise<void>;
-  codexLogout: () => Promise<void>;
-  codexEnable: (on: boolean) => Promise<void>;
   devinLogin: () => Promise<void>;
   devinCancel: () => Promise<void>;
   devinLogout: () => Promise<void>;
@@ -208,16 +203,13 @@ export interface Store extends LiveData {
   chatgptEnable: (on: boolean) => Promise<void>;
   /** the user dismissed "You're using your ChatGPT plan" */
   chatgptWelcome: () => Promise<void>;
-  /** look for droid.exe again (and its version) */
-  recheckDroid: () => Promise<void>;
-  /** ask Codex again whether it is there and signed in */
-  recheckCodex: () => Promise<void>;
   /** ask Devin again whether it is there and signed in */
   recheckDevin: () => Promise<void>;
   setDefault: (field: keyof SessionSettings, value: string) => void;
   /** show or hide models in the conversation's model menu (the settings page's lists) */
   setModelsVisible: (ids: string[], visible: boolean) => void;
   setMaxOpen: (n: number) => void;
+  setMaxSteps: (n: number) => void;
   /** the shared memory: the master switch, the engines that get it, and the state the memory page last heard of */
   setMemoryEnabled: (on: boolean) => void;
   setMemoryRecall: (on: boolean) => void;
@@ -227,9 +219,9 @@ export interface Store extends LiveData {
   /** ChatGPT Plan: summarise a long conversation before it outgrows the model's window (switch), at this percent of it (50 to 95) */
   setCompactAuto: (on: boolean) => void;
   setCompactAt: (percent: number) => void;
+  /** ask every model to write its thinking in Chinese */
+  setThinkChinese: (on: boolean) => void;
   setMemoryState: (state: MemoryState) => void;
-  setDroidPath: (p: string) => void;
-  setCodexPath: (p: string) => void;
   setDevinPath: (p: string) => void;
   /** while the splitter is dragged; `commit` once it is let go (the live app then saves it) */
   setSidebarWidth: (px: number, commit?: boolean) => void;
@@ -263,7 +255,7 @@ const HISTORY = (title: string): Turn[] => [
     prompts: [],
     blocks: [
       { kind: "user", id: `hu-${title}`, text: title },
-      { kind: "text", id: `hx-${title}`, markdown: "这是一个已保存的历史会话（演示数据）：打开时 Droid 会恢复它，历史消息按保存的样子显示。" },
+      { kind: "text", id: `hx-${title}`, markdown: "这是一个已保存的历史会话（演示数据）：打开时会恢复它，历史消息按保存的样子显示。" },
     ],
   },
 ];
@@ -277,16 +269,12 @@ function mockData(): LiveData {
     currentId: "s-file-ops",
     pendingSelect: null,
     models: buildModels(API_PROVIDERS),
-    defaults: { model: "claude-haiku-5-5", reasoning: "low", autonomy: "off", mode: "auto" },
-    factory: FACTORY_ACCOUNT,
-    codex: CODEX_ACCOUNT,
+    defaults: { model: CHATGPT_MODELS[0].id, reasoning: CHATGPT_MODELS[0].defaultEffort, autonomy: "code", mode: "auto" },
     devin: DEVIN_ACCOUNT,
     chatgpt: CHATGPT_ACCOUNT,
     providers: API_PROVIDERS,
     maxOpen: 4,
-    droidPath: "",
-    droidFound: "C:\\Users\\me\\AppData\\Local\\Factory\\bin\\droid.exe",
-    codexPath: "",
+    maxSteps: 80,
     devinPath: "",
     hiddenModels: [],
     themeChoice: "dark",
@@ -297,9 +285,10 @@ function mockData(): LiveData {
     memoryRecall: true,
     memoryCapture: true,
     memoryCurate: true,
-    memoryEngines: ["droid", "codex", "devin", "chatgpt"],
+    memoryEngines: ["devin", "chatgpt"],
     compactAuto: true,
     compactAt: COMPACT_AT_DEFAULT,
+    thinkChinese: true,
     lastProject: "",
     memory: { latest: MOCK_MEMORY_LATEST, unseen: 2, seen: MOCK_MEMORY_LATEST - 2, pending: MOCK_PENDING },
     maximized: false,
@@ -355,6 +344,15 @@ export const useStore = create<Store>((set, get) => ({
     set((st) => ({ tabs: [...st.tabs, id], currentId: id }));
     window.setTimeout(() => get().patchSession(id, (x) => ({ ...x, mark: "ready", workingLabel: "就绪" })), 700);
   },
+
+  reorderSession: (projectId, id, targetId, after) => set((s) => ({
+    projects: s.projects.map((p) => {
+      if (p.id !== projectId || id === targetId || !p.sessionIds.includes(id) || !p.sessionIds.includes(targetId)) return p;
+      const ids = p.sessionIds.filter((item) => item !== id);
+      ids.splice(ids.indexOf(targetId) + Number(after), 0, id);
+      return { ...p, sessionIds: ids };
+    }),
+  })),
 
   newSession: (projectId) => {
     // (from a conversation: its project is where the next one starts, as it always was)
@@ -442,7 +440,7 @@ export const useStore = create<Store>((set, get) => ({
       title: s.title,
       modified: s.modified,
       modifiedAt: s.modifiedAt ?? Date.now(),
-      engine: s.engine ?? "droid",
+      engine: s.engine ?? "chatgpt",
       settings: { ...s.settings, model: "" },
       usage: null,
       context: { used: null, window: 0, model: "", compacted: false },
@@ -467,7 +465,7 @@ export const useStore = create<Store>((set, get) => ({
     if (!s) return;
     get().openDialog({
       title: "重命名会话",
-      body: "只改 WittyCode 里显示的名字，不改 Droid、Codex、Devin 自己保存的标题。留空则恢复原来的标题。",
+      body: "只改 WittyCode 里显示的名字，不改引擎自己保存的标题。留空则恢复原来的标题。",
       confirmLabel: "保存",
       onConfirm: () => undefined,
       input: { value: s.title, placeholder: "会话名称", onSubmit: (value) => get().setSessionTitle(id, value) },
@@ -614,7 +612,7 @@ export const useStore = create<Store>((set, get) => ({
     const model = findModel(st.models, value);
     if (!model) return;
     const was = findModel(st.models, session.settings.model);
-    if (engineOfSource(model.source) !== engineOfSource(was?.source ?? "factory")) return switchEngine(id, model, was);
+    if (engineOfSource(model.source) !== engineOfSource(was?.source ?? "chatgpt")) return switchEngine(id, model, was);
     const { settings, changed } = settingsForModel(st.models, session.settings, value);
     get().patchSession(id, (s) => ({ ...s, settings, context: { ...s.context, model: value, window: model.window } }));
     if (changed.includes("reasoning")) {
@@ -685,18 +683,6 @@ export const useStore = create<Store>((set, get) => ({
     set((s) => ({ providers: s.providers.map((x) => (x.id === id ? { ...x, status: { ok: r.ok, text: r.text } } : x)) }));
   },
 
-  codexLogin: async () => {
-    set((s) => ({ codex: { ...s.codex, auth: "signing-in" } }));
-    const codex = await bridge.codex.login();
-    set({ codex });
-    if (codex.auth === "chatgpt") get().say(`已登录 Codex：${codex.email}（${codex.plan}）。`);
-  },
-  codexCancel: async () => set({ codex: await bridge.codex.cancelLogin() }),
-  codexLogout: async () => {
-    set({ codex: await bridge.codex.logout() });
-    get().say("已退出 Codex。打开着的 Codex 会话在下次发送时会提示重新登录。");
-  },
-  codexEnable: async (on) => set({ codex: await bridge.codex.setEnabled(on) }),
   devinLogin: async () => {
     set((s) => ({ devin: { ...s.devin, auth: "signing-in" } }));
     const devin = await bridge.devin.login();
@@ -723,8 +709,6 @@ export const useStore = create<Store>((set, get) => ({
   chatgptUse: async (clientId) => set({ chatgpt: await bridge.chatgpt.use(clientId) }),
   chatgptEnable: async (on) => set({ chatgpt: await bridge.chatgpt.setEnabled(on) }),
   chatgptWelcome: async () => set({ chatgpt: await bridge.chatgpt.welcomed() }),
-  recheckDroid: async () => get().say(`已重新检测：找到 droid ${get().factory.version}。`),
-  recheckCodex: async () => get().say("已重新检测：仍然没有找到 codex。"),
   recheckDevin: async () => get().say("已重新检测：仍然没有找到 devin。"),
 
   setDefault: (field, value) =>
@@ -735,16 +719,16 @@ export const useStore = create<Store>((set, get) => ({
   setModelsVisible: (ids, visible) =>
     set((s) => ({ hiddenModels: visible ? s.hiddenModels.filter((id) => !ids.includes(id)) : [...s.hiddenModels, ...ids.filter((id, i) => !s.hiddenModels.includes(id) && ids.indexOf(id) === i)] })),
   setMaxOpen: (maxOpen) => set({ maxOpen: Math.max(1, Math.min(16, maxOpen)) }),
+  setMaxSteps: (maxSteps) => set({ maxSteps }),
   setMemoryEnabled: (memoryEnabled) => set({ memoryEnabled }),
   setMemoryRecall: (memoryRecall) => set({ memoryRecall }),
   setMemoryCapture: (memoryCapture) => set({ memoryCapture }),
   setMemoryCurate: (memoryCurate) => set({ memoryCurate }),
   setMemoryEngines: (memoryEngines) => set({ memoryEngines }),
   setCompactAuto: (compactAuto) => set({ compactAuto }),
+  setThinkChinese: (thinkChinese) => set({ thinkChinese }),
   setCompactAt: (percent) => set({ compactAt: clampCompactAt(percent) }),
   setMemoryState: (memory) => set({ memory: { latest: memory.latest, unseen: memory.unseen, seen: memory.seen, pending: memory.pending ?? 0 } }),
-  setDroidPath: (droidPath) => set({ droidPath }),
-  setCodexPath: (codexPath) => set({ codexPath }),
   setDevinPath: (devinPath) => set({ devinPath }),
   setSidebarWidth: (sidebarWidth) => set({ sidebarWidth }),
   setSidebarOpen: (sidebarOpen) => set({ sidebarOpen }),
@@ -767,18 +751,12 @@ export const useStore = create<Store>((set, get) => ({
 
 // ------------------------------------------------------------------------------------- questions both modes ask first
 
-/** Closing the window asks first while a session is still working. */
+/** Closing the window asks first while a session is still working, a message waits to be sent or a goal is in progress. */
 export function confirmQuit(close: () => void) {
   const st = useStore.getState();
-  const working = Object.values(st.sessions).filter((s) => s.mark === "running" || s.mark === "attention").length;
-  if (working === 0) return close();
-  st.openDialog({
-    title: "退出 WittyCode？",
-    body: `有 ${working} 个会话还在工作。退出会中断它们正在做的事；下次可以从侧边栏恢复会话。`,
-    confirmLabel: "退出",
-    danger: true,
-    onConfirm: close,
-  });
+  const body = quitWarning(Object.values(st.sessions));
+  if (!body) return close();
+  st.openDialog({ title: "退出 WittyCode？", body, confirmLabel: "退出", danger: true, onConfirm: close });
 }
 
 /** Closing a tab whose turn is running asks first. */
@@ -819,7 +797,7 @@ export function confirmDeleteProvider(id: string, remove: (p: ApiProvider) => vo
   const inUse = Object.values(st.sessions).filter((s) => s.mark && s.settings.model.startsWith(`api:${id}:`)).length;
   st.openDialog({
     title: `删除「${p.name}」？`,
-    body: `${p.models.length} 个模型会从模型菜单里消失，并从 ~/.factory/settings.json 的 customModels 删除。${inUse ? `有 ${inUse} 个打开的会话正在用它，它们会继续用到结束。` : ""}密钥如果是环境变量，变量本身不会动。`,
+    body: `${p.models.length} 个模型会从模型菜单里消失，并从 WittyCode 的模型文件（models.json）里删除。${inUse ? `有 ${inUse} 个打开的会话正在用它，它们会继续用到结束。` : ""}密钥如果是环境变量，变量本身不会动。`,
     confirmLabel: "删除",
     danger: true,
     onConfirm: () => void remove(p),
@@ -839,7 +817,7 @@ function switchEngine(id: string, model: ModelChoice, was: ModelChoice | undefin
   const block: SwitchBlock = {
     kind: "switch",
     id: `sw-${++switchCounter}`,
-    from: { model: was?.label ?? session.settings.model, engine: engineLabel(was?.source ?? "factory") },
+    from: { model: was?.label ?? session.settings.model, engine: engineLabel(was?.source ?? "chatgpt") },
     to: { model: model.label, engine: engineLabel(model.source) },
     carried: h.carried,
     total: h.total,

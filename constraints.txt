@@ -1,0 +1,16 @@
+# Exact versions of everything the test suite and the release build install, so that CI, the release and a developer's
+# .venv run the same code: pip install -r requirements-dev.txt -c constraints.txt
+# Exported from the development .venv (Python 3.11.9). Change a version here together with requirements*.txt.
+colorama==0.4.6
+iniconfig==2.3.1
+packaging==26.3
+pluggy==1.7.0
+Pygments==2.21.0
+PySide6==6.12.0
+PySide6_Addons==6.12.0
+PySide6_Essentials==6.12.0
+PySide6_Pdf==6.12.0.140
+PySide6_WebEngine==6.12.0.140
+pytest==9.2.0
+qasync==0.28.0
+shiboken6==6.12.0

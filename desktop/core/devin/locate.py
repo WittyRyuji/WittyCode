@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from desktop.core.codex.rpc import CREATE_NO_WINDOW
+from desktop.core.jsonrpc import CREATE_NO_WINDOW
 
 VERSION_SECONDS = 15.0
 _VERSION = re.compile(r"\d+(?:\.\d+)+[0-9A-Za-z.+-]*")

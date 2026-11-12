@@ -241,7 +241,7 @@ await page.click(".sm-seg button", 1);
 await page.wait(120);
 const sourceFill = await fillOf(other.id);
 ok("the colour switch re-colours the stars by who wrote them", kindFill !== sourceFill && /-c-s-|#/.test(sourceFill) && /-c-k-|#/.test(kindFill), `${kindFill} -> ${sourceFill}`);
-ok("…and the legend says so", await page.eval("[...document.querySelectorAll('.sm-leg-i')].some((i) => /我|Droid|Codex|Devin|ChatGPT Plan|未知/.test(i.textContent))"));
+ok("…and the legend says so", await page.eval("[...document.querySelectorAll('.sm-leg-i')].some((i) => /我|ChatGPT Plan|Devin|其他代理|未知/.test(i.textContent))"));
 if (SHOTS) await shot(page, "mid-source-light");
 await page.click(".sm-seg button", 0);
 

@@ -16,7 +16,7 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from desktop.core.codex.items import user_message_parts
+from desktop.core.engine_items import user_message_parts
 from desktop.core.harness.loop import DECLINED, INTERRUPTED
 from desktop.core.harness.store import LOST, SavedSession, SavedTurn, diff_from_json
 from desktop.core.harness.tools import ToolRegistry

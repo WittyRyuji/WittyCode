@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from desktop.core.attachments import IMAGE, PDF, TEXT, Attachment, sniff_image
-from desktop.core.codex.items import (
+from desktop.core.engine_items import (
     APPLY_PATCH,
     CREATE,
     EDIT,
@@ -116,6 +116,8 @@ def tool_spec(update: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
     """``(tool name, input)`` for a ``tool_call`` update."""
     raw = dict(update["rawInput"]) if isinstance(update.get("rawInput"), Mapping) else {}
     native, kind = native_name(update), _text(update.get("kind"))
+    if native.lower() in ("todo_write", "todowrite"):
+        return "TodoWrite", raw
     path = _path(update, raw)
     if native == "exec" or kind == "execute":
         command = _text(raw.get("command"))

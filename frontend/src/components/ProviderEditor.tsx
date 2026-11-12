@@ -4,7 +4,7 @@ import { useStore } from "../store";
 import { bridge } from "../bridge-instance";
 import { KIND_INFO, PRESETS, REASONING, type Preset } from "../lib/vocab";
 import { envHintOf, envNameOf, envVarText } from "../lib/models";
-import { imagesAfterKindChange, imagesByDefault } from "../lib/providerDefaults";
+import { API_EFFORTS, contextProblem, imagesAfterKindChange, imagesByDefault, modelSpecification, withRemoteFigures } from "../lib/providerDefaults";
 import { messageOf } from "../lib/errors";
 import { formatTokens } from "../lib/format";
 import type { ApiKind, ApiModel, EnvState, KeyMode, ProviderDraft, RemoteModel } from "../types";
@@ -33,7 +33,7 @@ function EnvLine({ name, state, onRecheck }: { name: string; state: EnvState | n
     <div className={`envline ${state}`}>
       <div className="envline-top">
         <span className="pdot" />
-        {state === "set" && <span>已设置：WittyCode 启动的 Droid 读得到 <code>{name}</code>。</span>}
+        {state === "set" && <span>已设置：WittyCode 读得到 <code>{name}</code>。</span>}
         {state === "pending" && <span>已写进你的用户环境变量，但 WittyCode 是在那之前启动的：<b>重启 WittyCode</b> 后才读得到。</span>}
         {state === "unset" && <span>没有找到环境变量 <code>{name}</code>。在 PowerShell 里运行下面这行（把密钥换成你的），然后重启 WittyCode：</span>}
         <button type="button" className="btn small" onClick={onRecheck}>
@@ -67,8 +67,8 @@ const BEDROCK_METHODS = [
   { value: "environment-api-key", label: "Bedrock API Key", hint: "读环境变量 AWS_BEARER_TOKEN_BEDROCK" },
 ] as const;
 
-/** Efforts a model row can default to: Droid offers Off / Low / Medium / High for models it does not know. */
-const ROW_EFFORTS = REASONING.filter((r) => ["off", "low", "medium", "high"].includes(r.value));
+/** Configurable API levels; the provider remains responsible for accepting the selected level. */
+const ROW_EFFORTS = REASONING.filter((r) => API_EFFORTS.some((value) => value === r.value));
 
 let rowCounter = 0;
 const blankModel = (id: string, kind: ApiKind): ApiModel => ({ id, displayName: "", reasoning: "", images: imagesByDefault(kind) });
@@ -76,7 +76,7 @@ const blankModel = (id: string, kind: ApiKind): ApiModel => ({ id, displayName: 
 /** What the server's list says about a model fills the figures its row leaves empty; what the user typed stays. */
 const withFigures = (m: ApiModel, found: Map<string, RemoteModel>): ApiModel => {
   const f = found.get(m.id.trim());
-  return f ? { ...m, contextWindow: m.contextWindow ?? f.contextWindow, maxOutput: m.maxOutput ?? f.maxOutput } : m;
+  return withRemoteFigures(m, f);
 };
 
 function draftFrom(editId: string, existing: ProviderDraft | undefined): ProviderDraft {
@@ -111,6 +111,10 @@ function validate(d: ProviderDraft): Record<string, string> {
   if (d.keyMode === "command" && !d.keyHint.trim()) e.key = "填一条会输出密钥的命令。";
   if (d.models.length === 0 || d.models.every((m) => !m.id.trim())) e.models = "至少要有一个模型 ID。";
   else if (new Set(d.models.map((m) => m.id.trim()).filter(Boolean)).size < d.models.filter((m) => m.id.trim()).length) e.models = "有重复的模型 ID。";
+  if (!e.models) {
+    const problem = d.models.filter((m) => m.id.trim()).map(contextProblem).find(Boolean);
+    if (problem) e.models = problem;
+  }
   if (d.extraArgs.trim()) {
     try {
       const v = JSON.parse(d.extraArgs);
@@ -195,11 +199,12 @@ export function ProviderEditor({ editId }: { editId: string }) {
         return next.contextWindow !== m.contextWindow || next.maxOutput !== m.maxOutput;
       }).length;
       if (filled) setD((x) => ({ ...x, models: x.models.map((m) => withFigures(m, byId)) }));
-      const withWindow = found.filter((m) => m.contextWindow).length;
+      const serverWindows = found.filter((m) => m.contextWindow && m.contextSource !== "catalog").length;
+      const catalogWindows = found.filter((m) => m.contextSource === "catalog").length;
       const text = !found.length
-        ? "这个服务没有列出模型：自己填模型 ID。"
-        : `服务端列出了 ${found.length} 个模型` +
-          (withWindow ? `，其中 ${withWindow} 个带了上下文窗口` : "，列表里没有上下文窗口（这个服务不提供，OpenAI 就是这样）：留空就不主动压缩，需要的话自己填") +
+        ? "这个服务没有列出模型：自己填模型 ID 和上下文窗口。"
+        : `服务端列出了 ${found.length} 个模型；${serverWindows} 个窗口来自服务端，${catalogWindows} 个由内置规格表补全` +
+          "。其余未知模型需填写上下文窗口，不使用统一猜测值" +
           (filled ? `；已补上 ${filled} 行的空白项` : "");
       setTest({ busy: false, ok: found.length > 0, text });
       setSuggest(found);
@@ -292,7 +297,7 @@ export function ProviderEditor({ editId }: { editId: string }) {
             )}
             {d.keyMode === "command" && (
               <>
-                <Stack label="命令" error={shown("key")} hint="命令输出的内容就是密钥，Droid 在每次请求时运行它并缓存。适合发短期令牌的网关。">
+                <Stack label="命令" error={shown("key")} hint="命令输出的内容就是密钥，WittyCode 在请求时运行它并缓存。适合发短期令牌的网关。">
                   <TextInput label="命令" mono value={d.keyHint} onChange={(v) => set("keyHint", v)} placeholder="C:\tools\mint-gateway-token.cmd" invalid={!!shown("key")} />
                 </Stack>
                 <Stack label="刷新间隔（毫秒）" hint="默认 300000（5 分钟）；收到 401 时会立刻再取一次。">
@@ -330,14 +335,16 @@ export function ProviderEditor({ editId }: { editId: string }) {
             <div key={i} className="mrow" role="row">
               <TextInput label="模型 ID" mono value={m.id} onChange={(v) => setModel(i, { id: v })} placeholder="发给接口的模型名" />
               <TextInput label="显示名" value={m.displayName} onChange={(v) => setModel(i, { displayName: v })} placeholder={m.id || "菜单里的名字"} />
-              <TextInput label="上下文窗口" type="number" mono value={String(m.contextWindow ?? "")} onChange={(v) => setModel(i, { contextWindow: v ? Number(v) : undefined })} placeholder="例如 128000" />
+              <span title={m.contextWindow ? "已填写的窗口（优先于内置规格）" : modelSpecification(m.id) ? `内置规格：${modelSpecification(m.id)!.contextWindow} tokens · ${modelSpecification(m.id)!.source}` : "窗口未知，必须填写；不使用统一猜测值"}>
+                <TextInput label="上下文窗口" type="number" mono width="100%" value={String(m.contextWindow ?? "")} onChange={(v) => setModel(i, { contextWindow: v ? Number(v) : undefined })} placeholder={modelSpecification(m.id) ? String(modelSpecification(m.id)!.contextWindow) : "未知，必填"} invalid={tried && !!m.id.trim() && !!contextProblem(m)} />
+              </span>
               <TextInput label="最大输出" type="number" mono value={String(m.maxOutput ?? "")} onChange={(v) => setModel(i, { maxOutput: v ? Number(v) : undefined })} placeholder="接口默认" />
               <Select
                 value={m.reasoning ? (ROW_EFFORTS.find((r) => r.value === m.reasoning)?.label ?? m.reasoning) : "无"}
                 minWidth={160}
                 items={[
                   { id: "none", label: "无", description: "不提供推理档位", checked: !m.reasoning, onSelect: () => setModel(i, { reasoning: "" }) },
-                  ...ROW_EFFORTS.map((r) => ({ id: r.value, label: r.label, description: `默认 ${r.label}，菜单里提供 Off / Low / Medium / High`, checked: m.reasoning === r.value, onSelect: () => setModel(i, { reasoning: r.value }) })),
+                  ...ROW_EFFORTS.map((r) => ({ id: r.value, label: r.label, description: `默认 ${r.label}；实际支持以服务商为准`, checked: m.reasoning === r.value, onSelect: () => setModel(i, { reasoning: r.value }) })),
                 ]}
               />
               <Switch on={m.images} onChange={(v) => setModel(i, { images: v })} label="支持图片" />
@@ -369,7 +376,7 @@ export function ProviderEditor({ editId }: { editId: string }) {
                   className={`id-chip${have ? " have" : ""}`}
                   disabled={have}
                   title={s.contextWindow ? `上下文窗口 ${formatTokens(s.contextWindow)}${s.maxOutput ? `，最大输出 ${formatTokens(s.maxOutput)}` : ""}` : undefined}
-                  onClick={() => set("models", [...d.models.filter((m) => m.id.trim()), { ...blankModel(s.id, d.kind), contextWindow: s.contextWindow, maxOutput: s.maxOutput }])}
+                  onClick={() => set("models", [...d.models.filter((m) => m.id.trim()), withRemoteFigures(blankModel(s.id, d.kind), s)])}
                 >
                   {have && <Check size={11} />} {s.id}
                   {s.contextWindow ? <span className="muted-text"> · {formatTokens(s.contextWindow)}</span> : null}
@@ -379,7 +386,7 @@ export function ProviderEditor({ editId }: { editId: string }) {
           </div>
         )}
         <p className="pe-note">图片：图片输入默认只对 Anthropic 和 OpenAI 格式的模型打开；其他格式要自己确认模型支持再打开。推理：不认识的模型要在这里设一个默认档位，才会有推理菜单。</p>
-        <p className="pe-note">上下文窗口：留空时 WittyCode 不知道这个模型的窗口，状态栏显示不出比例，只在接口报「上下文太长」时才压缩。填了以后，状态栏按你填的显示，并在窗口的 85%（可在设置 › 会话里改）主动压缩。最大输出留空就用接口的默认值。服务端的模型列表里有窗口和最大输出（OpenRouter、Anthropic、Gemini 等）就自动带上，OpenAI 的列表只有模型名，要自己填。</p>
+        <p className="pe-note">上下文窗口：获取列表时优先读取服务端数据；服务端未提供时，按完整模型 ID 查内置规格表（灰色占位数字，悬停看来源），不猜测同系列或自定义别名。填写的值优先，网关可能比官方规格更小。仍未知的模型必须填写窗口才能使用，不再静默等到超限。窗口用于状态栏和自动压缩；默认在 85% 压缩，可在设置 › 会话调整。最大输出留空仍用接口默认值。</p>
       </section>
 
       <section className="pe-sec">
@@ -411,7 +418,7 @@ export function ProviderEditor({ editId }: { editId: string }) {
         )}
       </section>
 
-      <p className="pe-note">保存到 <code>~/.factory/settings.json</code> 的 <code>customModels</code>（Droid 的格式，Droid CLI 和 Factory 桌面版也能读）。这些模型由 WittyCode 直接请求你的接口，不经过 Droid，计费走你自己的账号；Bedrock 用 AWS 凭据签名请求（或 Bedrock API Key）。</p>
+      <p className="pe-note">保存到 WittyCode 自己的 <code>models.json</code>（<code>customModels</code> 格式）。这些模型由 WittyCode 直接请求你的接口，计费走你自己的账号；Bedrock 用 AWS 凭据签名请求（或 Bedrock API Key）。</p>
 
       <footer className="pe-foot">
         <button type="button" className="btn" disabled={test.busy} onClick={runTest}>

@@ -67,7 +67,7 @@ ok("the theme and the sidebar width are the ones in Python's settings", await js
 await page.waitFor("document.querySelectorAll('.srow').length === 3", 4000);
 ok("no demo data: only what Python sent", (await noMock()).length === 0, await noMock());
 ok("a saved row's time comes from modifiedAt, worded by the page", await js("[...document.querySelectorAll('.srow')].find(r => r.textContent.includes('整理发布说明'))?.querySelector('.ssub').textContent === '5 分钟前'"), await js("[...document.querySelectorAll('.srow')].map(r => r.querySelector('.ssub').textContent)"));
-ok("a saved Codex thread says · Codex", await js("[...document.querySelectorAll('.srow')].find(r => r.textContent.includes('迁移脚本'))?.querySelector('.ssub').textContent === '40 分钟前 · Codex'"), await js("[...document.querySelectorAll('.srow')].map(r => r.querySelector('.ssub').textContent)"));
+ok("a saved Devin session says · Devin", await js("[...document.querySelectorAll('.srow')].find(r => r.textContent.includes('迁移脚本'))?.querySelector('.ssub').textContent === '40 分钟前 · Devin'"), await js("[...document.querySelectorAll('.srow')].map(r => r.querySelector('.ssub').textContent)"));
 ok("Python's own wording of the time is not used", await js("!document.body.innerText.includes('Python 的旧写法')"));
 await page.waitFor("document.querySelectorAll('.controls .chip-v')[0]?.textContent === 'Claude Haiku 5.5'", 4000);
 ok("the defaults come from the models event", true);
@@ -75,11 +75,11 @@ await shot("empty");
 
 // ------------------------------------------------------------------------------------- 3. the model menu
 await page.click(".controls .chip", 0);
-ok("FACTORY is sub-grouped by maker", await js("[...document.querySelectorAll('.menu .menu-sub')].map(e => e.textContent).join() === 'Anthropic,OpenAI,Google'"), await js("[...document.querySelectorAll('.menu .menu-sub')].map(e => e.textContent)"));
+ok("the provider's models are under its own heading, with the address", await js("(() => { const h = [...document.querySelectorAll('.menu-head')].find(e => e.textContent.includes('API · GATEWAY')); return !!h && h.textContent.includes('gateway.example.com'); })()"), await js("[...document.querySelectorAll('.menu-head')].map(e => e.textContent)"));
 ok("a disabled model is not offered", await js("![...document.querySelectorAll('.menu-item')].some(e => e.textContent.includes('GLM Legacy'))"));
-ok("the makers' models sit under their heading", await js("(() => { const rows = [...document.querySelector('.menu').children].map(e => e.classList.contains('menu-sub') ? '#' + e.textContent : e.querySelector?.('.menu-label')?.textContent).filter(Boolean); return rows.join('|').startsWith('#Anthropic|Claude Haiku 5.5|Claude Opus 5.5|#OpenAI|GPT-5.4|#Google|Gemini 3 Pro'); })()"));
+ok("the provider's models are listed in Python's order", await js("(() => { const rows = [...document.querySelector('.menu').children].map(e => e.querySelector?.('.menu-label')?.textContent).filter(Boolean); return rows.join('|').includes('Claude Haiku 5.5|Claude Opus 5.5|GPT-5.4|Gemini 3 Pro'); })()"));
 ok("the pinned footer is still there", await js("[...document.querySelectorAll('.menu-pinned .menu-label')].map(e => e.textContent).join() === '添加 API Provider…,管理账号与模型…'"));
-ok("Codex is still being checked: 正在检测…, and no login yet", await js("(() => { const h = [...document.querySelectorAll('.menu-head')].find(e => e.textContent.includes('CODEX')); return !!h && h.textContent.includes('正在检测…') && ![...document.querySelectorAll('.menu-item')].some(e => e.textContent.includes('登录 Codex')); })()"));
+ok("Devin is still being checked: 正在检测…, and no login yet", await js("(() => { const h = [...document.querySelectorAll('.menu-head')].find(e => e.textContent.includes('DEVIN')); return !!h && h.textContent.includes('正在检测…') && ![...document.querySelectorAll('.menu-item')].some(e => e.textContent.includes('登录 Devin')); })()"));
 await shot("model-menu");
 await page.key("Escape");
 
@@ -87,7 +87,7 @@ await page.key("Escape");
 await page.click(".controls .chip", 0);
 await clickText(".menu-item", "GPT-5.4");
 await waitCalls("session.choose");
-ok("without a session the model menu changes the defaults (session.choose without id)", isDeepStrictEqual(await lastCall("session.choose"), { field: "model", value: "gpt-5.4" }), await lastCall("session.choose"));
+ok("without a session the model menu changes the defaults (session.choose without id)", isDeepStrictEqual(await lastCall("session.choose"), { field: "model", value: "api:gw:gpt-5.4" }), await lastCall("session.choose"));
 await page.waitFor("document.querySelectorAll('.controls .chip-v')[0].textContent === 'GPT-5.4'", 3000);
 await page.click(".controls .chip", 1);
 ok("GPT-5.4 offers 无 / Low / Medium / High", (await js("[...document.querySelectorAll('.menu-label')].map(e => e.textContent).join()")) === "无,Low,Medium,High", await js("[...document.querySelectorAll('.menu-label')].map(e => e.textContent).join()"));
@@ -109,19 +109,19 @@ await blur();
 await press(",", "Comma", 188, CTRL);
 await page.waitFor("!!document.querySelector('.settings')", 2000);
 await page.click(".snav", 1);
-ok("Codex card: 正在检测…, no login button yet", await js("(() => { const c = document.querySelector('.pcard:nth-child(2)'); return c.textContent.includes('正在检测…') && !c.querySelector('.pcard-actions .btn'); })()"));
-ok("Factory card: droid's version and path, no account or plan", await js("(() => { const c = document.querySelector('.pcard:nth-child(1)'); return c.textContent.includes('已找到 droid 0.262.1') && c.textContent.includes('Factory\\\\bin\\\\droid.exe') && !c.textContent.includes('Max') && !c.textContent.includes('@'); })()"));
+ok("Devin card: 正在检测…, no login button yet", await js("(() => { const c = document.querySelector('.pcard:nth-child(2)'); return c.textContent.includes('正在检测…') && !c.querySelector('.pcard-actions .btn'); })()"));
+ok("the cards are ChatGPT Plan, Devin and the API providers: no other program's", await js("(() => { const c = [...document.querySelectorAll('.providers .pcard')]; return c.length === 3 && c[0].textContent.includes('ChatGPT Plan') && !/Factory|Codex|Droid/.test(document.querySelector('.providers').textContent); })()"));
 await shot("accounts-checking");
-await emit("accounts", { codex: { cli: "found", auth: "signed-out", limits: [], enabled: true, version: "0.60.1", cliPath: "C:\\Users\\dev\\AppData\\Roaming\\npm\\codex.cmd" } });
+await emit("accounts", { devin: { cli: "found", auth: "signed-out", enabled: true, version: "3000.11.238", cliPath: "C:\\Users\\dev\\AppData\\Local\\Programs\\devin\\devin.exe" } });
 await page.waitFor("document.querySelector('.pcard:nth-child(2)').textContent.includes('未登录')", 2000);
-ok("once Codex answers, signed out: the login button appears", await js("document.querySelector('.pcard:nth-child(2) .btn.primary')?.textContent.includes('ChatGPT')"));
+ok("once Devin answers, signed out: the login button appears", await js("document.querySelector('.pcard:nth-child(2) .btn.primary')?.textContent.includes('登录 Devin')"));
 await page.click(".pcard:nth-child(2) .btn.primary");
-await waitCalls("codex.login");
-await page.waitFor("document.querySelector('.pcard:nth-child(2)').textContent.includes('已登录 · dev@example.com · ChatGPT Plus')", 3000);
-ok("signing in goes through codex.login and shows the account", true);
+await waitCalls("devin.login");
+await page.waitFor("document.querySelector('.pcard:nth-child(2)').textContent.includes('已登录 · dev@example.com · Devin Pro')", 3000);
+ok("signing in goes through devin.login and shows the account", true);
 
 // ChatGPT Plan: the user's plan run by WittyCode's own harness. The account came with app.init (read from files, no waiting).
-ok("ChatGPT Plan card: signed out, with OpenAI's wording on the button", await js("(() => { const c = document.querySelector('.pcard:nth-child(3)'); return c.textContent.includes('ChatGPT Plan') && c.textContent.includes('未登录') && c.querySelector('.btn.chatgpt-btn')?.textContent.trim() === 'Continue with ChatGPT'; })()"));
+ok("ChatGPT Plan card: signed out, with OpenAI's wording on the button", await js("(() => { const c = document.querySelector('.pcard:nth-child(1)'); return c.textContent.includes('ChatGPT Plan') && c.textContent.includes('未登录') && c.querySelector('.btn.chatgpt-btn')?.textContent.trim() === 'Continue with ChatGPT'; })()"));
 await page.key("Escape");
 await page.click(".controls .chip", 0);
 ok("the menu has a CHATGPT PLAN group that offers Continue with ChatGPT instead of models", await js("(() => { const h = [...document.querySelectorAll('.menu-head')].find(e => e.textContent.includes('CHATGPT PLAN')); const items = [...document.querySelectorAll('.menu-item')].map(e => e.textContent); return !!h && h.textContent.includes('未登录') && items.some(t => t.includes('Continue with ChatGPT')) && !items.some(t => t.includes('GPT-6.1-Sol')); })()"));
@@ -141,11 +141,11 @@ await blur();
 await press(",", "Comma", 188, CTRL);
 await page.waitFor("!!document.querySelector('.settings')", 2000);
 await page.click(".snav", 1);
-ok("the card shows the account and where to manage the usage", await js("(() => { const c = document.querySelector('.pcard:nth-child(3)'); return c.textContent.includes('已登录 · dev@example.com') && c.querySelector('a.inline-link')?.getAttribute('href') === 'https://chatgpt.com/settings/usage'; })()"));
-await clickText(".pcard:nth-child(3) .btn", "退出登录");
+ok("the card shows the account and where to manage the usage", await js("(() => { const c = document.querySelector('.pcard:nth-child(1)'); return c.textContent.includes('已登录 · dev@example.com') && c.querySelector('a.inline-link')?.getAttribute('href') === 'https://chatgpt.com/settings/usage'; })()"));
+await clickText(".pcard:nth-child(1) .btn", "退出登录");
 await waitCalls("chatgpt.logout");
 ok("signing out is chatgpt.logout, for the active account", isDeepStrictEqual(await lastCall("chatgpt.logout"), {}), await lastCall("chatgpt.logout"));
-await page.waitFor("document.querySelector('.pcard:nth-child(3)').textContent.includes('未登录')", 3000);
+await page.waitFor("document.querySelector('.pcard:nth-child(1)').textContent.includes('未登录')", 3000);
 ok("and the card is signed out again", true);
 await page.key("Escape");
 
@@ -178,6 +178,11 @@ const later = await js("document.querySelector('.text.streaming, .block.text-blo
 ok("the answer streams in: the text grows while the turn runs", later > early, [early, later]);
 await page.waitFor("!!document.querySelector('.prompt.perm')", 5000);
 ok("the permission card appears", await js("document.querySelector('.prompt.perm').textContent.includes('创建文件 hello.txt')"));
+ok(
+  "its answers are one per line",
+  await js("(() => { const r = [...document.querySelectorAll('.prompt.perm .pbtns .btn')].map(e => e.getBoundingClientRect()); return r.length > 1 && r.every((b, i) => i === 0 || (b.top >= r[i - 1].bottom - 1 && Math.abs(b.left - r[0].left) < 1)); })()"),
+  await js("[...document.querySelectorAll('.prompt.perm .pbtns .btn')].map(e => { const b = e.getBoundingClientRect(); return [e.textContent, Math.round(b.left), Math.round(b.top)]; })"),
+);
 ok("the turn and the tab say it is waiting", await js("document.querySelector('.turnfoot.live')?.textContent.includes('等待你的确认') && !!document.querySelector('.tab.current .dot-attention')"), await js("[document.querySelector('.turnfoot')?.textContent, document.querySelector('.tab.current').innerHTML]"));
 await shot("permission");
 const promptId = await js("__fake.events.filter(([n]) => n === 'turns').flatMap(([, p]) => p.turns).flatMap(t => t.prompts).at(-1).id");
@@ -189,8 +194,8 @@ ok("the turn finishes: the card is gone, the answer and the footer are there", a
 ok("the tab title is the first message", await js("document.querySelector('.tab.current').textContent.includes('hello')"));
 ok("Context 12K/— with an empty bar while the window is not known", await js("document.querySelector('.ctxmeter').innerText.replace(/\\s+/g, '') === 'Context12K/—' && !document.querySelector('.ctxmeter .meter-fill')"), await js("document.querySelector('.ctxmeter').innerText"));
 ok("TPS from Python's speed, between Context and Token", await js("(() => { const t = document.querySelector('.st-right').innerText.replace(/\\s+/g, ' '); return /Context .*TPS ≈43\\.3 .*Token 合计/.test(t); })()"), await js("document.querySelector('.st-right').innerText"));
-ok("Token 合计 / In / Out from Python's usage", await js("/Token 合计\\s*7\\.3K\\s*In\\s*1\\.2K\\s*Out\\s*0\\.3K/.test(document.querySelector('.usage').innerText.replace(/\\s+/g, ' '))"), await js("document.querySelector('.usage').innerText"));
-await js(`__fake.patch("c1", { context: { used: 12345, window: 872000, model: "claude-haiku-5-5", compacted: false } })`);
+ok("Token 合计 / In / Out from Python's usage", await js("/Token 合计\\s*6\\.5K\\s*In\\s*1\\.2K\\s*Out\\s*0\\.3K/.test(document.querySelector('.usage').innerText.replace(/\\s+/g, ' '))"), await js("document.querySelector('.usage').innerText"));
+await js(`__fake.patch("c1", { context: { used: 12345, window: 872000, model: "api:gw:claude-haiku-5-5", compacted: false } })`);
 await page.waitFor("document.querySelector('.ctxmeter').innerText.replace(/\\s+/g, '') === 'Context12K/872K'", 3000);
 ok("…and 12K/872K with a bar once it is", await js("!!document.querySelector('.ctxmeter .meter-fill')"));
 await shot("conversation");
@@ -208,6 +213,21 @@ await page.click(".input");
 await page.type("second");
 await page.key("Enter");
 await page.waitFor("!!document.querySelector('.prompt.ask')", 5000);
+ok("an older question without an explicit asker falls back to the API session", await js("document.querySelector('.prompt.ask .phead').textContent.trim() === 'API 模型 想先问你几个问题'"));
+// A card belongs to the engine that asked, even if the selected model is from another source.
+const questionUpdate = await js("structuredClone(__fake.events.filter(([n]) => n === 'turns').at(-1)[1])");
+const questionCard = questionUpdate.turns.at(-1).prompts[0];
+questionCard.who = "Devin";
+questionCard.questions[0].topic = "Devin";
+questionCard.questions[1].topic = questionCard.questions[1].question;
+await emit("turns", questionUpdate);
+await page.waitFor("document.querySelector('.prompt.ask .phead').textContent.includes('Devin')", 5000);
+ok("a question names its actual asker, not WittyCode or the selected model", await js("document.querySelector('.prompt.ask').getAttribute('aria-label') === 'Devin 的提问' && document.querySelector('.prompt.ask .phead').textContent.trim() === 'Devin 想先问你几个问题'"));
+ok("the asker and question are not repeated as topic badges", await js("document.querySelectorAll('.prompt.ask .qtopic').length === 0 && document.querySelectorAll('.prompt.ask .qtext').length === 2"));
+await shot("devin-question-dark");
+await js("document.documentElement.dataset.theme = 'light'");
+await shot("devin-question-light");
+await js("document.documentElement.dataset.theme = 'dark'");
 await page.click(".prompt.ask .opt input[type=radio]", 1);
 await page.click(".prompt.ask .opt input[type=checkbox]", 0);
 await page.click(".prompt.ask .opt input[type=checkbox]", 2);
@@ -226,10 +246,10 @@ const command = async (text) => {
 };
 const draftIs = (text) => js(`document.querySelector('.input').value === ${JSON.stringify(text)}`);
 const sendsAtSkills = (await calls("session.send")).length;
-// /compact and /goal go to Python on any engine (this conversation is Droid's); what Python says is shown
+// /compact and /goal go to Python on any engine (this conversation is the own loop's); what Python says is shown
 await command("/compact");
 await waitCalls("session.compact");
-ok("/compact in a Droid conversation is session.compact, what Python says is shown, the box is empty", isDeepStrictEqual(await lastCall("session.compact"), { id: "c1" }) && (await notice()).includes("已压缩") && (await draftIs("")), await notice());
+ok("/compact in an own-loop conversation is session.compact, what Python says is shown, the box is empty", isDeepStrictEqual(await lastCall("session.compact"), { id: "c1" }) && (await notice()).includes("已压缩") && (await draftIs("")), await notice());
 await page.click(".input");
 await setInput(".input", "/goal");
 await page.key("Enter");
@@ -249,7 +269,7 @@ await page.wait(300);
 await command("/compact");
 ok("/compact in a Devin conversation says Devin manages its own context and keeps the text", (await calls("session.compact")).length === compacts && (await notice()).includes("Devin 没有提供手动压缩") && (await draftIs("/compact")), await notice());
 await setInput(".input", "");
-await js(`__fake.patch("c1", { engine: "droid" })`);
+await js(`__fake.patch("c1", { engine: "chatgpt" })`);
 await page.wait(300);
 // the skills and commands of the user's: asked for when a slash is started, listed after the page's own, written by picking, never run by the page
 await page.click(".input");
@@ -334,7 +354,7 @@ await setInput(".input", "");
 
 // ------------------------------------------------------------------------------------- 11. change engine
 // a scanned PDF joins the conversation (the fake reads a PDF named "scan…" as one without words), so the question has
-// a picture, a text file and a PDF that Codex cannot read
+// a picture, a text file and a PDF that no engine can read
 await paste(`() => [new File(['%PDF-1.4'], 'scan.pdf', { type: 'application/pdf' })]`);
 await page.waitFor("document.querySelector('.att-row')?.textContent.includes('scan.pdf')", 3000);
 await page.click(".input");
@@ -356,30 +376,30 @@ const tick = async (name) => {
 };
 
 await page.click(".controls .chip", 0);
-ok("Codex is signed in now: its models are in the menu", await js("[...document.querySelectorAll('.menu-item')].some(e => e.textContent.includes('GPT-5.3 Codex'))"));
-await clickText(".menu-item", "GPT-5.3 Codex");
+ok("Devin is signed in now: its models are in the menu, under their makers", await js("[...document.querySelectorAll('.menu-item')].some(e => e.textContent.includes('SWE-2')) && [...document.querySelectorAll('.menu .menu-sub')].map(e => e.textContent).join() === 'Cognition,Anthropic,OpenAI'"), await js("[...document.querySelectorAll('.menu .menu-sub')].map(e => e.textContent)"));
+await clickText(".menu-item", "SWE-2");
 await waitCalls("session.choose", 7);
-ok("picking a Codex model asks Python to move the conversation", isDeepStrictEqual(await lastCall("session.choose"), { id: "c1", field: "model", value: "codex:gpt-5.3-codex" }), await lastCall("session.choose"));
+ok("picking a Devin model asks Python to move the conversation", isDeepStrictEqual(await lastCall("session.choose"), { id: "c1", field: "model", value: "devin:swe-2-high" }), await lastCall("session.choose"));
 // the conversation has attachments: Python asks which go along before it changes anything
 await page.waitFor("!!document.querySelector('.dialog')", 3000);
 ok("the conversation has attachments: the page asks, and nothing has changed yet", await js("!document.querySelector('.block.engine-switch') && document.querySelectorAll('.controls .chip')[0].textContent.includes('Claude Haiku 5.5')"));
-ok("the question names the model and says what taking them costs and how pictures go", await js("(() => { const t = document.querySelector('.dialog').textContent; return t.includes('GPT-5.3 Codex') && t.includes('3 个附件') && t.includes('输入 token') && t.includes('随下一条消息一起发出'); })()"));
+ok("the question names the model and says what taking them costs and how pictures go", await js("(() => { const t = document.querySelector('.dialog').textContent; return t.includes('SWE-2') && t.includes('3 个附件') && t.includes('输入 token') && t.includes('随下一条消息一起发出'); })()"));
 const first = await rows();
 ok("every attachment is listed, in the order sent, none ticked", isDeepStrictEqual(first.map((r) => [r.name, r.kind, r.checked]), [["shot.png", "图片", false], ["notes.txt", "文本", false], ["scan.pdf", "PDF", false]]), first);
 ok("a picture goes with the next message, a text file's words with the conversation", first[0].how.startsWith("图片随下一条消息发出") && first[1].how.startsWith("文字随对话一起交给它"), first);
-ok("what Codex cannot take is listed with the reason and cannot be ticked", first[2].disabled && !first[0].disabled && !first[1].disabled && first[2].how === "带不过去" && first[2].reason.includes("只能读 PDF 里的文字"), first);
+ok("what Devin cannot take is listed with the reason and cannot be ticked", first[2].disabled && !first[0].disabled && !first[1].disabled && first[2].how === "带不过去" && first[2].reason.includes("只能读 PDF 里的文字"), first);
 ok("with nothing ticked the button says so", (await confirmLabel()) === "都不带，换过去" && (await js("[...document.querySelectorAll('.dialog .dialog-btns .btn')].map(b => b.textContent.trim()).join('|')")) === "取消|都不带，换过去");
 await shot("carry-list");
 await page.key("Enter");
 ok("Enter does not decide for the user: no second call, same engine", (await calls("session.choose")).length === 7 && (await js("!document.querySelector('.block.engine-switch')")));
-await menuTo("GPT-5.3 Codex");
+await menuTo("SWE-2");
 await waitCalls("session.choose", 8);
 await page.waitFor("!!document.querySelector('.dialog')", 3000);
 await page.key("Escape");
 ok("Esc is a cancel: no answer, same engine", (await calls("session.choose")).length === 8 && (await js("!document.querySelector('.dialog') && !document.querySelector('.block.engine-switch')")));
 
 // the picture and the text file go, the scan stays behind
-await menuTo("GPT-5.3 Codex");
+await menuTo("SWE-2");
 await waitCalls("session.choose", 9);
 await page.waitFor("!!document.querySelector('.dialog')", 3000);
 await tick("shot.png");
@@ -389,46 +409,40 @@ await page.click(".dialog .carry-list li input", 2);
 ok("what cannot go cannot be ticked", isDeepStrictEqual((await rows()).map((r) => r.checked), [true, true, false]));
 await clickText(".dialog .btn", "带上选中的 2 个");
 await waitCalls("session.choose", 10);
-ok("the ids ticked go back to Python, in the order of the list", isDeepStrictEqual(await lastCall("session.choose"), { id: "c1", field: "model", value: "codex:gpt-5.3-codex", attachments: ["d1", "d2"] }), await lastCall("session.choose"));
+ok("the ids ticked go back to Python, in the order of the list", isDeepStrictEqual(await lastCall("session.choose"), { id: "c1", field: "model", value: "devin:swe-2-high", attachments: ["d1", "d2"] }), await lastCall("session.choose"));
 await page.waitFor("!!document.querySelector('.block.engine-switch')", 3000);
 ok("the status bar says what went along", (await notice()).includes("1 个文本附件的内容、1 张图片一起带过去"), await notice());
-ok("the divider: from Claude Haiku 5.5 (Droid) to GPT-5.3 Codex (Codex)", await js("(() => { const d = document.querySelector('.block.engine-switch').textContent; return d.includes('Claude Haiku 5.5') && d.includes('Droid') && d.includes('GPT-5.3 Codex') && d.includes('Codex'); })()"));
-ok("same tab, the model chip says GPT-5.3 Codex with 订阅", await js("document.querySelectorAll('.tab').length === 1 && document.querySelectorAll('.controls .chip')[0].textContent.includes('GPT-5.3 Codex') && document.querySelectorAll('.controls .chip')[0].querySelector('.src-tag')?.textContent === '订阅'"));
-ok("Codex's permission reads 只读 (Python's value readonly)", (await js("document.querySelectorAll('.controls .chip-v')[2].textContent")) === "只读");
-ok("the hint says the next message carries the earlier text and the 2 attachments", await js("/下一条消息会带上之前 \\d+ 条对话的文字和 2 个附件，交给 GPT-5.3 Codex/.test(document.querySelector('.hint').textContent)"), await js("document.querySelector('.hint').textContent"));
-ok("and the status bar shows the subscription's limits", await js("document.querySelector('.st-right').innerText.replace(/\\s+/g, ' ').includes('Limit 5h 12% 1w 30%')"));
+ok("the divider: from Claude Haiku 5.5 (API) to SWE-2 (Devin)", await js("(() => { const d = document.querySelector('.block.engine-switch').textContent; return d.includes('Claude Haiku 5.5') && d.includes('API') && d.includes('SWE-2') && d.includes('Devin'); })()"));
+ok("same tab, the model chip says SWE-2 with 订阅", await js("document.querySelectorAll('.tab').length === 1 && document.querySelectorAll('.controls .chip')[0].textContent.includes('SWE-2') && document.querySelectorAll('.controls .chip')[0].querySelector('.src-tag')?.textContent === '订阅'"));
+ok("Devin's permission reads 写代码 (Python's value code)", (await js("document.querySelectorAll('.controls .chip-v')[2].textContent")) === "写代码");
+ok("the hint says the next message carries the earlier text and the 2 attachments", await js("/下一条消息会带上之前 \\d+ 条对话的文字和 2 个附件，交给 SWE-2/.test(document.querySelector('.hint').textContent)"), await js("document.querySelector('.hint').textContent"));
+ok("and the status bar has no Limit segment", await js("!document.querySelector('.st-right').innerText.includes('Limit')"));
 await shot("switched");
 
-// back to Droid: the scan can go there; a message usually holds one file here (the fake's figure), both files is over it
+// back to the own loop: the scan cannot go there either
 await menuTo("Claude Haiku 5.5");
 await waitCalls("session.choose", 11);
 await page.waitFor("!!document.querySelector('.dialog')", 3000);
 const back = await rows();
-ok("asked again each time, and now the scan is offered: Droid reads PDF files", isDeepStrictEqual(back.map((r) => [r.name, r.disabled, r.reason]), [["shot.png", false, ""], ["notes.txt", false, ""], ["scan.pdf", false, ""]]) && back[2].how.startsWith("PDF 文件随下一条消息发出"), back);
-await tick("shot.png");
-await tick("scan.pdf");
+ok("asked again each time, and the scan cannot go to the own loop either", isDeepStrictEqual(back.map((r) => [r.name, r.disabled]), [["shot.png", false], ["notes.txt", false], ["scan.pdf", true]]) && back[2].reason.includes("只能读 PDF 里的文字"), back);
 const overText = () => js("document.querySelector('.dialog .carry-over')?.textContent ?? ''");
-ok("two files where a message usually holds one: the page says by how much, in Python's words", (await overText()).startsWith("比一条消息通常带的量多 1 个文件（这条消息有 2 个附件、") && (await overText()).includes("通常最多 1 个、20 MB") && !(await js("document.querySelector('.dialog .carry-problem')")), await overText());
-ok("…it is the user's call: the button says it is over and is not held", (await confirmLabel()) === "超出了，仍然带上选中的 2 个，换过去" && (await js("document.querySelector('.dialog .dialog-btns .btn:last-child').disabled")) === false, await confirmLabel());
-ok("…and nothing was unticked for the user", isDeepStrictEqual((await rows()).map((r) => r.checked), [true, false, true]));
 await tick("shot.png");
-ok("untick one and it is the usual amount: no warning, the plain button", (await overText()) === "" && (await confirmLabel()) === "带上选中的 1 个，换过去");
-await tick("shot.png");
-await clickText(".dialog .btn", "超出了，仍然带上选中的 2 个");
+ok("one picture is the usual amount here: no warning, the plain button", (await overText()) === "" && (await confirmLabel()) === "带上选中的 1 个，换过去", await confirmLabel());
+await clickText(".dialog .btn", "带上选中的 1 个");
 await waitCalls("session.choose", 12);
-ok("confirming sends the ids (in the order ticked) and says the user accepted being over (overLimit)", isDeepStrictEqual(await lastCall("session.choose"), { id: "c1", field: "model", value: "claude-haiku-5-5", attachments: ["d4", "d1"], overLimit: true }), await lastCall("session.choose"));
+ok("confirming sends the id ticked", isDeepStrictEqual(await lastCall("session.choose"), { id: "c1", field: "model", value: "api:gw:claude-haiku-5-5", attachments: ["d1"] }), await lastCall("session.choose"));
 await page.waitFor("document.querySelectorAll('.block.engine-switch').length === 2", 3000);
-ok("the status bar says both went along", (await notice()).includes("1 张图片、1 个 PDF 文件一起带过去"), await notice());
+ok("the status bar says the picture went along", (await notice()).includes("1 张图片一起带过去"), await notice());
 
-// and to Codex with none: an empty list is an answer too
-await menuTo("GPT-5.3 Codex");
+// and to Devin with none: an empty list is an answer too
+await menuTo("SWE-2");
 await waitCalls("session.choose", 13);
 await page.waitFor("!!document.querySelector('.dialog')", 3000);
 await tick("notes.txt");
 await tick("notes.txt");
 await clickText(".dialog .btn", "都不带");
 await waitCalls("session.choose", 14);
-ok("none picked is an empty list, not a missing one", isDeepStrictEqual(await lastCall("session.choose"), { id: "c1", field: "model", value: "codex:gpt-5.3-codex", attachments: [] }), await lastCall("session.choose"));
+ok("none picked is an empty list, not a missing one", isDeepStrictEqual(await lastCall("session.choose"), { id: "c1", field: "model", value: "devin:swe-2-high", attachments: [] }), await lastCall("session.choose"));
 await page.waitFor("document.querySelectorAll('.block.engine-switch').length === 3", 3000);
 ok("no files note in the status bar", !(await notice()).includes("一起带过去"), await notice());
 
@@ -437,15 +451,20 @@ await page.click(".input");
 await paste(PNG);
 await page.waitFor("document.querySelectorAll('.att-row .att').length === 1", 3000);
 await menuTo("Claude Haiku 5.5");
+await waitCalls("session.choose", 15);
 await page.waitFor("!!document.querySelector('.dialog')", 3000);
 ok("the question says the box holds an attachment already", await js("document.querySelector('.dialog').textContent.includes('输入框里已有 1 个附件')"));
+await tick("notes.txt");
+ok("a text file's words are no file: that is within the usual amount", (await overText()) === "" && (await confirmLabel()) === "带上选中的 1 个，换过去");
+await tick("notes.txt");
 await tick("shot.png");
 const inBoxOver = await overText();
 ok("a picture on top of it is one file more than a message usually holds: the page says by how much, the user may go on", inBoxOver.includes("这条消息有 2 个附件") && inBoxOver.includes("多 1 个文件") && (await js("document.querySelector('.dialog .dialog-btns .btn:last-child').disabled")) === false, inBoxOver);
-await tick("shot.png");
-await tick("notes.txt");
-ok("a text file's words are no file: that is within the usual amount", (await overText()) === "" && (await confirmLabel()) === "带上选中的 1 个，换过去");
-await page.key("Escape");
+ok("…it is the user's call: the button says it is over", (await confirmLabel()) === "超出了，仍然带上选中的 1 个，换过去", await confirmLabel());
+await clickText(".dialog .btn", "超出了，仍然带上选中的 1 个");
+await waitCalls("session.choose", 16);
+ok("going on anyway sends the id and that the user accepted being over (overLimit)", isDeepStrictEqual(await lastCall("session.choose"), { id: "c1", field: "model", value: "api:gw:claude-haiku-5-5", attachments: ["d1"], overLimit: true }), await lastCall("session.choose"));
+await page.waitFor("document.querySelectorAll('.block.engine-switch').length === 4", 3000);
 await page.click(".att-row .att-x", 0);
 await page.waitFor("!document.querySelector('.att-row')", 3000);
 
@@ -486,7 +505,7 @@ const tabsBefore = await js("document.querySelectorAll('.tab').length");
 await page.click(".srow:not(.open)", 0);
 await waitCalls("session.openSaved");
 ok("a saved row opens through session.openSaved", isDeepStrictEqual(await lastCall("session.openSaved"), { id: "s-saved-1", projectId: "D:\\Work\\demo-project", title: "整理发布说明" }), await lastCall("session.openSaved"));
-await page.waitFor("document.querySelector('.tab.current')?.textContent.includes('整理发布说明')", 3000);
+await page.waitFor("document.querySelector('.tab.current')?.textContent.includes('整理发布说明') && document.querySelectorAll('.main .transcript').length === 1 && document.querySelector('.transcript')?.textContent.includes('上次的回答')", 3000);
 ok("its tab is shown with the restored history", await js("document.querySelector('.transcript').textContent.includes('上次的回答')"));
 // a path in the restored answer: the page asks Python for the file (files.*), nothing else reads the disk
 ok("the paths in the answer are links", (await js("[...document.querySelectorAll('.text .pathref')].map(e => e.textContent).join()")) === "docs/notes.md:5,docs/report.pdf,docs/long.pdf,docs/broken.pdf,shots/ui.png");
@@ -664,21 +683,18 @@ await waitCalls("settings.set", 7);
 ok("the session limit too", isDeepStrictEqual(await lastCall("settings.set"), { key: "maxOpen", value: 5 }));
 await page.waitFor("document.querySelectorAll('.stepper span')[1].textContent === '5'", 2000);
 await page.click(".snav", 5);
-ok("the Droid page shows droid's version from Python, and no 浏览… (there is no such call)", await js("document.querySelector('.settings-body .kvs').textContent.includes('0.262.1') && ![...document.querySelectorAll('.settings-body .btn')].some(b => b.textContent.includes('浏览'))"));
-await clickText(".settings-body .btn", "重新检测");
-await waitCalls("factory.account");
-ok("重新检测 asks Python again (factory.account)", (await notice()).includes("找到 droid 0.262.1"));
-await page.click(".settings-body .segc button", 3); // Codex 命令行: 指定路径 starts from the one that was found
+ok("the 外部程序 page has only the Devin CLI, and no 浏览… (there is no such call)", await js("[...document.querySelectorAll('.settings-body .field-label')].map(e => e.textContent).join() === 'Devin 命令行' && ![...document.querySelectorAll('.settings-body .btn')].some(b => b.textContent.includes('浏览'))"));
+await page.click(".settings-body .segc button", 1); // Devin 命令行: 指定路径 starts from the one that was found
 await waitCalls("settings.set", 8);
-const codexInput = 'input[aria-label="Codex 命令行 路径"]';
-await page.waitFor(`document.querySelector('${codexInput}')?.value.endsWith('codex.cmd')`, 2000);
-await setInput(codexInput, "");
-await page.click(codexInput);
-await page.type("D:\\tools\\codex.cmd");
+const devinInput = 'input[aria-label="Devin 命令行 路径"]';
+await page.waitFor(`document.querySelector('${devinInput}')?.value.endsWith('devin.exe')`, 2000);
+await setInput(devinInput, "");
+await page.click(devinInput);
+await page.type("D:\\tools\\devin.exe");
 await page.key("Enter");
 await waitCalls("settings.set", 9);
-const codexPaths = (await calls("settings.set")).filter((c) => c.key === "codexPath").map((c) => c.value);
-ok("the Codex CLI path is saved when it is entered, not on every key", isDeepStrictEqual(codexPaths, ["C:\\Users\\dev\\AppData\\Roaming\\npm\\codex.cmd", "D:\\tools\\codex.cmd"]), codexPaths);
+const devinPaths = (await calls("settings.set")).filter((c) => c.key === "devinPath").map((c) => c.value);
+ok("the Devin CLI path is saved when it is entered, not on every key", isDeepStrictEqual(devinPaths, ["C:\\Users\\dev\\AppData\\Local\\Programs\\devin\\devin.exe", "D:\\tools\\devin.exe"]), devinPaths);
 await page.click(".snav", 8);
 ok("the About page offers no log folder button (there is no such call)", await js("!document.querySelector('.settings-body .about .btn')"));
 await page.key("Escape");
@@ -709,49 +725,51 @@ await blur();
 await press(",", "Comma", 188, CTRL);
 await page.waitFor("!!document.querySelector('.settings')", 2000);
 await page.click(".snav", 1);
-ok("the Factory card counts the models Python listed (the disabled one is not one to choose)", (await mvisCount("factory")) === "4/4", await mvisCount("factory"));
-ok("the Codex card has its own list", (await mvisCount("codex")) === "1/1", await mvisCount("codex"));
-await page.click(`${mvis("factory")} .disclose`);
-ok("Factory's models sit under their makers, like the menu", await js(`[...document.querySelectorAll('${mvis("factory")} .mvis-maker')].map(e => e.textContent).join() === 'Anthropic,OpenAI,Google'`));
+ok("the provider's card counts the models Python listed (the disabled one is not one to choose)", (await mvisCount("api:gw")) === "4/4", await mvisCount("api:gw"));
+ok("the Devin card has its own list", (await mvisCount("devin")) === "3/3", await mvisCount("devin"));
+await page.click(`${mvis("devin")} .disclose`);
+ok("Devin's models sit under their makers, like the menu", await js(`[...document.querySelectorAll('${mvis("devin")} .mvis-maker')].map(e => e.textContent).join() === 'Cognition,Anthropic,OpenAI'`));
+await page.click(`${mvis("devin")} .disclose`);
 const using = await js("document.querySelectorAll('.controls .chip-v')[0].textContent");
 const hide = using === "Gemini 3 Pro" ? "GPT-5.4" : "Gemini 3 Pro";
-await rowSwitch("factory", hide);
+await page.click(`${mvis("api:gw")} .disclose`);
+await rowSwitch("api:gw", hide);
 await waitCalls("models.setVisible");
-ok("a switch goes to Python (models.setVisible)", isDeepStrictEqual(await lastCall("models.setVisible"), { ids: [hide === "GPT-5.4" ? "gpt-5.4" : "gemini-3-pro"], visible: false }), await lastCall("models.setVisible"));
-await page.waitFor(`document.querySelector('${mvis("factory")} .mvis-count').textContent.replace(/\\s+/g, '') === '3/4'`, 2000);
+ok("a switch goes to Python (models.setVisible)", isDeepStrictEqual(await lastCall("models.setVisible"), { ids: [hide === "GPT-5.4" ? "api:gw:gpt-5.4" : "api:gw:gemini-3-pro"], visible: false }), await lastCall("models.setVisible"));
+await page.waitFor(`document.querySelector('${mvis("api:gw")} .mvis-count').textContent.replace(/\\s+/g, '') === '3/4'`, 2000);
 ok("the count follows Python's settings event", true);
 await page.key("Escape");
 ok("the model menu leaves it out", !(await menuItems()).includes(hide), await menuItems());
 await blur();
 await press(",", "Comma", 188, CTRL);
 await page.click(".snav", 1);
-await page.click(`${mvis("codex")} .disclose`);
-await clickText(`${mvis("codex")} .btn`, "全部隐藏");
+await page.click(`${mvis("devin")} .disclose`);
+await clickText(`${mvis("devin")} .btn`, "全部隐藏");
 await waitCalls("models.setVisible", 2);
-ok("hide all sends the ids of the whole list", isDeepStrictEqual(await lastCall("models.setVisible"), { ids: ["codex:gpt-5.3-codex"], visible: false }), await lastCall("models.setVisible"));
-await page.waitFor(`document.querySelector('${mvis("codex")} .mvis-count').textContent.replace(/\\s+/g, '') === '0/1'`, 2000);
+ok("hide all sends the ids of the whole list", isDeepStrictEqual(await lastCall("models.setVisible"), { ids: ["devin:swe-2-high", "devin:claude-opus-5-5-medium", "devin:gpt-6-sol-medium"], visible: false }), await lastCall("models.setVisible"));
+await page.waitFor(`document.querySelector('${mvis("devin")} .mvis-count').textContent.replace(/\\s+/g, '') === '0/3'`, 2000);
 await page.key("Escape");
 const usingNow = await js("document.querySelectorAll('.controls .chip-v')[0].textContent");
 const afterHideAll = await menuItems();
 ok(
-  usingNow.includes("Codex")
-    ? "a conversation on a Codex model keeps it in the menu even when the group is hidden, and says why"
+  usingNow === "SWE-2"
+    ? "a conversation on a Devin model keeps it in the menu even when the group is hidden, and says why"
     : "an emptied group says so in the menu",
-  usingNow.includes("Codex") ? afterHideAll.includes("GPT-5.3 Codex已在设置里隐藏，正在使用所以还显示") : afterHideAll.includes("没有显示的模型"),
+  usingNow === "SWE-2" ? afterHideAll.includes("SWE-2已在设置里隐藏，正在使用所以还显示") : afterHideAll.includes("没有显示的模型"),
   { usingNow, afterHideAll },
 );
 await blur();
 await press(",", "Comma", 188, CTRL);
 await page.click(".snav", 1);
-await page.click(`${mvis("factory")} .disclose`);
-await clickText(`${mvis("factory")} .btn`, "全部显示");
-await page.click(`${mvis("codex")} .disclose`);
-await clickText(`${mvis("codex")} .btn`, "全部显示");
+await page.click(`${mvis("api:gw")} .disclose`);
+await clickText(`${mvis("api:gw")} .btn`, "全部显示");
+await page.click(`${mvis("devin")} .disclose`);
+await clickText(`${mvis("devin")} .btn`, "全部显示");
 await waitCalls("models.setVisible", 4);
-await page.waitFor(`document.querySelector('${mvis("factory")} .mvis-count').textContent.replace(/\\s+/g, '') === '4/4' && document.querySelector('${mvis("codex")} .mvis-count').textContent.replace(/\\s+/g, '') === '1/1'`, 2000);
+await page.waitFor(`document.querySelector('${mvis("api:gw")} .mvis-count').textContent.replace(/\\s+/g, '') === '4/4' && document.querySelector('${mvis("devin")} .mvis-count').textContent.replace(/\\s+/g, '') === '3/3'`, 2000);
 ok("show all puts everything back", true);
 await page.key("Escape");
-ok("and the menu is whole again", await (async () => { const t = await menuItems(); return t.includes(hide) && t.includes("GPT-5.3 Codex") && !t.includes("没有显示的模型"); })());
+ok("and the menu is whole again", await (async () => { const t = await menuItems(); return t.includes(hide) && t.includes("SWE-2") && !t.includes("没有显示的模型"); })());
 
 // ------------------------------------------------------------------------------------- 14c. the shared memory
 const titles = () => js("[...document.querySelectorAll('.mem-note .mem-title')].map(e => e.textContent)");
@@ -766,30 +784,30 @@ await waitCalls("settings.set", 11);
 ok("the master switch is saved through settings.set", isDeepStrictEqual(await lastCall("settings.set"), { key: "memoryEnabled", value: false }));
 await page.waitFor("!document.querySelector('.mem-engine')", 2000);
 await page.click(".settings-body .field .switch", 0);
-await page.waitFor("document.querySelectorAll('.mem-engine').length === 4", 2000);
+await page.waitFor("document.querySelectorAll('.mem-engine').length === 2", 2000);
 await page.click(".mem-engine .switch", 1);
 await waitCalls("settings.set", 13);
-ok("an engine left out is saved as the list of those that stay", isDeepStrictEqual(await lastCall("settings.set"), { key: "memoryEngines", value: ["droid", "devin", "chatgpt"] }));
+ok("an engine left out is saved as the list of those that stay", isDeepStrictEqual(await lastCall("settings.set"), { key: "memoryEngines", value: ["chatgpt"] }));
 await page.click(".mem-engine .switch", 1);
 await waitCalls("settings.set", 14);
-ok("and put back in the order of the engines", isDeepStrictEqual(await lastCall("settings.set"), { key: "memoryEngines", value: ["droid", "codex", "devin", "chatgpt"] }));
-await page.click(".settings-body .field .switch", 5);
+ok("and put back in the order of the engines", isDeepStrictEqual(await lastCall("settings.set"), { key: "memoryEngines", value: ["chatgpt", "devin"] }));
+await page.click(".settings-body .field .switch", 3);
 await waitCalls("settings.set", 15);
 ok("the switch is about the start of a new conversation, not every message", await js("[...document.querySelectorAll('.settings-body .field')].some((f) => f.querySelector('.field-label')?.textContent === '新会话开头带上相关笔记' && /之后的消息不再带笔记/.test(f.textContent)) && ![...document.querySelectorAll('.settings-body .field')].some((f) => f.textContent.includes('每条消息带上'))"));
 ok("leaving the notes that bear on the first message out of it is saved (memoryRecall)", isDeepStrictEqual(await lastCall("settings.set"), { key: "memoryRecall", value: false }));
-await page.waitFor("document.querySelectorAll('.settings-body .field .switch')[5].getAttribute('aria-checked') === 'false'", 2000);
-await page.click(".settings-body .field .switch", 5);
+await page.waitFor("document.querySelectorAll('.settings-body .field .switch')[3].getAttribute('aria-checked') === 'false'", 2000);
+await page.click(".settings-body .field .switch", 3);
 await waitCalls("settings.set", 16);
 ok("and putting them back", isDeepStrictEqual(await lastCall("settings.set"), { key: "memoryRecall", value: true }));
-await page.click(".settings-body .field .switch", 6);
+await page.click(".settings-body .field .switch", 4);
 await waitCalls("settings.set", 17);
 ok("leaving out the notes the application writes when a message says remember is saved (memoryCapture)", isDeepStrictEqual(await lastCall("settings.set"), { key: "memoryCapture", value: false }));
-await page.click(".settings-body .field .switch", 6);
+await page.click(".settings-body .field .switch", 4);
 await waitCalls("settings.set", 18);
-await page.click(".settings-body .field .switch", 7);
+await page.click(".settings-body .field .switch", 5);
 await waitCalls("settings.set", 19);
 ok("and the suggestions after a turn (memoryCurate)", isDeepStrictEqual(await lastCall("settings.set"), { key: "memoryCurate", value: false }));
-await page.click(".settings-body .field .switch", 7);
+await page.click(".settings-body .field .switch", 5);
 await waitCalls("settings.set", 20);
 ok("both come back on", isDeepStrictEqual(await lastCall("settings.set"), { key: "memoryCurate", value: true }) && (await js("[...document.querySelectorAll('.settings-body .field .switch')].every((e) => e.getAttribute('aria-checked') === 'true')")));
 
@@ -805,10 +823,10 @@ await page.waitFor("document.querySelectorAll('.mem-note').length === 1", 3000);
 ok("it is listed, open, as written by me; the form is gone", await js("!!document.querySelector('.mem-note.open') && document.querySelector('.mem-note.open').textContent.includes('我写入') && !document.querySelector('.mem-create')"));
 ok("a change the user made is not news to them: no badge", await js("!document.querySelector('.snav-badge, .foot-badge')"));
 
-await js(`__fake.agentWrote("codex", "PowerShell 5.1 没有 &&", "用分号串联命令，用 $LASTEXITCODE 判断结果。")`);
+await js(`__fake.agentWrote("devin", "PowerShell 5.1 没有 &&", "用分号串联命令，用 $LASTEXITCODE 判断结果。")`);
 await page.waitFor("document.querySelectorAll('.mem-note').length === 2", 3000);
 ok("an agent's write arrives as the memory event: the list, the changes and both badges follow", await js("document.querySelectorAll('.mem-change').length === 1 && document.querySelector('.snav-badge')?.textContent === '1' && document.querySelector('.foot-badge')?.textContent === '1' && !!document.querySelector('.mem-change.new')"));
-ok("the change names who wrote what, and in which conversation", await js("(() => { const c = document.querySelector('.mem-change'); return c.textContent.includes('Codex') && c.textContent.includes('记住了') && c.textContent.includes('PowerShell 5.1 没有 &&') && c.querySelector('.mem-link')?.textContent === '整理发布说明'; })()"));
+ok("the change names who wrote what, and in which conversation", await js("(() => { const c = document.querySelector('.mem-change'); return c.textContent.includes('Devin') && c.textContent.includes('记住了') && c.textContent.includes('PowerShell 5.1 没有 &&') && c.querySelector('.mem-link')?.textContent === '整理发布说明'; })()"));
 await shot("memory");
 await page.click(".mem-change .mem-link");
 await waitCalls("session.openSaved");

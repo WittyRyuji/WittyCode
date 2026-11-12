@@ -95,6 +95,8 @@ kbd { font-family: var(--font-mono); font-size: 11px; }
 
 .srow { display: flex; align-items: center; gap: 10px; padding: 7px 4px 7px 12px; margin: 1px 0; cursor: pointer; }
 .srow:hover { background: var(--hover); }
+.srow.drop-before { box-shadow: 0 -2px 0 var(--fg); }
+.srow.drop-after { box-shadow: 0 2px 0 var(--fg); }
 .srow-text { flex: 1; min-width: 0; }
 .stitle { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-2); }
 .srow.open .stitle { color: var(--fg); font-weight: 600; }

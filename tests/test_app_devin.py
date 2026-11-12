@@ -1,17 +1,18 @@
 """The Devin engine inside the application: models, sessions, the sidebar, settings, the token total, an engine change.
 
-The engine here is the real one, talking to ``tests/fake_devin.py``; Droid's side is the usual fake."""
+The engine here is the real one, talking to ``tests/fake_devin.py``; the own loop is signed in to the loopback ChatGPT Plan
+fake (``tests/app_support``)."""
 
 from __future__ import annotations
 
 import asyncio
 
 from desktop.core.cache import Cache
-from desktop.core.session_manager import SessionState
+from desktop.core.session_state import SessionState
 from tests.app_support import make_core, ready_core
 from tests.devin_support import make_engine
 from tests.fakes import until
-from tests.support import complete, delta, success
+from tests.fake_responses import say
 
 
 def run(coro):
@@ -173,8 +174,8 @@ def test_a_devin_session_opens_runs_and_reports_its_settings_and_total(tmp_path)
         assert conv.engine == "devin"
         patch = meta(events, cid)
         assert patch["engine"] == "devin" and patch["nativeId"] == conv.controller.session_id
-        # (the level is the one the user's defaults ask for, when the model offers it: Opus offers "low")
-        assert patch["settings"] == {"model": "devin:claude-opus-5-5-medium", "reasoning": "low", "autonomy": "code", "mode": "auto"}
+        # (the level is the one the user's defaults ask for, when the model offers it: Opus offers "medium")
+        assert patch["settings"] == {"model": "devin:claude-opus-5-5-medium", "reasoning": "medium", "autonomy": "code", "mode": "auto"}
         assert await core.call("session.send", {"id": cid, "text": "hello"}) == {"ok": True}
         await until(lambda: meta(events, cid).get("mark") == "ready" and answer_of(events, cid) == "echo: hello")
         # the figures of the prompt: input without the cache, output, the cache read; and the context of the last call
@@ -187,6 +188,82 @@ def test_a_devin_session_opens_runs_and_reports_its_settings_and_total(tmp_path)
     run(scenario())
 
 
+def test_each_message_to_devin_asks_for_chinese_thinking_until_the_setting_is_off(tmp_path):
+    async def scenario():
+        from desktop.core.language import THINK_CHINESE
+
+        core, _, events, harness = await devin_core(tmp_path)
+        await core.call("settings.set", {"key": "thinkChinese", "value": True})
+        assert core.settings.think_chinese is True and core.settings_view()["thinkChinese"] is True
+        cid = await new_devin(core, events, tmp_path)
+
+        def sent(index):
+            return "".join(block.get("text", "") for block in harness.requests("session/prompt")[index]["prompt"])
+
+        await core.call("session.send", {"id": cid, "text": "hello"})
+        await until(lambda: meta(events, cid).get("mark") == "ready" and answer_of(events, cid).startswith("echo: hello"))
+        assert THINK_CHINESE in sent(-1) and "<wittycode-context>" in sent(-1), "after the typed text, in the block the page never shows"
+        await core.call("session.send", {"id": cid, "text": "next step"})
+        await until(lambda: meta(events, cid).get("mark") == "ready" and answer_of(events, cid).startswith("echo: next step"))
+        assert sent(-1).count(THINK_CHINESE) == 1, "later turns get the same rule, exactly once"
+        await core.call("settings.set", {"key": "thinkChinese", "value": False})
+        assert core.settings.think_chinese is False and core.settings_view()["thinkChinese"] is False
+        await core.call("session.send", {"id": cid, "text": "again"})
+        await until(lambda: meta(events, cid).get("mark") == "ready" and answer_of(events, cid).startswith("echo: again"))
+        assert THINK_CHINESE not in sent(-1)
+        await core.shutdown()
+
+    run(scenario())
+
+
+def test_steering_carries_the_chinese_rule_without_showing_it_and_reads_the_setting_each_time(tmp_path):
+    async def scenario():
+        from desktop.core.language import THINK_CHINESE
+
+        core, _, events, harness = await devin_core(tmp_path)
+        try:
+            await core.call("settings.set", {"key": "thinkChinese", "value": True})
+            cid = await new_devin(core, events, tmp_path)
+            for index, enabled in enumerate((True, False)):
+                await core.call("session.send", {"id": cid, "text": "[slow] wait"})
+                await until(lambda: len(harness.requests("session/prompt")) == index * 2 + 1)
+                await core.call("settings.set", {"key": "thinkChinese", "value": enabled})
+                text = f"continue {index}"
+                assert await core.call("session.send", {"id": cid, "text": text, "how": "steer"}) == {"ok": True, "steered": True}
+                await until(lambda: len(harness.requests("session/prompt")) == index * 2 + 2)
+                sent = harness.requests("session/prompt")[-1]["prompt"][0]["text"]
+                assert sent.startswith(text) and (THINK_CHINESE in sent) is enabled
+                if enabled:
+                    assert sent.count(THINK_CHINESE) == 1 and "<wittycode-context>" in sent
+                await until(lambda: any(b.get("steer") and b["text"] == text for b in last_turn_blocks(events, cid)))
+                await until(lambda: meta(events, cid).get("mark") == "ready")
+        finally:
+            await core.shutdown()
+
+    run(scenario())
+
+
+def test_the_total_moves_while_a_devin_turn_runs_and_is_not_counted_twice_when_it_ends(tmp_path):
+    async def scenario():
+        core, _, events, harness = await devin_core(tmp_path)
+        cid = await new_devin(core, events, tmp_path)
+        await core.call("session.send", {"id": cid, "text": "[slow] wait"})
+        live = {"input": 900, "output": 10, "cacheWrite": None, "cacheRead": 100}  # (the turn's one model call so far)
+        await until(lambda: meta(events, cid).get("usage") == live)
+        assert meta(events, cid)["mark"] == "running", "the figure is shown while the turn still runs"
+        assert core._by_cid[cid].ledger.total is None, "shown, but not booked before Devin's own figure for the prompt"
+        assert meta(events, cid)["usageModels"] == {"devin:swe-2-high": 1010}
+        assert core._by_cid[cid].ledger.by_model == {}, "pending model shares are not booked either"
+        await core.call("session.stop", {"id": cid})
+        await until(lambda: meta(events, cid).get("mark") == "ready")
+        await asyncio.sleep(0.2)
+        assert meta(events, cid)["usage"] == live, "the prompt's figure takes the place of what was shown: nothing twice"
+        assert meta(events, cid)["usageModels"] == {"devin:swe-2-high": 1010}, "the model share is not counted twice"
+        await core.shutdown()
+
+    run(scenario())
+
+
 def test_a_new_session_starts_with_the_default_permission_of_devin_and_remembers_the_one_chosen(tmp_path):
     async def scenario():
         core, _, events, harness = await devin_core(tmp_path)
@@ -194,7 +271,7 @@ def test_a_new_session_starts_with_the_default_permission_of_devin_and_remembers
         assert meta(events, cid)["settings"]["autonomy"] == "code"
         assert await core.call("session.choose", {"id": cid, "field": "autonomy", "value": "smart"}) == {"ok": True}
         await until(lambda: meta(events, cid)["settings"]["autonomy"] == "smart")
-        assert core.settings.devin_autonomy == "smart" and core.settings.autonomy == "off", "Droid's own level is not touched"
+        assert core.settings.devin_autonomy == "smart" and core.settings.chatgpt_autonomy == "code", "the own loop's level is not touched"
         cid2 = await new_devin(core, events, tmp_path)
         assert meta(events, cid2)["settings"]["autonomy"] == "smart"
         assert harness.state()["sessions"][core._by_cid[cid2].controller.session_id]["mode"] == "smart"
@@ -345,17 +422,15 @@ def test_the_total_goes_on_across_a_restart_and_nothing_is_counted_twice(tmp_pat
 # ---------------------------------------------------------------------------------------------- engine changes
 
 
-def test_a_droid_conversation_moves_to_devin_with_its_earlier_text_and_keeps_its_total(tmp_path):
+def test_a_chatgpt_plan_conversation_moves_to_devin_with_its_earlier_text_and_back(tmp_path):
     async def scenario():
-        core, factory, events, harness = await devin_core(tmp_path)
+        core, plan, events, harness = await devin_core(tmp_path)
+        plan.script(say("It is four."))
         cid = (await core.call("session.new", {"projectId": str(tmp_path / "proj")}))["id"]
         await until(lambda: meta(events, cid).get("mark") == "ready")
-        droid = factory.sessions[-1]
+        assert core._by_cid[cid].engine == "chatgpt"
         await core.call("session.send", {"id": cid, "text": "what is 2+2"})
-        await until(lambda: droid.active is not None)
-        droid.active.push(delta("It is four.", "m1"), complete("m1"), success("It is four."))
-        droid.active.end()
-        await until(lambda: core._by_cid[cid].controller.state is SessionState.READY)
+        await until(lambda: core._by_cid[cid].controller.state is SessionState.READY and answer_of(events, cid) == "It is four.")
         result = await core.call("session.choose", {"id": cid, "field": "model", "value": "devin:swe-2-high"})
         assert result["switched"] is True
         assert core._by_cid[cid].engine == "devin" and meta(events, cid)["engine"] == "devin"
@@ -366,35 +441,9 @@ def test_a_droid_conversation_moves_to_devin_with_its_earlier_text_and_keeps_its
         (sent,) = harness.requests("session/prompt")
         assert "what is 2+2" in sent["prompt"][0]["text"] and "It is four." in sent["prompt"][0]["text"] and sent["prompt"][0]["text"].endswith("and 3+3?")
         assert meta(events, cid)["handoff"] is None
-        # and back to Droid
-        assert (await core.call("session.choose", {"id": cid, "field": "model", "value": "claude-haiku-5-5"}))["switched"] is True
-        assert core._by_cid[cid].engine == "droid"
-        await core.shutdown()
-
-    run(scenario())
-
-
-def test_a_conversation_goes_between_devin_and_codex_too(tmp_path):
-    async def scenario():
-        core, factory, events, harness = await devin_core(tmp_path, codex=True)
-        cid = await new_devin(core, events, tmp_path)
-        controller = core._by_cid[cid].controller
-        await core.call("session.send", {"id": cid, "text": "hello"})
-        await until(lambda: controller.state is SessionState.READY and answer_of(events, cid) == "echo: hello")
-        codex = core.codex
-        result = await core.call("session.choose", {"id": cid, "field": "model", "value": "codex:gpt-5.3-codex"})
-        assert result["switched"] is True and core._by_cid[cid].engine == "codex"
-        handoff = codex.opened[-1]["handoff"]
-        assert handoff.carried == 2 and "echo: hello" in handoff.prefix, "what Devin said goes to Codex"
-        assert any("已换到 GPT-5.3 Codex（Codex）" in p["text"] for p in events.of("notice"))
-        # and from Codex to Devin: a new Devin session, the Codex session's text with it
-        await until(lambda: core._by_cid[cid].controller.state is SessionState.READY)
-        result = await core.call("session.choose", {"id": cid, "field": "model", "value": "devin:claude-opus-5-5-medium"})
-        assert result["switched"] is True and core._by_cid[cid].engine == "devin"
-        assert core._by_cid[cid].controller.session_id != controller.session_id
-        assert core._by_cid[cid].controller.handoff.carried == 2
-        # the old Devin session is not listed as a session of its own while its conversation is open
-        assert controller.session_id in core._by_cid[cid].hidden
+        # and back to ChatGPT Plan
+        assert (await core.call("session.choose", {"id": cid, "field": "model", "value": "chatgpt:gpt-6.1-sol"}))["switched"] is True
+        assert core._by_cid[cid].engine == "chatgpt"
         await core.shutdown()
 
     run(scenario())
@@ -402,19 +451,16 @@ def test_a_conversation_goes_between_devin_and_codex_too(tmp_path):
 
 def test_a_devin_model_that_cannot_see_pictures_says_so_when_the_conversation_moves_there(tmp_path):
     async def scenario():
-        core, factory, events, harness = await devin_core(tmp_path)
+        core, plan, events, harness = await devin_core(tmp_path)
+        plan.script(say("seen"))
         cid = (await core.call("session.new", {"projectId": str(tmp_path / "proj")}))["id"]
         await until(lambda: meta(events, cid).get("mark") == "ready")
         from tests.support import tiny_png
         import base64
 
         await core.call("attachments.add", {"id": cid, "files": [{"name": "shot.png", "data": base64.b64encode(tiny_png()).decode()}]})
-        droid = factory.sessions[-1]
         await core.call("session.send", {"id": cid, "text": "look"})
-        await until(lambda: droid.active is not None)
-        droid.active.push(delta("seen", "m1"), complete("m1"), success("seen"))
-        droid.active.end()
-        await until(lambda: core._by_cid[cid].controller.state is SessionState.READY)
+        await until(lambda: core._by_cid[cid].controller.state is SessionState.READY and answer_of(events, cid) == "seen")
         asked = await core.call("session.choose", {"id": cid, "field": "model", "value": "devin:glm-5-2"})
         (item,) = asked["choose"]["attachments"]
         assert item["as"] == "" and "不支持图片" in item["reason"]
@@ -432,7 +478,7 @@ def test_a_devin_session_cannot_change_engine_while_it_runs(tmp_path):
         await core.call("session.send", {"id": cid, "text": "[slow] wait"})
         await until(lambda: core._by_cid[cid].controller.state is SessionState.RUNNING)
         try:
-            await core.call("session.choose", {"id": cid, "field": "model", "value": "claude-haiku-5-5"})
+            await core.call("session.choose", {"id": cid, "field": "model", "value": "chatgpt:gpt-6.1-sol"})
         except Exception as error:
             assert "本轮还在运行" in str(error)
         else:

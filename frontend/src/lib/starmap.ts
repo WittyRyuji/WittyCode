@@ -7,7 +7,7 @@ import type { MemoryEntry, MemoryWho } from "../types";
 import { KINDS, engineName, kindLabel } from "./memory.ts";
 
 export type ColorBy = "kind" | "source";
-export type SourceKey = "user" | "droid" | "codex" | "devin" | "chatgpt" | "unknown";
+export type SourceKey = "user" | "chatgpt" | "devin" | "other" | "unknown";
 export type StarType = "root" | "scope" | "kind" | "note" | "cluster";
 export type Direction = "left" | "right" | "up" | "down";
 
@@ -197,30 +197,28 @@ export const KIND_COLORS: Record<string, string> = {
 export const OTHER_KIND_COLOR = "#c7cfe2";
 export const SOURCE_COLORS: Record<SourceKey, string> = {
   user: "#ffd66b",
-  droid: "#86b4ff",
-  codex: "#5fe1c6",
-  devin: "#ff8fae",
   chatgpt: "#b99dff",
+  devin: "#ff8fae",
+  other: "#86b4ff",
   unknown: "#a9b2c6",
 };
 export const BRANCH_COLOR = "#e4eaf7";
 export const SOURCES: { id: SourceKey; label: string }[] = [
   { id: "user", label: "我" },
-  { id: "droid", label: engineName("droid") },
-  { id: "codex", label: engineName("codex") },
-  { id: "devin", label: engineName("devin") },
   { id: "chatgpt", label: engineName("chatgpt") },
+  { id: "devin", label: engineName("devin") },
+  { id: "other", label: "其他代理" },
   { id: "unknown", label: "未知" },
 ];
 
-const AGENTS = new Set<string>(["droid", "codex", "devin", "chatgpt"]);
+const AGENTS = new Set<string>(["devin", "chatgpt"]);
 
-/** Who wrote a note, as a colour of the chart: the user, one of the four engines, or unknown (an engine WittyCode does not
- *  know counts as unknown). */
+/** Who wrote a note, as a colour of the chart: the user, one of the engines, another agent (a note brought in by an import,
+ *  or written by an engine of an earlier version), or unknown. */
 export function sourceKey(who: MemoryWho | null | undefined): SourceKey {
   if (!who) return "unknown";
   if (who.kind === "user") return "user";
-  if (who.kind === "agent" && AGENTS.has(who.engine)) return who.engine as SourceKey;
+  if (who.kind === "agent") return AGENTS.has(who.engine) ? (who.engine as SourceKey) : "other";
   return "unknown";
 }
 

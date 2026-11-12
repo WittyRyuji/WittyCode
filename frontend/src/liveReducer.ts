@@ -2,16 +2,14 @@
 // the side effects to run (a status bar message, the quit question). No React, no DOM, no store: `node scripts/unit.mjs`
 // runs them as they are (Node strips the types), and live.ts applies them to the zustand store.
 //
-// Ids: a project is its folder path; a sidebar row is a saved session ("s-...", Codex threads "cx:...", Devin sessions
+// Ids: a project is its folder path; a sidebar row is a saved session (own-loop conversations "cg:...", Devin sessions
 // "dv:...") or an open conversation ("c1", "c2", ...). Saved rows have no `mark`; open conversations always have one.
 
 import type {
   ApiProvider,
   ChatGPTAccount,
-  CodexAccount,
   DevinAccount,
   Engine,
-  FactoryAccount,
   FilePanelState,
   FontScale,
   MemoryState,
@@ -36,15 +34,11 @@ export interface LiveData {
   pendingSelect: string | null;
   models: ModelChoice[];
   defaults: SessionSettings;
-  factory: FactoryAccount;
-  codex: CodexAccount;
   devin: DevinAccount;
   chatgpt: ChatGPTAccount;
   providers: ApiProvider[];
   maxOpen: number;
-  droidPath: string;
-  droidFound: string;
-  codexPath: string;
+  maxSteps: number;
   devinPath: string;
   /** model ids left out of the conversation's model menu (a model in use is shown anyway) */
   hiddenModels: string[];
@@ -63,6 +57,8 @@ export interface LiveData {
   /** ChatGPT Plan: summarise the early part of a long conversation at this percent of the model's window (off: only after the server refuses) */
   compactAuto: boolean;
   compactAt: number;
+  /** every model is asked to write its thinking in Chinese */
+  thinkChinese: boolean;
   /** the folder of the conversation started last: where the first message box starts when nothing else was chosen */
   lastProject: string;
   /** the newest change of the shared memory, and how many by agents the user has not looked at (the badge) */
@@ -86,7 +82,7 @@ export interface Applied {
 }
 
 const NO_SETTINGS: SessionSettings = { model: "", reasoning: "", autonomy: "", mode: "auto" };
-export const ALL_ENGINES: Engine[] = ["droid", "codex", "devin", "chatgpt"];
+export const ALL_ENGINES: Engine[] = ["devin", "chatgpt"];
 /** The percent of a model's window at which a ChatGPT Plan conversation is summarised: what the bridge accepts, and the default. */
 export const COMPACT_AT_MIN = 50;
 export const COMPACT_AT_MAX = 95;
@@ -115,15 +111,11 @@ export function emptyLiveData(theme: ThemeChoice = "system", fontScale: FontScal
     pendingSelect: null,
     models: [],
     defaults: { ...NO_SETTINGS },
-    factory: { signedIn: false },
-    codex: { cli: "found", auth: "checking", limits: [], enabled: false },
     devin: { cli: "found", auth: "checking", enabled: false },
     chatgpt: { ...NO_CHATGPT },
     providers: [],
     maxOpen: 4,
-    droidPath: "",
-    droidFound: "",
-    codexPath: "",
+    maxSteps: 80,
     devinPath: "",
     hiddenModels: [],
     themeChoice: theme,
@@ -137,6 +129,7 @@ export function emptyLiveData(theme: ThemeChoice = "system", fontScale: FontScal
     memoryEngines: [...ALL_ENGINES],
     compactAuto: true,
     compactAt: COMPACT_AT_DEFAULT,
+    thinkChinese: true,
     lastProject: "",
     memory: { ...NO_MEMORY },
     maximized: false,
@@ -203,9 +196,7 @@ export function withSavedRows(sessions: Record<string, Session>, rows: Record<st
 export function settingsFields(v: SettingsView): Partial<LiveData> {
   return {
     maxOpen: v.maxOpen,
-    droidPath: v.droidPath,
-    droidFound: v.droidFound,
-    codexPath: v.codexPath,
+    maxSteps: v.maxSteps ?? 80,
     devinPath: v.devinPath ?? "",
     hiddenModels: v.hiddenModels ?? [],
     themeChoice: v.theme,
@@ -219,6 +210,7 @@ export function settingsFields(v: SettingsView): Partial<LiveData> {
     memoryEngines: v.memoryEngines ?? [...ALL_ENGINES],
     compactAuto: v.compactAuto ?? true,
     compactAt: v.compactAt ?? COMPACT_AT_DEFAULT,
+    thinkChinese: v.thinkChinese ?? true,
     lastProject: v.lastProject ?? "",
   };
 }
@@ -270,8 +262,6 @@ export function applyInit(s: LiveData, init: InitResult): Partial<LiveData> {
     archived: init.archived ?? [],
     models: init.models,
     defaults: init.defaults,
-    factory: init.factory,
-    codex: init.codex,
     devin: init.devin ?? { cli: "missing", auth: "signed-out", enabled: false },
     chatgpt: chatgptView(init.chatgpt),
     providers: init.providers,
@@ -363,8 +353,6 @@ export function applyEvent(s: LiveData, name: string, payload: unknown): Applied
     case "accounts": {
       const e = payload as Events["accounts"];
       return done({
-        ...(e.factory ? { factory: e.factory } : {}),
-        ...(e.codex ? { codex: e.codex } : {}),
         ...(e.devin ? { devin: e.devin } : {}),
         ...(e.chatgpt ? { chatgpt: chatgptView(e.chatgpt) } : {}),
       });
