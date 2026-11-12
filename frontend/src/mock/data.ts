@@ -269,6 +269,7 @@ const fileOps: Session = session({
   speed: { tps: 42.3, tokens: 1_840, seconds: 43.5, first: 1.4, genTps: 43.7 },
   mark: "ready",
   usage: baseUsage(1),
+  usageModels: { "chatgpt:gpt-6.1-sol": 50_000, "devin:claude-opus-5-5-medium": 15_000 },
   context: ctx("chatgpt:gpt-6.1-sol", 18_000),
   turns: [
     turn(

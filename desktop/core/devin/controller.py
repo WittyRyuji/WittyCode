@@ -131,6 +131,9 @@ class DevinController:
     _recall_ids: frozenset[str] = frozenset()
     _model: str = ""
     _turn_usage: dict[str, Tokens] = field(default_factory=dict)
+    _turn_models: dict[str, str] = field(default_factory=dict)
+    _usage_model: str = ""
+    """The selected model of a live turn; unknown if it was changed mid-turn or is historical."""
     _client: Any = None
     _turn: Turn | None = None
     _turn_done: asyncio.Event | None = None
@@ -231,6 +234,16 @@ class DevinController:
         for more in self._calls[1:]:
             total = total.plus(more)
         return total
+
+    def usage_model_series(self) -> dict[str, tuple[str, Tokens]]:
+        return {
+            f"turn:{key}": (self._turn_models[key], tokens)
+            for key, tokens in self._turn_usage.items() if self._turn_models.get(key)
+        }
+
+    def usage_pending_models(self) -> dict[str, Tokens]:
+        pending = self.usage_pending()
+        return {self._usage_model: pending} if self._usage_model and pending is not None else {}
 
     def _output_so_far(self) -> int | None:
         return own_output(self.usage_series())
@@ -411,6 +424,8 @@ class DevinController:
             return
         model = current_value(options, "model")
         if model:
+            if self._turn is not None and model != self._usage_model:
+                self._usage_model = ""  # the turn may have used more than one model; its aggregate cannot tell which share
             self._model = model
             if adopt:
                 self.requested_model = model
@@ -617,6 +632,7 @@ class DevinController:
         sent += wrap_context(self.preface, context.text)  # (after the message: see core/context_envelope)
         self.transcript.output_probe = self._output_so_far
         turn = self.transcript.start_turn(text, attachments, handoff=carried)
+        self._usage_model = self.model
         if context.notice:
             self.transcript.add_notice(context.notice)
         self._handoff_turn = turn if handoff is not None else None
@@ -978,6 +994,8 @@ class DevinController:
         self._calls.clear()  # (covered by this figure now: they must not stay in what is shown as still counting)
         if tokens is not None:
             self._turn_usage[message_id] = tokens
+            if self._turn is not None and self._usage_model and message_id not in self._turn_models:
+                self._turn_models[message_id] = self._usage_model
             self._changed()
 
     # ------------------------------------------------------------------ requests (approvals)

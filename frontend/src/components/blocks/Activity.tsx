@@ -40,8 +40,8 @@ function StatusIcon({ status }: { status: ToolItem["status"] | "thinking" | "thi
 function Detail({ item }: { item: ToolItem }) {
   const has = item.meta || item.command || item.output || item.diffs?.length || item.todos?.length || item.decision;
   if (!has) return <div className="idetail muted-text">没有更多内容。</div>;
-  return (
-    <div className="idetail selectable">
+  const content = (
+    <>
       {item.decision && <div className="imeta">审批：{DECISIONS[item.decision] ?? item.decision}</div>}
       {item.command && <CodeBlock code={item.command} language="powershell" />}
       {item.meta && !item.command && (
@@ -71,6 +71,11 @@ function Detail({ item }: { item: ToolItem }) {
           <pre className={`out${item.outputError ? " err" : ""}`}>{item.output}</pre>
         </div>
       )}
+    </>
+  );
+  return (
+    <div className="idetail selectable">
+      {item.todos ? <details className="plan-record"><summary>计划更新记录</summary>{content}</details> : content}
     </div>
   );
 }

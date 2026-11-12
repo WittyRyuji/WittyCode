@@ -505,7 +505,7 @@ const tabsBefore = await js("document.querySelectorAll('.tab').length");
 await page.click(".srow:not(.open)", 0);
 await waitCalls("session.openSaved");
 ok("a saved row opens through session.openSaved", isDeepStrictEqual(await lastCall("session.openSaved"), { id: "s-saved-1", projectId: "D:\\Work\\demo-project", title: "整理发布说明" }), await lastCall("session.openSaved"));
-await page.waitFor("document.querySelector('.tab.current')?.textContent.includes('整理发布说明')", 3000);
+await page.waitFor("document.querySelector('.tab.current')?.textContent.includes('整理发布说明') && document.querySelectorAll('.main .transcript').length === 1 && document.querySelector('.transcript')?.textContent.includes('上次的回答')", 3000);
 ok("its tab is shown with the restored history", await js("document.querySelector('.transcript').textContent.includes('上次的回答')"));
 // a path in the restored answer: the page asks Python for the file (files.*), nothing else reads the disk
 ok("the paths in the answer are links", (await js("[...document.querySelectorAll('.text .pathref')].map(e => e.textContent).join()")) === "docs/notes.md:5,docs/report.pdf,docs/long.pdf,docs/broken.pdf,shots/ui.png");

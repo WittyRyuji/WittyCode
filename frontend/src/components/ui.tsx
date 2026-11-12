@@ -189,10 +189,11 @@ export function MenuButton({
 
 // ---------------------------------------------------------------------------------------------- tooltip
 
-export function Tip({ text, children, className, side = "top" }: { text: ReactNode; children: ReactNode; className?: string; side?: "top" | "bottom" }) {
+export function Tip({ text, children, className, side = "top", interactive = false }: { text: ReactNode; children: ReactNode; className?: string; side?: "top" | "bottom"; interactive?: boolean }) {
   const [at, setAt] = useState<{ x: number; y: number } | null>(null);
   const timer = useRef<number | undefined>(undefined);
   const ref = useRef<HTMLSpanElement>(null);
+  useEffect(() => () => window.clearTimeout(timer.current), []);
   const show = () => {
     window.clearTimeout(timer.current);
     timer.current = window.setTimeout(() => {
@@ -202,13 +203,14 @@ export function Tip({ text, children, className, side = "top" }: { text: ReactNo
   };
   const hide = () => {
     window.clearTimeout(timer.current);
-    setAt(null);
+    if (interactive) timer.current = window.setTimeout(() => setAt(null), 180);
+    else setAt(null);
   };
   return (
-    <span ref={ref} className={className} onMouseEnter={show} onMouseLeave={hide} onMouseDown={hide}>
+    <span ref={ref} className={className} onMouseEnter={show} onMouseLeave={hide} onMouseDown={interactive ? undefined : hide}>
       {children}
       {at && (
-        <span className={`tip tip-${side}`} style={{ left: Math.max(150, Math.min(at.x, window.innerWidth - 150)), top: at.y }}>
+        <span className={`tip tip-${side}`} style={{ left: Math.max(150, Math.min(at.x, window.innerWidth - 150)), top: at.y }} onMouseEnter={interactive ? () => window.clearTimeout(timer.current) : undefined}>
           {text}
         </span>
       )}

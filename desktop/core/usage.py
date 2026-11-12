@@ -12,10 +12,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+import math
 from typing import Any
 
 
 def _count(value: Any) -> int | None:
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
     return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0 else None
 
 
@@ -114,6 +117,9 @@ class UsageLedger:
 
     total: Tokens | None = None
     seen: dict[str, Tokens] = field(default_factory=dict)
+    by_model: dict[str, int] = field(default_factory=dict)
+    model_seen: dict[str, Tokens] = field(default_factory=dict)
+    """Known model attribution has its own series: legacy totals may have no attribution at all."""
 
     def feed(self, series: Mapping[str, Tokens]) -> bool:
         """Take the figures the engine reports now; ``True`` when the total changed."""
@@ -125,12 +131,28 @@ class UsageLedger:
             self.seen[key] = now
         return self.total != before
 
+    def feed_models(self, series: Mapping[str, tuple[str, Tokens]]) -> None:
+        """Attribute known usage without changing the authoritative total or guessing a legacy session's model."""
+        for key, (model, now) in series.items():
+            if not model:
+                continue
+            earlier = self.model_seen.get(key)
+            added = now if earlier is None else (now.since(earlier) or now)
+            self.by_model[model] = self.by_model.get(model, 0) + added.total
+            self.model_seen[key] = now
+
     def restart(self) -> None:
         """The next figures belong to new sessions (the engine was changed): they are counted in full."""
         self.seen.clear()
+        self.model_seen.clear()
 
     def to_json(self) -> dict[str, Any]:
-        return {"total": self.total.to_json() if self.total else None, "seen": {key: value.to_json() for key, value in self.seen.items()}}
+        return {
+            "total": self.total.to_json() if self.total else None,
+            "seen": {key: value.to_json() for key, value in self.seen.items()},
+            "byModel": dict(self.by_model),
+            "modelSeen": {key: value.to_json() for key, value in self.model_seen.items()},
+        }
 
     @classmethod
     def from_json(cls, raw: Any) -> UsageLedger:
@@ -143,4 +165,13 @@ class UsageLedger:
                 tokens = Tokens.of(value)
                 if isinstance(key, str) and tokens is not None:
                     seen[key] = tokens
-        return cls(Tokens.of(raw.get("total")), seen)
+        models = raw.get("byModel")
+        by_model = {key: int(value) for key, value in models.items() if isinstance(key, str) and _count(value) is not None} if isinstance(models, Mapping) else {}
+        model_raw = raw.get("modelSeen")
+        model_seen = {}
+        if isinstance(model_raw, Mapping):
+            for key, value in model_raw.items():
+                tokens = Tokens.of(value)
+                if isinstance(key, str) and tokens is not None:
+                    model_seen[key] = tokens
+        return cls(Tokens.of(raw.get("total")), seen, by_model, model_seen)

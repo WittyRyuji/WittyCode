@@ -87,6 +87,8 @@ class SavedSession:
     """Tokens of the whole conversation: ``input``, ``output``, ``cacheRead``."""
     context_used: int = 0
     recalled: list[str] = field(default_factory=list)
+    usage_models: dict[str, dict[str, Any]] = field(default_factory=dict)
+    """Known cumulative usage per configured model; absent in older files (do not infer it from the latest model)."""
     origin: dict[str, Any] = field(default_factory=dict)
     """Where a conversation imported from another app came from: ``{"app", "native", "at"}`` (``core/importers``); empty
     for one made here. Written to the file only when set, so files without it read as before."""
@@ -152,6 +154,8 @@ def _session_json(session: SavedSession) -> dict[str, Any]:
         "recalled": session.recalled,
         "items": session.items,
     }
+    if session.usage_models:
+        data["usage_models"] = session.usage_models
     if session.origin:
         data["origin"] = session.origin
     if session.compaction:
@@ -193,6 +197,7 @@ def _session_from(raw: Any) -> SavedSession | None:
             turns=turns,
             tools={str(k): dict(v) for k, v in (raw.get("tools") or {}).items() if isinstance(v, Mapping)},
             usage={str(k): int(v) for k, v in (raw.get("usage") or {}).items() if isinstance(v, (int, float))},
+            usage_models={str(k): dict(v) for k, v in raw.get("usage_models", {}).items() if isinstance(v, Mapping)} if isinstance(raw.get("usage_models"), Mapping) else {},
             context_used=int(raw.get("context_used") or 0),
             recalled=[str(x) for x in raw.get("recalled") or ()],
             origin=dict(raw["origin"]) if isinstance(raw.get("origin"), Mapping) else {},

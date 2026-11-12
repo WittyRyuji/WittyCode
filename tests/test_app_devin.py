@@ -252,10 +252,13 @@ def test_the_total_moves_while_a_devin_turn_runs_and_is_not_counted_twice_when_i
         await until(lambda: meta(events, cid).get("usage") == live)
         assert meta(events, cid)["mark"] == "running", "the figure is shown while the turn still runs"
         assert core._by_cid[cid].ledger.total is None, "shown, but not booked before Devin's own figure for the prompt"
+        assert meta(events, cid)["usageModels"] == {"devin:swe-2-high": 1010}
+        assert core._by_cid[cid].ledger.by_model == {}, "pending model shares are not booked either"
         await core.call("session.stop", {"id": cid})
         await until(lambda: meta(events, cid).get("mark") == "ready")
         await asyncio.sleep(0.2)
         assert meta(events, cid)["usage"] == live, "the prompt's figure takes the place of what was shown: nothing twice"
+        assert meta(events, cid)["usageModels"] == {"devin:swe-2-high": 1010}, "the model share is not counted twice"
         await core.shutdown()
 
     run(scenario())

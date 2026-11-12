@@ -1601,6 +1601,37 @@ def test_a_chatgpt_plan_conversation_goes_from_the_model_menu_to_the_answer_and_
     run(loop, scenario())
 
 
+def test_token_tooltip_shows_the_models_share_of_the_whole_conversation(qapp, loop, tmp_path):
+    async def scenario():
+        from PySide6.QtTest import QTest
+        from tests.ui_support import outside_task
+
+        rig = await open_rig(tmp_path)
+        try:
+            await new_conversation(rig)
+            rig.plan.script(say("first answer", used=usage(100, 10, cached=20)))
+            await rig.send("first")
+            await rig.wait_text(".transcript", "first answer")
+            await rig.wait_text(".statusbar .st-left", "就绪")
+            await rig.click(".controls .chip", 0)
+            await rig.click_text(".menu-item", "GPT-6-Luna")
+            rig.plan.script(say("second answer", used=usage(200, 20, cached=50)))
+            await rig.send("second")
+            await rig.wait_text(".transcript", "second answer")
+            await rig.wait_text(".statusbar .st-left", "就绪")
+            at = await rig._center(".usage", 0)
+            await outside_task(lambda: QTest.mouseMove(rig._target(), at))
+            await rig.wait_for(".usage-pie", 1)
+            assert await rig.texts(".usage-percent") == ["66.7%", "33.3%"]
+            assert await rig.texts(".usage-model-name") == ["GPT-6-Luna", "GPT-6.1-Sol"]
+            assert await rig.js("getComputedStyle(document.querySelector('.usage-pie')).backgroundImage.startsWith('conic-gradient')")
+            assert await rig.js("(() => { const r = document.querySelector('.usage .tip').getBoundingClientRect(); return r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight; })()")
+        finally:
+            await rig.finish()
+
+    run(loop, scenario())
+
+
 def test_the_status_bar_shows_the_speed_of_a_turn_between_context_and_token(qapp, loop, tmp_path):
     async def scenario():
         import re

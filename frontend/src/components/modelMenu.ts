@@ -55,13 +55,12 @@ export function buildModelMenu(i: ModelMenuInput): MenuItem[] {
   const foreign = (m: ModelChoice) => i.engine !== undefined && engineOfSource(m.source) !== i.engine;
   const crossing = (m: ModelChoice) => {
     const to = engineLabel(m.source);
-    if (i.running) return `本轮结束后才能换到 ${to}`;
-    return i.fresh ? `换到 ${to}（这个会话还是空的）` : `换到 ${to} 接着做，之前的文字会交接`;
+    return i.running ? `本轮结束后才能换到 ${to}` : undefined;
   };
   const modelItem = (m: ModelChoice): MenuItem => ({
     id: m.id,
     label: m.label,
-    description: foreign(m) ? crossing(m) : hidden.has(m.id) ? "已在设置里隐藏，正在使用所以还显示" : m.note,
+    description: foreign(m) && i.running ? crossing(m) : hidden.has(m.id) ? "已在设置里隐藏，正在使用所以还显示" : m.note,
     checked: m.id === i.current,
     disabled: foreign(m) && !!i.running,
     onSelect: () => i.onPick(m.id),

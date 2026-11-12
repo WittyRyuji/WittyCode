@@ -1,6 +1,6 @@
 // Behaviour check of the design page with real mouse / keyboard events: `node scripts/check.mjs` (after `npm run build`).
 // The live app (Python behind QWebChannel) has its own check: scripts/check-live.mjs.
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { openPage } from "./cdp.mjs";
@@ -183,6 +183,16 @@ await page.hover(".usage");
 await page.wait(700);
 ok("the Token tooltip lists In / Out / Cache Write / Cache Read / hit rate", await page.eval("(() => { const t = [...document.querySelectorAll('.tip-row dt')].map(e => e.textContent).join('|'); return t === '合计|In|Out|Cache Write|Cache Read|Cache 命中率'; })()"));
 ok("the hit rate is a percentage", await page.eval("/^\\d+(\\.\\d)?%$/.test([...document.querySelectorAll('.tip-row dd')].pop().textContent)"));
+ok("the model pie is above the token table and includes cached tokens in its shares", await page.eval("(() => { const p = document.querySelector('.usage-pie'); const r = [...document.querySelectorAll('.usage-legend li')]; return p?.getAttribute('role') === 'img' && getComputedStyle(p).backgroundImage.startsWith('conic-gradient') && p.getBoundingClientRect().bottom < document.querySelector('.usage-tip .tip-table').getBoundingClientRect().top && r.map(e => e.querySelector('.usage-percent').textContent).join('|') === '69.1%|20.7%|10.2%' && r[0].textContent.includes('GPT-6.1-Sol') && r[1].textContent.includes('Claude Opus 5.5') && r[2].textContent.includes('未归属'); })()"));
+await page.hover(".usage .tip");
+await page.wait(500);
+ok("the model tooltip stays open when the pointer moves onto the chart", await page.eval("!!document.querySelector('.usage-pie')"));
+ok("the expanded usage tooltip fits inside the window", await page.eval("(() => { const r = document.querySelector('.usage .tip').getBoundingClientRect(); return r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight; })()"));
+mkdirSync(resolve("shots"), { recursive: true });
+await page.shot(resolve("shots/model-usage-dark.png"));
+await page.eval("document.documentElement.dataset.theme = 'light'");
+await page.shot(resolve("shots/model-usage-light.png"));
+await page.eval("document.documentElement.dataset.theme = 'dark'");
 ok("TPS sits between Context and Token in the status bar", await page.eval("(() => { const t = document.querySelector('.st-right').innerText.replace(/\\s+/g, ' '); return t.indexOf('Context') >= 0 && t.indexOf('Context') < t.indexOf('TPS') && t.indexOf('TPS') < t.indexOf('Token 合计') && /TPS ≈42\\.3 /.test(t); })()"));
 await page.hover(".speed");
 await page.wait(700);
@@ -294,7 +304,7 @@ await page.mouse("mouseMoved", 5, 5, { button: "none", clickCount: 0 });
 const tabsBefore = await page.eval("document.querySelectorAll('.tab').length");
 await page.click(".controls .chip", 0);
 ok("the model menu has ChatGPT Plan, Devin and API groups, and nothing else", await page.eval("(() => { const h = [...document.querySelectorAll('.menu-head > span:first-child')].map(e => e.textContent); return h[0] === 'CHATGPT PLAN' && h[1] === 'DEVIN' && h.length >= 3 && h.slice(2).every(x => x.startsWith('API · ')); })()"));
-ok("Devin's models say the conversation is handed over", await page.eval("(() => { const items = [...document.querySelectorAll('.menu-item')].filter(e => e.textContent.includes('换到 Devin 接着做，之前的文字会交接')); return items.length === 4 && ['SWE-2', 'Claude Opus 5.5', 'GPT-6 Sol', 'GLM-5.2 High'].every(n => items.some(e => e.textContent.includes(n))); })()"));
+ok("Devin's models are offered without repeating a handover explanation on every row", await page.eval("(() => { const t = document.querySelector('.menu').textContent; return !t.includes('之前的文字会交接') && ['SWE-2', 'Claude Opus 5.5', 'GPT-6 Sol', 'GLM-5.2 High'].every(n => t.includes(n)); })()"));
 ok("adding a provider and managing accounts stay visible at the bottom", await page.eval("(() => { const p = document.querySelector('.menu-pinned').getBoundingClientRect(); const m = document.querySelector('.menu').getBoundingClientRect(); return p.bottom <= m.bottom + 1 && p.top >= m.top && [...document.querySelectorAll('.menu-pinned .menu-label')].map(e => e.textContent).join() === '添加 API Provider…,管理账号与模型…'; })()"));
 ok("the plan's own models carry no such note", await page.eval("![...document.querySelectorAll('.menu-item')].some(e => e.textContent.includes('GPT-6-Astra') && e.textContent.includes('交接'))"));
 await clickText(".menu-item", "SWE-2");
@@ -313,7 +323,7 @@ ok("Context starts again for the new engine, the Token total goes on", await pag
 ok("the hint under the message box says the next message carries the text", await page.eval("(() => { const h = document.querySelector('.hint'); return h.classList.contains('handoff') && /下一条消息会带上之前 \\d+ 条对话的文字，交给 SWE-2/.test(h.textContent); })()"));
 ok("the sidebar names the engine of the conversation", await page.eval("document.querySelector('.srow.current').textContent.includes('· Devin')"));
 await page.click(".controls .chip", 0);
-ok("from here the plan's models are the ones that say 换到 ChatGPT Plan", await page.eval("[...document.querySelectorAll('.menu-item')].filter(e => e.textContent.includes('换到 ChatGPT Plan 接着做，之前的文字会交接')).length >= 3"));
+ok("the plan's models also omit the repetitive handover explanation", await page.eval("document.querySelector('.menu').textContent.includes('GPT-6.1-Sol') && !document.querySelector('.menu').textContent.includes('之前的文字会交接')"));
 await page.key("Escape");
 
 // the next message goes out with the text, and a running turn cannot change engine
@@ -355,7 +365,7 @@ await page.close();
 // changing engine in a session with nothing in it loses nothing, so there is nothing to hand over
 page = await openPage(`${index}?scene=empty&theme=dark&review=0`);
 await page.click(".controls .chip", 0);
-ok("an empty session says so in the menu", await page.eval("[...document.querySelectorAll('.menu-item')].some(e => e.textContent.includes('这个会话还是空的'))"));
+ok("an empty session's menu also omits the redundant switch explanation", await page.eval("!document.querySelector('.menu').textContent.includes('这个会话还是空的') && !document.querySelector('.menu').textContent.includes('之前的文字会交接')"));
 await clickText(".menu-item", "SWE-2");
 ok("it changes engine without a divider or a handoff note", await page.eval("!document.querySelector('.block.engine-switch') && !document.querySelector('.hint.handoff') && document.querySelectorAll('.controls .chip-v')[0].textContent === 'SWE-2'"));
 ok("and the status bar does not talk about earlier text", await page.eval("(() => { const t = document.querySelector('.notice-text')?.textContent ?? ''; return t.includes('已换到 SWE-2') && !t.includes('条对话'); })()"));
@@ -982,5 +992,7 @@ ok("nothing was blocked by the Content-Security-Policy (long answer, pictures, f
 const errors = page.consoleErrors();
 ok("no console errors", errors.length === 0);
 await page.close();
+await import("./check-plan.mjs");
+await import("./check-step-limit.mjs");
 console.log(failed ? `${failed} check(s) FAILED` : "all checks passed");
 process.exit(failed ? 1 : 0);

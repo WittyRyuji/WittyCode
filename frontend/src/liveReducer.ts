@@ -38,6 +38,7 @@ export interface LiveData {
   chatgpt: ChatGPTAccount;
   providers: ApiProvider[];
   maxOpen: number;
+  maxSteps: number;
   devinPath: string;
   /** model ids left out of the conversation's model menu (a model in use is shown anyway) */
   hiddenModels: string[];
@@ -114,6 +115,7 @@ export function emptyLiveData(theme: ThemeChoice = "system", fontScale: FontScal
     chatgpt: { ...NO_CHATGPT },
     providers: [],
     maxOpen: 4,
+    maxSteps: 80,
     devinPath: "",
     hiddenModels: [],
     themeChoice: theme,
@@ -194,6 +196,7 @@ export function withSavedRows(sessions: Record<string, Session>, rows: Record<st
 export function settingsFields(v: SettingsView): Partial<LiveData> {
   return {
     maxOpen: v.maxOpen,
+    maxSteps: v.maxSteps ?? 80,
     devinPath: v.devinPath ?? "",
     hiddenModels: v.hiddenModels ?? [],
     themeChoice: v.theme,

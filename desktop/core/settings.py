@@ -40,6 +40,8 @@ to the running turn now. Ctrl+Enter does the other one."""
 SIDEBAR_WIDTH_RANGE = (220, 440)
 MAX_OPEN_SESSIONS_RANGE = (1, 16)
 DEFAULT_MAX_OPEN_SESSIONS = 4
+DEFAULT_MAX_STEPS = 80
+MAX_STEPS_RANGE = (1, 2**53 - 1)  # positive integers that survive the JSON/JavaScript bridge exactly
 MAX_REMEMBERED_SESSIONS = 5000
 """Archived and renamed conversations kept in the settings file; a file with more is cut here."""
 MAX_SESSION_TITLE = 120
@@ -91,6 +93,8 @@ class AppSettings:
     Off: only when the server has refused a request as too big (a conversation must not get stuck)."""
     chatgpt_compact_at: int = DEFAULT_COMPACT_AT
     """The percent of the window at which that happens (``COMPACT_AT_RANGE``)."""
+    max_steps: int = DEFAULT_MAX_STEPS
+    """Model decision steps allowed in one turn of the own loop; read again between steps."""
     think_chinese: bool = True
     """Ask every model to write its thinking in Chinese (``core/language``)."""
     mode: str = "auto"
@@ -256,6 +260,9 @@ def settings_from_dict(raw: object) -> AppSettings:
     low_at, high_at = COMPACT_AT_RANGE
     if not isinstance(compact_at, int) or isinstance(compact_at, bool) or not low_at <= compact_at <= high_at:
         compact_at = defaults.chatgpt_compact_at
+    max_steps = raw.get("max_steps")
+    if not isinstance(max_steps, int) or isinstance(max_steps, bool) or not MAX_STEPS_RANGE[0] <= max_steps <= MAX_STEPS_RANGE[1]:
+        max_steps = defaults.max_steps
     think_chinese = raw.get("think_chinese")
     if not isinstance(think_chinese, bool):
         think_chinese = defaults.think_chinese
@@ -312,6 +319,7 @@ def settings_from_dict(raw: object) -> AppSettings:
         chatgpt_welcomed=chatgpt_welcomed,
         chatgpt_compact=chatgpt_compact,
         chatgpt_compact_at=compact_at,
+        max_steps=max_steps,
         think_chinese=think_chinese,
         mode=text("mode", MODES),
         projects=projects,

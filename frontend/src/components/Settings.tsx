@@ -11,6 +11,7 @@ import { COMPACT_AT_MAX, COMPACT_AT_MIN } from "../liveReducer";
 import { Field, Select, Seg, Switch } from "./formkit";
 import { buildModelMenu } from "./modelMenu";
 import { MemoryPage } from "./MemoryPage";
+import { StepLimitSetting } from "./StepLimitSetting";
 import { ProviderEditor } from "./ProviderEditor";
 import { ProvidersPage } from "./ProvidersPage";
 import type { MenuItem } from "./ui";
@@ -157,6 +158,7 @@ function SessionsPage() {
           </div>
         </Field>
       )}
+      <StepLimitSetting />
       <Field
         label="思考过程用中文"
         hint="让模型把思考过程（回答下面折叠的那部分）也写成中文：WittyCode 自己的循环写进系统提示，其他引擎随每条消息附上一句说明（页面上看不到）。是否照做取决于模型；服务端自己生成的推理摘要可能仍是英文。"

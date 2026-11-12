@@ -18,6 +18,8 @@ import { effortLabel, permissionsFor, reasoningChoices, startingLevel } from "..
 import { CALL_TIMEOUT_MS, QWebChannelTransport } from "../src/transport.ts";
 import { COMMANDS, commandNamed, fromSkills, parseSlash, suggestions, unavailable } from "../src/lib/commands.ts";
 import { quitWarning } from "../src/lib/quit.ts";
+import "./usage.test.mjs";
+import "./plan.test.mjs";
 
 test("API windows use exact specifications, preserve overrides and require unknown limits", () => {
   const model = { id: "gpt-6.1-sol", displayName: "demo", images: true, reasoning: "max" };
@@ -690,6 +692,14 @@ test("hidden models: nothing before Python says, then what its settings list (at
   assert.deepEqual(play(state, ["settings", { settings: { ...SETTINGS, hiddenModels: [] } }]).state.hiddenModels, [], "showing them again");
   const { hiddenModels, ...older } = SETTINGS;
   assert.deepEqual(play(state, ["settings", { settings: older }]).state.hiddenModels, [], "a settings view without the field hides nothing");
+});
+
+test("the configurable step limit arrives with init and live settings, with the legacy default of 80", () => {
+  assert.equal(emptyLiveData().maxSteps, 80);
+  assert.equal(applyInit(emptyLiveData(), { ...INIT, settings: { ...SETTINGS, maxSteps: 240 } }).maxSteps, 240);
+  const { state } = play(started(), ["settings", { settings: { ...SETTINGS, maxSteps: 300 } }]);
+  assert.equal(state.maxSteps, 300);
+  assert.equal(play(state, ["settings", { settings: SETTINGS }]).state.maxSteps, 80);
 });
 
 test("ChatGPT Plan compaction: the switch and the percent come with the settings, a view without them is the default", () => {

@@ -409,6 +409,7 @@ function liveActions(): Partial<Store> {
     setFontScale: (scale) => void setting("fontScale", scale),
     setFollowUp: (how) => void setting("followUp", how),
     setMaxOpen: (n) => void setting("maxOpen", Math.max(1, Math.min(16, n))),
+    setMaxSteps: (n) => void setting("maxSteps", n),
     setMemoryEnabled: (on) => void setting("memoryEnabled", on),
     setMemoryRecall: (on) => void setting("memoryRecall", on),
     setMemoryCapture: (on) => void setting("memoryCapture", on),

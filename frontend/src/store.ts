@@ -209,6 +209,7 @@ export interface Store extends LiveData {
   /** show or hide models in the conversation's model menu (the settings page's lists) */
   setModelsVisible: (ids: string[], visible: boolean) => void;
   setMaxOpen: (n: number) => void;
+  setMaxSteps: (n: number) => void;
   /** the shared memory: the master switch, the engines that get it, and the state the memory page last heard of */
   setMemoryEnabled: (on: boolean) => void;
   setMemoryRecall: (on: boolean) => void;
@@ -273,6 +274,7 @@ function mockData(): LiveData {
     chatgpt: CHATGPT_ACCOUNT,
     providers: API_PROVIDERS,
     maxOpen: 4,
+    maxSteps: 80,
     devinPath: "",
     hiddenModels: [],
     themeChoice: "dark",
@@ -717,6 +719,7 @@ export const useStore = create<Store>((set, get) => ({
   setModelsVisible: (ids, visible) =>
     set((s) => ({ hiddenModels: visible ? s.hiddenModels.filter((id) => !ids.includes(id)) : [...s.hiddenModels, ...ids.filter((id, i) => !s.hiddenModels.includes(id) && ids.indexOf(id) === i)] })),
   setMaxOpen: (maxOpen) => set({ maxOpen: Math.max(1, Math.min(16, maxOpen)) }),
+  setMaxSteps: (maxSteps) => set({ maxSteps }),
   setMemoryEnabled: (memoryEnabled) => set({ memoryEnabled }),
   setMemoryRecall: (memoryRecall) => set({ memoryRecall }),
   setMemoryCapture: (memoryCapture) => set({ memoryCapture }),

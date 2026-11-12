@@ -2,6 +2,8 @@ import { currentSession, useStore } from "../store";
 import type { ContextState, Speed, Usage } from "../types";
 import { cacheHitRate, formatCount, formatSpeed, formatTokens, usageTotal } from "../lib/format";
 import { StateDot, Tip } from "./ui";
+import { usagePercent, usageSlices } from "../lib/usage";
+import type { ModelChoice } from "../types";
 
 const UNKNOWN = "—";
 
@@ -38,7 +40,32 @@ function ContextMeter({ c }: { c: ContextState }) {
   );
 }
 
-function UsageTip({ u }: { u: Usage }) {
+function ModelUsageChart({ total, byModel, models }: { total: number; byModel?: Record<string, number>; models: ModelChoice[] }) {
+  const slices = usageSlices(total, byModel, models);
+  if (!slices.length) return null;
+  let end = 0;
+  const stops = slices.map((s) => {
+    const start = end;
+    end += s.share;
+    return `${s.color} ${start}turn ${end}turn`;
+  });
+  return (
+    <div className="usage-models">
+      <div className="usage-pie" role="img" aria-label={`模型 Token 占比：${slices.map((s) => `${s.label} ${usagePercent(s.share)}`).join("，")}`} style={{ background: `conic-gradient(${stops.join(",")})` }} />
+      <ul className="usage-legend">
+        {slices.map((s) => (
+          <li key={s.id} data-model={s.id} title={`${s.label} · ${s.tokens.toLocaleString()} token`}>
+            <span className="usage-swatch" style={{ background: s.color }} aria-hidden />
+            <span className="usage-model-name">{s.label}</span>
+            <span className="usage-percent">{usagePercent(s.share)}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function UsageTip({ u, byModel, models }: { u: Usage; byModel?: Record<string, number>; models: ModelChoice[] }) {
   const rate = cacheHitRate(u);
   // A service that does not report cache writes (OpenAI's, Devin's) has no such row, rather than a row of dashes.
   const rows: [string, string][] = [
@@ -50,7 +77,8 @@ function UsageTip({ u }: { u: Usage }) {
     ["Cache 命中率", rate === null ? UNKNOWN : `${(rate * 100).toFixed(1)}%`],
   ];
   return (
-    <div className="tip-lines">
+    <div className="tip-lines usage-tip">
+      <ModelUsageChart total={usageTotal(u)} byModel={byModel} models={models} />
       <b>Token 用量（整个对话累计）</b>
       <dl className="tip-table">
         {rows.map(([k, v]) => (
@@ -107,7 +135,8 @@ function SpeedText({ s }: { s: Speed | null | undefined }) {
 }
 
 /** `Token 合计 69K In 0.4K Out 4K`: the whole conversation's cumulative use; hover for the whole breakdown. */
-function UsageText({ u }: { u: Usage | null }) {
+function UsageText({ u, byModel }: { u: Usage | null; byModel?: Record<string, number> }) {
+  const models = useStore((s) => s.models);
   if (!u) {
     return (
       <span className="usage">
@@ -116,7 +145,7 @@ function UsageText({ u }: { u: Usage | null }) {
     );
   }
   return (
-    <Tip text={<UsageTip u={u} />} className="usage">
+    <Tip text={<UsageTip u={u} byModel={byModel} models={models} />} className="usage" interactive>
       <span className="k">Token 合计</span>
       <span className="v">{formatCount(usageTotal(u))}</span>
       <span className="k">In</span>
@@ -152,7 +181,7 @@ export function StatusBar() {
           <span className="st-sep" aria-hidden />
           <SpeedText s={session.speed} />
           <span className="st-sep" aria-hidden />
-          <UsageText u={session.usage} />
+          <UsageText u={session.usage} byModel={session.usageModels} />
         </div>
       )}
     </footer>

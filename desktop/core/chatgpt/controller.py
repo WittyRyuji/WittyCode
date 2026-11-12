@@ -136,6 +136,7 @@ class ChatGPTController:
     recalled: set[str] = field(default_factory=set)
     saved: SavedSession = field(init=False)
     _usage_total: Tokens | None = None
+    _usage_models: dict[str, Tokens] = field(default_factory=dict)
     _turn: Turn | None = None
     _turn_task: asyncio.Task[Any] | None = None
     _turn_done: asyncio.Event | None = None
@@ -243,6 +244,9 @@ class ChatGPTController:
         conversation reports where it was and adds nothing twice."""
         return {"self": self._usage_total} if self._usage_total is not None else {}
 
+    def usage_model_series(self) -> dict[str, tuple[str, Tokens]]:
+        return {f"model:{model}": (model, tokens) for model, tokens in self._usage_models.items()}
+
     def _output_so_far(self) -> int | None:
         return own_output(self.usage_series())
 
@@ -286,6 +290,7 @@ class ChatGPTController:
         usage = saved.usage
         if usage:
             self._usage_total = Tokens(usage.get("input", 0), usage.get("output", 0), None, usage.get("cacheRead", 0))
+        self._usage_models = {model: tokens for model, raw in saved.usage_models.items() if (tokens := Tokens.of(raw)) is not None}
         self.context = ContextState(used=saved.context_used or None, window=self.manager.model_window(self.model), model=self.model)
         self.saved_settings = LiveSettings(model=self.model, reasoning=self.reasoning, autonomy=self.autonomy, mode=self.mode)
         if recovered:
@@ -509,6 +514,7 @@ class ChatGPTController:
                 instructions=instructions,
                 shape=self.manager.shape,
                 conversation=self.session_id,
+                max_steps=lambda: self.manager.settings.max_steps,
                 **self._carried_measure(model),
             )
             # The loop works on the view (what the model reads: the summary of the early part, then the rest); what it adds
@@ -536,7 +542,7 @@ class ChatGPTController:
         if end.reason == "incomplete":
             note = STOP_NOTES.get(end.detail, f"回答没有说完（{end.detail}）。")
         elif end.reason == "step_limit":
-            note = f"这一轮用了 {end.steps} 步还没结束，先停在这里；可以回复「继续」。"
+            note = f"这一轮用了 {end.steps} 步还没结束，先停在这里；可在设置 → 会话里调整「单轮步数上限」，或回复「继续」。"
         if note:
             self.transcript.add_notice(note)
         self._release_steers()
@@ -751,6 +757,10 @@ class ChatGPTController:
     def _add_usage(self, usage: Usage, *, measures_context: bool = True) -> None:
         tokens = usage.tokens()
         self._usage_total = tokens if self._usage_total is None else self._usage_total.plus(tokens)
+        model = self.running_model
+        if model:
+            self._usage_models[model] = self._usage_models.get(model, Tokens()).plus(tokens)
+            self.saved.usage_models = {name: value.to_json() for name, value in self._usage_models.items()}
         total = self._usage_total
         self.saved.usage = {"input": total.input_tokens, "output": total.output_tokens, "cacheRead": total.cache_read_tokens}
         if not measures_context:  # (a summary request: it counts, but it says nothing about how full the conversation is)

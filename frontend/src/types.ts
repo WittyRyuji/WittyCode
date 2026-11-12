@@ -273,6 +273,8 @@ export interface Session {
   nativeId?: string;
   turns: Turn[];
   usage: Usage | null;
+  /** Token totals attributed to configured model ids; the remainder of usage is unknown legacy usage. */
+  usageModels?: Record<string, number>;
   speed?: Speed | null;
   context: ContextState;
   settings: SessionSettings;

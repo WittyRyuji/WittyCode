@@ -11,7 +11,7 @@ Invariants worth knowing:
   turn is cancelled halfway (the missing outputs are written as "interrupted"): the API refuses a history with a call that
   has no output, and the conversation could never go on.
 - A step is one request. A turn ends when a step brings no tool call and nothing the user said meanwhile is waiting
-  (``Observer.take_steer``), or at ``MAX_STEPS``.
+  (``Observer.take_steer``), or at the configured step budget (default ``MAX_STEPS``).
 - A request that fails before any of its answer arrived, in a way that may pass (the connection broke, the server is busy or
   overloaded: ``errors.is_transient``), is sent again after a pause that grows (``RETRY_DELAYS``, or the server's own
   ``Retry-After``), and the user is told. Nothing of the failed attempt is in the history, so the repeat is the same request.
@@ -262,7 +262,7 @@ class AgentLoop:
         instructions: str,
         shape: Shape = Shape(),
         conversation: str = "",
-        max_steps: int = MAX_STEPS,
+        max_steps: int | Callable[[], int] = MAX_STEPS,
         measured: tuple[int, int] | None = None,
         floor: int = 0,
         retry_delays: Sequence[float] | None = None,
@@ -318,7 +318,10 @@ class AgentLoop:
         extended in place; the exception ``asyncio.CancelledError`` leaves it valid (see the module docstring). Before a
         request the observer may shorten ``history`` (``Observer.prepare``)."""
         incomplete = ""
-        for step in range(1, self.max_steps + 1):
+        step = 0
+        # A callable lets the app apply a saved change to an already running turn, without interrupting a request or tool.
+        while step < (self.max_steps() if callable(self.max_steps) else self.max_steps):
+            step += 1
             self._deliver_steers(history)
             await self._prepare(history)
             calls, incomplete = await self._step(history)
@@ -327,7 +330,7 @@ class AgentLoop:
                     continue
                 return TurnEnd("incomplete" if incomplete else "done", incomplete, step)
             await self._run_calls(history, calls)
-        return TurnEnd("step_limit", steps=self.max_steps)
+        return TurnEnd("step_limit", steps=step)
 
     # ------------------------------------------------------------------ a step
 

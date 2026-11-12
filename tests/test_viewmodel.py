@@ -83,6 +83,14 @@ def test_a_todo_list_becomes_todo_rows():
     assert [row["state"] for row in tool["todos"]] == ["completed", "in_progress", "pending"]
 
 
+def test_an_explicitly_empty_todo_update_clears_the_plan_panel():
+    transcript = Transcript()
+    transcript.start_turn("go")
+    use_tool(transcript, "t1", "TodoWrite", todos=[])
+    tool = activity_of(turn_json(transcript.turns[0]))["entries"][0]
+    assert tool["todos"] == []
+
+
 def test_prompts_are_listed_while_pending_and_settled_ones_are_dropped():
     transcript = Transcript()
     transcript.start_turn("go")

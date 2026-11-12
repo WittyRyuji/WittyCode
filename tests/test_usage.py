@@ -113,6 +113,32 @@ def test_the_ledger_survives_the_cache():
         assert UsageLedger.from_json(broken) == UsageLedger(), broken
 
 
+def test_model_breakdown_has_its_own_stable_series_and_does_not_change_the_total():
+    ledger = UsageLedger()
+    ledger.feed({"self": tokens(100, 10, 0, 90)})
+    ledger.feed_models({"model:a": ("chatgpt:a", tokens(40, 5, 0, 55)), "model:b": ("chatgpt:b", tokens(60, 5, 0, 35))})
+    assert ledger.by_model == {"chatgpt:a": 100, "chatgpt:b": 100}
+    ledger.feed_models({"model:a": ("chatgpt:a", tokens(40, 5, 0, 55))})
+    assert ledger.by_model["chatgpt:a"] == 100 and ledger.total.total == 200
+    ledger.restart()
+    ledger.feed_models({"turn:t1": ("devin:c", tokens(25))})
+    assert ledger.by_model == {"chatgpt:a": 100, "chatgpt:b": 100, "devin:c": 25}
+    assert UsageLedger.from_json(ledger.to_json()) == ledger
+
+
+def test_malformed_model_counters_are_ignored_without_breaking_the_legacy_total():
+    ledger = UsageLedger.from_json({"total": tokens(100).to_json(), "byModel": {"a": float("inf"), "b": float("nan"), "c": -1, "d": True}, "modelSeen": "bad"})
+    assert ledger.by_model == {} and ledger.model_seen == {} and ledger.total.total == 100
+
+
+def test_legacy_totals_are_not_guessed_to_belong_to_the_current_model():
+    ledger = UsageLedger.from_json({"total": tokens(100).to_json(), "seen": {"self": tokens(100).to_json()}})
+    assert ledger.by_model == {}
+    ledger.feed({"self": tokens(120)})
+    ledger.feed_models({"model:a": ("chatgpt:a", tokens(20))})
+    assert ledger.total.total == 120 and ledger.by_model == {"chatgpt:a": 20}
+
+
 @pytest.mark.parametrize("series", [{}, {"self": tokens()}])
 def test_a_ledger_with_nothing_to_say_has_no_total_or_a_zero_one(series):
     ledger = UsageLedger()

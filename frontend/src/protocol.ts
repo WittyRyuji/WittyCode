@@ -46,6 +46,8 @@ import type { TestResult } from "./bridge";
 /** AppCore.settings_view(). `devinPath` is what the user set ("" = find it). */
 export interface SettingsView {
   maxOpen: number;
+  /** own-loop steps per turn; missing on an older sender: 80 */
+  maxSteps?: number;
   devinPath: string;
   /** page model ids the user left out of the conversation's model menu */
   hiddenModels: string[];
@@ -73,7 +75,7 @@ export interface SettingsView {
   lastProject?: string;
 }
 export type FollowUp = "queue" | "steer";
-export type SettingKey = "theme" | "fontScale" | "followUp" | "maxOpen" | "sidebarWidth" | "devinPath" | "memoryEnabled" | "memoryRecall" | "memoryCapture" | "memoryCurate" | "memoryEngines" | "compactAuto" | "compactAt" | "thinkChinese";
+export type SettingKey = "theme" | "fontScale" | "followUp" | "maxOpen" | "maxSteps" | "sidebarWidth" | "devinPath" | "memoryEnabled" | "memoryRecall" | "memoryCapture" | "memoryCurate" | "memoryEngines" | "compactAuto" | "compactAt" | "thinkChinese";
 export type SettingValue = string | number | boolean | string[];
 
 /** What `memory.list` can be narrowed by (all optional). `query`: words to look for; `status` "all" lists forgotten notes too. */
@@ -138,6 +140,7 @@ export interface ConversationMeta {
   nativeId: string;
   settings: SessionSettings;
   usage: Usage | null;
+  usageModels?: Record<string, number>;
   speed: Speed | null;
   context: ContextState;
   handoff: PendingHandoff | null;

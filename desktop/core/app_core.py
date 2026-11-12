@@ -72,6 +72,7 @@ from desktop.core.settings import (
     FONT_SCALES,
     COMPACT_AT_RANGE,
     MAX_OPEN_SESSIONS_RANGE,
+    MAX_STEPS_RANGE,
     MAX_SESSION_TITLE,
     MEMORY_ENGINES,
     SIDEBAR_WIDTH_RANGE,
@@ -516,6 +517,7 @@ class AppCore:
             "lastProject": self.settings.last_project,
             "compactAuto": self.settings.chatgpt_compact,
             "compactAt": self.settings.chatgpt_compact_at,
+            "maxSteps": self.settings.max_steps,
             "thinkChinese": self.settings.think_chinese,
         }
 
@@ -892,7 +894,7 @@ class AppCore:
             controller.title,
             controller.active_at,
             listed,
-            {name: meta[name] for name in ("settings", "usage", "speed", "context")},
+            {name: meta[name] for name in ("settings", "usage", "usageModels", "speed", "context")},
             conv.ledger,
         )
 
@@ -1200,6 +1202,12 @@ class AppCore:
             counted = Tokens.of(getattr(controller, "usage", None))
             series = {} if counted is None else {"self": counted}
         conv.ledger.feed(series)
+        models_of = getattr(controller, "usage_model_series", None)
+        if models_of is not None:
+            conv.ledger.feed_models({
+                key: (self.catalog.page_id(conv.engine, model), tokens)
+                for key, (model, tokens) in models_of().items()
+            })
 
     def _row_of(self, conv: Conversation) -> str:
         """The sidebar row of an open conversation ("" until the engine has given it an id of its own)."""
@@ -1236,8 +1244,16 @@ class AppCore:
         pending = pending_of() if pending_of is not None else None
         if pending is not None:
             total = pending if total is None else total.plus(pending)
+        usage_models = dict(conv.ledger.by_model)
+        pending_models = getattr(controller, "usage_pending_models", None)
+        if pending_models is not None:
+            for native, tokens in pending_models().items():
+                key = self.catalog.page_id(conv.engine, native)
+                usage_models[key] = usage_models.get(key, 0) + tokens.total
         # Until the live session reports its own, the page keeps what was known when it was last cached.
         usage = usage_json(total) or cached.get("usage")
+        if total is None and not usage_models:
+            usage_models = cached.get("usageModels") or {}
         found = speed_of(controller.transcript.turns)
         speed = found.to_json() if found is not None else cached.get("speed")
         self._learn_window(conv, model_id)
@@ -1256,6 +1272,7 @@ class AppCore:
             "nativeId": controller.session_id or "",
             "settings": settings,
             "usage": usage,
+            "usageModels": usage_models,
             "speed": speed,
             "context": context,
             "queued": self._queued_json(conv),
@@ -2414,7 +2431,7 @@ class AppCore:
         # are new ones. A figure the shared transcript keeps goes too, or the new session would start from the one an
         # earlier session left there.
         self._feed_usage(conv)
-        ledger_before = (conv.ledger.total, dict(conv.ledger.seen))
+        ledger_before = (conv.ledger.total, dict(conv.ledger.seen), dict(conv.ledger.model_seen))
         usage_before = transcript.usage
         conv.ledger.restart()
         transcript.usage = None
@@ -2431,7 +2448,7 @@ class AppCore:
         except BaseException as error:
             self._rollback_switch(conv, old, controller)
             transcript.restore(before)  # a failed open writes its error into the shared transcript
-            conv.ledger.total, conv.ledger.seen = ledger_before
+            conv.ledger.total, conv.ledger.seen, conv.ledger.model_seen = ledger_before
             transcript.usage = usage_before
             conv.requested = previous_requested
             if isinstance(error, (AppError, asyncio.CancelledError)):
@@ -2715,6 +2732,8 @@ class AppCore:
             s.chatgpt_compact = value
         elif key == "compactAt" and _is_int(value) and COMPACT_AT_RANGE[0] <= value <= COMPACT_AT_RANGE[1]:
             s.chatgpt_compact_at = value
+        elif key == "maxSteps" and _is_int(value) and MAX_STEPS_RANGE[0] <= value <= MAX_STEPS_RANGE[1]:
+            s.max_steps = value
         elif key == "thinkChinese" and isinstance(value, bool):
             s.think_chinese = value
         elif key == "maxOpen" and _is_int(value) and MAX_OPEN_SESSIONS_RANGE[0] <= value <= MAX_OPEN_SESSIONS_RANGE[1]:

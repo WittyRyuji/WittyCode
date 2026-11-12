@@ -105,7 +105,7 @@ def tool_json(item: ToolItem) -> dict[str, Any]:
     command = item.input.get("command")
     if item.name == "TodoWrite":
         todos = parse_todos(item.input.get("todos"))
-        if todos:
+        if todos or item.input.get("todos") == []:
             out["todos"] = [{"text": todo.text, "state": todo.status} for todo in todos]
         else:
             out["meta"] = _meta(item)

@@ -1,0 +1,27 @@
+/* A plan only takes room beside the transcript; tabs and the composer keep the full conversation width. */
+.conversation-body { flex: 1; min-height: 0; min-width: 0; display: flex; }
+.conversation-body > .stage { min-width: 0; }
+.planpanel { flex: 0 0 min(280px, 32%); min-width: 0; overflow-y: auto; padding: 18px 12px 24px 0; }
+.plan-card { border: 1px solid var(--line-strong); background: var(--bg-raised); }
+.plan-head { display: flex; align-items: center; gap: 7px; width: 100%; padding: 10px; text-align: left; }
+.plan-head:hover { background: var(--hover); }
+.plan-title { flex: 1; font-weight: 700; }
+.plan-count { font-size: 11.5px; color: var(--muted); }
+.plan-body { padding: 0 10px 10px; }
+.plan-meter { height: 3px; background: var(--line); margin-bottom: 10px; }
+.plan-meter > span { display: block; height: 100%; background: var(--ink); transition: width 0.15s; }
+.plan-steps { list-style: none; margin: 0; padding: 0; }
+.plan-step { display: flex; align-items: flex-start; gap: 7px; padding: 5px 0; font-size: 12.5px; line-height: 1.55; overflow-wrap: anywhere; }
+.plan-state { display: inline-flex; flex: none; margin-top: 3px; color: var(--muted); }
+.plan-step.st-in_progress { font-weight: 700; }
+.plan-step.st-in_progress .plan-state { color: var(--fg); }
+.plan-step.st-completed { color: var(--muted); }
+.plan-step.st-completed > span:last-child { text-decoration: line-through; }
+.plan-record > summary { cursor: pointer; color: var(--muted); font-size: 12px; padding: 3px 0; }
+.plan-record[open] > summary { margin-bottom: 5px; }
+@media (max-width: 1000px) {
+  .planpanel { padding-right: 8px; }
+  .plan-head { padding: 8px; gap: 4px; }
+  .plan-head > svg:first-child { display: none; }
+  .plan-body { padding: 0 8px 8px; }
+}

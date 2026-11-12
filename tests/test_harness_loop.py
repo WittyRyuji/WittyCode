@@ -310,6 +310,31 @@ def test_words_that_arrive_during_the_last_step_get_a_step_of_their_own():
     assert kinds(history)[-1] == "message:assistant" and "two" in json.dumps(history[-1])
 
 
+def test_a_configured_limit_can_run_past_the_old_80_step_ceiling():
+    script = Script(*[call("echo", {}, call_id=f"c{i}") for i in range(81)], say("finished"))
+    end, history, _, _ = run(script, max_steps=200)
+    assert (end.reason, end.steps) == ("done", 82)
+    assert len(script.requests) == 82
+    assert_paired(history)
+
+
+@pytest.mark.parametrize("initial, changed, expected", [(1, 3, ("done", 3)), (5, 1, ("step_limit", 1))])
+def test_a_saved_limit_change_is_read_between_steps_without_interrupting_a_tool(initial, changed, expected):
+    limit = [initial]
+    tools = FakeTools()
+
+    def change(call):
+        limit[0] = changed
+        return Outcome("tool finished normally")
+
+    tools.handlers["echo"] = change
+    script = Script(call("echo", {}, call_id="c1"), call("echo", {}, call_id="c2"), say("finished"))
+    end, history, _, _ = run(script, tools, max_steps=lambda: limit[0])
+    assert (end.reason, end.steps) == expected
+    assert len(script.requests) == expected[1]
+    assert_paired(history)
+
+
 def test_the_step_limit_stops_a_model_that_never_stops_calling_tools():
     script = Script(*[call("echo", {}, call_id=f"c{i}") for i in range(5)])
     end, history, _, _ = run(script, max_steps=3)

@@ -234,7 +234,7 @@ function fakeBackend(config) {
     models: [...GW_MODELS],
     providers: [clone(GATEWAY)],
     defaults: { model: "", reasoning: "", autonomy: "code", mode: "auto" },
-    settings: { maxOpen: 4, devinPath: "", hiddenModels: [], theme: "dark", fontScale: "md", sidebarWidth: 300, memoryEnabled: true, memoryRecall: true, memoryCapture: true, memoryCurate: true, memoryEngines: ["devin", "chatgpt"], compactAuto: true, compactAt: 85, lastProject: "" },
+    settings: { maxOpen: 4, maxSteps: 80, devinPath: "", hiddenModels: [], theme: "dark", fontScale: "md", sidebarWidth: 300, memoryEnabled: true, memoryRecall: true, memoryCapture: true, memoryCurate: true, memoryEngines: ["devin", "chatgpt"], compactAuto: true, compactAt: 85, lastProject: "" },
     devin: { cli: "found", auth: "checking", enabled: true },
     chatgpt: clone(CHATGPT_OUT),
   };
@@ -895,6 +895,7 @@ function fakeBackend(config) {
       if (p.key === "theme" && ["system", "light", "dark"].includes(v)) s.theme = v;
       else if (p.key === "fontScale" && ["sm", "md", "lg"].includes(v)) s.fontScale = v;
       else if (p.key === "maxOpen" && Number.isInteger(v) && v >= 1 && v <= 16) s.maxOpen = v;
+      else if (p.key === "maxSteps" && Number.isSafeInteger(v) && v >= 1) s.maxSteps = v;
       else if (p.key === "sidebarWidth" && Number.isInteger(v) && v >= 220 && v <= 440) s.sidebarWidth = v;
       else if (p.key === "devinPath" && typeof v === "string") s.devinPath = v.trim();
       else if (p.key === "memoryEnabled" && typeof v === "boolean") s.memoryEnabled = v;

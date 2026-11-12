@@ -7,6 +7,7 @@ import { AgentBar, AgentPanel } from "./components/Agents";
 import { FilePanel, PathMenuHost } from "./components/FilePanel";
 import { Composer } from "./components/Composer";
 import { StatusBar } from "./components/StatusBar";
+import { PlanPanel } from "./components/PlanPanel";
 import { ChatGPTWelcome, DialogHost, DropOverlay, EmptyPage, LightboxHost } from "./components/Overlays";
 import { ReviewBar, WIDTHS } from "./components/Review";
 import { TitleBar } from "./components/TitleBar";
@@ -35,6 +36,7 @@ function useTheme() {
 
 function Main() {
   const session = useStore(currentSession);
+  const inspectorOpen = useStore((s) => (s.agentPanel !== null && s.agentPanel.sessionId === s.currentId) || (s.filePanel !== null && s.filePanel.sessionId === s.currentId));
   const setDragging = useStore((s) => s.setDragging);
   const say = useStore((s) => s.say);
   const attachFiles = useStore((s) => s.attachFiles);
@@ -73,7 +75,12 @@ function Main() {
     >
       <Tabs />
       {/* keyed: Python numbers turns and blocks per conversation, so two conversations share ids */}
-      {session ? <Transcript key={session.id} session={session} /> : <EmptyPage />}
+      {session ? (
+        <div className="conversation-body">
+          <Transcript key={session.id} session={session} />
+          <PlanPanel key={`plan:${session.id}`} session={session} covered={inspectorOpen} />
+        </div>
+      ) : <EmptyPage />}
       {session && <AgentBar session={session} />}
       <Composer />
       <DropOverlay />

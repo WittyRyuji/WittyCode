@@ -462,17 +462,13 @@ def test_a_picture_is_refused_for_a_model_that_cannot_read_it_and_a_pdf_without_
     run(go())
 
 
-def test_a_turn_that_runs_out_of_steps_says_so(tmp_path, monkeypatch):
-    from desktop.core.chatgpt import controller as controller_module
-
-    real = controller_module.AgentLoop
-    monkeypatch.setattr(controller_module, "AgentLoop", lambda *args, **kwargs: real(*args, max_steps=2, **kwargs))
-
+def test_a_turn_that_runs_out_of_steps_says_so(tmp_path):
     async def go() -> None:
         with FakeResponses(token=ACCESS_TOKEN) as fake:
             where = str(tmp_path / "project")
             fake.script(*[call("list_dir", {"directory_path": where}, call_id=f"c{i}") for i in range(3)])
             engine, controller = await opened(tmp_path, fake)
+            engine.settings.max_steps = 2
             controller.send_prompt("keep going")
             await finish_turn(controller)
             turn = controller.transcript.turns[0]

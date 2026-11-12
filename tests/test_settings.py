@@ -36,6 +36,7 @@ def test_round_trip_keeps_every_field(tmp_path):
         hidden_models=["chatgpt:gpt-6-luna", "devin:swe-2-high"],
         chatgpt_compact=False,
         chatgpt_compact_at=70,
+        max_steps=240,
     )
     target = tmp_path / "nested" / "settings.json"
     save_settings(original, target)
@@ -78,6 +79,16 @@ def test_the_compaction_threshold_of_the_chatgpt_plan_defaults_to_85_percent_and
         assert settings_from_dict({"chatgpt_compact": value}).chatgpt_compact is True, value
     assert settings_from_dict({"chatgpt_compact": False}).chatgpt_compact is False
     assert settings_to_dict(AppSettings(chatgpt_compact=False, chatgpt_compact_at=60))["chatgpt_compact_at"] == 60
+
+
+def test_the_step_limit_defaults_to_80_and_accepts_larger_positive_integers():
+    from desktop.core.harness.loop import MAX_STEPS
+
+    assert settings_from_dict({}).max_steps == MAX_STEPS == 80
+    for value in (1, 200, 1000, 2**53 - 1):
+        assert settings_from_dict({"max_steps": value}).max_steps == value
+    for value in (0, -1, True, False, "200", 200.5, None, 2**53):
+        assert settings_from_dict({"max_steps": value}).max_steps == 80
 
 
 def test_archived_sessions_their_names_and_the_last_project_survive_the_file_and_bad_entries_fall_away(tmp_path):
