@@ -1,12 +1,13 @@
-"""Skills and custom slash commands: workflows kept in files, in the layout Factory's Droid uses, for every engine.
+"""Skills and custom slash commands: workflows kept in files, for every engine.
 
 A **skill** is a folder with a ``SKILL.md`` (front matter ``name`` and ``description``, then the instructions) and, beside it,
 whatever the workflow needs. A **custom command** is a Markdown file in a ``commands`` folder; ``/name arguments`` runs it with
-``$ARGUMENTS`` replaced. Both are found in the project (``.factory``, ``.agents``, ``.agent``, ``.claude``), in the user's
-folders (``~/.factory`` …) and inside the plugins installed under ``~/.factory/plugins`` (a folder holding
-``.factory-plugin/plugin.json`` or ``.claude-plugin/plugin.json``, with its own ``skills/`` and ``commands/``); the project wins
-over the user's, which wins over a plugin's, and the first of two skills of one name is the one that counts. A skill turned off
-(``enabled: false``, ``disabledSkills`` in either ``settings.json``) is left out.
+``$ARGUMENTS`` replaced. Both are found in the project and in the user's home folder, in WittyCode's own ``.wittycode`` first
+and then, read only, in the folders other agent applications use (``SKILL_FOLDERS`` / ``COMMAND_FOLDERS``), so skills written
+for those work here too; plugins of that layout (a folder holding ``.factory-plugin/plugin.json`` or ``.claude-plugin/plugin.json``,
+with its own ``skills/`` and ``commands/``) are read as well. The project wins over the user's, which wins over a plugin's, and
+the first of two skills of one name is the one that counts. A skill turned off (``enabled: false``, or ``disabledSkills`` in a
+``settings.json`` of that layout) is left out; reading those settings is a leftover the Roadmap removes.
 
 How they reach the model:
 
@@ -17,9 +18,7 @@ How they reach the model:
 * **WittyCode's own loop, by the model's choice**: the instructions list the skills (name and description) and the ``skill``
   tool loads one; the folders of the skills may be read without asking (``ToolContext.readable``).
 
-Not carried over from plugins: droids (subagents), hooks, output styles and MCP servers. The layout was read from Factory's
-documentation (docs.factory.ai: Skills, Custom Slash Commands, Plugins); no plugin was installed on the machine it was written
-on, so the plugin side is by that description only.
+Not carried over from plugins: subagents, hooks, output styles and MCP servers.
 """
 
 from __future__ import annotations
@@ -146,6 +145,12 @@ class Source:
     """The root of the plugin the folder belongs to (``${DROID_PLUGIN_ROOT}`` in its files)."""
 
 
+SKILL_FOLDERS = (".wittycode", ".agents", ".agent", ".claude", ".factory")
+"""The folders a project or the user keeps skills in: WittyCode's own first, then the ones other agent applications use, so
+skills written for those work here too (they are only read)."""
+COMMAND_FOLDERS = (".wittycode", ".factory")
+"""The same for custom commands (``commands/*.md``)."""
+
 USER_HOME: Path | None = None
 """Whose folders count as the user's (``~/.factory`` …): the real home folder unless a test says otherwise."""
 
@@ -233,8 +238,8 @@ def skill_sources(project: Path, home: Path | None = None) -> list[Source]:
     home = _home(home)
     out: list[Source] = []
     for folder in _repository_folders(project, home):
-        out += [Source("project", folder / part / "skills") for part in (".factory", ".agents", ".agent", ".claude")]
-    for part in (".factory", ".agents", ".agent", ".claude"):
+        out += [Source("project", folder / part / "skills") for part in SKILL_FOLDERS]
+    for part in SKILL_FOLDERS:
         out.append(Source("personal", home / part / "skills"))
     out += [Source("plugin", root / "skills", root) for root in _plugins(home)]
     return out
@@ -242,8 +247,8 @@ def skill_sources(project: Path, home: Path | None = None) -> list[Source]:
 
 def command_sources(project: Path, home: Path | None = None) -> list[Source]:
     home = _home(home)
-    out = [Source("project", folder / ".factory" / "commands") for folder in _repository_folders(project, home)]
-    out.append(Source("personal", home / ".factory" / "commands"))
+    out = [Source("project", folder / part / "commands") for folder in _repository_folders(project, home) for part in COMMAND_FOLDERS]
+    out += [Source("personal", home / part / "commands") for part in COMMAND_FOLDERS]
     out += [Source("plugin", root / "commands", root) for root in _plugins(home)]
     return out
 

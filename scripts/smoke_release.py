@@ -1,11 +1,11 @@
-r"""Starts the application the way the release does, offscreen, on a recorded conversation, and checks that it comes up.
+r"""Starts the application the way the release does, offscreen, and checks that it comes up.
 
-    <python> scripts\smoke_release.py [--fixture fixtures\stream_turn.jsonl] [--timeout 60]
+    <python> scripts\smoke_release.py [--timeout 60]
 
 Run it with the interpreter that is being checked (the release's own ``python\python.exe``, or the development one). It builds
-the real application in replay mode (no droid, no model, nothing written to %APPDATA%), loads the page into Qt WebEngine, waits
-for the channel to the page to connect and for the replayed answer to be drawn, then shuts the window down. Exit code 0: it came
-up; anything else: what is missing is printed.
+the real application with settings in a temporary folder (no model is called, nothing is written to %APPDATA%), loads the page
+into Qt WebEngine, waits for the channel to the page to connect and for the message box to be drawn, then shuts the window
+down. Exit code 0: it came up; anything else: what is missing is printed.
 """
 
 from __future__ import annotations
@@ -27,20 +27,18 @@ ROOT = Path(__file__).resolve().parents[1]
 
 async def wait_until(check, what: str, timeout: float) -> None:
     end = time.monotonic() + timeout
-    while True:
+    while time.monotonic() < end:
         value = check()
         if asyncio.iscoroutine(value):
             value = await value
         if value:
             return
-        if time.monotonic() > end:
-            raise TimeoutError(f"timed out waiting for {what}")
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0.1)
+    raise TimeoutError(f"timed out waiting for {what}")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--fixture", default=str(ROOT / "fixtures" / "stream_turn.jsonl"))
     parser.add_argument("--timeout", type=float, default=60.0)
     given = parser.parse_args()
 
@@ -49,8 +47,11 @@ def main() -> int:
     from desktop.ui import app as wittycode
 
     print(f"python {sys.version.split()[0]} at {sys.executable}")
-    project = tempfile.mkdtemp(prefix="wc-smoke-")
-    options, qt_args = wittycode.parse_args(["--replay", given.fixture, "--speed", "50", "--project", project])
+    folder = Path(tempfile.mkdtemp(prefix="wc-smoke-"))
+    project = folder / "project"
+    project.mkdir()
+    os.environ["WITTYCODE_SETTINGS"] = str(folder / "settings.json")  # (the API providers' files go next to it too)
+    options, qt_args = wittycode.parse_args(["--settings", str(folder / "settings.json"), "--project", str(project)])
     context = wittycode.build_application(options, qt_args)
     window = context.window
     failure: list[str] = []
@@ -64,10 +65,8 @@ def main() -> int:
             await wait_until(lambda: window.backend.connected, "the page to ask for its state", given.timeout)
             print("channel connected")
             await wait_until(lambda: window.eval_js("document.querySelectorAll('.titlebar').length > 0"), "the page to draw its title bar", given.timeout)
-            created = await context.core.call("session.new", {"projectId": project})
-            await context.core.call("session.send", {"id": created["id"], "text": "smoke"})
-            await wait_until(lambda: window.eval_js("document.querySelectorAll('.block').length > 1"), "the replayed conversation to be drawn", given.timeout)
-            print("conversation drawn")
+            await wait_until(lambda: window.eval_js("!document.querySelector('.boot') && !!document.querySelector('.input')"), "the message box", given.timeout)
+            print("message box drawn")
         except Exception as error:
             failure.append(f"{type(error).__name__}: {error}")
             try:

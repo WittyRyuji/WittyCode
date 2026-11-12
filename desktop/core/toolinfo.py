@@ -72,8 +72,7 @@ MEMORY_TOOLS = ("memory_search", "memory_read", "memory_write", "memory_update",
 
 def memory_tool(name: str) -> str | None:
     """Which tool of the shared memory a call is (``memory_write`` …). The engines name an MCP tool each their own way:
-    Droid ``wittycode-memory___memory_write``, Codex ``wittycode-memory/memory_write``, Devin
-    ``mcp__wittycode-memory__memory_write``."""
+    ``wittycode-memory___memory_write``, ``wittycode-memory/memory_write``, ``mcp__wittycode-memory__memory_write`` (Devin)."""
     if MEMORY_SERVER not in name:
         return None
     return next((tool for tool in MEMORY_TOOLS if name.endswith(tool)), None)
@@ -166,7 +165,7 @@ WORKING_STATE_LABELS: dict[str, str] = {
 
 
 def working_label(state: str | None, *, stopping: bool = False) -> str:
-    """Chinese label for a Droid working state (``WorkingState.value``)."""
+    """Chinese label for an engine's working state."""
     if stopping:
         return "正在停止…"
     return WORKING_STATE_LABELS.get(state or "", "处理中…")
@@ -225,7 +224,7 @@ def display_path(path: str, limit: int = 64) -> str:
 
 
 _EXIT_CODE = re.compile(r"\[Process exited with code (-?\d+)\]|^Exit code: (-?\d+)[ \t]*$", re.MULTILINE)
-"""Droid's Execute result ends with the first form; WittyCode's own shell tool (``harness/shell``) with the second."""
+"""Some agents' shell results end with the first form; WittyCode's own shell tool (``harness/shell``) with the second."""
 
 
 def exit_code(output: str | None) -> int | None:

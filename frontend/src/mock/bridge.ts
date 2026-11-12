@@ -1,18 +1,16 @@
 // Stands in for the Python side in the design page: the same calls as `Bridge`, answered after a believable delay.
 
 import type { Bridge, TestResult } from "../bridge";
-import type { ApiProvider, ChatGPTAccount, CodexAccount, DevinAccount, EnvState, ProviderDraft } from "../types";
+import type { ApiProvider, ChatGPTAccount, DevinAccount, EnvState, ProviderDraft } from "../types";
 import { envNameOf } from "../lib/models";
-import { CHATGPT_ACCOUNT, CODEX_ACCOUNT, DEVIN_ACCOUNT, FACTORY_ACCOUNT } from "./data";
+import { CHATGPT_ACCOUNT, DEVIN_ACCOUNT } from "./data";
 import { mockImporter } from "./importer";
 import { mockMemory } from "./memory";
 
 const sleep = (ms: number) => new Promise<void>((r) => window.setTimeout(r, ms));
 
-let codex: CodexAccount = { ...CODEX_ACCOUNT };
 let devin: DevinAccount = { ...DEVIN_ACCOUNT };
 let chatgpt: ChatGPTAccount = { ...CHATGPT_ACCOUNT };
-let loginCancelled = false;
 let devinCancelled = false;
 let chatgptCancelled = false;
 let chatgptAttempt = 0;
@@ -37,34 +35,6 @@ function fakeServer(d: ProviderDraft): TestResult {
 }
 
 export const mockBridge: Bridge = {
-  factory: {
-    account: async () => ({ ...FACTORY_ACCOUNT }),
-  },
-  codex: {
-    account: async () => ({ ...codex }),
-    async login() {
-      loginCancelled = false;
-      codex = { ...codex, auth: "signing-in" };
-      await sleep(2600); // the browser is open, the user signs in
-      if (loginCancelled) return { ...codex };
-      codex = { ...CODEX_ACCOUNT, enabled: true };
-      return { ...codex };
-    },
-    async cancelLogin() {
-      loginCancelled = true;
-      codex = { ...codex, auth: "signed-out" };
-      return { ...codex };
-    },
-    async logout() {
-      await sleep(300);
-      codex = { ...codex, auth: "signed-out", email: undefined, plan: undefined, limits: [] };
-      return { ...codex };
-    },
-    async setEnabled(on) {
-      codex = { ...codex, enabled: on };
-      return { ...codex };
-    },
-  },
   devin: {
     account: async () => ({ ...devin }),
     async login() {

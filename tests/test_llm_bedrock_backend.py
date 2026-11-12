@@ -34,7 +34,7 @@ def entry(kind: str = "bedrock-converse", base: str = "", **bedrock: Any) -> dic
 
 
 def store_for(path: Path, environ: dict[str, str] | None = None, **more: Any) -> ProviderStore:
-    return ProviderStore(factory_settings=path, sidecar=path.with_name("providers.json"), environ=KEYS if environ is None else environ, registry_env=lambda: {}, aws_home=path.parent / "aws-home", **more)
+    return ProviderStore(models_file=path, sidecar=path.with_name("providers.json"), environ=KEYS if environ is None else environ, registry_env=lambda: {}, aws_home=path.parent / "aws-home", **more)
 
 
 def request_for(store: ProviderStore, reasoning: str | None = None) -> dict:
@@ -262,9 +262,9 @@ def test_a_credentials_command_that_prints_json_signs_the_request(tmp_path):
 def test_a_model_that_was_taken_out_of_the_settings_is_told_to_the_user(tmp_path):
     store = store_for(write_settings(tmp_path, entry()))
     request = request_for(store)
-    store.factory_settings.write_text(json.dumps({"customModels": []}), encoding="utf-8")
+    store.models_file.write_text(json.dumps({"customModels": []}), encoding="utf-8")
     with pytest.raises(ChatGPTError, match="已经不在 API Provider"):
-        run(ask(ApiBackend(store_for(store.factory_settings)), request))
+        run(ask(ApiBackend(store_for(store.models_file)), request))
 
 
 def test_the_openai_wire_without_an_endpoint_goes_to_mantle_and_is_signed_for_it(tmp_path):

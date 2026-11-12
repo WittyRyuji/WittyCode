@@ -5,10 +5,11 @@
 ## 命令
 
 - 只用 Python 3.11.x：`.\.venv\Scripts\python.exe`（`_pyguard` 会拒绝其他版本）。
-- 测试（不调用模型）：`.\.venv\Scripts\python.exe -m pytest tests -q -p no:cacheprovider`。全量约 8 分钟，放到后台跑、输出重定向到文件。`tests/test_app_e2e.py` 是整机测试（真 Qt 窗口 + 真 React 页 + 假引擎），页面没构建时自动跳过。
+- 测试（不调用模型）：`.\.venv\Scripts\python.exe -m pytest tests -q -p no:cacheprovider`。全量约 8 分钟，放到后台跑、输出重定向到文件。`tests/test_app_e2e.py` 是整机测试（真 Qt 窗口 + 真 React 页 + 自有循环接本机假 Responses 服务，需要第二个引擎时用假 Devin），页面没构建时自动跳过；CI 不跑它（`--ignore`），只在本地跑，变异测试也只在本地跑。CI 用 `constraints.txt` 固定依赖版本。
 - 构建页面（改 `frontend/` 后必须做，否则应用和 e2e 跑的是旧页面）：`cd frontend; npm run build:app`。界面检查：`node frontend/scripts/check.mjs`（模拟数据）、`node frontend/scripts/check-live.mjs`（接真后端，不调用模型）、`npm run unit`、`npm run typecheck`。
 - 启动：`.\.venv\Scripts\python.exe -m desktop`；无控制台：`.\.venv\Scripts\pythonw.exe WittyCode.pyw`。
-- 离线回放（不花额度）：`.\.venv\Scripts\python.exe -m desktop --replay fixtures\stream_turn.jsonl --speed 20 --project .`
+- 自己开窗口试用时把设置指到 `sandbox/`：`.\.venv\Scripts\python.exe -m desktop --settings sandbox	ry\settings.json --project .`（不动 `%APPDATA%\WittyCode\`）。
+- 发布包冒烟（离屏，不调用模型，设置在临时目录）：`$env:PYTHONPATH='.'; .\.venv\Scripts\python.exe scripts\smoke_release.py`。
 - 真实窗口冒烟（不调用模型，会在屏幕上开一个窗口再自己关掉）：`.\.venv\Scripts\python.exe sandbox\real_window_smoke.py`
 - README 截图重拍（演示数据，不含真实对话）：`cd frontend; npm run build; node scripts/readme-shots.mjs`
 - 发布包：先 `cd frontend; npm run build:app`，再 `.\.venv\Scripts\python.exe scripts\build_release.py`（`--no-smoke` / `--no-zip` / `--keep-work`），产物在 `dist/`。包的结构和验证见 `docs/project.md`「发布包」。
@@ -18,6 +19,7 @@
 
 - 变异脚本 `sandbox/mutate_*.py` 有两种：**在副本里跑**的（`mutate_llm.py`、`mutate_commands.py`、`mutate_harness_g*.py`……，有 `--check`）可以直接跑；**直接改工作树**的老脚本（`mutate_compaction.py`、`mutate_chatgpt.py`、`mutate_curate.py`……）没有 `--check` 保护，`import` 就开跑，被超时杀掉会把变异留在源码里：要跑就完整地跑、不设短超时，最好在仓库的临时副本里跑，跑完用全量 pytest 确认工作树完好。只读地查模式串用 `sandbox/check_old_patterns.py`。细节见 `docs/knowledge.md`「变异脚本两种」。
 - 写 e2e 测试前先读 `docs/knowledge.md` 的「e2e 踩出的前三个坑」「e2e 的第四个坑」；崩溃排查见「崩溃排查流程（Windows）」。
+- 测试**不许碰用户的目录**：`tests/conftest.py` 的 autouse `_no_files_of_the_real_user` 把每个测试的 `WITTYCODE_SETTINGS` 指到临时目录；测默认位置的测试自己再 `monkeypatch` `WITTYCODE_SETTINGS` 和 `Path.home`（见 `docs/knowledge.md` 第 67 条）。
 - 往工具声明或系统提示里加东西会抬高每个请求的固定 token，按窗口大小调好的压缩测试可能要跟着调（`test_chatgpt_compaction.roomy`）。
 
 ## 环境

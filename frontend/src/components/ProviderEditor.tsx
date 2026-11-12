@@ -33,7 +33,7 @@ function EnvLine({ name, state, onRecheck }: { name: string; state: EnvState | n
     <div className={`envline ${state}`}>
       <div className="envline-top">
         <span className="pdot" />
-        {state === "set" && <span>已设置：WittyCode 启动的 Droid 读得到 <code>{name}</code>。</span>}
+        {state === "set" && <span>已设置：WittyCode 读得到 <code>{name}</code>。</span>}
         {state === "pending" && <span>已写进你的用户环境变量，但 WittyCode 是在那之前启动的：<b>重启 WittyCode</b> 后才读得到。</span>}
         {state === "unset" && <span>没有找到环境变量 <code>{name}</code>。在 PowerShell 里运行下面这行（把密钥换成你的），然后重启 WittyCode：</span>}
         <button type="button" className="btn small" onClick={onRecheck}>
@@ -67,7 +67,7 @@ const BEDROCK_METHODS = [
   { value: "environment-api-key", label: "Bedrock API Key", hint: "读环境变量 AWS_BEARER_TOKEN_BEDROCK" },
 ] as const;
 
-/** Efforts a model row can default to: Droid offers Off / Low / Medium / High for models it does not know. */
+/** Efforts a model row can default to: Off / Low / Medium / High for models nobody knows more about. */
 const ROW_EFFORTS = REASONING.filter((r) => ["off", "low", "medium", "high"].includes(r.value));
 
 let rowCounter = 0;
@@ -292,7 +292,7 @@ export function ProviderEditor({ editId }: { editId: string }) {
             )}
             {d.keyMode === "command" && (
               <>
-                <Stack label="命令" error={shown("key")} hint="命令输出的内容就是密钥，Droid 在每次请求时运行它并缓存。适合发短期令牌的网关。">
+                <Stack label="命令" error={shown("key")} hint="命令输出的内容就是密钥，WittyCode 在请求时运行它并缓存。适合发短期令牌的网关。">
                   <TextInput label="命令" mono value={d.keyHint} onChange={(v) => set("keyHint", v)} placeholder="C:\tools\mint-gateway-token.cmd" invalid={!!shown("key")} />
                 </Stack>
                 <Stack label="刷新间隔（毫秒）" hint="默认 300000（5 分钟）；收到 401 时会立刻再取一次。">
@@ -411,7 +411,7 @@ export function ProviderEditor({ editId }: { editId: string }) {
         )}
       </section>
 
-      <p className="pe-note">保存到 <code>~/.factory/settings.json</code> 的 <code>customModels</code>（Droid 的格式，Droid CLI 和 Factory 桌面版也能读）。这些模型由 WittyCode 直接请求你的接口，不经过 Droid，计费走你自己的账号；Bedrock 用 AWS 凭据签名请求（或 Bedrock API Key）。</p>
+      <p className="pe-note">保存到 WittyCode 自己的 <code>models.json</code>（<code>customModels</code> 格式）。这些模型由 WittyCode 直接请求你的接口，计费走你自己的账号；Bedrock 用 AWS 凭据签名请求（或 Bedrock API Key）。</p>
 
       <footer className="pe-foot">
         <button type="button" className="btn" disabled={test.busy} onClick={runTest}>

@@ -22,7 +22,8 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from desktop.core.codex.rpc import INTERNAL_ERROR, CodexRpcError, JsonRpcClient
+from desktop.core.engine_errors import EngineRpcError
+from desktop.core.jsonrpc import INTERNAL_ERROR, JsonRpcClient
 
 log = logging.getLogger("desktop.devin.rpc")
 
@@ -72,7 +73,7 @@ class AcpClient(JsonRpcClient):
             details = error if isinstance(error, Mapping) else {"message": str(error)}
             code = details.get("code")
             future.set_exception(
-                CodexRpcError(
+                EngineRpcError(
                     code if isinstance(code, int) and not isinstance(code, bool) else INTERNAL_ERROR,
                     str(details.get("message") or ""),
                     details.get("data"),

@@ -7,7 +7,7 @@ import { CodeBlock } from "./Markdown";
 import { Diff } from "./Diff";
 
 const IMPACT: Record<string, string> = { low: "低", medium: "中", high: "高" };
-const WHO = { droid: "Droid", codex: "Codex", devin: "Devin", chatgpt: "ChatGPT Plan" } as const;
+const WHO = { devin: "Devin", chatgpt: "ChatGPT Plan" } as const;
 
 export function PermissionCard({ sessionId, prompt }: { sessionId: string; prompt: PermissionPrompt }) {
   const answer = useStore((s) => s.answerPermission);
@@ -48,7 +48,7 @@ export function QuestionCard({ sessionId, prompt }: { sessionId: string; prompt:
   const answer = useStore((s) => s.answerQuestion);
   const who = useStore((s) => {
     const session = s.sessions[sessionId];
-    if (!session) return "Droid";
+    if (!session) return "模型";
     const model = findModel(s.models, session.settings.model);
     const label = model ? engineLabel(model.source) : WHO[engineOfSession(s.models, session)];
     return label === "API" ? "API 模型" : label;
@@ -69,7 +69,7 @@ export function QuestionCard({ sessionId, prompt }: { sessionId: string; prompt:
   const submit = () => {
     setTried(true);
     if (prompt.questions.some((_, i) => missing(i))) return;
-    // A multi-select answer goes as the list of choices (Droid joins them its own way).
+    // A multi-select answer goes as the list of choices (the engine joins them its own way).
     answer(sessionId, prompt.id, prompt.questions.map((q, i) => (q.multiSelect ? value(i) : value(i).join("、"))));
   };
 

@@ -31,7 +31,7 @@ def settings_with(tmp_path: Path, base_url: str, **entry: Any) -> Path:
 
 def store_for(path: Path, environ: dict[str, str] | None = None, registry: dict[str, str] | None = None, run_command=None) -> ProviderStore:
     return ProviderStore(
-        factory_settings=path, sidecar=path.with_name("providers.json"), environ={"TEST_API_KEY": "sk-test-1"} if environ is None else environ,
+        models_file=path, sidecar=path.with_name("providers.json"), environ={"TEST_API_KEY": "sk-test-1"} if environ is None else environ,
         registry_env=lambda: registry or {}, run_command=run_command,
     )
 

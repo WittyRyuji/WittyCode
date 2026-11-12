@@ -1,59 +1,57 @@
-"""The application without Factory: only a ChatGPT plan is signed in, there is no droid.exe on the computer (and no Codex, no
-Devin). That is a way to use WittyCode, not an error: it starts quietly, offers what there is, and starts conversations of it."""
+"""A fresh install: no default model chosen yet, only what the user signed in to. It starts quietly, offers what there is,
+starts conversations of it, and says what to do when there is nothing yet."""
 
 from __future__ import annotations
 
 import asyncio
 
-from desktop.core.droid_locator import DroidNotFoundError
-from tests.chatgpt_support import ACCESS_TOKEN
+import pytest
+
+from desktop.core.app_core import AppError
+from desktop.core.settings import AppSettings
+from tests.app_support import ready_core
+from tests.chatgpt_support import ACCESS_TOKEN, make_engine
 from tests.fake_responses import FakeResponses, say
-from tests.fakes import FakeFactory, until
-from tests.test_app_chatgpt import answer_of, chatgpt_core, meta
+from tests.fakes import until
+from tests.test_app_chatgpt import answer_of, meta
 
 
 def run(coro):
     return asyncio.run(coro)
 
 
-class NoDroid(FakeFactory):
-    def __init__(self, error: Exception | None = None) -> None:
-        super().__init__()
-        self.error = error or DroidNotFoundError("找不到 droid：请安装 Factory 桌面版，或在设置中指定 droid.exe 的路径，或设置环境变量 WITTYCODE_DROID_EXECUTABLE。")
-
-    async def list_models(self, cwd):
-        raise self.error
-
-
 def notices(events) -> list[str]:
     return [payload["text"] for payload in events.of("notice")]
 
 
-def test_without_factory_it_starts_quietly_and_the_first_model_is_the_plans(tmp_path, monkeypatch):
-    monkeypatch.delenv("WITTYCODE_DROID_EXECUTABLE", raising=False)
+async def fresh_core(tmp_path, fake):
+    settings = AppSettings(think_chinese=False)
+    engine = make_engine(tmp_path, fake, settings=settings)
+    core, _, events, _, _ = await ready_core(tmp_path, chatgpt_engine=engine, settings=settings)
+    return core, events
 
+
+def test_a_fresh_install_starts_quietly_and_the_first_model_is_the_plans(tmp_path):
     async def scenario():
         with FakeResponses(token=ACCESS_TOKEN) as fake:
-            core, _, events, _ = await chatgpt_core(tmp_path, fake, factory=NoDroid())
-            assert not [text for text in notices(events) if "模型列表" in text or "droid" in text.lower()], "no Factory is not a failure"
+            core, events = await fresh_core(tmp_path, fake)
+            assert not [text for text in notices(events) if "模型列表" in text], "nothing went wrong"
             defaults = events.last("models")["defaults"]
             assert defaults["model"] == "chatgpt:gpt-6.1-sol", "the first model there is"
-            assert defaults["autonomy"] in ("ask", "code", "full"), "the plan's permission scale, not Droid's"
+            assert defaults["autonomy"] in ("ask", "code", "full"), "the own loop's permission scale"
             await core.shutdown()
 
     run(scenario())
 
 
-def test_a_conversation_started_without_naming_a_model_is_the_plans_and_gets_an_answer(tmp_path, monkeypatch):
-    monkeypatch.delenv("WITTYCODE_DROID_EXECUTABLE", raising=False)
-
+def test_a_conversation_started_without_naming_a_model_is_the_plans_and_gets_an_answer(tmp_path):
     async def scenario():
         with FakeResponses(token=ACCESS_TOKEN) as fake:
             fake.script(say("Hello from the plan."))
-            core, factory, events, _ = await chatgpt_core(tmp_path, fake, factory=NoDroid())
+            core, events = await fresh_core(tmp_path, fake)
             cid = (await core.call("session.new", {"projectId": str(tmp_path / "proj")}))["id"]
             await until(lambda: meta(events, cid).get("mark") == "ready")
-            assert meta(events, cid)["engine"] == "chatgpt" and not factory.sessions, "no droid process was needed"
+            assert meta(events, cid)["engine"] == "chatgpt"
             await core.call("session.send", {"id": cid, "text": "hi"})
             await until(lambda: "Hello from the plan." in answer_of(events, cid))
             await core.shutdown()
@@ -61,51 +59,28 @@ def test_a_conversation_started_without_naming_a_model_is_the_plans_and_gets_an_
     run(scenario())
 
 
-def test_a_droid_path_the_user_named_that_does_not_exist_is_said(tmp_path, monkeypatch):
-    monkeypatch.delenv("WITTYCODE_DROID_EXECUTABLE", raising=False)
-
+def test_with_nothing_signed_in_a_new_conversation_says_what_to_do(tmp_path):
     async def scenario():
-        with FakeResponses(token=ACCESS_TOKEN) as fake:
-            core, _, events, _ = await chatgpt_core(tmp_path, fake, factory=NoDroid(DroidNotFoundError("设置中指定的 droid 路径不存在：C:\\nope\\droid.exe")))
-            assert notices(events) == [], "nothing was named yet"
-            core.settings.droid_path = "C:\\nope\\droid.exe"
-            await core._load_models()
-            assert any("读取模型列表失败" in text and "C:\\nope\\droid.exe" in text for text in notices(events))
-            await core.shutdown()
+        core, _, events, _, _ = await ready_core(tmp_path, plan=False)
+        assert events.last("models")["defaults"]["model"] == ""
+        with pytest.raises(AppError, match="还没有可用的模型"):
+            await core.call("session.new", {"projectId": str(tmp_path / "proj")})
+        assert core.order == [], "no tab was opened"
+        await core.shutdown()
 
     run(scenario())
 
 
-def test_the_variable_that_names_droid_counts_as_naming_it(tmp_path, monkeypatch):
-    monkeypatch.setenv("WITTYCODE_DROID_EXECUTABLE", "C:\\nope\\droid.exe")
+def test_a_default_model_of_an_engine_that_is_gone_falls_back_to_what_there_is(tmp_path):
+    """A settings file from an older version may name a model no engine of this one runs."""
 
     async def scenario():
         with FakeResponses(token=ACCESS_TOKEN) as fake:
-            _, _, events, _ = await chatgpt_core(tmp_path, fake, factory=NoDroid(DroidNotFoundError("环境变量 WITTYCODE_DROID_EXECUTABLE 指向的文件不存在")))
-            assert any("读取模型列表失败" in text for text in notices(events))
-
-    run(scenario())
-
-
-def test_a_droid_that_fails_in_another_way_is_said_whatever_was_named(tmp_path, monkeypatch):
-    monkeypatch.delenv("WITTYCODE_DROID_EXECUTABLE", raising=False)
-
-    async def scenario():
-        with FakeResponses(token=ACCESS_TOKEN) as fake:
-            _, _, events, _ = await chatgpt_core(tmp_path, fake, factory=NoDroid(RuntimeError("droid crashed")))
-            assert any("读取模型列表失败" in text and "droid crashed" in text for text in notices(events))
-
-    run(scenario())
-
-
-def test_when_factory_is_there_its_first_model_is_still_the_default_and_hiding_all_of_it_is_a_choice(tmp_path):
-    async def scenario():
-        with FakeResponses(token=ACCESS_TOKEN) as fake:
-            core, _, events, _ = await chatgpt_core(tmp_path, fake)
-            assert events.last("models")["defaults"]["model"] == "claude-haiku-5-5"
-            factory_ids = [m["id"] for m in events.last("models")["models"] if m["source"] == "factory"]
-            await core.call("models.setVisible", {"ids": factory_ids, "visible": False})
-            assert events.last("defaults")["defaults"]["model"] == "", "Factory's models are there and hidden: Droid picks, as before"
+            settings = AppSettings(think_chinese=False, default_model="claude-haiku-5-5")
+            engine = make_engine(tmp_path, fake, settings=settings)
+            core, _, events, _, _ = await ready_core(tmp_path, chatgpt_engine=engine, settings=settings)
+            assert events.last("models")["defaults"]["model"] == "chatgpt:gpt-6.1-sol"
+            assert core.settings.default_model == "claude-haiku-5-5", "the setting itself is left as it was"
             await core.shutdown()
 
     run(scenario())

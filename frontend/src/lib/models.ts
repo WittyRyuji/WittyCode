@@ -2,13 +2,12 @@ import type { ApiProvider, Engine, ModelChoice, Session } from "../types";
 
 /** The engine that runs a model of this source. An API provider's models are run by the application's own loop, the engine
  *  that also runs the ChatGPT plan's (Bedrock's too: it signs its own requests with the user's AWS credentials). */
-export const engineOfSource = (source: string): Engine =>
-  source === "codex" ? "codex" : source === "devin" ? "devin" : source === "chatgpt" || source.startsWith("api:") ? "chatgpt" : "droid";
+export const engineOfSource = (source: string): Engine => (source === "devin" ? "devin" : "chatgpt");
 
-const ENGINE_NAMES: Record<Engine, string> = { droid: "Droid", codex: "Codex", devin: "Devin", chatgpt: "ChatGPT Plan" };
+const ENGINE_NAMES: Record<Engine, string> = { devin: "Devin", chatgpt: "ChatGPT Plan" };
 
-/** What the page calls the place a model runs. An API provider's model is run by a droid process, but to the user it is
- *  "API" (the word on the model chip), not Factory's Droid. */
+/** What the page calls the place a model runs. An API provider's model runs in the own loop, but to the user it is
+ *  "API" (the word on the model chip). */
 export const engineLabel = (source: string): string => (source.startsWith("api:") ? "API" : ENGINE_NAMES[engineOfSource(source)]);
 
 export function findModel(models: ModelChoice[], id: string): ModelChoice | undefined {
@@ -19,13 +18,11 @@ export function findModel(models: ModelChoice[], id: string): ModelChoice | unde
 export function engineOfSession(models: ModelChoice[], s: Pick<Session, "settings" | "engine">): Engine {
   if (s.engine) return s.engine;
   const m = findModel(models, s.settings.model);
-  return m ? engineOfSource(m.source) : "droid";
+  return m ? engineOfSource(m.source) : "chatgpt";
 }
 
-/** `Codex` / `Devin` / `ChatGPT Plan` / `OpenRouter` / "" (Factory's own models carry no label): what the sidebar and the model chip add. */
+/** `Devin` / `ChatGPT Plan` / `OpenRouter` / "": what the sidebar and the model chip add. */
 export function sourceLabel(source: string, providers: ApiProvider[]): string {
-  if (source === "factory") return "";
-  if (source === "codex") return "Codex";
   if (source === "devin") return "Devin";
   if (source === "chatgpt") return "ChatGPT Plan";
   return providers.find((p) => `api:${p.id}` === source)?.name.replace(/[（(].*$/, "") ?? "API";
@@ -50,7 +47,7 @@ export function envHintOf(typed: string): string {
   return name ? `\${${name}}` : "";
 }
 
-/** The little tag on the model chip: where the model is billed, when that is not Factory. */
+/** The little tag on the model chip: where the model is billed. */
 export function sourceTag(source: string): string {
-  return source === "factory" ? "" : source === "codex" || source === "devin" || source === "chatgpt" ? "订阅" : "API";
+  return source === "devin" || source === "chatgpt" ? "订阅" : "API";
 }

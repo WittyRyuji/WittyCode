@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from desktop.core.attachments import IMAGE, PDF, TEXT, Attachment, sniff_image
-from desktop.core.codex.items import (
+from desktop.core.engine_items import (
     APPLY_PATCH,
     CREATE,
     EDIT,

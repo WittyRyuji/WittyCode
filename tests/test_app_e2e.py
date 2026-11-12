@@ -1,7 +1,8 @@
-"""The whole application: the real React page in the real Qt window, the real application core, fake Droid / Codex sessions.
+"""The whole application: the real React page in the real Qt window, the real application core, WittyCode's own loop on the
+loopback ChatGPT Plan fake (and the fake Devin where a second engine is needed).
 
 Everything the user does is done the way a user does it: Qt mouse and key events into the page, the clipboard, the window.
-(Offscreen Qt, no droid process, no model call.)
+(Offscreen Qt, no model call.)
 """
 
 from __future__ import annotations
@@ -11,30 +12,90 @@ import json
 import time
 
 import pytest
-from droid_sdk import ModelInfo, ModelProvider, ReasoningEffort, ToolConfirmationOutcome
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication, QImage
 
-from desktop.core.session_manager import SessionState
+from desktop.core.session_state import SessionState
+from tests.devin_support import make_engine as make_devin
 from tests.e2e_support import open_rig
+from tests.fake_responses import call, say, usage
 from tests.fakes import until
-from tests.support import complete, delta, permission_request, saved_session, success, tiny_png, tool_call, tool_result, usage
+from tests.support import tiny_png
 from tests.ui_support import release, run, wait_for
 
 pytestmark = pytest.mark.ui
 
 
-async def new_conversation(rig, *, tab_count: int = 1):
+def user_parts(request):
+    messages = [item for item in request["input"] if item.get("type") == "message" and item.get("role") == "user"]
+    return messages[-1]["content"] if messages else []
+
+
+def user_text(request) -> str:
+    parts = user_parts(request)
+    return parts[0]["text"] if parts else ""
+
+
+class Model:
+    """The model behind the own loop, turn by turn: each answer is scripted before the message goes out and waits
+    (``("hold", key)``) until the test lets it go, so the page can be looked at while the turn runs."""
+
+    def __init__(self, rig) -> None:
+        self.rig = rig
+        self.plan = rig.plan
+        self.keys: list[str] = []
+        self.released = 0
+
+    def next(self, *events, hold: bool = True) -> None:
+        """The answer to the next request the model gets (several requests: several calls)."""
+        if hold:
+            key = f"t{len(self.keys) + 1}-{id(self)}"
+            self.keys.append(key)
+            self.plan.script([("hold", key), *[e for group in events for e in group]])
+        else:
+            self.plan.script([e for group in events for e in group])
+
+    def go(self) -> None:
+        """Let the oldest held answer through."""
+        self.plan.release(self.keys[self.released])
+        self.released += 1
+
+    def go_all(self) -> None:
+        while self.released < len(self.keys):
+            self.go()
+
+    @property
+    def requests(self):
+        return self.plan.requests
+
+    @property
+    def prompts(self) -> list[str]:
+        return [user_text(r) for r in self.plan.requests]
+
+    async def asked(self, count: int = 1, timeout: float = 10.0) -> None:
+        await until(lambda: len(self.plan.requests) >= count, timeout=timeout)
+
+
+async def new_conversation(rig, *, tab_count: int = 1, autonomy: str | None = None) -> Model:
     """A conversation opened the way the page does it once a first message is sent (the page opens none before that)."""
-    await rig.core.call("session.new", {"projectId": str(rig.project)})
+    await rig.core.call("session.new", {"projectId": str(rig.project), **({"autonomy": autonomy} if autonomy else {})})
     await rig.wait_for(".tab", tab_count)
     await rig.wait_text(".statusbar .st-left", "就绪")
-    return rig.factory.sessions[-1]
+    return Model(rig)
+
+
+async def finish(rig, model: Model | None = None) -> None:
+    if model is not None:
+        model.go_all()
+    await rig.finish()
+
+
+SAVED = [("s-1", "修复点击闪烁", 5), ("s-2", "附件功能设计", 1500)]
 
 
 def test_it_starts_with_the_saved_sessions_and_nothing_made_up(qapp, loop, tmp_path):
     async def scenario():
-        rig = await open_rig(tmp_path, saved=[saved_session("s-1", "修复点击闪烁", minutes_ago=5), saved_session("s-2", "附件功能设计", minutes_ago=1500)])
+        rig = await open_rig(tmp_path, saved=SAVED)
         await rig.wait_for(".srow", 2)
         titles = await rig.texts(".srow .stitle")
         assert titles == ["修复点击闪烁", "附件功能设计"], "newest first"
@@ -53,25 +114,36 @@ def test_chinese_and_english_mixed_can_be_typed_and_arrive_unchanged(qapp, loop,
 
     async def scenario():
         rig = await open_rig(tmp_path)
-        droid = await new_conversation(rig)
-        await rig.send("你好 world 再见，Droid！")
-        await until(lambda: droid.active is not None)
-        assert droid.streams[-1].prompt == "你好 world 再见，Droid！"
+        model = await new_conversation(rig)
+        model.next(say("好的"))
+        await rig.send("你好 world 再见，WittyCode！")
+        await model.asked()
+        assert model.prompts[-1] == "你好 world 再见，WittyCode！"
         await rig.wait_for(".block.user")
-        assert await rig.text(".block.user .body") == "你好 world 再见，Droid！"
-        droid.active.push(delta("好的", "m1"), complete("m1"), success("好的"))
-        droid.active.end()
+        assert await rig.text(".block.user .body") == "你好 world 再见，WittyCode！"
+        model.go()
         await rig.wait_text(".statusbar .st-left", "就绪")
-        await rig.finish()
+        await finish(rig, model)
 
     run(loop, scenario())
 
 
+def devin_prompts(harness) -> list[str]:
+    return [request["prompt"][0]["text"] for request in harness.requests("session/prompt")]
+
+
+async def devin_listed(rig) -> None:
+    """Until Devin's models are in the list (listing them opens a scratch session of its own: not at the same time as the test's)."""
+    await until(lambda: any(m.get("source") == "devin" for m in rig.core.catalog.models), timeout=20)
+
+
 def test_you_can_type_and_send_while_the_session_is_still_connecting(qapp, loop, tmp_path):
     async def scenario():
-        rig = await open_rig(tmp_path, open_delay=1.5)
+        harness = make_devin(tmp_path, FAKE_DEVIN_OPEN_DELAY="1.5")
+        rig = await open_rig(tmp_path, devin_engine=harness.engine)
         try:
-            opening = asyncio.ensure_future(rig.core.call("session.new", {"projectId": str(rig.project)}))
+            await devin_listed(rig)
+            opening = asyncio.ensure_future(rig.core.call("session.new", {"projectId": str(rig.project), "modelId": "devin:swe-2-high"}))
             await rig.wait_for(".tab", 1)
             assert await rig.js("document.querySelector('.input') && !document.querySelector('.input').disabled"), "the box is not locked"
             placeholder = await rig.js("document.querySelector('.input').placeholder")
@@ -82,14 +154,10 @@ def test_you_can_type_and_send_while_the_session_is_still_connecting(qapp, loop,
             assert await rig.count(".qs-row .qs-icons button") == 4, "and can be seen, changed, taken back and sent"
             assert await rig.js("document.querySelectorAll(\".qs-row .qs-icons button\")[3].disabled"), "sending it now has to wait for the connection"
             assert await rig.js("document.querySelector('.input').value") == "", "the box is empty again"
-            await wait_for(lambda: bool(rig.factory.sessions) and rig.factory.sessions[-1].active is not None, 10, "the message to be sent once ready")
-            session = rig.factory.sessions[-1]
-            assert session.streams[-1].prompt == "你好 hello"
+            await wait_for(lambda: devin_prompts(harness) == ["你好 hello"], 15, "the message to be sent once ready")
             await rig.wait_for(".qs-row", 0)  # the real turn replaces the waiting one ...
             assert await rig.count(".block.user") == 1 and await rig.text(".block.user .body") == "你好 hello"  # ... with the same words
-            session.active.push(delta("好", "m1"), complete("m1"), success("好"))
-            session.active.end()
-            await rig.wait_text(".statusbar .st-left", "就绪")
+            await rig.wait_text(".statusbar .st-left", "就绪", timeout=15)
             await opening
         finally:
             await rig.finish()
@@ -99,18 +167,19 @@ def test_you_can_type_and_send_while_the_session_is_still_connecting(qapp, loop,
 
 def test_a_queued_message_can_be_taken_back_from_the_page(qapp, loop, tmp_path):
     async def scenario():
-        rig = await open_rig(tmp_path, open_delay=2.0)
+        harness = make_devin(tmp_path, FAKE_DEVIN_OPEN_DELAY="2.0")
+        rig = await open_rig(tmp_path, devin_engine=harness.engine)
         try:
-            opening = asyncio.ensure_future(rig.core.call("session.new", {"projectId": str(rig.project)}))
+            await devin_listed(rig)
+            opening = asyncio.ensure_future(rig.core.call("session.new", {"projectId": str(rig.project), "modelId": "devin:swe-2-high"}))
             await rig.wait_for(".tab", 1)
             await rig.send("changed my mind")
             await rig.wait_for(".qs-row")
             await rig.click(".qs-row .qs-icons button", 2)  # cancel
-            await wait_for(lambda: True, 1, "")
             await rig.wait_for(".qs-row", 0)
             assert await rig.js("document.querySelector('.input').value") == "changed my mind", "the text is back in the box"
-            await rig.wait_text(".statusbar .st-left", "就绪", timeout=10)
-            assert not rig.factory.sessions[-1].streams, "nothing was sent"
+            await rig.wait_text(".statusbar .st-left", "就绪", timeout=15)
+            assert devin_prompts(harness) == [], "nothing was sent"
             await opening
         finally:
             await rig.finish()
@@ -121,27 +190,27 @@ def test_a_queued_message_can_be_taken_back_from_the_page(qapp, loop, tmp_path):
 def test_the_window_opens_on_a_message_box_and_a_conversation_exists_only_once_a_message_is_sent(qapp, loop, tmp_path):
     async def scenario():
         rig = await open_rig(tmp_path)
+        model = Model(rig)
         try:
-            assert await rig.count(".tab") == 0 and not rig.factory.sessions, "nothing is open and nothing was made"
+            assert await rig.count(".tab") == 0 and not rig.core.order, "nothing is open and nothing was made"
             assert await rig.js("document.querySelector('.input') && !document.querySelector('.input').disabled"), "the box can be typed in at once"
             assert await rig.texts(".controls .chip-k") == ["模式"], "the chips are not labelled in words, except the mode"
             assert await rig.text(".hint .chip-k") == "项目" and await rig.text(".hint .chip-v") == rig.project.name, "the project it starts in is named, under the box"
             assert "Enter 发送" in await rig.js("document.querySelector('.input').placeholder"), "the keys are in the box"
+            model.next(say("好"))
             await rig.send("你好，开始吧")
             await rig.wait_for(".tab", 1)
-            await wait_for(lambda: bool(rig.factory.sessions) and rig.factory.sessions[-1].active is not None, 10, "the first message to reach the session")
-            session = rig.factory.sessions[-1]
-            assert len(rig.factory.sessions) == 1 and session.streams[-1].prompt == "你好，开始吧"
+            await model.asked()
+            assert len(rig.core.order) == 1 and model.prompts == ["你好，开始吧"]
             assert await rig.js("document.querySelector('.input').value") == "", "the box is empty again"
             assert rig.core.settings.last_project == str(rig.project.resolve()), "the next window starts in the same project"
-            session.active.push(delta("好", "m1"), complete("m1"), success("好"))
-            session.active.end()
+            model.go()
             await rig.wait_text(".statusbar .st-left", "就绪")
             await rig.press("n", Qt.KeyboardModifier.ControlModifier)
             await rig.wait_for(".emptypage")
             assert await rig.count(".tab.current") == 0 and await rig.count(".tab") == 1, "the conversation stays open, the box is for the next one"
         finally:
-            await rig.finish()
+            await finish(rig, model)
 
     run(loop, scenario())
 
@@ -158,7 +227,7 @@ def test_a_file_dropped_on_the_message_box_opens_the_conversation_to_hold_it(qap
             await rig.wait_for(".tab", 1)
             await rig.wait_for(".att-row .att", 1, timeout=15)
             assert await rig.text(".att-row .fname") == "notes.txt"
-            assert len(rig.factory.sessions) == 1
+            assert len(rig.core.order) == 1
             assert await rig.js("document.querySelector('.input').value") == "看一下这个文件", "what was typed went along into the new conversation"
         finally:
             await rig.finish()
@@ -168,7 +237,7 @@ def test_a_file_dropped_on_the_message_box_opens_the_conversation_to_hold_it(qap
 
 def test_a_session_can_be_renamed_and_archived_from_its_menu_and_brought_back(qapp, loop, tmp_path):
     async def scenario():
-        rig = await open_rig(tmp_path, saved=[saved_session("s-1", "修复点击闪烁", minutes_ago=5), saved_session("s-2", "附件功能设计", minutes_ago=1500)])
+        rig = await open_rig(tmp_path, saved=SAVED)
         try:
             await rig.wait_for(".srow", 2)
             await rig.click(".srow", 1, right=True)
@@ -181,12 +250,12 @@ def test_a_session_can_be_renamed_and_archived_from_its_menu_and_brought_back(qa
             await rig.type("新的名字")
             await rig.press("Enter")
             await rig.wait_text(".srow .stitle", "新的名字")
-            assert rig.core.settings.session_titles == {"s-2": "新的名字"}, "kept in the settings, the engine's own title is not touched"
+            assert rig.core.settings.session_titles == {"cg:s-2": "新的名字"}, "kept in the settings, the engine's own title is not touched"
             await rig.click(".srow", 1, right=True)
             await rig.click_text(".menu-item", "归档")
             await rig.wait_for(".srow", 1)
             await rig.wait_text(".archived .pname", "已归档 · 1")
-            assert "s-2" in rig.core.settings.archived_sessions
+            assert "cg:s-2" in rig.core.settings.archived_sessions
             await rig.click(".archived .proj-toggle")
             assert await rig.texts(".archived-row .stitle") == ["新的名字"]
             await rig.click(".archived-row .more")
@@ -201,7 +270,7 @@ def test_a_session_can_be_renamed_and_archived_from_its_menu_and_brought_back(qa
 
 def test_a_conversation_that_is_open_is_closed_when_it_is_archived(qapp, loop, tmp_path):
     async def scenario():
-        rig = await open_rig(tmp_path, saved=[saved_session("s-1", "修复点击闪烁", minutes_ago=5)])
+        rig = await open_rig(tmp_path, saved=SAVED[:1])
         try:
             await rig.wait_for(".srow", 1)
             await rig.click(".srow")
@@ -217,201 +286,47 @@ def test_a_conversation_that_is_open_is_closed_when_it_is_archived(qapp, loop, t
 
     run(loop, scenario())
 
-def test_the_window_is_full_from_the_cache_while_the_slow_listings_are_still_on_their_way(qapp, loop, tmp_path):
-    from desktop.core.cache import Cache
-
-    async def scenario():
-        proj = (tmp_path / "proj").resolve()
-        proj.mkdir(exist_ok=True)
-        cache = Cache(tmp_path / "cache")
-        rows = [
-            {"id": "s-1", "native": "s-1", "engine": "droid", "title": "修复点击闪烁", "modified": time.time() - 300, "count": 4},
-            {"id": "s-2", "native": "s-2", "engine": "droid", "title": "附件功能设计", "modified": time.time() - 90000, "count": 4},
-        ]
-        models = [{"id": "claude-haiku-5-5", "label": "Haiku 5.5", "source": "factory", "efforts": ["low", "high"], "defaultEffort": "low", "window": 0}]
-        cache.save_index({"rows": {str(proj): rows}, "models": models})
-        start = time.time()
-        rig = await open_rig(
-            tmp_path, cache=cache, list_delay=3.0, saved=[saved_session("s-1", "修复点击闪烁", minutes_ago=5), saved_session("s-2", "附件功能设计", minutes_ago=1500)]
-        )
-        try:
-            await rig.wait_for(".srow", 2, timeout=5.0)
-            assert time.time() - start < 3.0, "the rows were there before the 3 s listing could have answered"
-            assert await rig.texts(".srow .stitle") == ["修复点击闪烁", "附件功能设计"]
-            await rig.core.call("session.new", {"projectId": str(rig.project)})
-            await rig.wait_for(".tab", 1)
-            await rig.click(".controls .chip", 0)
-            await rig.wait_for(".menu-item")
-            assert "Haiku 5.5" in await rig.texts(".menu-item .menu-label"), "the model menu has its models before the list has loaded"
-            await rig.press("Escape")
-        finally:
-            await rig.finish()
-
-    run(loop, scenario())
-
-
-def test_a_conversation_is_on_the_page_from_the_cache_before_droid_has_loaded_it(qapp, loop, tmp_path):
-    from desktop.core.cache import Cache
-    from desktop.core.session_manager import HistorySnapshot
-    from tests.support import history_messages
-
-    async def scenario():
-        proj = (tmp_path / "proj").resolve()
-        proj.mkdir(exist_ok=True)
-        cache = Cache(tmp_path / "cache")
-        first = await open_rig(tmp_path, cache=cache, saved=[saved_session("s-1", "File operations", minutes_ago=7)])
-        first.factory.history["s-1"] = HistorySnapshot(messages=history_messages(), title="File operations")
-        try:
-            await first.wait_for(".srow", 1)
-            await first.click(".srow")
-            await first.wait_for(".block.user")
-            await first.wait_text(".statusbar .st-left", "就绪")
-            body = await first.text(".block.user .body")
-        finally:
-            await first.finish()
-        assert body
-
-        second = await open_rig(tmp_path, cache=cache, saved=[saved_session("s-1", "File operations", minutes_ago=7)])
-        second.factory.history["s-1"] = HistorySnapshot(messages=history_messages(), title="File operations")
-        second.factory.history_delay = 3.0  # droid.exe takes seconds to read it
-        try:
-            await second.wait_for(".srow", 1)
-            started = time.time()
-            await second.click(".srow")
-            await second.wait_for(".block.user", timeout=5.0)
-            assert time.time() - started < 2.5 and await second.text(".block.user .body") == body, "the conversation is there long before the history is"
-            assert second.core.order[0].controller.state.value == "opening", "while it is still connecting"
-        finally:
-            await second.finish()
-
-    run(loop, scenario())
-
-
-def test_a_session_nobody_has_opened_yet_is_on_the_page_at_once_with_its_settings_and_its_figures(qapp, loop, tmp_path, monkeypatch):
-    from desktop.core import app_core
-    from desktop.core.cache import Cache
-    from desktop.core.session_manager import HistorySnapshot, LiveSettings
-    from tests.support import history_messages
-
-    monkeypatch.setattr(app_core, "WARM_DELAY_SECONDS", 0.0)
-
-    async def scenario():
-        cache = Cache(tmp_path / "cache")
-        left = HistorySnapshot(
-            messages=history_messages(),
-            title="File operations",
-            usage=usage(input_tokens=1500, output_tokens=420, cache_read=88_000),
-            settings=LiveSettings(model="claude-haiku-5-5", reasoning="high", autonomy="medium", mode="spec"),
-            context_used=38_088,
-        )
-        rig = await open_rig(
-            tmp_path, cache=cache, read_ahead=True, open_delay=3.0, saved=[saved_session("s-1", "File operations", minutes_ago=7)], history={"s-1": left}
-        )
-        try:
-            await rig.wait_for(".srow", 1)
-            await until(lambda: cache.load_session("s-1") is not None, timeout=5)  # read in the background, never opened
-            assert not rig.factory.sessions, "no droid process was started for it"
-            rig.factory.history_delay = 3.0  # what opening it for real would now take
-            started = time.time()
-            await rig.click(".srow")
-            await rig.wait_for(".block.user", timeout=5.0)
-            assert time.time() - started < 2.5
-            assert await rig.text(".statusbar .st-left") == "正在连接…", "droid has not answered: all of this is the cache's"
-            assert await rig.texts(".controls .chip-v") == ["Haiku 5.5", "High", "Medium", "Plan"], "the four settings it was left with"
-            right = (await rig.texts(".statusbar .st-right"))[0]
-            assert "Context38K/" in right and "Token 合计89.9K" in right, f"the context and the token total: {right!r}"
-        finally:
-            await rig.finish()
-
-    run(loop, scenario())
-
-
-def test_a_sub_agent_shows_in_the_bar_opens_in_the_side_panel_and_its_approval_is_answered_there(qapp, loop, tmp_path):
-    from tests.codex_support import make_engine
-
-    async def scenario():
-        harness = make_engine(tmp_path)  # the real engine on the fake app-server: the sub-agent is real protocol traffic
-        rig = await open_rig(tmp_path, codex_engine=harness.engine)
-        try:
-            await wait_for(lambda: any(m["id"] == "codex:gpt-6-luna" for m in rig.core.catalog.models), 15, "the Codex models")
-            cid = (await rig.core.call("session.new", {"projectId": str(rig.project), "modelId": "codex:gpt-6-luna"}))["id"]
-            await rig.wait_for(".tab", 1)
-            await rig.wait_text(".statusbar .st-left", "就绪")
-            assert not await rig.exists(".agentbar"), "no sub-agents, no bar"
-            await rig.send("[subagent] write the file")
-            await rig.wait_for(".agent-chip.waiting", 1, timeout=15)
-            assert "Dirac" in await rig.text(".agent-chip .agent-name") or "coder_write_sub" in await rig.text(".agent-chip .agent-name")
-            assert await rig.exists(".tab .dot-attention"), "the tab asks for attention: the sub-agent waits for the user"
-            assert not await rig.exists(".agentpanel"), "the panel is closed until it is asked for"
-
-            await rig.click(".agent-chip")
-            await rig.wait_for(".agentpanel", 1)
-            await rig.wait_for(".agentpanel .prompt.perm", 1, timeout=10)
-            assert "Set-Content -Path sub.txt -Value hi" in await rig.text(".agentpanel .prompt.perm")
-            assert "主智能体" in await rig.text(".agentpanel .block.user .who"), "its task is labelled as the agent's, not 'you'"
-            assert not await rig.exists(".stage .prompt.perm"), "the question is in the sub-agent's panel, not in the conversation"
-
-            await rig.click_text(".agentpanel .pbtns .btn", "允许（仅此一次）")
-            await rig.wait_for(".agent-chip.done", 1, timeout=15)
-            await rig.wait_for(".agentpanel .prompt.perm", 0)
-            await rig.wait_text(".statusbar .st-left", "就绪", timeout=15)
-            decisions = [m["result"]["decision"] for m in harness.answers() if "result" in m and "decision" in (m["result"] or {})]
-            assert decisions == ["accept"], "the sub-agent got the user's answer"
-            await rig.wait_text(".transcript .text-block", "all-done (accept)", timeout=10)
-
-            await rig.click(".agentpanel-head .icon-btn")
-            await rig.wait_for(".agentpanel", 0)
-            assert rig.core._by_cid[cid].watching is None, "closing the panel stops the feed"
-        finally:
-            await rig.finish()
-
-    run(loop, scenario())
-
-
 def test_a_conversation_from_a_new_session_to_the_answer(qapp, loop, tmp_path):
     async def scenario():
         rig = await open_rig(tmp_path)
-        droid = await new_conversation(rig)
+        model = await new_conversation(rig)
+        model.next(say("Hi there"))
         await rig.send("hello")
-        await until(lambda: droid.active is not None)
-        assert droid.streams[-1].prompt == "hello"
+        await model.asked()
+        assert model.prompts[-1] == "hello"
         await rig.wait_for(".block.user")
         assert await rig.text(".block.user .body") == "hello"
         assert await rig.exists(".send.stop"), "the send button turns into stop while the turn runs"
-        droid.active.push(delta("Hi ", "m1"), delta("there", "m1"))
+        model.go()
         await rig.wait_text(".text-block", "Hi there")
-        droid.active.push(complete("m1"), success("Hi there", seconds=3))
-        droid.active.end()
         await rig.wait_for(".send.stop", 0)
         await rig.wait_text(".turnfoot", "用时")
         assert (await rig.text(".statusbar .st-left")).strip().endswith("就绪")
-        await rig.finish()
+        await finish(rig, model)
 
     run(loop, scenario())
 
 
 def test_tool_calls_fold_into_one_row_and_open_on_click(qapp, loop, tmp_path):
+    from tests.fake_responses import calls
+
     async def scenario():
         rig = await open_rig(tmp_path)
-        droid = await new_conversation(rig)
+        (rig.project / "README.md").write_text("# readme\n", encoding="utf-8")
+        (rig.project / "a.txt").write_text("alpha\n", encoding="utf-8")
+        model = await new_conversation(rig, autonomy="full")
+        model.next(calls([("read_file", json.dumps({"file_path": "README.md"}), "c1", "fc_1"), ("read_file", json.dumps({"file_path": "a.txt"}), "c2", "fc_2")]), hold=False)
+        model.next(say("Done.", item_id="msg_2"), hold=False)
         await rig.send("look around")
-        await until(lambda: droid.active is not None)
-        droid.active.push(
-            tool_call("t1", "Read", file_path="README.md"),
-            tool_result("t1", "Read", "# readme"),
-            tool_call("t2", "Execute", command="dir"),
-            tool_result("t2", "Execute", "a.txt\nb.txt"),
-            delta("Done.", "m1"), complete("m1"), success("Done."),
-        )
-        droid.active.end()
-        await rig.wait_for(".block.activity", 1)
+        await rig.wait_for(".block.activity", 1, timeout=15)
+        await rig.wait_text(".statusbar .st-left", "就绪", timeout=15)
         assert "2 步" in await rig.text(".block.activity .gtext")
         assert not await rig.exists(".block.activity .gbody"), "folded by default"
         await rig.click(".block.activity .gsum")
         await rig.wait_for(".block.activity .item", 2)
         await rig.click(".block.activity .irow", 1)
-        await rig.wait_text(".idetail", "a.txt")
-        await rig.finish()
+        await rig.wait_text(".idetail", "alpha")
+        await finish(rig, model)
 
     run(loop, scenario())
 
@@ -419,19 +334,20 @@ def test_tool_calls_fold_into_one_row_and_open_on_click(qapp, loop, tmp_path):
 def test_an_approval_is_answered_from_the_card(qapp, loop, tmp_path):
     async def scenario():
         rig = await open_rig(tmp_path)
-        droid = await new_conversation(rig)
+        model = await new_conversation(rig, autonomy="ask")
+        model.next(call("shell", {"command": "New-Item marker.txt"}, call_id="c1"), hold=False)
+        model.next(say("ok", item_id="msg_2"), hold=False)
         await rig.send("go")
-        await until(lambda: droid.active is not None)
-        asking = asyncio.ensure_future(droid.interactions.on_permission(permission_request()))
-        await rig.wait_for(".prompt.perm")
+        await rig.wait_for(".prompt.perm", timeout=15)
         assert await rig.exists(".tab.current .dot-attention, .srow.m-attention"), "the session is marked as waiting for you"
+        assert not (rig.project / "marker.txt").exists(), "nothing ran before the answer"
         await rig.click(".prompt.perm .btn.primary")
-        response = await asyncio.wait_for(asking, 5)
-        assert response.selected_option is ToolConfirmationOutcome.PROCEED_ONCE
         await rig.wait_for(".prompt.perm", 0)
-        droid.active.push(success("ok"))
-        droid.active.end()
-        await rig.finish()
+        await rig.wait_text(".statusbar .st-left", "就绪", timeout=15)
+        assert (rig.project / "marker.txt").exists()
+        outputs = [item for item in model.requests[-1]["input"] if item.get("type") == "function_call_output"]
+        assert [item["call_id"] for item in outputs] == ["c1"], "the model was given the result"
+        await finish(rig, model)
 
     run(loop, scenario())
 
@@ -439,15 +355,15 @@ def test_an_approval_is_answered_from_the_card(qapp, loop, tmp_path):
 def test_escape_stops_the_running_turn(qapp, loop, tmp_path):
     async def scenario():
         rig = await open_rig(tmp_path)
-        droid = await new_conversation(rig)
+        model = await new_conversation(rig)
+        model.next(say("late"))
         await rig.send("long job")
-        await until(lambda: droid.active is not None)
+        await model.asked()
         await rig.wait_for(".send.stop")
         await rig.focus_composer()
         await rig.press("Escape")
-        await until(lambda: droid.interrupts == 1)
-        await rig.wait_text(".turnfoot", "已停止")
-        await rig.finish()
+        await rig.wait_text(".turnfoot", "已停止", timeout=15)
+        await finish(rig, model)
 
     run(loop, scenario())
 
@@ -455,7 +371,8 @@ def test_escape_stops_the_running_turn(qapp, loop, tmp_path):
 def test_a_pasted_picture_becomes_an_attachment_and_goes_out_with_the_message(qapp, loop, tmp_path):
     async def scenario():
         rig = await open_rig(tmp_path)
-        droid = await new_conversation(rig)
+        model = await new_conversation(rig)
+        model.next(say("a red box"))
         image = QImage(64, 40, QImage.Format.Format_RGB32)
         image.fill(0xE5484D)
         QGuiApplication.clipboard().setImage(image)
@@ -465,12 +382,11 @@ def test_a_pasted_picture_becomes_an_attachment_and_goes_out_with_the_message(qa
         assert await rig.exists(".att-row .att-thumb"), "the card shows a thumbnail made by Python"
         await rig.type("what is this")
         await rig.press("Enter")
-        await until(lambda: droid.active is not None)
-        assert len(droid.streams[-1].images) == 1 and droid.streams[-1].prompt == "what is this"
+        await model.asked()
+        parts = user_parts(model.requests[-1])
+        assert [p["type"] for p in parts].count("input_image") == 1 and parts[0]["text"] == "what is this"
         await rig.wait_for(".block.user .att-img", 1)
-        droid.active.push(success("a red box"))
-        droid.active.end()
-        await rig.finish()
+        await finish(rig, model)
 
     run(loop, scenario())
 
@@ -478,46 +394,50 @@ def test_a_pasted_picture_becomes_an_attachment_and_goes_out_with_the_message(qa
 def test_the_settings_under_the_message_box_change_the_session_and_the_defaults(qapp, loop, tmp_path):
     async def scenario():
         rig = await open_rig(tmp_path)
-        droid = await new_conversation(rig)
+        await new_conversation(rig)
+        controller = rig.core.order[0].controller
         assert await rig.texts(".controls .chip-k") == ["模式"]
         names = await rig.js("[...document.querySelectorAll('.controls .chip')].map(e => e.getAttribute('aria-label').split('：')[0]).join()")
         assert names == "模型,推理,权限,模式", "the others are named for assistive technology and in the tooltip"
         await rig.click(".controls .chip", 1)  # reasoning
         await rig.wait_for(".menu-item")
         await rig.click_text(".menu-item", "High")
-        await until(lambda: droid.settings_calls and droid.settings_calls[-1].get("reasoning_effort") == ReasoningEffort.HIGH)
+        await until(lambda: controller.live_settings().reasoning == "high")
         assert rig.core.settings.reasoning_effort == "high"
         await rig.wait_text(".controls .chip-v", "High")
         await rig.click(".controls .chip", 3)  # mode
         await rig.click_text(".menu-item", "Plan")
-        await until(lambda: droid.settings_calls[-1].get("mode") is not None)
+        await until(lambda: controller.mode == "spec")
         await rig.finish()
 
     run(loop, scenario())
 
 
-def test_the_conversation_can_move_to_codex_and_back(qapp, loop, tmp_path):
+def test_the_conversation_can_move_to_devin_and_back(qapp, loop, tmp_path):
     async def scenario():
-        rig = await open_rig(tmp_path, codex=True)
-        droid = await new_conversation(rig)
+        harness = make_devin(tmp_path)
+        rig = await open_rig(tmp_path, devin_engine=harness.engine)
+        await devin_listed(rig)
+        model = await new_conversation(rig)
+        model.next(say("first answer"), hold=False)
         await rig.send("first question")
-        await until(lambda: droid.active is not None)
-        droid.active.push(delta("first answer", "m1"), complete("m1"), success("first answer"))
-        droid.active.end()
         await rig.wait_text(".text-block", "first answer")
         await wait_for(lambda: rig.core.order[0].controller.state is SessionState.READY, message="ready again")
         await rig.click(".controls .chip", 0)
-        await rig.wait_text(".menu-head", "CODEX")
-        await rig.click_text(".menu-item", "GPT-5.3 Codex")
-        await rig.wait_for(".block.engine-switch", 1)
+        await rig.wait_text(".menu-head", "DEVIN")
+        await rig.click_text(".menu-item", "SWE-2")
+        await rig.wait_for(".block.engine-switch", 1, timeout=15)
         assert await rig.count(".tab") == 1, "the same tab"
-        assert "Codex" in await rig.text(".block.engine-switch .sw-main")
-        assert rig.codex.opened[0]["handoff"].carried == 2
+        assert "Devin" in await rig.text(".block.engine-switch .sw-main")
+        assert rig.core.order[0].controller.handoff.carried == 2
         await rig.wait_text(".hint", "下一条消息会带上")
+        await rig.click(".controls .chip", 0)
+        await rig.click_text(".menu-item", "GPT-6.1-Sol")
+        await rig.wait_for(".block.engine-switch", 2, timeout=15)
+        assert rig.core.order[0].engine == "chatgpt", "and back on the own loop"
         await rig.finish()
 
     run(loop, scenario())
-
 
 def test_the_title_bar_works_as_a_window_frame(qapp, loop, tmp_path, monkeypatch):
     async def scenario():
@@ -558,7 +478,7 @@ def test_the_app_menu_and_shortcuts(qapp, loop, tmp_path):
         await rig.focus_composer()
         await rig.press("n", Qt.KeyboardModifier.ControlModifier)
         await rig.wait_for(".emptypage")
-        assert await rig.count(".tab") == 0 and not rig.factory.sessions, "Ctrl+N shows the message box; the conversation is made by the first message"
+        assert await rig.count(".tab") == 0 and not rig.core.order, "Ctrl+N shows the message box; the conversation is made by the first message"
         await rig.press(",", Qt.KeyboardModifier.ControlModifier)
         await rig.wait_for(".settings")
         await rig.press("Escape")
@@ -569,20 +489,18 @@ def test_the_app_menu_and_shortcuts(qapp, loop, tmp_path):
 
 
 def test_a_saved_session_opens_with_its_history_and_is_resumed(qapp, loop, tmp_path):
-    from desktop.core.session_manager import HistorySnapshot
-    from tests.support import history_messages
-
     async def scenario():
-        rig = await open_rig(tmp_path, saved=[saved_session("s-1", "File operations", minutes_ago=7)])
-        rig.factory.history["s-1"] = HistorySnapshot(messages=history_messages(), title="File operations")
+        rig = await open_rig(tmp_path, saved=[("s-1", "File operations", 7)])
         await rig.wait_for(".srow", 1)
         await rig.click(".srow")
         await rig.wait_for(".tab", 1)
         await rig.wait_for(".block.user")
-        assert [c[0] for c in rig.factory.calls if c[0] in ("load_history", "resume")] == ["load_history", "resume"]
+        assert await rig.text(".block.user .body") == "about File operations", "the conversation as it was saved"
+        await rig.wait_text(".text-block", "File operations: done.")
         await rig.wait_text(".statusbar .st-left", "就绪")
         assert await rig.count(".srow") == 1, "the open session replaces its saved row"
         assert await rig.exists(".srow.current, .srow.open")
+        assert rig.core.order[0].controller.session_id == "s-1", "the same conversation goes on"
         await rig.finish()
 
     run(loop, scenario())
@@ -590,7 +508,8 @@ def test_a_saved_session_opens_with_its_history_and_is_resumed(qapp, loop, tmp_p
 
 def test_the_sidebar_is_ordered_by_the_last_message_not_by_what_was_clicked(qapp, loop, tmp_path):
     async def scenario():
-        rig = await open_rig(tmp_path, saved=[saved_session("s-1", "修复点击闪烁", minutes_ago=5), saved_session("s-2", "附件功能设计", minutes_ago=1500)])
+        rig = await open_rig(tmp_path, saved=SAVED)
+        model = Model(rig)
         try:
             await rig.wait_for(".srow", 2)
             order = ["修复点击闪烁", "附件功能设计"]
@@ -616,40 +535,41 @@ def test_the_sidebar_is_ordered_by_the_last_message_not_by_what_was_clicked(qapp
             titles, subs = await where()
             assert titles == order and old_age in subs[1] and "刚刚" not in subs[0], "five minutes old stays five minutes old"
 
-            old = rig.factory.sessions[0]  # the session of "附件功能设计", opened first
+            model.next(say("好"))
             await rig.send("继续 go on")
-            await until(lambda: old.active is not None)
+            await model.asked()
 
             async def first_is_the_one_talked_to() -> bool:
-                return "刚刚" in (await rig.texts(".srow .ssub"))[0]  # its title is now the message just sent
+                return "刚刚" in (await rig.texts(".srow .ssub"))[0]
 
             await wait_for(first_is_the_one_talked_to, 10, "the session talked to moves to the top")
             titles, subs = await where()
             assert "刚刚" not in subs[1] and titles[1] == "修复点击闪烁", "the one not talked to is now second"
-            old.active.push(delta("好", "m1"), complete("m1"), success("好"))
-            old.active.end()
+            model.go()
             await rig.wait_text(".statusbar .st-left", "就绪")
         finally:
-            await rig.finish()
+            await finish(rig, model)
 
     run(loop, scenario())
 
 
-def test_a_session_whose_process_died_can_be_reconnected_from_the_page(qapp, loop, tmp_path):
-    from droid_sdk import DroidProcessError
-
+def test_a_devin_session_whose_process_died_can_be_reconnected_from_the_page(qapp, loop, tmp_path):
     async def scenario():
-        rig = await open_rig(tmp_path)
-        droid = await new_conversation(rig)
-        await rig.send("go")
-        await until(lambda: droid.active is not None)
-        droid.active.push(DroidProcessError("crashed", exit_code=1))
-        await rig.wait_for(".block.error .btn")
-        await rig.wait_text(".statusbar .st-left", "断开")
-        await rig.click(".block.error .btn")
-        await wait_for(lambda: [c for c in rig.factory.calls if c[0] == "resume"], message="the session to be resumed")
-        await rig.wait_text(".statusbar .st-left", "就绪")
-        await rig.finish()
+        harness = make_devin(tmp_path)
+        rig = await open_rig(tmp_path, devin_engine=harness.engine)
+        try:
+            await devin_listed(rig)
+            await rig.core.call("session.new", {"projectId": str(rig.project), "modelId": "devin:swe-2-high"})
+            await rig.wait_for(".tab", 1)
+            await rig.wait_text(".statusbar .st-left", "就绪", timeout=15)
+            await rig.send("[crash] go")
+            await rig.wait_for(".block.error .btn", timeout=15)
+            await rig.wait_text(".statusbar .st-left", "断开")
+            await rig.click(".block.error .btn")
+            await rig.wait_text(".statusbar .st-left", "就绪", timeout=15)
+            assert rig.core.order[0].controller.state is SessionState.READY
+        finally:
+            await rig.finish()
 
     run(loop, scenario())
 
@@ -657,7 +577,8 @@ def test_a_session_whose_process_died_can_be_reconnected_from_the_page(qapp, loo
 def test_files_dropped_from_explorer_are_attached(qapp, loop, tmp_path):
     async def scenario():
         rig = await open_rig(tmp_path)
-        droid = await new_conversation(rig)
+        model = await new_conversation(rig)
+        model.next(say("ok"))
         notes = tmp_path / "notes.txt"
         notes.write_text("remember the milk", encoding="utf-8")
         action = await rig.drop_files([notes])
@@ -665,11 +586,10 @@ def test_files_dropped_from_explorer_are_attached(qapp, loop, tmp_path):
         await rig.wait_for(".att-row .att", 1, timeout=15)
         assert await rig.text(".att-row .fname") == "notes.txt"
         await rig.send("read it")
-        await until(lambda: droid.active is not None)
-        assert [d.source.name for d in droid.streams[-1].files] == ["notes.txt"] and notes.exists()
-        droid.active.push(success("ok"))
-        droid.active.end()
-        await rig.finish()
+        await model.asked()
+        texts = [p.get("text", "") for p in user_parts(model.requests[-1])]
+        assert texts[0] == "read it" and any("notes.txt" in t and "remember the milk" in t for t in texts[1:]) and notes.exists()
+        await finish(rig, model)
 
     run(loop, scenario())
 
@@ -677,8 +597,11 @@ def test_files_dropped_from_explorer_are_attached(qapp, loop, tmp_path):
 def test_the_copy_buttons_reach_the_system_clipboard(qapp, loop, tmp_path):
     async def scenario():
         rig = await open_rig(tmp_path)
-        droid = await new_conversation(rig)
-        sid = droid.id
+        model = await new_conversation(rig)
+        model.next(say("好"), hold=False)
+        await rig.send("hello")
+        await rig.wait_text(".statusbar .st-left", "就绪")
+        sid = rig.core.order[0].controller.session_id
         QGuiApplication.clipboard().setText("before")
         await rig.click(".srow", 0, right=True)
         await rig.wait_for(".menu-item")
@@ -711,15 +634,12 @@ def test_a_project_is_added_through_the_folder_dialog(qapp, loop, tmp_path, monk
 def test_the_status_bar_shows_context_and_token_figures(qapp, loop, tmp_path):
     async def scenario():
         rig = await open_rig(tmp_path)
-        droid = await new_conversation(rig)
-        droid.last_call_tokens = 22_518
+        model = await new_conversation(rig)
+        model.next(say("x", used=usage(22_518, 498, cached=20_000)), hold=False)
         await rig.send("hello")
-        await until(lambda: droid.active is not None)
-        droid.active.push(usage(input_tokens=394, output_tokens=498, cache_read=68_300), delta("x", "m1"), complete("m1"), success("x"))
-        droid.active.end()
         await rig.wait_text(".statusbar .st-right", "Out")  # "Token —" says nothing yet: wait for the figures
         text = (await rig.texts(".statusbar .st-right"))[0]
-        assert "Context" in text and "23K" in text.replace(" ", "") and "872K" in text.replace(" ", ""), text
+        assert "Context" in text and "400K" in text.replace(" ", ""), text
         assert "In" in text and "Out" in text
         await rig.finish()
 
@@ -738,17 +658,24 @@ def test_the_theme_chosen_in_the_settings_is_applied_and_remembered(qapp, loop, 
 
     run(loop, scenario())
 
+def steers_of(rig) -> list[str]:
+    return [steer.ref.text for steer in rig.core.order[0].controller._steers]
+
 
 def test_while_a_turn_runs_enter_queues_the_message_and_ctrl_enter_gives_it_to_the_turn(qapp, loop, tmp_path):
     async def scenario():
         rig = await open_rig(tmp_path)
-        droid = await new_conversation(rig)
+        model = await new_conversation(rig)
+        model.next(say("ok"))  # the first turn's answer, held until the test lets it go
+        model.next(say("noted", item_id="msg_s"), hold=False)  # the request that carries the steer
+        model.next(say("done", item_id="msg_2"))  # the queued message's turn
         await rig.send("long job")
-        await until(lambda: droid.active is not None)
+        await model.asked()
         await rig.wait_for(".send.stop")
         hint = await rig.js("document.querySelector('.input').placeholder")
         assert "Enter 排队" in hint and "Ctrl+Enter 引导" in hint and "Esc 停止" in hint, hint
-        assert not await rig.exists(".hint"), "the keys are in the box; there is no line under it"
+        under = await rig.text(".hint") if await rig.exists(".hint") else ""
+        assert "Enter" not in under and "Using ChatGPT Plan" in under, "the keys are in the box; the line under it only says the plan is in use"
         assert await rig.count(".send.how") == 0, "nothing typed: only the stop button"
 
         # Enter: queued behind the turn, shown as sent, the box empty again
@@ -760,33 +687,30 @@ def test_while_a_turn_runs_enter_queues_the_message_and_ctrl_enter_gives_it_to_t
         assert "then do this" in await rig.text(".qs-row .qs-text")
         assert await rig.text(".qs-row .qs-tag") == "排队" and await rig.js("document.querySelector(\".qs-row .qs-tag\").title") == "本轮结束后发出"
         assert await rig.js("document.querySelector('.input').value") == ""
-        assert [s.prompt for s in droid.streams] == ["long job"] and droid.user_messages == []
+        assert model.prompts == ["long job"] and steers_of(rig) == []
 
         # Ctrl+Enter: given to the running turn now
         await rig.type("actually, stop at the docs")
         await rig.press("Enter", Qt.KeyboardModifier.ControlModifier)
         await rig.wait_for(".block.user.steer", 1)
         assert "actually, stop at the docs" in await rig.text(".block.user.steer .body")
-        assert "引导" in await rig.text(".block.user.steer .who") and await rig.exists(".block.user.steer.pending"), "waiting for droid to take it in"
-        assert [m["text"] for m in droid.user_messages] == ["actually, stop at the docs"]
+        assert "引导" in await rig.text(".block.user.steer .who") and await rig.exists(".block.user.steer.pending"), "waiting for the loop to take it in"
+        assert steers_of(rig) == ["actually, stop at the docs"]
         assert await rig.count(".qs-row") == 1, "the queued one is still waiting"
 
-        # droid takes it in (its echo): no longer waiting
-        from tests.support import user_message
-
-        droid.active.push(user_message(droid.user_messages[0]["message_id"], "actually, stop at the docs"))
+        # the loop takes it into its next request: no longer waiting
+        model.go()
+        await model.asked(2)
+        assert model.prompts[1] == "actually, stop at the docs"
         await rig.wait_for(".block.user.steer.pending", 0)
 
         # the turn ends: the queued message goes out by itself
-        droid.active.push(delta("ok", "m1"), complete("m1"), success("ok"))
-        droid.active.end()
-        await wait_for(lambda: len(droid.streams) == 2, 10, "the queued message to be sent")
-        assert droid.streams[1].prompt == "then do this"
+        await model.asked(3)
+        assert model.prompts[2] == "then do this"
         await rig.wait_for(".qs-row", 0)
-        droid.active.push(delta("done", "m2"), complete("m2"), success("done"))
-        droid.active.end()
+        model.go()
         await rig.wait_text(".statusbar .st-left", "就绪")
-        await rig.finish()
+        await finish(rig, model)
 
     run(loop, scenario())
 
@@ -794,9 +718,13 @@ def test_while_a_turn_runs_enter_queues_the_message_and_ctrl_enter_gives_it_to_t
 def test_a_waiting_message_can_be_taken_back_and_the_setting_swaps_the_two_keys(qapp, loop, tmp_path):
     async def scenario():
         rig = await open_rig(tmp_path)
-        droid = await new_conversation(rig)
+        model = await new_conversation(rig)
+        model.next(say("x"))
+        model.next(say("y", item_id="msg_s"), hold=False)
+        model.next(say("z", item_id="msg_2"), hold=False)
+        model.next(say("w", item_id="msg_3"), hold=False)
         await rig.send("long job")
-        await until(lambda: droid.active is not None)
+        await model.asked()
         await rig.wait_for(".send.stop")
         await rig.focus_composer()
         await rig.type("one")
@@ -822,13 +750,11 @@ def test_a_waiting_message_can_be_taken_back_and_the_setting_swaps_the_two_keys(
         await rig.focus_composer()
         await rig.press("Enter")  # the box holds "two"
         await rig.wait_for(".block.user.steer", 1)
-        assert [m["text"] for m in droid.user_messages] == ["two"]
+        assert steers_of(rig) == ["two"]
         await rig.type("three")
         await rig.press("Enter", Qt.KeyboardModifier.ControlModifier)
         await rig.wait_for(".qs-row", 2)
-        droid.active.push(delta("x", "m1"), complete("m1"), success("x"))
-        droid.active.end()
-        await rig.finish()
+        await finish(rig, model)
 
     run(loop, scenario())
 
@@ -836,9 +762,12 @@ def test_a_waiting_message_can_be_taken_back_and_the_setting_swaps_the_two_keys(
 def test_a_waiting_message_can_be_looked_at_changed_and_sent_now_from_its_line(qapp, loop, tmp_path):
     async def scenario():
         rig = await open_rig(tmp_path)
-        droid = await new_conversation(rig)
+        model = await new_conversation(rig)
+        model.next(say("x"))
+        model.next(say("noted", item_id="msg_s"), hold=False)
+        model.next(say("y", item_id="msg_2"), hold=False)
         await rig.send("long job")
-        await until(lambda: droid.active is not None)
+        await model.asked()
         await rig.wait_for(".send.stop")
         await rig.focus_composer()
         await rig.type("then do this")
@@ -867,16 +796,14 @@ def test_a_waiting_message_can_be_looked_at_changed_and_sent_now_from_its_line(q
         await rig.wait_for(".qs-row", 1)
         await rig.wait_for(".block.user.steer", 1)
         assert "and that please" in await rig.text(".block.user.steer .body")
-        assert [m["text"] for m in droid.user_messages] == ["and that please"]
+        assert steers_of(rig) == ["and that please"]
         assert await rig.text(".qs-row .qs-text") == "then do this" and await rig.text(".qs-row .qs-tag") == "排队"
 
-        droid.active.push(delta("x", "m1"), complete("m1"), success("x"))
-        droid.active.end()
-        await wait_for(lambda: len(droid.streams) == 2, 10, "the one left in line to be sent")
-        assert droid.streams[1].prompt == "then do this"
-        droid.active.push(delta("y", "m2"), complete("m2"), success("y"))
-        droid.active.end()
-        await rig.finish()
+        model.go()
+        await model.asked(3)
+        assert model.prompts[1:] == ["and that please", "then do this"], "the steer went with the turn, the one left in line after it"
+        await rig.wait_text(".statusbar .st-left", "就绪")
+        await finish(rig, model)
 
     run(loop, scenario())
 
@@ -893,11 +820,9 @@ def test_a_pdf_and_a_picture_the_answer_names_are_drawn_in_the_side_panel(qapp, 
         picture = QImage(64, 48, QImage.Format.Format_RGB32)
         picture.fill(0xFFCC3333)
         assert picture.save(str(rig.project / "shot.png"), "PNG")
-        droid = await new_conversation(rig)
+        model = await new_conversation(rig)
+        model.next(say("报告在 `docs/r.pdf`，截图是 `shot.png`。"), hold=False)
         await rig.send("show me")
-        await until(lambda: droid.active is not None)
-        droid.active.push(delta("报告在 `docs/r.pdf`，截图是 `shot.png`。", "m1"), complete("m1"), success("x"))
-        droid.active.end()
         await rig.wait_for(".text-block code.pathref", 2)
 
         await rig.click(".text-block code.pathref", 0)
@@ -944,11 +869,9 @@ def test_a_file_the_answer_names_opens_in_the_side_panel_with_the_default_progra
         platform.open_path = default.append
         platform.open_with = chosen.append
         platform.show_in_folder = shown.append
-        droid = await new_conversation(rig)
+        model = await new_conversation(rig)
+        model.next(say("改了 `docs/a.md` 和 `src/m.py:300-302`，别运行 `run.bat`；`self.state` 只是代码，`docs/none.md` 还没有。"), hold=False)
         await rig.send("what did you change")
-        await until(lambda: droid.active is not None)
-        droid.active.push(delta("改了 `docs/a.md` 和 `src/m.py:300-302`，别运行 `run.bat`；`self.state` 只是代码，`docs/none.md` 还没有。", "m1"), complete("m1"), success("x"))
-        droid.active.end()
         await rig.wait_for(".text-block code.pathref", 4)
         assert await rig.texts(".text-block code.pathref") == ["docs/a.md", "src/m.py:300-302", "run.bat", "docs/none.md"], "`self.state` stays plain code"
         assert not await rig.exists(".filepanel")
@@ -1021,21 +944,24 @@ def test_a_file_the_answer_names_opens_in_the_side_panel_with_the_default_progra
 def test_closing_the_window_during_a_turn_asks_first(qapp, loop, tmp_path):
     async def scenario():
         rig = await open_rig(tmp_path)
-        droid = await new_conversation(rig)
+        model = await new_conversation(rig)
+        model.next(say("late"))
         await rig.send("long job")
-        await until(lambda: droid.active is not None)
+        await model.asked()
         await rig.wait_for(".send.stop")
+        controller = rig.core.order[0].controller
         rig.window.close()  # Alt+F4
         await rig.wait_for(".dialog")
         assert "退出" in await rig.text(".dialog")
         await rig.press("Escape")
         await rig.wait_for(".dialog", 0)
-        assert not rig.window.closed.is_set() and droid.closed == 0, "cancelling keeps everything running"
+        assert not rig.window.closed.is_set() and controller.is_open, "cancelling keeps everything running"
         rig.window.close()
         await rig.wait_for(".dialog")
         await rig.click(".dialog .danger-solid")
         await asyncio.wait_for(rig.window.closed.wait(), 15)
-        assert droid.closed == 1
+        assert not controller.is_open
+        model.go_all()
         await release(rig.window)
 
     run(loop, scenario())
@@ -1045,7 +971,7 @@ def test_a_provider_is_added_through_the_settings_editor(qapp, loop, tmp_path):
 
     async def scenario():
         store = ProviderStore(
-            factory_settings=tmp_path / "home" / ".factory" / "settings.json",
+            models_file=tmp_path / "app" / "models.json",
             sidecar=tmp_path / "app" / "providers.json",
             environ={},
             registry_env=lambda: {},
@@ -1069,7 +995,7 @@ def test_a_provider_is_added_through_the_settings_editor(qapp, loop, tmp_path):
         await rig.wait_for(".pe", 0)
         await rig.wait_for(".prov", 1)
         assert await rig.text(".prov .prov-name") == "Test GW"
-        saved = json.loads((tmp_path / "home" / ".factory" / "settings.json").read_text(encoding="utf-8"))
+        saved = json.loads((tmp_path / "app" / "models.json").read_text(encoding="utf-8"))
         assert [(m["model"], m["baseUrl"]) for m in saved["customModels"]] == [("my-model", "https://example.com/v1")]
         await rig.finish()
 
@@ -1086,13 +1012,13 @@ def test_what_an_agent_wrote_to_the_shared_memory_shows_as_a_badge_and_can_be_un
         assert not await rig.exists(".foot-badge"), "nothing written yet: no number on the sidebar's memory button"
         # another process (an agent's memory server) writes to the same folder
         store = MemoryStore(launch.root)
-        entry = store.create(title="PowerShell 5.1 has no &&", text="Chain commands with a semicolon.", scope="global", kind="pitfall", by=agent("codex", "run-1"))
+        entry = store.create(title="PowerShell 5.1 has no &&", text="Chain commands with a semicolon.", scope="global", kind="pitfall", by=agent("devin", "run-1"))
         await rig.wait_for(".foot-badge", 1, timeout=10)
         assert await rig.text(".foot-badge") == "1"
         await rig.click(".foot-btn", 0)
         await rig.wait_for(".settings")
         await rig.wait_for(".mem-change", 1)
-        assert "Codex" in await rig.text(".mem-change-line") and "记住了" in await rig.text(".mem-change-line")
+        assert "Devin" in await rig.text(".mem-change-line") and "记住了" in await rig.text(".mem-change-line")
         assert await rig.text(".snav.on") == "共享记忆1", "the settings tab carries the number too"
         await rig.wait_for(".mem-note", 1)
         assert await rig.texts(".mem-note .mem-title") == ["PowerShell 5.1 has no &&"]
@@ -1218,34 +1144,12 @@ def test_a_note_is_written_and_the_memory_switched_off_from_the_settings(qapp, l
         await wait_for(lambda: rig.core.settings.memory_enabled is False, message="the master switch to reach the settings")
         await rig.wait_for(".mem-engine", 0)
         await rig.click(".settings-body .field .switch", 0)
-        await rig.wait_for(".mem-engine", 4)
+        await rig.wait_for(".mem-engine", 2)
         await rig.click(".mem-engine .switch", 1)
-        await wait_for(lambda: rig.core.settings.memory_engines == ["droid", "devin", "chatgpt"], message="the engine switch to reach the settings")
+        await wait_for(lambda: rig.core.settings.memory_engines == ["chatgpt"], message="the engine switch to reach the settings")
         await rig.finish()
 
     run(loop, scenario())
-
-
-def test_codex_sign_in_and_out_from_the_settings(qapp, loop, tmp_path):
-    async def scenario():
-        rig = await open_rig(tmp_path, codex=True, codex_signed_in=False)
-        await rig.press(",", Qt.KeyboardModifier.ControlModifier)
-        await rig.wait_for(".settings")
-        await rig.click_text(".snav", "账号与模型")
-        await rig.wait_for(".providers")
-        codex_card = ".providers section.pcard:nth-of-type(2)"
-        await rig.wait_text(f"{codex_card} .pstate", "未登录")
-        await rig.click_text(f"{codex_card} .btn", "用 ChatGPT 账号登录")
-        await wait_for(lambda: rig.codex.logins == 1, message="the login to reach Codex")
-        await rig.wait_text(f"{codex_card} .pstate", "a@b.c")
-        assert await rig.exists(f"{codex_card} .limrow"), "the usage limits are shown once signed in"
-        await rig.click_text(f"{codex_card} .btn", "退出登录")
-        await rig.wait_text(f"{codex_card} .pstate", "未登录")
-        assert rig.codex.signed_in is False
-        await rig.finish()
-
-    run(loop, scenario())
-
 
 
 def test_the_light_theme_carries_a_whole_conversation(qapp, loop, tmp_path):
@@ -1258,11 +1162,9 @@ def test_the_light_theme_carries_a_whole_conversation(qapp, loop, tmp_path):
         assert await rig.js("document.documentElement.dataset.theme") == "light"
         await rig.press("Escape")
         await rig.wait_for(".settings", 0)
-        droid = await new_conversation(rig)
+        model = await new_conversation(rig)
+        model.next(say("Hi"), hold=False)
         await rig.send("hello")
-        await until(lambda: droid.active is not None)
-        droid.active.push(delta("Hi", "m1"), complete("m1"), success("Hi"))
-        droid.active.end()
         await rig.wait_text(".text-block", "Hi")
         assert await rig.js("document.documentElement.dataset.theme") == "light", "the theme survived a whole conversation"
         await rig.finish()
@@ -1272,8 +1174,11 @@ def test_the_light_theme_carries_a_whole_conversation(qapp, loop, tmp_path):
 
 def test_changing_engine_asks_which_of_the_attachments_go_along(qapp, loop, tmp_path):
     async def scenario():
-        rig = await open_rig(tmp_path, codex=True)
-        droid = await new_conversation(rig)
+        harness = make_devin(tmp_path)
+        rig = await open_rig(tmp_path, devin_engine=harness.engine)
+        await devin_listed(rig)
+        model = await new_conversation(rig)
+        model.next(say("noted"), hold=False)
         notes = tmp_path / "notes.txt"
         notes.write_text("remember the milk", encoding="utf-8")
         picture = tmp_path / "shot.png"
@@ -1281,32 +1186,30 @@ def test_changing_engine_asks_which_of_the_attachments_go_along(qapp, loop, tmp_
         await rig.drop_files([notes, picture])
         await rig.wait_for(".att-row .att", 2, timeout=15)
         await rig.send("read it")
-        await until(lambda: droid.active is not None)
-        droid.active.push(delta("noted", "m1"), complete("m1"), success("noted"))
-        droid.active.end()
+        await rig.wait_text(".text-block", "noted")
         await wait_for(lambda: rig.core.order[0].controller.state is SessionState.READY, message="ready again")
 
-        async def pick_codex() -> None:
+        async def pick_devin() -> None:
             await rig.click(".controls .chip", 0)
-            await rig.click_text(".menu-item", "GPT-5.3 Codex")
+            await rig.click_text(".menu-item", "SWE-2")
             await rig.wait_for(".dialog")
 
-        await pick_codex()
-        assert "GPT-5.3 Codex" in await rig.text(".dialog")
+        await pick_devin()
+        assert "SWE-2" in await rig.text(".dialog")
         names = await rig.texts(".dialog .carry-name")
         assert sorted(names) == ["notes.txt", "shot.png"], "every attachment is listed, the picture too"
         assert await rig.js("[...document.querySelectorAll('.dialog .carry-list input')].every(e => !e.checked && !e.disabled)")
         assert await rig.texts(".dialog .dialog-btns .btn") == ["取消", "都不带，换过去"]
         await rig.press("Escape")
         await rig.wait_for(".dialog", 0)
-        assert rig.codex.opened == [] and rig.core.order[0].controller.engine == "droid", "cancelling changes nothing"
+        assert rig.core.order[0].engine == "chatgpt", "cancelling changes nothing"
 
-        await pick_codex()
+        await pick_devin()
         await rig.click(".dialog .carry-list input", names.index("shot.png"))
         await rig.wait_text(".dialog .dialog-btns .btn.primary", "带上选中的 1 个，换过去")
         await rig.click_text(".dialog .btn", "带上选中的 1 个")
-        await wait_for(lambda: rig.codex.opened, message="the conversation to move to Codex")
-        handoff = rig.codex.opened[0]["handoff"]
+        await wait_for(lambda: rig.core.order[0].engine == "devin", message="the conversation to move to Devin")
+        handoff = rig.core.order[0].controller.handoff
         assert (handoff.files, handoff.pictures) == (0, 1) and "remember the milk" not in handoff.prefix, "only the picture was ticked"
         await rig.wait_for(".block.engine-switch", 1)
         await rig.wait_text(".statusbar .st-left", "1 张图片一起带过去")
@@ -1328,46 +1231,48 @@ def test_models_hidden_in_the_settings_leave_the_conversations_model_menu(qapp, 
         return labels
 
     async def scenario():
-        rig = await open_rig(tmp_path, codex=True)
+        harness = make_devin(tmp_path)
+        rig = await open_rig(tmp_path, devin_engine=harness.engine)
+        await devin_listed(rig)
         await new_conversation(rig)
 
         async def lists_every_model() -> bool:
-            return {"Haiku 5.5", "GPT-5.4", "GPT-5.3 Codex"} <= set(await menu_labels(rig))
+            return {"GPT-6.1-Sol", "GPT-6-Luna", "SWE-2"} <= set(await menu_labels(rig))
 
-        # The model list and the Codex account arrive on their own, a moment after the page starts: the menu opened
-        # right when the session is ready may still lack them (the Codex group says "checking" until the account is in).
-        await wait_for(lists_every_model, 10, "the model menu to list the Factory and Codex models")
+        await wait_for(lists_every_model, 10, "the model menu to list the plan's and Devin's models")
 
         await rig.press(",", Qt.KeyboardModifier.ControlModifier)
         await rig.wait_for(".settings")
         await rig.click_text(".snav", "账号与模型")
-        await rig.wait_text(f"{source.format('factory')} .mvis-count", "2 / 2")
-        await rig.wait_text(f"{source.format('codex')} .mvis-count", "1 / 1")
-        await rig.click(f"{source.format('factory')} .disclose")
-        row = await rig.js(f"[...document.querySelectorAll(\"{source.format('factory')} .mvis-row\")].findIndex(e => e.textContent.includes('GPT-5.4'))")
-        await rig.click(f"{source.format('factory')} .mvis-row .switch", row)
-        await wait_for(lambda: rig.core.settings.hidden_models == ["gpt-5.4"], message="the switch to reach the settings")
-        await rig.wait_text(f"{source.format('factory')} .mvis-count", "1 / 2")
-        await rig.click(f"{source.format('codex')} .disclose")
-        await rig.click_text(f"{source.format('codex')} .btn", "全部隐藏")
-        await wait_for(lambda: rig.core.settings.hidden_models == ["gpt-5.4", "codex:gpt-5.3-codex"], message="hide all to reach the settings")
+        await rig.wait_text(f"{source.format('chatgpt')} .mvis-count", "2 / 2")
+        await rig.click(f"{source.format('chatgpt')} .disclose")
+        row = await rig.js(f"[...document.querySelectorAll(\"{source.format('chatgpt')} .mvis-row\")].findIndex(e => e.textContent.includes('GPT-6-Luna'))")
+        await rig.click(f"{source.format('chatgpt')} .mvis-row .switch", row)
+        await wait_for(lambda: rig.core.settings.hidden_models == ["chatgpt:gpt-6-luna"], message="the switch to reach the settings")
+        await rig.wait_text(f"{source.format('chatgpt')} .mvis-count", "1 / 2")
+        await rig.click(f"{source.format('devin')} .disclose")
+        await rig.click_text(f"{source.format('devin')} .btn", "全部隐藏")
+        await wait_for(
+            lambda: rig.core.settings.hidden_models[:1] == ["chatgpt:gpt-6-luna"] and len(rig.core.settings.hidden_models) > 1 and all(m.startswith("devin:") for m in rig.core.settings.hidden_models[1:]),
+            message="hide all to reach the settings",
+        )
         await rig.press("Escape")
         await rig.wait_for(".settings", 0)
 
         labels = await menu_labels(rig)
-        assert "GPT-5.4" not in labels and "GPT-5.3 Codex" not in labels and "Haiku 5.5" in labels
-        assert "没有显示的模型" in labels, "the emptied Codex group says why it is empty"
+        assert "GPT-6-Luna" not in labels and "SWE-2" not in labels and "GPT-6.1-Sol" in labels
+        assert "没有显示的模型" in labels, "the emptied Devin group says why it is empty"
 
         await rig.press(",", Qt.KeyboardModifier.ControlModifier)
         await rig.wait_for(".settings")
         await rig.click_text(".snav", "账号与模型")
-        await rig.click(f"{source.format('codex')} .disclose")
-        await rig.click_text(f"{source.format('codex')} .btn", "全部显示")
-        await wait_for(lambda: rig.core.settings.hidden_models == ["gpt-5.4"], message="show all to reach the settings")
+        await rig.click(f"{source.format('devin')} .disclose")
+        await rig.click_text(f"{source.format('devin')} .btn", "全部显示")
+        await wait_for(lambda: rig.core.settings.hidden_models == ["chatgpt:gpt-6-luna"], message="show all to reach the settings")
         await rig.press("Escape")
         await rig.wait_for(".settings", 0)
         labels = await menu_labels(rig)
-        assert "GPT-5.3 Codex" in labels and "GPT-5.4" not in labels and "没有显示的模型" not in labels
+        assert "SWE-2" in labels and "GPT-6-Luna" not in labels and "没有显示的模型" not in labels
         await rig.finish()
 
     run(loop, scenario())
@@ -1407,7 +1312,6 @@ def test_there_is_no_outline_without_a_system_shadow_to_go_with_it(qapp, loop, t
         await rig.finish()
 
     run(loop, scenario())
-
 
 async def devin_rig(tmp_path, **options):
     """The real page on the real core and the real Devin engine, which talks to the fake `devin acp`."""
@@ -1468,15 +1372,14 @@ def test_the_devin_program_path_is_set_from_the_settings(qapp, loop, tmp_path):
             await wait_for(lambda: any(m["id"] == "devin:swe-2-high" for m in rig.core.catalog.models), 15, "the Devin models")
             await rig.press(",", Qt.KeyboardModifier.ControlModifier)
             await rig.wait_for(".settings")
-            await rig.click_text(".snav", "Droid")
+            await rig.click_text(".snav", "外部程序")
             await rig.wait_text(".settings-body", "Devin 命令行")
             assert rig.core.settings.devin_path == ""
             buttons = await rig.texts(".settings-body .segc button")
-            assert buttons.count("指定路径") == 3, "Droid, Codex and Devin each have a path"
-            await rig.click(".settings-body .segc button", buttons.index("指定路径", 4))  # the third pair
+            assert buttons == ["自动检测", "指定路径"], "only Devin has a path: the own loop needs no program"
+            await rig.click(".settings-body .segc button", 1)
             await wait_for(lambda: rig.core.settings.devin_path != "", 10, "the path to reach the settings")
             assert rig.core.settings.devin_path.endswith("fake_devin.py"), "the program in use becomes the path to use"
-            assert rig.core.settings.codex_path == "" and rig.core.settings.droid_path == ""
         finally:
             await rig.finish()
 
@@ -1540,7 +1443,7 @@ def test_devin_sign_in_and_out_from_the_settings(qapp, loop, tmp_path):
             await rig.wait_for(".settings")
             await rig.click_text(".snav", "账号与模型")
             await rig.wait_for(".providers")
-            card = ".providers section.pcard:nth-of-type(3)"
+            card = ".providers section.pcard:nth-of-type(2)"
             await rig.wait_text(f"{card} .pstate", "未登录", timeout=15)
             await rig.click_text(f"{card} .btn", "登录 Devin")
             await rig.wait_text(f"{card} .pstate", "me@example.com", timeout=15)
@@ -1561,7 +1464,7 @@ async def chatgpt_rig(tmp_path, fake, *, welcomed: bool = True, **options):
     from tests.chatgpt_support import make_engine
 
     engine = make_engine(tmp_path, fake, **options.pop("engine", {}))
-    return await open_rig(tmp_path, chatgpt_engine=engine, chatgpt_welcomed=welcomed, **options)
+    return await open_rig(tmp_path, chatgpt_engine=engine, chatgpt_welcomed=welcomed, plan=False, **options)
 
 
 def test_a_chatgpt_plan_model_can_ask_a_question_mid_turn_and_goes_on_with_the_answer(qapp, loop, tmp_path):
@@ -1608,7 +1511,7 @@ def test_a_chatgpt_plan_conversation_goes_from_the_model_menu_to_the_answer_and_
             try:
                 await wait_for(lambda: any(m["id"] == "chatgpt:gpt-6.1-sol" for m in rig.core.catalog.models), 15, "the ChatGPT Plan models")
                 await new_conversation(rig)
-                assert not await rig.exists(".plan-badge"), "a conversation that is not on the plan does not say it is"
+                assert await rig.exists(".plan-badge"), "a new conversation starts on the plan, and says so"
                 await rig.click(".controls .chip", 0)
                 await rig.wait_text(".menu-head", "CHATGPT PLAN")
                 assert "GPT-6.1-Sol" in " ".join(await rig.texts(".menu-item")), "the models are in the menu"
@@ -1619,7 +1522,7 @@ def test_a_chatgpt_plan_conversation_goes_from_the_model_menu_to_the_answer_and_
                 badge = await rig.text(".plan-badge")
                 assert "Using ChatGPT Plan" in badge and "Manage usage" in badge, "OpenAI's guideline: say the plan is in use and where to manage it"
                 assert "ChatGPT Plan" in await rig.text(".srow.open .ssub"), "the sidebar names the engine"
-                assert await rig.js("document.querySelector('.plan-badge .plan-ring .usage-ring')?.classList.contains('unknown')"), "no Codex login of this account: the ring after Manage usage is grey"
+                assert await rig.js("document.querySelector('.plan-badge .plan-ring .usage-ring')?.classList.contains('unknown')"), "the plan gives this sign-in no figures: the ring after Manage usage is grey"
 
                 fake.script(say("Hello from the plan."))
                 await rig.send("hello plan")
@@ -1720,7 +1623,7 @@ def test_the_chatgpt_plan_card_shows_the_account_and_its_switch_takes_the_models
                 await rig.wait_for(".settings")
                 await rig.click_text(".snav", "账号与模型")
                 await rig.wait_for(".providers")
-                card = ".providers section.pcard:nth-of-type(3)"
+                card = ".providers section.pcard:nth-of-type(1)"
                 await rig.wait_text(f"{card} .pstate", "me@example.com", timeout=15)
                 assert "ChatGPT Plan" in await rig.text(card) and "使用你的 ChatGPT 套餐" in await rig.text(f"{card} .pstate")
                 assert "Manage usage" in await rig.text(card), "the way to the user's usage settings"
@@ -1741,7 +1644,7 @@ def test_without_a_sign_in_chatgpt_plan_asks_for_it_with_openais_wording(qapp, l
         with FakeResponses() as fake:
             rig = await chatgpt_rig(tmp_path, fake, engine={"signed_in": False})
             try:
-                await new_conversation(rig)
+                assert await rig.count(".tab") == 0, "no model at all: nothing can be opened, the box for the first message is there"
                 await rig.click(".controls .chip", 0)
                 await rig.wait_text(".menu-head", "CHATGPT PLAN")
                 assert "Continue with ChatGPT" in await rig.texts(".menu-label"), "the menu offers the sign-in"
@@ -1751,7 +1654,7 @@ def test_without_a_sign_in_chatgpt_plan_asks_for_it_with_openais_wording(qapp, l
                 await rig.wait_for(".settings")
                 await rig.click_text(".snav", "账号与模型")
                 await rig.wait_for(".providers")
-                card = ".providers section.pcard:nth-of-type(3)"
+                card = ".providers section.pcard:nth-of-type(1)"
                 await rig.wait_text(f"{card} .pstate", "未登录", timeout=15)
                 assert await rig.text(f"{card} .btn.chatgpt-btn") == "Continue with ChatGPT"
             finally:
@@ -1765,13 +1668,14 @@ def test_the_slash_menu_offers_the_users_skills_and_a_skill_named_in_a_message_r
 
     home = tmp_path / "home"
     monkeypatch.setattr(skills, "USER_HOME", home)
-    folder = home / ".factory" / "skills" / "summarize-diff"
+    folder = home / ".wittycode" / "skills" / "summarize-diff"
     folder.mkdir(parents=True)
     (folder / "SKILL.md").write_text("---\nname: summarize-diff\ndescription: Summarizes the diff.\n---\n\nRun git diff and list the risks.\n", encoding="utf-8")
 
     async def scenario():
         rig = await open_rig(tmp_path)
-        droid = await new_conversation(rig)
+        model = await new_conversation(rig)
+        model.next(say("Done."))
         await rig.focus_composer()
         await rig.type("/")
         await rig.wait_for(".slash-menu")
@@ -1787,35 +1691,33 @@ def test_the_slash_menu_offers_the_users_skills_and_a_skill_named_in_a_message_r
         assert await rig.js("document.querySelector('.input').value") == "/summarize-diff ", "picking a skill writes its name and waits for the rest"
         await rig.type("the migration")
         await rig.press("Enter")
-        await until(lambda: droid.active is not None)
-        sent = droid.streams[-1].prompt
+        await model.asked()
+        sent = "\n".join(part.get("text", "") for part in user_parts(model.requests[-1]))
         assert "/summarize-diff the migration" in sent and "Run git diff and list the risks." in sent
         await rig.wait_for(".block.user")
         assert await rig.text(".block.user .body") == "/summarize-diff the migration", "the page shows what was typed, not the instructions"
         await rig.wait_text(".block.notice", "已载入技能 summarize-diff")
-        droid.active.push(delta("Done.", "m1"), complete("m1"), success("Done."))
-        droid.active.end()
+        model.go()
         await rig.wait_text(".statusbar .st-left", "就绪")
-        await rig.finish()
+        await finish(rig, model)
 
     run(loop, scenario())
 
 
-def test_typing_slash_compact_in_the_message_box_compacts_a_droid_conversation(qapp, loop, tmp_path):
+def test_typing_slash_compact_in_the_message_box_compacts_the_conversation(qapp, loop, tmp_path):
     async def scenario():
         rig = await open_rig(tmp_path)
-        droid = await new_conversation(rig)
-        await rig.send("hello")
-        await until(lambda: droid.active is not None)
-        droid.active.push(delta("Hi.", "m1"), complete("m1"), success("Hi."))
-        droid.active.end()
+        model = await new_conversation(rig)
+        model.next(say("Hi."), hold=False)
+        model.next(say("SUMMARY: the user said hello.", item_id="msg_s"), hold=False)
+        await rig.send("hello " + "background " * 300)
         await rig.wait_text(".statusbar .st-left", "就绪")
         await rig.focus_composer()
         await rig.type("/compact")
         await rig.wait_for(".slash-item", 1)
         await rig.press("Enter")
-        await until(lambda: droid.compacts == 1)
-        await rig.wait_text(".block.notice", "Droid 压缩了上下文")
+        await model.asked(2)
+        await rig.wait_text(".block.notice", "已按你的要求压缩", timeout=15)
         assert await rig.js("document.querySelector('.input').value") == "", "the command is taken out of the box once it runs"
         await rig.wait_text(".statusbar .st-left", "就绪")
         await rig.finish()

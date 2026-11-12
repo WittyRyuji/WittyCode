@@ -1,4 +1,4 @@
-"""``mcpServer/elicitation/request``: an MCP server asking the user for something, through Codex.
+"""An MCP-style elicitation: an engine (Devin's ``elicitation/create``) or an MCP server asking the user for something.
 
 The request (app-server schema, MCP 2025-11-25) carries ``serverName``, a ``message`` for the user and one of:
 
@@ -29,8 +29,8 @@ OPEN, YES, NO = "打开链接并继续", "是", "否"
 FORM_MODES = ("form", "openai/form", "openaiForm")
 MAX_FIELDS = 12
 APPROVAL = "mcp_tool_call"
-"""``_meta.codex_approval_kind`` of the request Codex makes before it runs a tool of an MCP server (2026-11-02, Codex
-0.166 on a tool without annotations in a read-only thread; ``persist`` lists how long the user may allow it for)."""
+"""``_meta.codex_approval_kind`` of a request made before a tool of an MCP server runs (the key one app-server
+implementation uses; ``persist`` lists how long the user may allow it for)."""
 DETAIL_CHARS = 600
 
 

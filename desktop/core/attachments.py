@@ -1,37 +1,26 @@
-"""Attachments of a prompt: their shape, the limits, how they reach the SDK and how saved ones come back.
+"""Attachments of a prompt: their shape and the limits.
 
 No Qt here. The UI turns what the user pasted, dropped or picked into ``Attachment`` values
 (``desktop.ui.attachments`` decodes and shrinks pictures and reads files); this module defines
-what an attachment is, which limits apply, how it becomes an SDK ``Image`` / ``Document`` and how the
-image and document blocks of saved messages are read back for the transcript.
+what an attachment is and which limits apply; each engine sends them its own way.
 
-Three kinds exist, matching what Droid accepts:
+Three kinds exist:
 
-- ``image``: PNG / JPEG / GIF / WebP bytes (the SDK checks the signature);
-- ``pdf``: the PDF bytes, plus the text extracted from it so that models without native PDF support
-  still get the content (Droid falls back to ``parsedData`` for those);
-- ``text``: the decoded text of a source or text file, sent with ``Document.from_text``.
+- ``image``: PNG / JPEG / GIF / WebP bytes;
+- ``pdf``: the PDF bytes, plus the text extracted from it (every engine reads a PDF's words);
+- ``text``: the decoded text of a source or text file.
 """
 
 from __future__ import annotations
 
 import base64
-import binascii
 import codecs
 import locale
 import struct
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import PurePath
-from typing import Any
 
-from droid_sdk import (
-    MAX_ATTACHMENT_BYTES,
-    MAX_PDF_ATTACHMENT_BYTES,
-    Document,
-    Image,
-    PdfDocumentSource,
-)
 
 from desktop.core.context_envelope import strip as strip_context
 
@@ -44,9 +33,9 @@ HARD_ATTACHMENTS = 50
 HARD_TOTAL_BYTES = 200 * MIB
 """Not asked about: past this a drop or a paste is a slip (a folder dragged in by mistake) and every file would sit in
 memory, be base64-encoded by the page and sent through the bridge. Five times what one message usually holds."""
-MAX_IMAGE_BYTES = MAX_ATTACHMENT_BYTES
+MAX_IMAGE_BYTES = 5 * MIB
 """The SDK refuses pictures (and text) above this."""
-MAX_PDF_BYTES = MAX_PDF_ATTACHMENT_BYTES
+MAX_PDF_BYTES = 3 * MIB
 MAX_TEXT_BYTES = MIB
 """Much lower than the SDK's 5 MiB on purpose: 1 MiB of text is already ~250k tokens, more than most context windows."""
 MAX_SOURCE_BYTES = 64 * MIB
@@ -405,145 +394,10 @@ def insertable_path(path: str) -> str:
     return f'"{path}"' if any(char.isspace() for char in path) else path
 
 
-# --------------------------------------------------------------------------- SDK
-
-def _pdf_document(item: Attachment) -> Document:
-    source = PdfDocumentSource(
-        data=base64.b64encode(item.data).decode("ascii"),
-        parsed_data=item.parsed_text,
-        name=item.name,
-        path=item.path or None,
-    )
-    return Document(source)
-
-
-def to_sdk(attachments: Iterable[Attachment]) -> tuple[list[Image], list[Document]]:
-    """SDK values for ``Session.stream(images=..., files=...)``; raises ``InvalidAttachmentError`` for bad data."""
-    images: list[Image] = []
-    documents: list[Document] = []
-    for item in attachments:
-        if item.kind == IMAGE:
-            images.append(Image.from_bytes(item.data, media_type=item.media_type))  # type: ignore[arg-type]
-        elif item.kind == PDF:
-            documents.append(_pdf_document(item))
-        elif item.kind == TEXT:
-            documents.append(Document.from_text(item.text, name=item.name, mime="text/plain"))
-    return images, documents
-
-
-def stream_options(attachments: Iterable[Attachment]) -> dict[str, list[Any]]:
-    """Keyword arguments for ``Session.stream``: only the ones in use, so plain prompts call it as before."""
-    images, documents = to_sdk(attachments)
-    options: dict[str, list[Any]] = {}
-    if images:
-        options["images"] = images
-    if documents:
-        options["files"] = documents
-    return options
-
-
-def steer_options(attachments: Iterable[Attachment]) -> dict[str, list[dict[str, Any]]]:
-    """Keyword arguments for ``DroidClient.add_user_message``, which takes the wire form (``Session.stream`` converts
-    ``Image`` / ``Document`` into it before it calls that; a message to a running turn has to bypass ``stream``)."""
-    from droid_sdk._high_level._convert import document_to_wire  # the SDK's own conversion, not worth copying
-
-    images, documents = to_sdk(attachments)
-    options: dict[str, list[dict[str, Any]]] = {}
-    if images:
-        options["images"] = [
-            {"type": "base64", "data": image.source.data, "mediaType": image.source.media_type} for image in images
-        ]
-    if documents:
-        options["files"] = [document_to_wire(document) for document in documents]
-    return options
-
-
-# --------------------------------------------------------------------------- saved messages
-
-def _value(value: Any) -> Any:
-    return getattr(value, "value", value)
-
-
-def _block_kind(block: Any) -> str:
-    kind = str(_value(getattr(block, "type", "")))
-    if kind:
-        return kind
-    # Live SDK blocks are plain dataclasses without a ``type``.
-    return {"TextBlock": "text", "ImageBlock": "image", "DocumentBlock": "document"}.get(type(block).__name__, "")
+# --------------------------------------------------------------------------- messages written by other programs
 
 
 def is_system_reminder(text: str) -> bool:
-    """A text block droid added to a message by itself, for example where the temporary copy of a picture was put."""
+    """A text block an agent added to a message by itself (``<system-reminder>``), not something the user wrote."""
     stripped = text.strip()
     return stripped.startswith("<system-reminder>") and stripped.endswith("</system-reminder>")
-
-
-def typed_text(content: Iterable[Any], fallback: str = "") -> str:
-    """What the user typed in a message: its text blocks without droid's system reminders.
-
-    Droid saves a message with pictures as the picture, a ``<system-reminder>`` block with the paths of the
-    pictures' temporary copies, then the typed text. ``fallback`` is returned when there are no text blocks at all.
-    """
-    blocks = [block for block in content if _block_kind(block) == "text"]
-    if not blocks:
-        return fallback
-    texts = (str(getattr(block, "text", "") or "") for block in blocks)
-    return strip_context("".join(text for text in texts if not is_system_reminder(text)))
-
-
-def _decode(data: Any) -> bytes:
-    if not isinstance(data, str) or not data:
-        return b""
-    try:
-        return base64.b64decode(data)
-    except (binascii.Error, ValueError):
-        return b""
-
-
-def _image_from_block(block: Any, number: int) -> Attachment:
-    source = getattr(block, "source", None)
-    media_type = str(_value(getattr(source, "media_type", "")) or "")
-    data = _decode(getattr(source, "data", None))
-    name = f"图片 {number}"
-    if not data:
-        return Attachment(kind=IMAGE, name=name, media_type=media_type)
-    return image_attachment(name, data, sniff_image(data) or media_type)
-
-
-def _document_from_block(block: Any) -> Attachment | None:
-    source = getattr(block, "source", None)
-    if source is None:
-        return None
-    name = getattr(source, "name", None) or "文档"
-    if isinstance(source, PdfDocumentSource) or _value(getattr(source, "media_type", "")) == "application/pdf":
-        data = _decode(getattr(source, "data", None))
-        return Attachment(
-            kind=PDF,
-            name=name,
-            data=data,
-            media_type="application/pdf",
-            size=len(data) or None,
-            parsed_text=getattr(source, "parsed_data", None),
-            path=getattr(source, "path", None) or "",
-        )
-    text = getattr(source, "data", "")
-    return text_attachment(name, text if isinstance(text, str) else "")
-
-
-def attachments_from_content(content: Iterable[Any]) -> list[Attachment]:
-    """The pictures and documents among the content blocks of a user message (saved wire models or live SDK blocks).
-
-    Droid keeps a saved PDF without its bytes (``data`` is empty): such an attachment has no size and no preview.
-    """
-    found: list[Attachment] = []
-    pictures = 0
-    for block in content:
-        kind = _block_kind(block)
-        if kind == "image":
-            pictures += 1
-            found.append(_image_from_block(block, pictures))
-        elif kind == "document":
-            item = _document_from_block(block)
-            if item is not None:
-                found.append(item)
-    return found

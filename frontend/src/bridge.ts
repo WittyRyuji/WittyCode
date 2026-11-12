@@ -3,7 +3,7 @@
 // (liveBridge.ts: calls through QWebChannel); in the design page it is the mock in `mock/bridge.ts`.
 //
 // Python side, in short:
-//   providers.*  read and write `customModels` in ~/.factory/settings.json (Droid's BYOK list) and the provider names that
+//   providers.*  read and write `customModels` in WittyCode's own models file (models.json) and the provider names that
 //                WittyCode keeps; `test` sends one minimal request through the same base URL / key / headers the session would use.
 //                Keys are never written: `apiKey` is `${NAME}` (an environment variable) or absent, `apiKeyHelper` is a
 //                command. An existing plaintext `apiKey` is left alone until the user switches that provider to a variable
@@ -11,17 +11,14 @@
 //   window.*     the frameless window's controls: the title bar is drawn by the page. Python: Qt.FramelessWindowHint,
 //                `QWindow.startSystemMove()` / `startSystemResize(edges)` so Windows snapping keeps working, and a push of
 //                the maximized state back to the page.
-//   codex.*      talk to `codex app-server` (JSON-RPC over stdio): account/read, account/login/start (opens the browser),
-//                account/logout, account/rateLimits/read. The login tokens stay in Codex's own ~/.codex/auth.json.
 //   devin.*      the Devin CLI (`devin auth status|login|logout`, `devin acp` for the sessions). Its sign-in is shared with the
 //                Devin desktop app; the tokens stay in Devin's credentials.toml.
 //   chatgpt.*    the ChatGPT plan as an engine run by WittyCode's own agent loop (desktop/core/chatgpt): OpenAI's "Sign in with
 //                ChatGPT" for open-source apps (browser, PKCE, loopback callback). The tokens stay in WittyCode's own folder.
-//   factory.*    Droid's own sign-in state (droid-sdk), read only: signing in is `droid` in a terminal.
-//   memory.*     the shared memory (desktop/core/memory): notes that Droid, Codex, Devin and the user read and write. The page lists,
+//   memory.*     the shared memory (desktop/core/memory): notes that the own loop, Devin and the user read and write. The page lists,
 //                edits, forgets and restores them; every change is journalled and `undo` takes one back.
 
-import type { ApiProvider, ChatGPTAccount, CodexAccount, DevinAccount, EnvState, FactoryAccount, ProviderDraft, RemoteModel } from "./types";
+import type { ApiProvider, ChatGPTAccount, DevinAccount, EnvState, ProviderDraft, RemoteModel } from "./types";
 import type { Calls } from "./protocol";
 
 export interface TestResult {
@@ -35,17 +32,6 @@ export interface TestResult {
 }
 
 export interface Bridge {
-  factory: {
-    account(): Promise<FactoryAccount>;
-  };
-  codex: {
-    account(): Promise<CodexAccount>;
-    /** opens the browser for the ChatGPT sign-in; resolves with the account once the user has signed in (or cancelled) */
-    login(): Promise<CodexAccount>;
-    cancelLogin(): Promise<CodexAccount>;
-    logout(): Promise<CodexAccount>;
-    setEnabled(on: boolean): Promise<CodexAccount>;
-  };
   devin: {
     account(): Promise<DevinAccount>;
     /** `devin auth login` opens the browser; resolves with the account once the user has signed in (or cancelled) */
@@ -69,7 +55,7 @@ export interface Bridge {
     remove(id: string): Promise<void>;
     test(draft: ProviderDraft): Promise<TestResult>;
     listModels(draft: ProviderDraft): Promise<RemoteModel[]>;
-    /** for each variable name: is it there for the droid that WittyCode starts */
+    /** for each variable name: is it there for the requests WittyCode makes */
     envStatus(names: string[]): Promise<Record<string, EnvState>>;
   };
   memory: {

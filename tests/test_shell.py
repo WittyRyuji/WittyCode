@@ -15,13 +15,10 @@ import pytest
 from PySide6.QtCore import Qt
 
 from desktop.core.app_core import AppCore
-from desktop.core.session_manager import SessionManager
 from desktop.core.settings import AppSettings
 from desktop.ui import shell
 from desktop.ui.shell import MainWindow
-from tests.app_support import FakeCodexEngine
-from tests.fakes import FakeFactory, until
-from tests.support import saved_session
+from tests.app_support import MODEL, Plan, make_core, save_conversation
 from tests.ui_support import release, run, wait_for
 
 pytestmark = pytest.mark.ui
@@ -30,10 +27,11 @@ PAGE = Path(__file__).parent / "pages" / "channel.html"
 
 
 class Rig:
-    def __init__(self, window: MainWindow, core: AppCore, factory: FakeFactory, project: Path) -> None:
+    def __init__(self, window: MainWindow, core: AppCore, plan: Plan, engine, project: Path) -> None:
         self.window = window
         self.core = core
-        self.factory = factory
+        self.plan = plan
+        self.engine = engine
         self.project = project
 
     async def js(self, source: str):
@@ -64,21 +62,20 @@ class Rig:
         await release(self.window)
 
 
-async def open_rig(tmp_path, *, codex: bool = False) -> Rig:
+async def open_rig(tmp_path, *, saved: tuple[tuple[str, str], ...] = ()) -> Rig:
+    """The window around the stand-in page, on a core whose own loop answers from the loopback ChatGPT Plan fake."""
+    core, plan, _events, _platform, engine = make_core(tmp_path)
     project = tmp_path / "proj"
-    project.mkdir()
-    settings = AppSettings(default_model="claude-haiku-5-5", reasoning_effort="low")
-    settings.add_project(project)
-    factory = FakeFactory()
-    manager = SessionManager(settings, factory)
-    window = MainWindow(settings, persist=False, page_file=PAGE)
-    core = AppCore(manager, window.platform, codex=FakeCodexEngine(settings) if codex else None, persist=False)
+    for session_id, title in saved:
+        save_conversation(engine, project, session_id, title, minutes_ago=3)
+    window = MainWindow(core.settings, persist=False, page_file=PAGE)
+    core.platform = window.platform
     window.attach(core)
     window.load()
     window.show()
     await wait_for(lambda: window.page_loaded, message="the page to load")
     await wait_for(lambda: window.eval_js("window.ready === true"), message="the channel to connect")
-    return Rig(window, core, factory, project)
+    return Rig(window, core, plan, engine, project)
 
 
 def test_the_client_script_is_there_before_the_page_runs_and_the_channel_connects(qapp, loop, tmp_path):
@@ -96,10 +93,10 @@ def test_a_call_from_the_page_reaches_the_core_and_its_events_come_back(qapp, lo
         rig = await open_rig(tmp_path)
         ok, init = await rig.rpc("app.init")
         assert ok and init["version"] == 1 and init["projects"][0]["name"] == "proj"
-        assert init["defaults"]["reasoning"] == "low" and init["maximized"] is False
+        assert init["defaults"]["model"] == MODEL and init["maximized"] is False
         await wait_for(lambda: rig.events("models"), message="the model list event")
         (models,) = (await rig.events("models"))[:1]
-        assert "claude-haiku-5-5" in [m["id"] for m in models["models"]]
+        assert MODEL in [m["id"] for m in models["models"]]
         ok, created = await rig.rpc("session.new", {"projectId": str(rig.project.resolve())})
         assert ok and created["id"] == "c1"
         await wait_for(lambda: rig.events("tabs"), message="the tabs event")
@@ -130,13 +127,16 @@ def test_a_failing_call_is_an_error_message_in_the_page_not_an_exception_in_pyth
 
 def test_large_and_non_ascii_payloads_survive_the_channel(qapp, loop, tmp_path):
     async def scenario():
-        rig = await open_rig(tmp_path)
         title = "重构：读取上下文 🐉 " * 3000
-        rig.factory.saved = [saved_session("s-1", title, minutes_ago=3)]
+        rig = await open_rig(tmp_path, saved=(("s-1", title),))
         await rig.rpc("app.init")
-        await wait_for(lambda: rig.events("sidebar"), message="the sidebar event")
-        sidebar = (await rig.events("sidebar"))[-1]
-        assert sidebar["sessions"]["s-1"]["title"] == title
+
+        async def listed() -> bool:
+            return any("cg:s-1" in s["sessions"] for s in await rig.events("sidebar"))
+
+        await wait_for(listed, message="the sidebar event")
+        sidebar = [s for s in await rig.events("sidebar") if "cg:s-1" in s["sessions"]][-1]
+        assert sidebar["sessions"]["cg:s-1"]["title"] == title
         await rig.finish()
 
     run(loop, scenario())
@@ -203,14 +203,16 @@ def test_closing_the_window_asks_the_page_and_the_page_answers_with_window_close
         rig = await open_rig(tmp_path)
         await rig.rpc("app.init")
         ok, created = await rig.rpc("session.new", {"projectId": str(rig.project.resolve())})
-        await until(lambda: rig.factory.sessions and rig.factory.sessions[0].log.count("open-end") == 1, timeout=5)
+        assert ok
+        await wait_for(lambda: bool(rig.engine.open_controllers()), message="the session to open")
+        controller = rig.engine.open_controllers()[0]
         rig.window.close()  # Alt+F4, the taskbar ...
         await wait_for(lambda: rig.events("closeRequested"), message="the page to be asked")
         assert not rig.window.closed.is_set(), "the window stays until the page agrees"
         ok, _ = await rig.rpc("window.close")
         assert ok
         await asyncio.wait_for(rig.window.closed.wait(), 10)
-        assert rig.factory.sessions[0].closed == 1, "every session is closed on the way out"
+        assert not controller.is_open and rig.engine.open_controllers() == [], "every session is closed on the way out"
         assert not rig.window.isVisible()
         await release(rig.window)
 
@@ -223,7 +225,7 @@ def test_closing_before_the_page_is_connected_just_shuts_down(qapp, loop, tmp_pa
         project.mkdir()
         settings = AppSettings()
         window = MainWindow(settings, persist=False, page_file=PAGE)
-        core = AppCore(SessionManager(settings, FakeFactory()), window.platform, persist=False)
+        core = AppCore(settings, window.platform, persist=False)
         window.attach(core)
         window.show()
         window.close()

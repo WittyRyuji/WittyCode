@@ -18,7 +18,7 @@ from desktop.core.devin.errors import DevinRpcError
 from desktop.core.devin.locate import DevinBinary
 from desktop.core.devin.models import DevinModel
 from desktop.core.memory.launch import MemoryLaunch
-from desktop.core.session_manager import SessionState
+from desktop.core.session_state import SessionState
 from desktop.core.settings import AppSettings
 from desktop.core.transcript import TurnStatus
 from tests.devin_support import make_engine, run, until

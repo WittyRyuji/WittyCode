@@ -13,7 +13,7 @@ import pytest
 from desktop.core.chatgpt.errors import AuthError, PlanNotEnabled
 from desktop.core.memory.launch import MemoryLaunch
 from desktop.core.memory.store import MemoryStore
-from desktop.core.session_manager import SessionState
+from desktop.core.session_state import SessionState
 from desktop.core.transcript import PromptStatus, ToolStatus, TurnStatus
 from tests.chatgpt_support import ACCESS_TOKEN, finish_turn, make_engine, until
 from tests.fake_responses import FakeResponses, call, calls, fail, say, usage

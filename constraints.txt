@@ -2,13 +2,9 @@
 # .venv run the same code: pip install -r requirements-dev.txt -c constraints.txt
 # Exported from the development .venv (Python 3.11.9). Change a version here together with requirements*.txt.
 colorama==0.4.6
-droid-sdk==0.5.0
-annotated-types==0.8.0
 iniconfig==2.3.1
 packaging==26.3
 pluggy==1.7.0
-pydantic==2.14.1
-pydantic_core==2.50.1
 Pygments==2.21.0
 PySide6==6.12.0
 PySide6_Addons==6.12.0
@@ -18,5 +14,3 @@ PySide6_WebEngine==6.12.0.140
 pytest==9.2.0
 qasync==0.28.0
 shiboken6==6.12.0
-typing-inspection==0.4.4
-typing_extensions==4.16.0

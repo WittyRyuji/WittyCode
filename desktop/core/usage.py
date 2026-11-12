@@ -1,6 +1,6 @@
 """Token use of a whole conversation, however many times it was disconnected, closed, reopened or moved to another engine.
 
-Each engine counts per native session (a Droid session, a Codex thread) and keeps counting across a resume: what it
+Each engine counts per native session (an own-loop session, a Devin session) and keeps counting across a resume: what it
 reports is that session's running total. A conversation is more than one session when its engine was changed, and the
 page wants the sum, so the app keeps a ledger: the total so far, and the last figure each running series reported
 (``seen``). A new figure adds only what is new since the last one of its series; a series that starts over (a new
@@ -21,10 +21,10 @@ def _count(value: Any) -> int | None:
 
 @dataclass(frozen=True, slots=True)
 class Tokens:
-    """Counts with the attribute names of Droid's ``TokenUsageUpdate`` (what ``viewmodel.usage_json`` reads).
+    """Token counts in one shape for every engine (what ``viewmodel.usage_json`` reads).
 
     ``input_tokens`` is what was not served from the cache; ``cache_creation_tokens`` is ``None`` where the engine has
-    no such figure (Codex)."""
+    no such figure (the Responses API)."""
 
     input_tokens: int = 0
     output_tokens: int = 0
@@ -33,8 +33,8 @@ class Tokens:
 
     @classmethod
     def of(cls, usage: Any) -> Tokens | None:
-        """From an engine's usage object (``TokenUsageUpdate``, ``CodexUsage``, the SDK's ``TokenUsage``), a page /
-        cache JSON (``input``, ``output``, ``cacheWrite``, ``cacheRead``) or a droid notification (``inputTokens``…)."""
+        """From an engine's usage object (attributes ``input_tokens`` …), a page / cache JSON (``input``, ``output``,
+        ``cacheWrite``, ``cacheRead``) or an engine's notification (``inputTokens``…)."""
         if usage is None:
             return None
         if isinstance(usage, Tokens):

@@ -147,6 +147,11 @@ ok("取消归档 puts the row back and the archived list is gone", await page.ev
 ok("nothing was blocked by the Content-Security-Policy", page.cspViolations().length === 0);
 await page.close();
 
+const clickText = async (selector, text) => {
+  const i = await page.eval(`[...document.querySelectorAll(${JSON.stringify(selector)})].findIndex(e => e.textContent.includes(${JSON.stringify(text)}))`);
+  if (i < 0) throw new Error(`no ${selector} containing "${text}"`);
+  await page.click(selector, i);
+};
 page = await openPage(`${index}?scene=done&theme=light`);
 await page.click(".seg button", 1);
 ok("dark theme on click", await page.eval("document.documentElement.dataset.theme === 'dark'"));
@@ -159,18 +164,15 @@ const menu = async (chip) => {
   await page.key("Escape");
   return items;
 };
-ok("Haiku offers Off/Low/Medium/High", (await menu(1)) === "Off,Low,Medium,High");
+ok("GPT-6.1-Sol offers Low/Medium/High/XHigh", (await menu(1)) === "Low,Medium,High,XHigh");
 ok("the mode menu says Auto / Plan", (await menu(3)) === "Auto,Plan");
-ok("the permission menu says OFF / Low / Medium / High", (await menu(2)) === "OFF,Low,Medium,High");
-await page.click(".controls .chip", 0);
-await page.click(".menu-item", 2); // Opus 5.5
-ok("Opus keeps Haiku's Low and now offers up to Max", (await menu(1)) === "Low,Medium,High,XHigh,Max");
+ok("the permission menu says 询问 / 写代码 / 完全访问", (await menu(2)) === "询问,写代码,完全访问");
 await page.click(".controls .chip", 1);
-await page.click(".menu-item", 4); // Max
-ok("Max can be chosen", await page.eval("document.querySelectorAll('.controls .chip-v')[1].textContent === 'Max'"));
+await clickText(".menu-item", "XHigh");
+ok("XHigh can be chosen", await page.eval("document.querySelectorAll('.controls .chip-v')[1].textContent === 'XHigh'"));
 await page.click(".controls .chip", 0);
-await page.click(".menu-item", 4); // Kimi K3 only has Low / High
-ok("a model without Max falls back to its default level", await page.eval("document.querySelectorAll('.controls .chip-v')[1].textContent === 'Low'"));
+await clickText(".menu-item", "GPT-6-Luna"); // Luna only goes up to High
+ok("a model without XHigh falls back to its default level", await page.eval("document.querySelectorAll('.controls .chip-v')[1].textContent === 'Low'"));
 ok("and the status bar says so", await page.eval("document.querySelector('.notice-text')?.textContent.includes('不支持')"));
 
 // the status bar: Context used/window [meter] | Token In x Out y; the tooltip lists the breakdown
@@ -190,7 +192,7 @@ ok("the TPS tooltip says in its first line that the figure is an estimate", awai
 // settings: the button, the pages, and a change that takes effect at once
 await page.click(".foot-btn", 1);
 ok("the settings button opens the settings", await page.eval("!!document.querySelector('.settings')"));
-ok("the settings pages are 外观 / 账号与模型 / 新会话默认值 / … / 关于", await page.eval("[...document.querySelectorAll('.snav')].map(e => e.textContent.trim()).join(',') === '外观,账号与模型,新会话默认值,会话,共享记忆5,Droid,项目,快捷键,关于'"));
+ok("the settings pages are 外观 / 账号与模型 / 新会话默认值 / … / 关于", await page.eval("[...document.querySelectorAll('.snav')].map(e => e.textContent.trim()).join(',') === '外观,账号与模型,新会话默认值,会话,共享记忆5,外部程序,项目,快捷键,关于'"));
 await page.click(".snav", 2);
 ok("defaults page lists model / reasoning / permission / mode", await page.eval("document.querySelectorAll('.settings-scroll .field').length === 4"));
 await page.click(".snav", 0);
@@ -213,13 +215,13 @@ await page.click(".settings-body .field .switch", 0);
 ok("with the compaction switched off the percent is not offered, only the session limit", await page.eval("document.querySelector('.settings-body .field .switch').getAttribute('aria-checked') === 'false' && [...document.querySelectorAll('.stepper span')].map(e => e.textContent).join() === '5'"));
 await page.click(".settings-body .field .switch", 0);
 await page.click(".snav", 5);
-ok("the Droid page also has the Codex CLI, found automatically", await page.eval("[...document.querySelectorAll('.settings-body .field-label')].some(e => e.textContent === 'Codex 命令行') && [...document.querySelectorAll('.settings-body .pathbox')].some(p => p.textContent.endsWith('codex.cmd'))"));
-await page.click(".settings-body .segc button", 3);
-const codexPath = 'input[aria-label="Codex 命令行 路径"]';
-await page.waitFor(`!!document.querySelector('${codexPath}')`, 2000);
-await page.click(codexPath);
-await page.eval(`(() => { const e = document.querySelector('${codexPath}'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(e, 'D:\\\\tools\\\\codex.cmd'); e.dispatchEvent(new Event('input', { bubbles: true })); e.blur(); })()`);
-ok("指定路径 takes your own path when you leave the field", await page.eval("[...document.querySelectorAll('.settings-body .pathbox')].some(p => p.textContent === 'D:\\\\tools\\\\codex.cmd')"));
+ok("the 外部程序 page has only the Devin CLI, found automatically", await page.eval("[...document.querySelectorAll('.settings-body .field-label')].map(e => e.textContent).join() === 'Devin 命令行' && [...document.querySelectorAll('.settings-body .pathbox')].some(p => p.textContent.toLowerCase().endsWith('devin.exe'))"));
+await page.click(".settings-body .segc button", 1);
+const devinPath = 'input[aria-label="Devin 命令行 路径"]';
+await page.waitFor(`!!document.querySelector('${devinPath}')`, 2000);
+await page.click(devinPath);
+await page.eval(`(() => { const e = document.querySelector('${devinPath}'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(e, 'D:\\\\tools\\\\devin.exe'); e.dispatchEvent(new Event('input', { bubbles: true })); e.blur(); })()`);
+ok("指定路径 takes your own path when you leave the field", await page.eval("[...document.querySelectorAll('.settings-body .pathbox')].some(p => p.textContent === 'D:\\\\tools\\\\devin.exe')"));
 await page.key("Escape");
 ok("Esc closes the settings", await page.eval("!document.querySelector('.settings')"));
 await page.eval("document.activeElement && document.activeElement.blur()");
@@ -267,17 +269,12 @@ ok("the stopped turn shows its footer in the warning colour", await page.eval("!
 // in a conversation: /compact and /goal run on any engine (the demo says what the real app would do)
 await setDraft("/compact");
 await page.key("Enter");
-ok("/compact in a Droid conversation runs, and the box is empty", await page.eval("document.querySelector('.input').value === '' && document.querySelector('.notice-text')?.textContent.includes('压缩成摘要')"));
+ok("/compact in a ChatGPT Plan conversation runs, and the box is empty", await page.eval("document.querySelector('.input').value === '' && document.querySelector('.notice-text')?.textContent.includes('压缩成摘要')"));
 await setDraft("/goal make it pass");
 await page.key("Enter");
 ok("/goal there runs too", await page.eval("document.querySelector('.input').value === '' && document.querySelector('.notice-text')?.textContent.includes('make it pass')"));
 await page.close();
 
-const clickText = async (selector, text) => {
-  const i = await page.eval(`[...document.querySelectorAll(${JSON.stringify(selector)})].findIndex(e => e.textContent.includes(${JSON.stringify(text)}))`);
-  if (i < 0) throw new Error(`no ${selector} containing "${text}"`);
-  await page.click(selector, i);
-};
 const setValue = (selector, value) =>
   page.eval(`(() => { const e = document.querySelector(${JSON.stringify(selector)}); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(e, ${JSON.stringify(value)}); e.dispatchEvent(new Event('input', { bubbles: true })); })()`);
 const openSettings = async (nav) => {
@@ -287,7 +284,7 @@ const openSettings = async (nav) => {
   await page.click(".snav", nav);
 };
 
-// the model menu: grouped by where the model runs, a Codex model starts a session of its own
+// the model menu: grouped by where the model runs, a model of the other engine continues the conversation there
 page = await openPage(`${index}?scene=done&theme=dark&review=0`);
 ok("the context meter is a bar only, no tick", await page.eval("!!document.querySelector('.ctxmeter .meter') && !document.querySelector('.meter-tick') && document.querySelectorAll('.ctxmeter .meter > *').length === 1"));
 await page.hover(".ctxmeter");
@@ -296,61 +293,62 @@ ok("the Context tooltip has no word about a compaction line", await page.eval("(
 await page.mouse("mouseMoved", 5, 5, { button: "none", clickCount: 0 });
 const tabsBefore = await page.eval("document.querySelectorAll('.tab').length");
 await page.click(".controls .chip", 0);
-ok("the model menu has Factory, Codex 订阅, ChatGPT Plan, Devin and API groups", await page.eval("(() => { const h = [...document.querySelectorAll('.menu-head > span:first-child')].map(e => e.textContent); return h[0] === 'FACTORY' && h[1] === 'CODEX 订阅' && h[2] === 'CHATGPT PLAN' && h[3] === 'DEVIN' && h.length >= 5 && h.slice(4).every(x => x.startsWith('API · ')); })()"));
+ok("the model menu has ChatGPT Plan, Devin and API groups, and nothing else", await page.eval("(() => { const h = [...document.querySelectorAll('.menu-head > span:first-child')].map(e => e.textContent); return h[0] === 'CHATGPT PLAN' && h[1] === 'DEVIN' && h.length >= 3 && h.slice(2).every(x => x.startsWith('API · ')); })()"));
 ok("Devin's models say the conversation is handed over", await page.eval("(() => { const items = [...document.querySelectorAll('.menu-item')].filter(e => e.textContent.includes('换到 Devin 接着做，之前的文字会交接')); return items.length === 4 && ['SWE-2', 'Claude Opus 5.5', 'GPT-6 Sol', 'GLM-5.2 High'].every(n => items.some(e => e.textContent.includes(n))); })()"));
 ok("adding a provider and managing accounts stay visible at the bottom", await page.eval("(() => { const p = document.querySelector('.menu-pinned').getBoundingClientRect(); const m = document.querySelector('.menu').getBoundingClientRect(); return p.bottom <= m.bottom + 1 && p.top >= m.top && [...document.querySelectorAll('.menu-pinned .menu-label')].map(e => e.textContent).join() === '添加 API Provider…,管理账号与模型…'; })()"));
-ok("the Codex models say the conversation is handed over", await page.eval("[...document.querySelectorAll('.menu-item')].filter(e => e.textContent.includes('换到 Codex 接着做，之前的文字会交接')).length === 3"));
-ok("Droid's own models carry no such note", await page.eval("![...document.querySelectorAll('.menu-item')].some(e => e.textContent.includes('Haiku 5.5') && e.textContent.includes('交接'))"));
-await clickText(".menu-item", "GPT-5.3 Codex");
+ok("the plan's own models carry no such note", await page.eval("![...document.querySelectorAll('.menu-item')].some(e => e.textContent.includes('GPT-6-Astra') && e.textContent.includes('交接'))"));
+await clickText(".menu-item", "SWE-2");
 
 // changing engine inside the conversation: same tab, a divider, what goes along, a fresh start for the figures
-ok("picking a Codex model stays in the same conversation: no new tab", (await page.eval("document.querySelectorAll('.tab').length")) === tabsBefore && (await page.eval("document.querySelector('.tab.current').textContent.includes('File operations')")));
-ok("the status bar says what happens to the earlier text", await page.eval("(() => { const t = document.querySelector('.notice-text')?.textContent ?? ''; return t.includes('已换到 GPT-5.3 Codex（Codex）') && /之前 \\d+ 条对话的文字会随下一条消息交给它/.test(t); })()"));
-ok("a divider marks the change: from Haiku 5.5 (Droid) to GPT-5.3 Codex (Codex)", await page.eval("(() => { const d = document.querySelector('.block.engine-switch'); return !!d && d.textContent.includes('Haiku 5.5') && d.textContent.includes('Droid') && d.textContent.includes('GPT-5.3 Codex') && d.textContent.includes('Codex'); })()"));
+ok("picking a Devin model stays in the same conversation: no new tab", (await page.eval("document.querySelectorAll('.tab').length")) === tabsBefore && (await page.eval("document.querySelector('.tab.current').textContent.includes('File operations')")));
+ok("the status bar says what happens to the earlier text", await page.eval("(() => { const t = document.querySelector('.notice-text')?.textContent ?? ''; return t.includes('已换到 SWE-2（Devin）') && /之前 \\d+ 条对话的文字会随下一条消息交给它/.test(t); })()"));
+ok("a divider marks the change: from GPT-6.1-Sol (ChatGPT Plan) to SWE-2 (Devin)", await page.eval("(() => { const d = document.querySelector('.block.engine-switch'); return !!d && d.textContent.includes('GPT-6.1-Sol') && d.textContent.includes('ChatGPT Plan') && d.textContent.includes('SWE-2') && d.textContent.includes('Devin'); })()"));
 ok("the divider states what is not carried over", await page.eval("document.querySelector('.block.engine-switch').textContent.includes('工具调用、结果、思考和图片不会带过去')"));
 ok("the divider spans the conversation and is a few lines tall, not a squeezed column", await page.eval("(() => { const d = document.querySelector('.block.engine-switch').getBoundingClientRect(); const t = document.querySelector('.transcript').getBoundingClientRect(); return d.width > t.width * 0.8 && d.height < 130; })()"));
 ok("the earlier conversation is still on the page", await page.eval("document.querySelector('.transcript').textContent.includes('List the files here')"));
-ok("the model chip is GPT-5.3 Codex with the 订阅 tag", await page.eval("(() => { const c = document.querySelectorAll('.controls .chip')[0]; return c.textContent.includes('GPT-5.3 Codex') && c.querySelector('.src-tag')?.textContent === '订阅'; })()"));
-ok("Codex has its own permission scale, and the old level gave way to its first", (await menu(2)) === "只读,工作区,完全访问" && (await page.eval("document.querySelectorAll('.controls .chip-v')[2].textContent === '只读'")));
-ok("the status bar shows the subscription limits", await page.eval("document.querySelector('.st-right').innerText.replace(/\\s+/g, ' ').includes('Limit 5h 17% 1w 41%')"));
-ok("Context starts again for the new engine, the Token total goes on", await page.eval("(() => { const t = document.querySelector('.st-right').innerText.replace(/\\s+/g, ' '); return /Context —\\/400K/.test(t) && /Token 合计\\s*[\\d.]+[KM]?\\s*In/.test(t); })()"));
-ok("the hint under the message box says the next message carries the text", await page.eval("(() => { const h = document.querySelector('.hint'); return h.classList.contains('handoff') && /下一条消息会带上之前 \\d+ 条对话的文字，交给 GPT-5.3 Codex/.test(h.textContent); })()"));
-ok("the sidebar names the engine of the conversation", await page.eval("document.querySelector('.srow.current').textContent.includes('· Codex')"));
+ok("the model chip is SWE-2 with the 订阅 tag", await page.eval("(() => { const c = document.querySelectorAll('.controls .chip')[0]; return c.textContent.includes('SWE-2') && c.querySelector('.src-tag')?.textContent === '订阅'; })()"));
+ok("Devin has its own permission scale", (await menu(2)) === "问答,计划,写代码,智能,完全访问" && (await page.eval("['问答', '计划', '写代码', '智能', '完全访问'].includes(document.querySelectorAll('.controls .chip-v')[2].textContent)")));
+ok("the status bar has no Limit segment", await page.eval("!document.querySelector('.st-right').innerText.includes('Limit')"));
+ok("Context starts again for the new engine, the Token total goes on", await page.eval("(() => { const t = document.querySelector('.st-right').innerText.replace(/\\s+/g, ' '); return /Context —\\/\\d+K/.test(t) && /Token 合计\\s*[\\d.]+[KM]?\\s*In/.test(t); })()"));
+ok("the hint under the message box says the next message carries the text", await page.eval("(() => { const h = document.querySelector('.hint'); return h.classList.contains('handoff') && /下一条消息会带上之前 \\d+ 条对话的文字，交给 SWE-2/.test(h.textContent); })()"));
+ok("the sidebar names the engine of the conversation", await page.eval("document.querySelector('.srow.current').textContent.includes('· Devin')"));
 await page.click(".controls .chip", 0);
-ok("from here the Droid models are the ones that say 换到 Droid", await page.eval("[...document.querySelectorAll('.menu-item')].filter(e => e.textContent.includes('换到 Droid 接着做，之前的文字会交接')).length >= 5"));
+ok("from here the plan's models are the ones that say 换到 ChatGPT Plan", await page.eval("[...document.querySelectorAll('.menu-item')].filter(e => e.textContent.includes('换到 ChatGPT Plan 接着做，之前的文字会交接')).length >= 3"));
 await page.key("Escape");
 
 // the next message goes out with the text, and a running turn cannot change engine
+await page.click(".controls .chip", 2);
+await clickText(".menu-item", "写代码");
 await page.click(".input");
-await page.type("continue with the Codex model");
+await page.type("continue with the Devin model");
 await page.key("Enter");
 await page.waitFor("document.querySelector('.send.stop')", 3000);
 ok("the sent message says it carried the earlier text", await page.eval("(() => { const n = [...document.querySelectorAll('.handoff-note')].pop(); return !!n && /附带了之前 \\d+ 条对话的文字/.test(n.textContent); })()"));
 ok("and the hint is back to normal", await page.eval("!document.querySelector('.hint.handoff')"));
 await page.click(".controls .chip", 0);
-ok("while the turn runs the other engine's models are disabled, with the reason", await page.eval("(() => { const items = [...document.querySelectorAll('.menu-item')].filter(e => e.textContent.includes('本轮结束后才能换到 Droid')); return items.length >= 5 && items.every(e => e.disabled); })()"));
-ok("while Codex's own models stay available", await page.eval("[...document.querySelectorAll('.menu-item')].filter(e => /GPT-5\\.4/.test(e.textContent) && e.textContent.includes('GPT-5.4') && !e.textContent.includes('本轮结束后')).every(e => !e.disabled)"));
+ok("while the turn runs the other engine's models are disabled, with the reason", await page.eval("(() => { const items = [...document.querySelectorAll('.menu-item')].filter(e => e.textContent.includes('本轮结束后才能换到 ChatGPT Plan')); return items.length >= 3 && items.every(e => e.disabled); })()"));
+ok("while Devin's own models stay available", await page.eval("[...document.querySelectorAll('.menu-item')].filter(e => e.textContent.includes('Claude Opus 5.5') && !e.textContent.includes('本轮结束后')).every(e => !e.disabled)"));
 await page.click(".scroller"); // closes the menu without Esc, which would also stop the turn
-await page.waitFor("document.querySelector('.prompt.perm')", 10000); // Codex's read-only level asks before it edits
-ok("Codex's 只读 level asks for approval before the edit", true);
+await page.waitFor("document.querySelector('.prompt.perm')", 10000); // Devin's Code level asks before it edits
+ok("Devin's 写代码 level asks for approval before the edit", true);
 ok("the approval's answers are one per line, as wide as the card, the label at the left", await page.eval(`${oneLineEach(".prompt.perm .pbtns .btn")} && (() => { const card = document.querySelector('.prompt.perm .pbtns').getBoundingClientRect(); return [...document.querySelectorAll('.prompt.perm .pbtns .btn')].every(b => Math.abs(b.getBoundingClientRect().width - card.width) < 1 && getComputedStyle(b).justifyContent === 'flex-start'); })()`));
 await page.click(".prompt.perm .btn.primary");
 await page.waitFor(READY, 12000);
 await page.hover(".usage");
 await page.wait(700);
-ok("the first turn on the new engine adds to the conversation's total, the Droid part's cache writes included", await page.eval("(() => { const rows = Object.fromEntries([...document.querySelectorAll('.tip-row')].map(r => [r.querySelector('dt').textContent, r.querySelector('dd').textContent])); return /\\d/.test(rows['合计']) && /\\d/.test(rows['Cache Write']) && rows['Cache 命中率'] !== '—'; })()"));
+ok("the first turn on the new engine adds to the conversation's total", await page.eval("(() => { const rows = Object.fromEntries([...document.querySelectorAll('.tip-row')].map(r => [r.querySelector('dt').textContent, r.querySelector('dd').textContent])); return /\\d/.test(rows['合计']) && rows['Cache 命中率'] !== '—'; })()"));
 await page.mouse("mouseMoved", 5, 5, { button: "none", clickCount: 0 });
 
-// and back to Droid, then a change inside one engine, which leaves no divider
+// and back to the own loop, then a change inside one engine, which leaves no divider
 const firstCarried = await page.eval("Number(document.querySelector('.block.engine-switch').textContent.match(/之前 (\\d+) 条/)[1])");
 await page.click(".controls .chip", 0);
-await clickText(".menu-item", "Sonnet 5.5");
-ok("changing back adds a second divider, from Codex to Droid", await page.eval("(() => { const d = [...document.querySelectorAll('.block.engine-switch')]; return d.length === 2 && d[1].textContent.includes('GPT-5.3 Codex') && d[1].textContent.includes('Sonnet 5.5'); })()"));
-ok("it carries the whole conversation so far, including the Codex turn", await page.eval(`Number([...document.querySelectorAll('.block.engine-switch')][1].textContent.match(/之前 (\\d+) 条/)[1]) > ${firstCarried}`));
-ok("the permission scale is Droid's again and the Limit segment is gone", (await menu(2)) === "OFF,Low,Medium,High" && (await page.eval("!document.querySelector('.st-right').innerText.includes('Limit')")));
+await clickText(".menu-item", "GPT-6-Astra");
+ok("changing back adds a second divider, from Devin to ChatGPT Plan", await page.eval("(() => { const d = [...document.querySelectorAll('.block.engine-switch')]; return d.length === 2 && d[1].textContent.includes('SWE-2') && d[1].textContent.includes('GPT-6-Astra'); })()"));
+ok("it carries the whole conversation so far, including the Devin turn", await page.eval(`Number([...document.querySelectorAll('.block.engine-switch')][1].textContent.match(/之前 (\\d+) 条/)[1]) > ${firstCarried}`));
+ok("the permission scale is the own loop's again", (await menu(2)) === "询问,写代码,完全访问");
 await page.click(".controls .chip", 0);
-await clickText(".menu-item", "Opus 5.5");
-ok("a change inside Droid has no divider and no handoff", await page.eval("document.querySelectorAll('.block.engine-switch').length === 2 && document.querySelectorAll('.controls .chip-v')[0].textContent === 'Opus 5.5'"));
+await clickText(".menu-item", "GPT-6.1-Sol");
+ok("a change inside the own loop has no divider and no handoff", await page.eval("document.querySelectorAll('.block.engine-switch').length === 2 && document.querySelectorAll('.controls .chip-v')[0].textContent === 'GPT-6.1-Sol'"));
 ok("no console errors (model menu)", page.consoleErrors().length === 0);
 await page.close();
 
@@ -358,20 +356,20 @@ await page.close();
 page = await openPage(`${index}?scene=empty&theme=dark&review=0`);
 await page.click(".controls .chip", 0);
 ok("an empty session says so in the menu", await page.eval("[...document.querySelectorAll('.menu-item')].some(e => e.textContent.includes('这个会话还是空的'))"));
-await clickText(".menu-item", "GPT-5.3 Codex");
-ok("it changes engine without a divider or a handoff note", await page.eval("!document.querySelector('.block.engine-switch') && !document.querySelector('.hint.handoff') && document.querySelectorAll('.controls .chip-v')[0].textContent === 'GPT-5.3 Codex'"));
-ok("and the status bar does not talk about earlier text", await page.eval("(() => { const t = document.querySelector('.notice-text')?.textContent ?? ''; return t.includes('已换到 GPT-5.3 Codex') && !t.includes('条对话'); })()"));
+await clickText(".menu-item", "SWE-2");
+ok("it changes engine without a divider or a handoff note", await page.eval("!document.querySelector('.block.engine-switch') && !document.querySelector('.hint.handoff') && document.querySelectorAll('.controls .chip-v')[0].textContent === 'SWE-2'"));
+ok("and the status bar does not talk about earlier text", await page.eval("(() => { const t = document.querySelector('.notice-text')?.textContent ?? ''; return t.includes('已换到 SWE-2') && !t.includes('条对话'); })()"));
 await page.close();
 
-// a Codex session and an API session
-page = await openPage(`${index}?scene=codex&theme=dark&review=0`);
-ok("a Codex session: the status bar has Context, Token and Limit", await page.eval("(() => { const t = document.querySelector('.st-right').innerText.replace(/\\s+/g, ' '); return /Context \\d+K\\/\\d+K/.test(t) && /Token 合计/.test(t) && /Limit 5h \\d+% 1w \\d+%/.test(t); })()"));
-ok("Codex reasoning levels come from the model", (await menu(1)) === "Low,Medium,High,XHigh");
+// another ChatGPT Plan session and an API session
+page = await openPage(`${index}?scene=index&theme=dark&review=0`);
+ok("a ChatGPT Plan session: the status bar has Context and Token, no Limit", await page.eval("(() => { const t = document.querySelector('.st-right').innerText.replace(/\\s+/g, ' '); return /Context \\d+K\\/\\d+K/.test(t) && /Token 合计/.test(t) && !t.includes('Limit'); })()"));
+ok("its reasoning levels come from the model", (await menu(1)) === "Low,Medium,High,XHigh");
 await page.hover(".usage");
 await page.wait(700);
-ok("a Codex session shows its own speed", await page.eval("/TPS ≈63\\.4 /.test(document.querySelector('.st-right').innerText.replace(/\\s+/g, ' '))"));
+ok("the session shows its own speed", await page.eval("/TPS ≈63\\.4 /.test(document.querySelector('.st-right').innerText.replace(/\\s+/g, ' '))"));
 ok("there is no Cache Write row when the service does not report it, and no explaining notes", await page.eval("(() => { const rows = [...document.querySelectorAll('.tip-row dt')].map(e => e.textContent).join('|'); return rows === '合计|In|Out|Cache Read|Cache 命中率' && !document.querySelector('.tip-lines .tip-note'); })()"));
-ok("the sidebar names the engine of a Codex session", await page.eval("[...document.querySelectorAll('.srow')].some(r => r.textContent.includes('Codex：重写索引构建') && r.textContent.includes('· Codex'))"));
+ok("the sidebar names the engine of the session", await page.eval("[...document.querySelectorAll('.srow')].some(r => r.textContent.includes('重写索引构建') && r.textContent.includes('· ChatGPT Plan'))"));
 await page.close();
 
 page = await openPage(`${index}?scene=api&theme=light&review=0`);
@@ -380,49 +378,20 @@ ok("a model without reasoning levels disables the reasoning chip", await page.ev
 ok("an API session has no Limit segment", await page.eval("!document.querySelector('.st-right').innerText.includes('Limit')"));
 await page.close();
 
-// accounts and models: the Codex subscription
-page = await openPage(`${index}?scene=done&settings=providers&codex=signed-out&theme=dark&review=0`);
-ok("the page has a Factory, a Codex, a ChatGPT Plan, a Devin and an API Provider card", await page.eval("document.querySelectorAll('.providers .pcard').length === 5"));
-ok("Codex starts signed out", await page.eval("!!document.querySelector('.pstate.off') && document.querySelector('.pcard:nth-child(2)').textContent.includes('未登录')"));
-await page.click(".pcard:nth-child(2) .btn.primary");
-await page.waitFor("document.querySelector('.pcard:nth-child(2)').textContent.includes('正在等你在浏览器里完成登录')", 2000);
-ok("signing in shows that the browser is open, with a cancel button", await page.eval("document.querySelector('.pcard:nth-child(2) .pcard-actions .btn').textContent.trim() === '取消'"));
-await page.click(".pcard:nth-child(2) .pcard-actions .btn");
-await page.waitFor("document.querySelector('.pcard:nth-child(2)').textContent.includes('未登录')", 2000);
-ok("cancelling goes back to signed out", true);
-await page.click(".pcard:nth-child(2) .btn.primary");
-await page.waitFor("document.querySelectorAll('.limrow').length === 2", 6000);
-ok("after signing in the card shows the account and both limit windows", await page.eval("document.querySelector('.pcard:nth-child(2)').textContent.includes('已登录') && document.querySelectorAll('.limrow').length === 2"));
-await page.click(".pcard:nth-child(2) .switch");
-await page.waitFor("document.querySelector('.pcard:nth-child(2) .switch').getAttribute('aria-checked') === 'false'", 2000);
-ok("Codex models can be hidden from the menu without signing out", await page.eval("document.querySelector('.pcard:nth-child(2) .switch').getAttribute('aria-checked') === 'false'"));
-await page.click(".pcard:nth-child(2) .switch");
-await page.waitFor("document.querySelector('.pcard:nth-child(2) .switch').getAttribute('aria-checked') === 'true'", 2000);
-await page.key("Escape");
-await page.click(".controls .chip", 0);
-await page.waitFor("document.querySelectorAll('.menu-item').length > 0", 2000);
-ok("Codex models are in the menu after signing in", await page.eval("[...document.querySelectorAll('.menu-item')].some(e => e.textContent.includes('GPT-5.3 Codex')) && ![...document.querySelectorAll('.menu-item')].some(e => e.textContent.includes('登录 Codex'))"));
-await page.key("Escape");
-await openSettings(1);
-await clickText(".pcard:nth-child(2) .btn", "退出登录");
-await page.waitFor("document.querySelector('.pcard:nth-child(2)').textContent.includes('未登录')", 3000);
-await page.key("Escape");
-await page.click(".controls .chip", 0);
-ok("signed out: the menu offers 登录 Codex… instead of its models", await page.eval("[...document.querySelectorAll('.menu-item')].some(e => e.textContent.includes('登录 Codex')) && ![...document.querySelectorAll('.menu-item')].some(e => e.textContent.includes('GPT-5.3 Codex'))"));
-await clickText(".menu-item", "登录 Codex");
-ok("and picking it opens the accounts page", await page.eval("!!document.querySelector('.settings') && document.querySelector('.settings-body').textContent.includes('Codex 订阅')"));
-ok("no console errors (Codex card)", page.consoleErrors().length === 0);
+// accounts and models: WittyCode's own engine, Devin and the API providers, no other program's
+page = await openPage(`${index}?scene=done&settings=providers&theme=dark&review=0`);
+ok("the page has a ChatGPT Plan, a Devin and an API Provider card, and nothing of another program", await page.eval("document.querySelectorAll('.providers .pcard').length === 3 && !/Factory|Codex|Droid/.test(document.querySelector('.providers').textContent)"));
+ok("no console errors (accounts page)", page.consoleErrors().length === 0);
 await page.close();
 
-page = await openPage(`${index}?scene=done&settings=providers&codex=missing&providers=none&theme=light&review=0`);
-ok("Codex CLI missing: the card says how to install it", await page.eval("document.querySelector('.pcard:nth-child(2)').textContent.includes('npm i -g @openai/codex') && document.querySelector('.pcard:nth-child(2)').textContent.includes('没有找到 codex 命令行')"));
+page = await openPage(`${index}?scene=done&settings=providers&providers=none&theme=light&review=0`);
 ok("with no providers the API card offers quick starts", await page.eval("[...document.querySelectorAll('.quick .chip-suggest')].map(e => e.textContent).join() === 'OpenAI 官方,Anthropic 官方,OpenRouter,Ollama（本机）'"));
 await clickText(".quick .chip-suggest", "Ollama");
 ok("a quick start opens the editor with the preset filled in", await page.eval("document.querySelector('.pe-title').textContent === '添加 API Provider' && document.querySelector('input[aria-label=\"Base URL\"]').value === 'http://localhost:11434/v1' && document.querySelector('.segc button.on').textContent === '不需要'"));
 const imagesOn = () => page.eval("document.querySelector('.mrow:not(.mhead) .switch').getAttribute('aria-checked') === 'true'");
-ok("a generic-format provider's model starts with pictures off (Droid's default for that format)", (await imagesOn()) === false);
+ok("a generic-format provider's model starts with pictures off (the usual default for that format)", (await imagesOn()) === false);
 await page.close();
-page = await openPage(`${index}?scene=done&settings=providers&codex=missing&providers=none&theme=light&review=0`);
+page = await openPage(`${index}?scene=done&settings=providers&providers=none&theme=light&review=0`);
 await clickText(".quick .chip-suggest", "OpenAI 官方");
 ok("an OpenAI provider's model starts with pictures on, as the editor's note says", await page.eval("document.querySelector('.mrow:not(.mhead) .switch').getAttribute('aria-checked') === 'true'"));
 await page.click(".mtable + .pe-btns .btn");
@@ -448,26 +417,26 @@ ok("an empty session moved to a Devin model takes that engine's levels: Code and
 await page.close();
 
 page = await openPage(`${index}?scene=done&settings=providers&devin=signed-out&theme=dark&review=0`);
-ok("Devin starts signed out, with a sign-in button", await page.eval("document.querySelector('.pcard:nth-child(4)').textContent.includes('Devin 账号') && document.querySelector('.pcard:nth-child(4) .pstate.off')?.textContent.includes('未登录') && document.querySelector('.pcard:nth-child(4) .btn.primary').textContent.trim() === '登录 Devin'"));
-await page.click(".pcard:nth-child(4) .btn.primary");
-await page.waitFor("document.querySelector('.pcard:nth-child(4)').textContent.includes('正在等你在浏览器里完成登录')", 2000);
-ok("signing in shows that the browser is open, with a cancel button", await page.eval("document.querySelector('.pcard:nth-child(4) .pcard-actions .btn').textContent.trim() === '取消'"));
-await page.click(".pcard:nth-child(4) .pcard-actions .btn");
-await page.waitFor("document.querySelector('.pcard:nth-child(4)').textContent.includes('未登录')", 2000);
-await page.click(".pcard:nth-child(4) .btn.primary");
-await page.waitFor("document.querySelector('.pcard:nth-child(4)').textContent.includes('已登录')", 6000);
-ok("after signing in the card shows the account and the plan", await page.eval("document.querySelector('.pcard:nth-child(4)').textContent.includes('Devin Pro') && document.querySelector('.pcard:nth-child(4)').textContent.includes('demo@example.com')"));
+ok("Devin starts signed out, with a sign-in button", await page.eval("document.querySelector('.pcard:nth-child(2)').textContent.includes('Devin 账号') && document.querySelector('.pcard:nth-child(2) .pstate.off')?.textContent.includes('未登录') && document.querySelector('.pcard:nth-child(2) .btn.primary').textContent.trim() === '登录 Devin'"));
+await page.click(".pcard:nth-child(2) .btn.primary");
+await page.waitFor("document.querySelector('.pcard:nth-child(2)').textContent.includes('正在等你在浏览器里完成登录')", 2000);
+ok("signing in shows that the browser is open, with a cancel button", await page.eval("document.querySelector('.pcard:nth-child(2) .pcard-actions .btn').textContent.trim() === '取消'"));
+await page.click(".pcard:nth-child(2) .pcard-actions .btn");
+await page.waitFor("document.querySelector('.pcard:nth-child(2)').textContent.includes('未登录')", 2000);
+await page.click(".pcard:nth-child(2) .btn.primary");
+await page.waitFor("document.querySelector('.pcard:nth-child(2)').textContent.includes('已登录')", 6000);
+ok("after signing in the card shows the account and the plan", await page.eval("document.querySelector('.pcard:nth-child(2)').textContent.includes('Devin Pro') && document.querySelector('.pcard:nth-child(2)').textContent.includes('demo@example.com')"));
 ok("the models can be chosen one by one, like the other sources", await page.eval("!!document.querySelector('.mvis[data-source=\"devin\"]') && document.querySelector('.mvis[data-source=\"devin\"] .mvis-count').textContent.replace(/\\s+/g, '') === '4/4'"));
-await page.click(".pcard:nth-child(4) .switch");
-ok("Devin models can be hidden from the menu without signing out", await page.eval("document.querySelector('.pcard:nth-child(4) .switch').getAttribute('aria-checked') === 'false'"));
-await page.click(".pcard:nth-child(4) .switch");
+await page.click(".pcard:nth-child(2) .switch");
+ok("Devin models can be hidden from the menu without signing out", await page.eval("document.querySelector('.pcard:nth-child(2) .switch').getAttribute('aria-checked') === 'false'"));
+await page.click(".pcard:nth-child(2) .switch");
 await page.key("Escape");
 await page.click(".controls .chip", 0);
 ok("Devin models are in the menu after signing in", await page.eval("[...document.querySelectorAll('.menu-item')].some(e => e.textContent.includes('Claude Opus 5.5')) && ![...document.querySelectorAll('.menu-item')].some(e => e.textContent.includes('登录 Devin'))"));
 await page.key("Escape");
 await openSettings(1);
-await clickText(".pcard:nth-child(4) .btn", "退出登录");
-await page.waitFor("document.querySelector('.pcard:nth-child(4)').textContent.includes('未登录')", 3000);
+await clickText(".pcard:nth-child(2) .btn", "退出登录");
+await page.waitFor("document.querySelector('.pcard:nth-child(2)').textContent.includes('未登录')", 3000);
 await page.key("Escape");
 await page.click(".controls .chip", 0);
 ok("signed out: the menu offers 登录 Devin… instead of its models", await page.eval("[...document.querySelectorAll('.menu-item')].some(e => e.textContent.includes('登录 Devin')) && ![...document.querySelectorAll('.menu-item')].some(e => e.textContent.includes('Claude Opus 5.5'))"));
@@ -477,17 +446,17 @@ ok("no console errors (Devin card)", page.consoleErrors().length === 0);
 await page.close();
 
 page = await openPage(`${index}?scene=done&settings=providers&devin=missing&theme=light&review=0`);
-ok("Devin CLI missing: the card says what to install", await page.eval("document.querySelector('.pcard:nth-child(4)').textContent.includes('没有找到 devin 命令行') && document.querySelector('.pcard:nth-child(4)').textContent.includes('Devin 桌面版或 Devin CLI')"));
+ok("Devin CLI missing: the card says what to install", await page.eval("document.querySelector('.pcard:nth-child(2)').textContent.includes('没有找到 devin 命令行') && document.querySelector('.pcard:nth-child(2)').textContent.includes('Devin 桌面版或 Devin CLI')"));
 await page.close();
 
 // a ChatGPT Plan session: WittyCode's own harness on the user's ChatGPT plan
 page = await openPage(`${index}?scene=chatgpt&theme=dark&review=0`);
 ok("a ChatGPT Plan session says it is using the plan, with the way to manage usage", await page.eval("(() => { const b = document.querySelector('.hint .plan-badge'); const a = b?.querySelector('a'); return !!b && b.textContent.includes('Using ChatGPT Plan') && !b.classList.contains('off') && a.textContent === 'Manage usage' && a.getAttribute('href') === 'https://chatgpt.com/settings/usage'; })()"));
 ok("the badge is under the box, so the send button stays on the row of the controls and nothing is left empty below it", await page.eval("(() => { const r = (e) => e.getBoundingClientRect(); const bar = document.querySelector('.composer-bar'); const chip = document.querySelector('.controls .chip'); const send = document.querySelector('.composer-bar .send'); const hint = document.querySelector('.hint'); const b = document.querySelector('.hint .plan-badge'); const mid = (e) => r(e).top + r(e).height / 2; return !document.querySelector('.controls .plan-badge') && Math.abs(mid(send) - mid(chip)) < 6 && r(bar).height < 40 && r(hint).height < 22 && r(b).right <= r(hint).right + 1 && r(b).left > r(hint).left + 100; })()"));
-ok("the badge ends in a ring after Manage usage, 14 px, drawn to the highest of the two windows (41%)", await page.eval("(() => { const b = document.querySelector('.hint .plan-badge'); const ring = b.querySelector('.plan-ring .usage-ring'); const a = b.querySelector('a'); const arc = ring?.querySelector('.ring-arc'); const C = 2 * Math.PI * 5.5; return !!ring && ring.getBoundingClientRect().width === 14 && ring.getBoundingClientRect().left > a.getBoundingClientRect().right && !ring.classList.contains('unknown') && !!arc && Math.abs(parseFloat(arc.getAttribute('stroke-dasharray')) - C * 0.41) < 0.05 && ring.getAttribute('aria-label') === '套餐额度已用 41%'; })()"));
+ok("the badge ends in a grey ring after Manage usage, 14 px: the plan's figures are not given to this sign-in", await page.eval("(() => { const b = document.querySelector('.hint .plan-badge'); const ring = b.querySelector('.plan-ring .usage-ring'); const a = b.querySelector('a'); return !!ring && ring.getBoundingClientRect().width === 14 && ring.classList.contains('unknown') && !ring.querySelector('.ring-arc') && (a.compareDocumentPosition(ring) & Node.DOCUMENT_POSITION_FOLLOWING); })()"));
 await page.hover(".plan-ring");
 await page.waitFor("!!document.querySelector('.plan-ring .tip')", 2000);
-ok("hovering it lists both windows with their reset", await page.eval("(() => { const t = document.querySelector('.plan-ring .tip').textContent; return t.includes('ChatGPT Pro 额度') && t.includes('5 小时已用 17%') && t.includes('每周已用 41%') && t.includes('3 小时 12 分后重置') && t.includes('4 天 6 小时后重置'); })()"));
+ok("hovering it says why there are no figures and where to look", await page.eval("(() => { const t = document.querySelector('.plan-ring .tip').textContent; return t.includes('现在读不到') && t.includes('Manage usage') && !/%/.test(t); })()"));
 ok("the badge still fits the line under the box with the ring", await page.eval("(() => { const r = (e) => e.getBoundingClientRect(); const hint = document.querySelector('.hint'); const b = document.querySelector('.hint .plan-badge'); return r(hint).height < 22 && r(b).right <= r(hint).right + 1 && r(b).height < 22; })()"));
 ok("the reasoning levels are the model's own", (await menu(1)) === "Low,Medium,High,XHigh");
 ok("the permission scale is WittyCode's own three", (await menu(2)) === "询问,写代码,完全访问");
@@ -502,12 +471,12 @@ ok("the menu has its own CHATGPT PLAN group, with the models and the account", a
 })());
 await page.close();
 
-// the ring when the plan's use cannot be read (no Codex login of the same account): grey, and the tip says why
-page = await openPage(`${index}?scene=chatgpt&codex=signed-out&theme=light&review=0`);
-ok("without a Codex login the ring is grey and empty", await page.eval("(() => { const ring = document.querySelector('.hint .plan-ring .usage-ring'); return !!ring && ring.classList.contains('unknown') && !ring.querySelector('.ring-arc') && ring.getAttribute('aria-label') === '套餐额度读不到'; })()"));
+// the ring: OpenAI gives this sign-in no figures, so it is grey, and the tip says why
+page = await openPage(`${index}?scene=chatgpt&theme=light&review=0`);
+ok("the ring is grey and empty", await page.eval("(() => { const ring = document.querySelector('.hint .plan-ring .usage-ring'); return !!ring && ring.classList.contains('unknown') && !ring.querySelector('.ring-arc') && ring.getAttribute('aria-label') === '套餐额度读不到'; })()"));
 await page.hover(".plan-ring");
 await page.waitFor("!!document.querySelector('.plan-ring .tip')", 2000);
-ok("and the tip says why and how to get the figures, without inventing any", await page.eval("(() => { const t = document.querySelector('.plan-ring .tip').textContent; return t.includes('现在读不到：Codex 没有用 ChatGPT 账号登录。') && t.includes('没有给「用 ChatGPT 登录」的应用开放用量接口') && t.includes('登录 Codex') && !/已用 \\d+%/.test(t); })()"));
+ok("and the tip says why and where to look, without inventing any figures", await page.eval("(() => { const t = document.querySelector('.plan-ring .tip').textContent; return t.includes('现在读不到：') && t.includes('没有给「用 ChatGPT 登录」的应用开放用量接口') && !/Codex|%/.test(t); })()"));
 await page.close();
 
 // messages waiting for their turn: one line each above the composer, the width of the box, four icons at the end
@@ -552,7 +521,7 @@ for (const width of [1500, 1100, 900]) {
   await page.close();
 }
 // a conversation of any engine: no line under the box unless it has something to say
-page = await openPage(`${index}?scene=done&theme=light&review=0`, { width: 1300 });
+page = await openPage(`${index}?scene=devin&theme=light&review=0`, { width: 1300 });
 ok("an ordinary conversation has no line under the box, and the keys are in the box", await page.eval("!document.querySelector('.hint') && /Enter 发送 · Shift\\+Enter 换行/.test(document.querySelector('.input').placeholder)"));
 ok("the model chip and the reasoning chip are not labelled in words (they are named for assistive technology), the mode is", await page.eval("[...document.querySelectorAll('.controls .chip')].map((c) => c.getAttribute('aria-label').split('：')[0]).join(',') === '模型,推理,权限,模式' && [...document.querySelectorAll('.controls .chip-k')].map((e) => e.textContent).join(',') === '模式'"));
 await page.close();
@@ -564,31 +533,31 @@ ok("an empty session moved to a ChatGPT Plan model takes that engine's levels: C
 await page.close();
 
 page = await openPage(`${index}?scene=done&settings=providers&chatgpt=signed-out&theme=dark&review=0`);
-ok("the page has five cards now: Factory, Codex, ChatGPT Plan, Devin and API Provider", await page.eval("document.querySelectorAll('.providers .pcard').length === 5"));
-ok("ChatGPT Plan starts signed out, with OpenAI's wording on a black button", await page.eval("document.querySelector('.pcard:nth-child(3)').textContent.includes('ChatGPT Plan') && document.querySelector('.pcard:nth-child(3) .pstate.off')?.textContent.includes('未登录') && document.querySelector('.pcard:nth-child(3) .btn.chatgpt-btn').textContent.trim() === 'Continue with ChatGPT' && getComputedStyle(document.querySelector('.pcard:nth-child(3) .btn.chatgpt-btn')).backgroundColor === 'rgb(0, 0, 0)'"));
-await page.click(".pcard:nth-child(3) .btn.chatgpt-btn");
-await page.waitFor("document.querySelector('.pcard:nth-child(3)').textContent.includes('正在等你在浏览器里完成登录')", 2000);
-ok("signing in shows that the browser is open, with a cancel button", await page.eval("document.querySelector('.pcard:nth-child(3) .pcard-actions .btn').textContent.trim() === '取消'"));
-await page.click(".pcard:nth-child(3) .pcard-actions .btn");
-await page.waitFor("document.querySelector('.pcard:nth-child(3)').textContent.includes('未登录')", 2000);
-await page.click(".pcard:nth-child(3) .btn.chatgpt-btn");
-await page.waitFor("document.querySelector('.pcard:nth-child(3)').textContent.includes('使用你的 ChatGPT 套餐')", 6000);
-ok("after signing in the card shows the account and where to manage the usage", await page.eval("document.querySelector('.pcard:nth-child(3)').textContent.includes('demo@example.com') && document.querySelector('.pcard:nth-child(3) a.inline-link')?.getAttribute('href') === 'https://chatgpt.com/settings/usage'"));
+ok("the page has three cards: ChatGPT Plan, Devin and API Provider", await page.eval("document.querySelectorAll('.providers .pcard').length === 3"));
+ok("ChatGPT Plan starts signed out, with OpenAI's wording on a black button", await page.eval("document.querySelector('.pcard:nth-child(1)').textContent.includes('ChatGPT Plan') && document.querySelector('.pcard:nth-child(1) .pstate.off')?.textContent.includes('未登录') && document.querySelector('.pcard:nth-child(1) .btn.chatgpt-btn').textContent.trim() === 'Continue with ChatGPT' && getComputedStyle(document.querySelector('.pcard:nth-child(1) .btn.chatgpt-btn')).backgroundColor === 'rgb(0, 0, 0)'"));
+await page.click(".pcard:nth-child(1) .btn.chatgpt-btn");
+await page.waitFor("document.querySelector('.pcard:nth-child(1)').textContent.includes('正在等你在浏览器里完成登录')", 2000);
+ok("signing in shows that the browser is open, with a cancel button", await page.eval("document.querySelector('.pcard:nth-child(1) .pcard-actions .btn').textContent.trim() === '取消'"));
+await page.click(".pcard:nth-child(1) .pcard-actions .btn");
+await page.waitFor("document.querySelector('.pcard:nth-child(1)').textContent.includes('未登录')", 2000);
+await page.click(".pcard:nth-child(1) .btn.chatgpt-btn");
+await page.waitFor("document.querySelector('.pcard:nth-child(1)').textContent.includes('使用你的 ChatGPT 套餐')", 6000);
+ok("after signing in the card shows the account and where to manage the usage", await page.eval("document.querySelector('.pcard:nth-child(1)').textContent.includes('demo@example.com') && document.querySelector('.pcard:nth-child(1) a.inline-link')?.getAttribute('href') === 'https://chatgpt.com/settings/usage'"));
 ok("and the first sign-in is met with 'You're using your ChatGPT Plan'", await page.eval("(() => { const d = document.querySelector('.chatgpt-welcome'); return !!d && d.textContent.includes(\"You're using your ChatGPT Plan\") && d.textContent.includes('Manage usage') && d.querySelector('.btn.primary').textContent.trim() === 'Got it'; })()"));
 await page.click(".chatgpt-welcome .btn.primary");
 ok("Got it closes it for good", await page.eval("!document.querySelector('.chatgpt-welcome')"));
 ok("the models can be chosen one by one, like the other sources", await page.eval("!!document.querySelector('.mvis[data-source=\"chatgpt\"]') && document.querySelector('.mvis[data-source=\"chatgpt\"] .mvis-count').textContent.replace(/\\s+/g, '') === '3/3'"));
-await page.click(".pcard:nth-child(3) .switch");
+await page.click(".pcard:nth-child(1) .switch");
 await page.wait(150);
-ok("ChatGPT Plan models can be hidden from the menu without signing out", await page.eval("document.querySelector('.pcard:nth-child(3) .switch').getAttribute('aria-checked') === 'false'"));
-await page.click(".pcard:nth-child(3) .switch");
+ok("ChatGPT Plan models can be hidden from the menu without signing out", await page.eval("document.querySelector('.pcard:nth-child(1) .switch').getAttribute('aria-checked') === 'false'"));
+await page.click(".pcard:nth-child(1) .switch");
 await page.key("Escape");
 await page.click(".controls .chip", 0);
 ok("the models are in the menu after signing in", await page.eval("[...document.querySelectorAll('.menu-item')].some(e => e.textContent.includes('GPT-6-Astra')) && ![...document.querySelectorAll('.menu-item')].some(e => e.textContent.includes('Continue with ChatGPT'))"));
 await page.key("Escape");
 await openSettings(1);
-await clickText(".pcard:nth-child(3) .btn", "退出登录");
-await page.waitFor("document.querySelector('.pcard:nth-child(3)').textContent.includes('未登录')", 3000);
+await clickText(".pcard:nth-child(1) .btn", "退出登录");
+await page.waitFor("document.querySelector('.pcard:nth-child(1)').textContent.includes('未登录')", 3000);
 await page.key("Escape");
 await page.click(".controls .chip", 0);
 ok("signed out: the menu offers Continue with ChatGPT instead of the models", await page.eval("[...document.querySelectorAll('.menu-item')].some(e => e.textContent.includes('Continue with ChatGPT')) && ![...document.querySelectorAll('.menu-item')].some(e => e.textContent.includes('GPT-6-Astra'))"));
@@ -596,7 +565,7 @@ ok("no console errors (ChatGPT Plan card)", page.consoleErrors().length === 0);
 await page.close();
 
 page = await openPage(`${index}?scene=done&settings=providers&chatgpt=no-plan&theme=light&review=0`);
-ok("signed in without the permission to use the plan: the card says so and offers to ask again", await page.eval("document.querySelector('.pcard:nth-child(3)').textContent.includes('还没有允许使用套餐') && document.querySelector('.pcard:nth-child(3) .pstate.warn') && document.querySelector('.pcard:nth-child(3) .pcard-actions .btn').textContent.trim() === '允许使用 ChatGPT 套餐'"));
+ok("signed in without the permission to use the plan: the card says so and offers to ask again", await page.eval("document.querySelector('.pcard:nth-child(1)').textContent.includes('还没有允许使用套餐') && document.querySelector('.pcard:nth-child(1) .pstate.warn') && document.querySelector('.pcard:nth-child(1) .pcard-actions .btn').textContent.trim() === '允许使用 ChatGPT 套餐'"));
 await page.key("Escape");
 await page.click(".controls .chip", 0);
 ok("and so does the menu, without any ChatGPT Plan models", await page.eval("[...document.querySelectorAll('.menu-item')].some(e => e.textContent.includes('允许使用 ChatGPT 套餐…')) && ![...document.querySelectorAll('.menu-item')].some(e => e.textContent.includes('GPT-6-Astra'))"));
@@ -606,8 +575,8 @@ page = await openPage(`${index}?scene=chatgpt&chatgpt=signed-out&theme=light&rev
 ok("a ChatGPT Plan session whose account signed out says it is not signed in", await page.eval("document.querySelector('.plan-badge.off')?.textContent.includes('ChatGPT 未登录')"));
 await page.close();
 
-page = await openPage(`${index}?scene=done&settings=droid&theme=light&review=0`);
-ok("the Droid page also holds the Devin program path", await page.eval("document.querySelector('.settings-body').textContent.includes('Devin 命令行')"));
+page = await openPage(`${index}?scene=done&settings=programs&theme=light&review=0`);
+ok("the 外部程序 page holds the Devin program path", await page.eval("document.querySelector('.settings-body').textContent.includes('Devin 命令行')"));
 await page.close();
 
 // accounts and models: which models the conversation's model menu offers
@@ -625,32 +594,32 @@ const menuLabels = async () => {
   await page.key("Escape");
   return items;
 };
-ok("the Factory card counts its models, all shown to begin with", (await mvisCount("factory")) === "5/5");
-ok("so does the Codex card", (await mvisCount("codex")) === "3/3");
+ok("the ChatGPT Plan card counts its models, all shown to begin with", (await mvisCount("chatgpt")) === "3/3");
+ok("so does the Devin card", (await mvisCount("devin")) === "4/4");
 ok("and every API provider", await page.eval("[...document.querySelectorAll('.mvis[data-source^=\"api:\"]')].length === 3 && [...document.querySelectorAll('.mvis[data-source^=\"api:\"] .mvis-count')].every(e => /^(\\d+)\\s*\\/\\s*\\1$/.test(e.textContent.trim()))"));
 ok("the lists are folded away until asked for", await page.eval("!document.querySelector('.mvis-body')"));
-await page.click(`${mvis("factory")} .disclose`);
-ok("unfolded: a switch for each model, all on", await page.eval(`(() => { const s = [...document.querySelectorAll('${mvis("factory")} .switch')]; return s.length === 5 && s.every(x => x.getAttribute('aria-checked') === 'true'); })()`));
-await rowSwitch("factory", "Kimi K3");
-ok("turning one off updates the count", (await mvisCount("factory")) === "4/5");
-ok("and the switch", await page.eval(`document.querySelectorAll('${mvis("factory")} .switch')[4].getAttribute('aria-checked') === 'false'`));
+await page.click(`${mvis("chatgpt")} .disclose`);
+ok("unfolded: a switch for each model, all on", await page.eval(`(() => { const s = [...document.querySelectorAll('${mvis("chatgpt")} .switch')]; return s.length === 3 && s.every(x => x.getAttribute('aria-checked') === 'true'); })()`));
+await rowSwitch("chatgpt", "GPT-6-Luna");
+ok("turning one off updates the count", (await mvisCount("chatgpt")) === "2/3");
+ok("and the switch", await page.eval(`document.querySelectorAll('${mvis("chatgpt")} .switch')[2].getAttribute('aria-checked') === 'false'`));
 await page.key("Escape");
-ok("the model menu no longer offers it", !(await menuLabels()).includes("Kimi K3"));
+ok("the model menu no longer offers it", !(await menuLabels()).includes("GPT-6-Luna"));
 await openSettings(1);
-await page.click(`${mvis("factory")} .disclose`);
-await rowSwitch("factory", "Haiku 5.5"); // the model this conversation is using
+await page.click(`${mvis("chatgpt")} .disclose`);
+await rowSwitch("chatgpt", "GPT-6.1-Sol"); // the model this conversation is using
 await page.key("Escape");
 await page.click(".controls .chip", 0);
-const inUse = await page.eval("[...document.querySelectorAll('.menu-item')].filter(e => e.textContent.includes('Haiku 5.5')).map(e => e.textContent).join('|')");
+const inUse = await page.eval("[...document.querySelectorAll('.menu-item')].filter(e => e.textContent.includes('GPT-6.1-Sol')).map(e => e.textContent).join('|')");
 await page.key("Escape");
 ok("a hidden model that is in use is still offered, saying why", inUse.includes("正在使用所以还显示"), inUse);
 await openSettings(1);
-await page.click(`${mvis("codex")} .disclose`);
-await clickText(`${mvis("codex")} .btn`, "全部隐藏");
-ok("hiding all of Codex's models: 0 of 3, the button is spent", (await mvisCount("codex")) === "0/3" && (await page.eval(`[...document.querySelectorAll('${mvis("codex")} .btn')].find(b => b.textContent.includes('全部隐藏')).disabled`)));
+await page.click(`${mvis("devin")} .disclose`);
+await clickText(`${mvis("devin")} .btn`, "全部隐藏");
+ok("hiding all of Devin's models: 0 of 4, the button is spent", (await mvisCount("devin")) === "0/4" && (await page.eval(`[...document.querySelectorAll('${mvis("devin")} .btn')].find(b => b.textContent.includes('全部隐藏')).disabled`)));
 await page.key("Escape");
 await page.click(".controls .chip", 0);
-ok("the menu keeps the CODEX heading and says nothing is shown (and where to change that)", await page.eval("(() => { const items = [...document.querySelectorAll('.menu-item')].map(e => e.textContent); return !items.some(t => t.includes('GPT-5.3 Codex')) && items.some(t => t.includes('没有显示的模型') && t.includes('账号与模型')) && [...document.querySelectorAll('.menu-head')].some(e => e.textContent.includes('CODEX')); })()"));
+ok("the menu keeps the DEVIN heading and says nothing is shown (and where to change that)", await page.eval("(() => { const items = [...document.querySelectorAll('.menu-item')].map(e => e.textContent); return !items.some(t => t.includes('SWE-2')) && items.some(t => t.includes('没有显示的模型') && t.includes('账号与模型')); })()"));
 ok("that note cannot be picked", await page.eval("[...document.querySelectorAll('.menu-item')].find(e => e.textContent.includes('没有显示的模型')).disabled"));
 await page.key("Escape");
 // an API provider whose models are all hidden keeps its heading too, with the same note
@@ -666,21 +635,21 @@ ok("hiding all of an API provider's models: none of them shown", (await mvisCoun
 await page.key("Escape");
 await page.click(".controls .chip", 0);
 ok("the menu keeps that provider's heading (no API group vanishes)", headsBefore === 3 && (await apiHeads()) === headsBefore, [headsBefore, await apiHeads()]);
-ok("and says nothing is shown under it, next to Codex's own note (Codex is still all hidden here)", await page.eval("[...document.querySelectorAll('.menu-item')].filter((e) => e.textContent.includes('没有显示的模型') && e.disabled).length === 2"));
+ok("and says nothing is shown under it, next to Devin's own note (Devin is still all hidden here)", await page.eval("[...document.querySelectorAll('.menu-item')].filter((e) => e.textContent.includes('没有显示的模型') && e.disabled).length === 2"));
 await page.key("Escape");
 await openSettings(1);
 await page.click(`${mvis(apiSource)} .disclose`);
 await clickText(`${mvis(apiSource)} .btn`, "全部显示");
 await page.key("Escape");
 await openSettings(1);
-await page.click(`${mvis("factory")} .disclose`);
-await clickText(`${mvis("factory")} .btn`, "全部显示");
-await page.click(`${mvis("codex")} .disclose`);
-await clickText(`${mvis("codex")} .btn`, "全部显示");
-ok("show all brings every model back", (await mvisCount("factory")) === "5/5" && (await mvisCount("codex")) === "3/3");
+await page.click(`${mvis("chatgpt")} .disclose`);
+await clickText(`${mvis("chatgpt")} .btn`, "全部显示");
+await page.click(`${mvis("devin")} .disclose`);
+await clickText(`${mvis("devin")} .btn`, "全部显示");
+ok("show all brings every model back", (await mvisCount("chatgpt")) === "3/3" && (await mvisCount("devin")) === "4/4");
 await page.key("Escape");
 const everything = await menuLabels();
-ok("the menu is whole again", ["Haiku 5.5", "Kimi K3", "GPT-5.3 Codex"].every((m) => everything.includes(m)) && !everything.includes("没有显示的模型") && !everything.includes("正在使用所以还显示"));
+ok("the menu is whole again", ["GPT-6.1-Sol", "GPT-6-Luna", "SWE-2"].every((m) => everything.includes(m)) && !everything.includes("没有显示的模型") && !everything.includes("正在使用所以还显示"));
 ok("no console errors (model lists)", page.consoleErrors().length === 0);
 await page.close();
 
@@ -752,7 +721,7 @@ await page.key("Escape");
 await openSettings(1);
 await page.click(".prov .btn", 1); // edit OR2
 await clickText(".pe-foot .btn", "删除");
-ok("deleting asks first and names what goes away", await page.eval("!!document.querySelector('.dialog') && document.querySelector('.dialog').textContent.includes('customModels')"));
+ok("deleting asks first and names what goes away", await page.eval("!!document.querySelector('.dialog') && document.querySelector('.dialog').textContent.includes('models.json')"));
 await page.click(".dialog .danger-solid");
 await page.waitFor("document.querySelectorAll('.prov').length === 3", 3000);
 ok("confirming removes it and returns to the list", await page.eval("![...document.querySelectorAll('.prov-name')].some(e => e.textContent === 'OR2') && !document.querySelector('.pe')"));
@@ -781,18 +750,18 @@ const noteTitles = () => page.eval("[...document.querySelectorAll('.mem-note .me
 const notice = () => page.eval("document.querySelector('.notice-text')?.textContent ?? ''");
 ok("the settings have a memory page, with the number of new notes on its tab", await page.eval("(() => { const n = [...document.querySelectorAll('.snav')].find(e => e.textContent.includes('共享记忆')); return !!n && n.classList.contains('on') && n.querySelector('.snav-badge')?.textContent === '5' && document.querySelector('.settings-body h2').textContent === '共享记忆'; })()"));
 ok("the sidebar's memory button carries the same number: two new notes and three notes for the weekly review", await page.eval("document.querySelector('.foot-btn .foot-badge')?.textContent === '5'"));
-ok("the switches: on, for Droid, Codex, Devin and ChatGPT Plan, and for the two ways notes get written by the application itself", await page.eval("(() => { const on = [...document.querySelectorAll('.settings-body .field .switch')].map((e) => e.getAttribute('aria-checked')); return on.length === 8 && on.every((v) => v === 'true') && [...document.querySelectorAll('.mem-engine')].map((e) => e.textContent.trim()).join() === 'Droid,Codex,Devin,ChatGPT Plan'; })()"));
+ok("the switches: on, for ChatGPT Plan and Devin, and for the two ways notes get written by the application itself", await page.eval("(() => { const on = [...document.querySelectorAll('.settings-body .field .switch')].map((e) => e.getAttribute('aria-checked')); return on.length === 6 && on.every((v) => v === 'true') && [...document.querySelectorAll('.mem-engine')].map((e) => e.textContent.trim()).join() === 'ChatGPT Plan,Devin'; })()"));
 await page.click(".mem-engine .switch", 1);
-ok("an engine can be left out", await page.eval("[...document.querySelectorAll('.mem-engine .switch')].map((e) => e.getAttribute('aria-checked')).join() === 'true,false,true,true'"));
+ok("an engine can be left out", await page.eval("[...document.querySelectorAll('.mem-engine .switch')].map((e) => e.getAttribute('aria-checked')).join() === 'true,false'"));
 await page.click(".mem-engine .switch", 1);
+await page.click(".settings-body .field .switch", 3);
+ok("the notes that bear on a message can be left out of the messages", await page.eval("document.querySelectorAll('.settings-body .field .switch')[3].getAttribute('aria-checked') === 'false'"));
+await page.click(".settings-body .field .switch", 3);
+await page.click(".settings-body .field .switch", 4);
 await page.click(".settings-body .field .switch", 5);
-ok("the notes that bear on a message can be left out of the messages", await page.eval("document.querySelectorAll('.settings-body .field .switch')[5].getAttribute('aria-checked') === 'false'"));
+ok("a message that says remember, and the notes the application writes by itself after a turn, can each be switched off", await page.eval("(() => { const s = [...document.querySelectorAll('.settings-body .field .switch')]; return s[4].getAttribute('aria-checked') === 'false' && s[5].getAttribute('aria-checked') === 'false' && /说了「记住」就直接记下/.test(document.querySelectorAll('.settings-body .field')[3].textContent) && /自动记笔记，每周回顾一次/.test(document.querySelectorAll('.settings-body .field')[4].textContent); })()"));
+await page.click(".settings-body .field .switch", 4);
 await page.click(".settings-body .field .switch", 5);
-await page.click(".settings-body .field .switch", 6);
-await page.click(".settings-body .field .switch", 7);
-ok("a message that says remember, and the notes the application writes by itself after a turn, can each be switched off", await page.eval("(() => { const s = [...document.querySelectorAll('.settings-body .field .switch')]; return s[6].getAttribute('aria-checked') === 'false' && s[7].getAttribute('aria-checked') === 'false' && /说了「记住」就直接记下/.test(document.querySelectorAll('.settings-body .field')[3].textContent) && /自动记笔记，每周回顾一次/.test(document.querySelectorAll('.settings-body .field')[4].textContent); })()"));
-await page.click(".settings-body .field .switch", 6);
-await page.click(".settings-body .field .switch", 7);
 await page.click(".settings-body .field .switch", 0);
 ok("with the master switch off the engines are gone, and the page says the notes stay", await page.eval("!document.querySelector('.mem-engine') && document.querySelectorAll('.settings-body .field .switch').length === 1 && document.querySelector('.page-note')?.textContent.includes('已关闭') && !!document.querySelector('.mem-note')"));
 await page.click(".settings-body .field .switch", 0);
@@ -802,11 +771,11 @@ ok("the button says how many stay and how many go", await page.eval("document.qu
 await clickText(".mem-rev-foot .btn", "确认");
 await page.waitFor("!document.querySelector('.mem-rev')", 3000);
 ok("confirming says what was kept and dropped; only what agents wrote is counted by the tab again", await page.eval("document.querySelector('.mem-lead')?.textContent.includes('保留 2 条，丢弃 1 条') && [...document.querySelectorAll('.snav-badge')].map((e) => e.textContent).join() === '2'"));
-ok("what agents wrote lately: five changes, newest first", await page.eval("(() => { const r = [...document.querySelectorAll('.mem-change .mem-change-line')].map((e) => e.textContent.replace(/\\s+/g, ' ')); return r.length === 5 && r[0].startsWith('Codex 忘记了「旧结论') && r[1].startsWith('Codex 记住了「改了 frontend') && r[2].startsWith('Devin') && r[3].startsWith('Droid'); })()"));
+ok("what agents wrote lately: five changes, newest first", await page.eval("(() => { const r = [...document.querySelectorAll('.mem-change .mem-change-line')].map((e) => e.textContent.replace(/\\s+/g, ' ')); return r.length === 5 && r[0].startsWith('Devin 忘记了「旧结论') && r[1].startsWith('Devin 记住了「改了 frontend') && r[2].startsWith('Devin') && r[3].startsWith('ChatGPT Plan'); })()"));
 ok("the two the user has not looked at are marked", await page.eval("document.querySelectorAll('.mem-change.new').length === 2 && document.querySelector('.mem-new')?.textContent.includes('2 条新的')"));
 ok("a change made in a conversation names it as a link", await page.eval("[...document.querySelectorAll('.mem-change .mem-link')].some((e) => e.textContent === '修复缓存')"));
 ok("the notes: four in use and one forgotten", (await page.eval("document.querySelector('.mem-count').textContent.replace(/\\s+/g, '')")) === "4·已忘记1" && (await noteTitles()).length === 4);
-await page.click(".mem-change .btn", 0); // undo: Codex forgot the old note
+await page.click(".mem-change .btn", 0); // undo: Devin forgot the old note
 await page.waitFor("document.querySelectorAll('.mem-note').length === 5", 3000);
 ok("undoing the forget brings the note back", (await noteTitles()).some((t) => t.startsWith("旧结论")) && (await notice()).includes("已撤销"));
 await page.click(".mem-head .btn", 0); // 全部标为已看过
@@ -826,7 +795,7 @@ await page.click(".mem-tools .segc button", 0);
 await page.waitFor("document.querySelectorAll('.mem-note').length === 5", 3000);
 
 await clickText(".mem-note-head", "PowerShell");
-ok("a note opens to its text and says where it came from", await page.eval("(() => { const b = document.querySelector('.mem-note.open .mem-note-body'); return !!b && b.textContent.includes('用分号串联') && b.textContent.includes('Droid 写入') && b.textContent.includes('整理测试'); })()"));
+ok("a note opens to its text and says where it came from", await page.eval("(() => { const b = document.querySelector('.mem-note.open .mem-note-body'); return !!b && b.textContent.includes('用分号串联') && b.textContent.includes('ChatGPT Plan 写入') && b.textContent.includes('整理测试'); })()"));
 ok("and offers 编辑 and 忘记", await page.eval("[...document.querySelectorAll('.mem-note.open .btn')].map((e) => e.textContent.trim()).join() === '编辑,忘记'"));
 await clickText(".mem-note.open .btn", "编辑");
 ok("the editor takes the focus (so Esc leaves it, not the settings)", await page.eval("document.activeElement?.getAttribute('aria-label') === '标题'"));

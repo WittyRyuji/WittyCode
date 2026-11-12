@@ -4,6 +4,7 @@
 
 ## 当前状态
 
+- 2026-11-12（独立化：去掉 Droid / Factory / Codex，未提交）：WittyCode 只剩自有循环（ChatGPT Plan、API Provider，引擎名 `chatgpt`）和可选的 Devin。删了 `desktop/core/codex/`、`session_manager.py`、`droid_locator.py`、`droid_limits.py`、`history.py`、`devtools/replay.py` 和 `droid-sdk` 依赖；前端去掉 Factory / Codex 卡片和 Plan 额度来源，设置里「Droid」页改成「外部程序」（只有 Devin 路径）；API Provider 的模型存在 WittyCode 自己的 `models.json`，**不再读也不复制 `~/.factory/settings.json`**（用户定）；技能目录 `.wittycode` 优先，其他代理的目录只读兼容（`~/.factory/settings.json` 里的 `disabledSkills`、插件仍在读，Roadmap 里写了要去掉）。测试底座换成 `tests/app_support.make_core`（真 ChatGPTEngine + 本机假 Responses 服务，`Plan.script` / `("hold", key)` / `release`）、`save_conversation`、假 Devin 的 `FAKE_DEVIN_OPEN_DELAY` / `FAKE_DEVIN_OPEN_FAIL`、e2e 的 `Model` 帮手。**事故**：一个旧测试用默认路径建 `ProviderStore`，把 `~/.factory/settings.json` 的 `customModels` 复制进了用户真实的 `%APPDATA%\WittyCode\models.json`；已按用户意见删除该文件、删掉迁移逻辑，并在 `tests/conftest.py` 加了 autouse 的 `_no_files_of_the_real_user`（每个测试的 `WITTYCODE_SETTINGS` 指向临时目录）。新增 `README.md`（英文）/ `README.zh-CN.md`、`ROADMAP.md` / `ROADMAP.zh-CN.md`、`SECURITY.md`、`CONTRIBUTING.md`。验证：全量 pytest（不含 e2e）2743 通过 / 2 跳过（之后又修了一个时序断言），整机 e2e 54 通过，前端 typecheck、unit 69、星图单测 26、`check.mjs` 332、`check-live.mjs` 261，冒烟脚本 OK。未做：版本号 0.1.0a1、`release.yml`、提交推送。
 - 2026-11-11（深夜，第三批：答复选项一行一个）：用户：「提问回答的选项应该一行一个，包括权限审批」。权限卡的答复按钮改成竖排、占满卡片宽、文字靠左（`.pbtns.choices`，类名 `.pbtns` / `.btn` 不变，测试的选择器照旧）；提问卡的选项本来就一行一个，没改。没有提交。细节见批次记录最上面一条。
 - 2026-11-11（深夜，第二批：用户九条里能直接做的）：`AGENTS.md` 再缩成只有硬约束（16 行：语言、沟通、验证、边界、公开仓库、Git、交接），命令和环境搬到 `docs/development.md`，产品原则进 `docs/project.md`。**Devin 会问问题了**（声明 ACP elicitation，`elicitation/create` 画成提问卡）；**Devin 的 token 合计实时动**（本轮已有调用先显示、不记账）；**思考用中文**（设置开关，默认开）；压缩摘要请求失败会重试；停止超时不再把旧引导塞进下一轮；退出确认提醒排队消息和 `/goal`；提问卡等回答时回车不再悄悄排队。**没做、等用户定**：去掉 Droid / Factory（747 个测试建在 Droid 的假引擎上，要先重写测试底座）、设置里「删除 Codex 的 ACP 模式，只保留 Plan」（理解成去掉「Codex 订阅」引擎，待确认）、Codex 的提问（随上一条定）。没有提交。细节见批次记录最上面一条。
 - 2026-11-11（深夜：`AGENTS.md` 瘦身）：用户：「仓库下的 Agents.md 明显太臃肿……这个应该是对于 Agent 运行的定义。项目信息不应该混入」。`AGENTS.md` 现在只放代理的工作约定（先读什么、规则、命令、版本控制、交接），207 KB → 9 KB；项目概况、模块图、发布包结构和「版本控制」里仓库 / 许可证 / 隐私的原文搬到 `docs/project.md`，原「SDK 已确认的事实」一节（65 条）原样搬到 `docs/knowledge.md`（开头加了索引）。**下面各条和批次记录里说「见 `AGENTS.md` 的「某某」一条」的，现在都在 `docs/knowledge.md`。** 没有提交（等用户说）。细节见批次记录最上面一条。
@@ -59,6 +60,24 @@
 - 尚未提交到 git；用户之后要推到自己的 GitHub。
 
 ## 批次记录（新的在最上面）
+
+### 2026-11-12 独立化：去掉 Droid / Factory / Codex，公开发布的准备（Devin 会话）
+
+**用户**：「WittyCode 不应含有 Droid、Factory 等外部产品信息，也不应依赖其他程序」「能让用户使用这两个订阅和 CLI，但是我们的 App 不能依赖他们的 CLI 或者框架」；首个 Release `0.1.0 alpha`、公开 CI（固定 `windows-2025`）、Roadmap（不写日期）、英文 README 可切中文、`SECURITY.md` / `CONTRIBUTING.md`（外部 PR 要审计）、先推 `dev` 再由用户在 GitHub 批准合并到 `main`。
+
+**结果**：引擎只剩 `chatgpt`（自有循环：ChatGPT Plan + API Provider）和可选的 `devin`。中间版本 `e9b6bdf` 和 CI 配置 `0d5637f` 已推到 `dev`；这一批还没提交。
+
+**改动**：
+- 后端：删 `core/codex/`、`session_manager.py`、`droid_locator.py`、`droid_limits.py`、`history.py`、`devtools/replay.py`，删依赖 `droid-sdk` 和 pydantic；共用部分搬进 `session_state.py`、`jsonrpc.py`、`elicit.py`、`engine_items.py`、`engine_errors.py`、`side_helpers.py`；`AppCore(settings, platform, devin=, chatgpt=)`。`ProviderStore` 的参数 `factory_settings` 改名 `models_file`，删了 `migrate_models`（从 `~/.factory/settings.json` 复制）和 `factory_compaction`。技能目录加 `SKILL_FOLDERS` / `COMMAND_FOLDERS`，`.wittycode` 第一。`scripts/smoke_release.py` 不再靠 `--replay`（临时设置目录，等输入框画出）。
+- 前端：类型、协议、store、模型菜单、设置（「Droid」页 → 「外部程序」，只有 Devin 路径）、账号页（ChatGPT Plan / Devin / API Provider 三张卡）、状态栏（ChatGPT Plan 没有额度数据就是灰环）、演示数据、`check.mjs`、`check-live.mjs` 和 `fake-backend.mjs`（主模型是 API Provider「Gateway」，第二引擎是 Devin）。侧栏：不知道模型的自有循环已保存会话不再标「ChatGPT Plan」。
+- 测试：底座换成 `tests/app_support.make_core`（真 `ChatGPTEngine` + 本机假 Responses 服务）、`save_conversation`、假 Devin 的 `FAKE_DEVIN_OPEN_DELAY` / `FAKE_DEVIN_OPEN_FAIL`；整机测试 54 个全部移植（`Model` 帮手）；`test_catalog.py`、`test_settings.py`、`test_shell.py` 按新规则重写。只测已删引擎的测试删掉了；「缓存先显示、未打开会话预读」两个整机测试随 Droid 的慢加载一起删了，子代理整机测试（只有 Codex 有）也删了。
+- 文档：`README.md`（英文）/ `README.zh-CN.md`、`ROADMAP.md` / `ROADMAP.zh-CN.md`、`SECURITY.md`、`CONTRIBUTING.md`；`docs/project.md` 模块图、`docs/development.md`、`docs/knowledge.md` 第 67 条。
+
+**事故**：移植中跑到一个旧测试，它用默认参数建 `ProviderStore`，`migrate_models` 把 `~/.factory/settings.json` 的 `customModels` 复制进了用户真实的 `%APPDATA%\WittyCode\models.json`（新建，1026 字节）。发现后先停下问用户，用户：「不应该依赖这个文件我认为，如非必须，删除」。已删除该文件（只删这一个），删掉迁移逻辑，`tests/conftest.py` 加 autouse `_no_files_of_the_real_user`（`WITTYCODE_SETTINGS` 指向临时目录），测默认位置的测试改成临时 home。
+
+**验证**：全量 pytest（不含 e2e）2743 通过 / 2 跳过，唯一的失败是时序断言（换引擎失败后页面要等下一次 flush），改成 `until` 后连跑 6 次通过；`test_app_e2e.py` 54 个整文件通过；前端 typecheck 0 错、unit 69、星图单测 26、`check.mjs` 332、`check-live.mjs` 261；冒烟脚本 OK；账号页、外部程序页、模型菜单截图看过（发现演示数据的权限芯片显示 `off`，已改成 `code`）。
+
+**未解决**：版本号 `0.1.0a1` 和 `release.yml`；提交、推送 `dev`；GitHub 上 Actions 策略要用户放宽才能跑起来；`~/.factory/settings.json` 的 `disabledSkills` 和 `~/.factory/plugins` 仍在读；`providers.py` / `skills.py` 的文档字符串和部分注释还有旧名字；`context.py` 和 `devtools/samples.py` 的旧帮手；README 截图要重拍；AppCore 的子代理管道没有引擎提供（写进 Roadmap）。
 
 ### 2026-11-11（深夜，第三批）答复选项一行一个（Devin 会话）
 

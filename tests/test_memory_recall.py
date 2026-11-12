@@ -40,33 +40,21 @@ def test_the_first_versions_note_in_front_of_a_message_is_taken_out_too():
     assert context_envelope.strip("[Shared memory is a phrase the user may type]") == "[Shared memory is a phrase the user may type]"
 
 
-def test_a_saved_conversation_reads_back_as_it_was_typed_in_all_three_engines():
-    from droid_sdk import TextBlock
-
-    from desktop.core.attachments import typed_text
-    from desktop.core.codex.items import split_handoff, user_message_parts
+def test_a_saved_conversation_reads_back_as_it_was_typed_in_every_engine():
+    from desktop.core.engine_items import split_handoff, user_message_parts
     from desktop.core.devin.items import user_text_and_attachments
-    from desktop.core.transcript import Transcript
-    from tests.support import wire_message
 
     block = context_envelope.wrap("[Shared memory of the user's coding agents is available: ...]\nGlobal notes:\n- m-1 T (fact)", "Notes: - m-2 Other (fact): body")
     sent = "fix the build" + block
-    assert typed_text([TextBlock(text=sent)]) == "fix the build"
-    assert typed_text([TextBlock(text="<system-reminder>Attached image local file paths: x</system-reminder>"), TextBlock(text=sent)]) == "fix the build"
-
-    transcript = Transcript()
-    transcript.load_history([wire_message("u1", "user", {"type": "text", "text": sent})])
-    assert transcript.turns[0].user_block.text == "fix the build", "Droid: the saved first message"
-
     text, _, handoff = user_message_parts({"type": "userMessage", "id": "u", "content": [{"type": "text", "text": sent, "text_elements": []}]})
-    assert (text, handoff) == ("fix the build", None), "Codex"
+    assert (text, handoff) == ("fix the build", None), "the own loop's saved message"
     assert user_text_and_attachments([{"type": "text", "text": sent}])[0] == "fix the build", "Devin"
-    assert split_handoff(sent)[0] == "fix the build", "and a thread's preview, which names it in the sidebar"
+    assert split_handoff(sent)[0] == "fix the build", "and a conversation's preview, which names it in the sidebar"
     assert split_handoff("fix the build\n\n<wittycode-context>\nNotes: cut o")[0] == "fix the build"
 
 
 def test_a_message_that_carried_an_earlier_conversation_and_notes_is_read_back_too():
-    from desktop.core.codex.items import split_handoff
+    from desktop.core.engine_items import split_handoff
     from desktop.core.handoff import build_handoff
     from desktop.core.transcript import Transcript, TurnStatus
 

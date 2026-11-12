@@ -239,38 +239,36 @@ def test_a_turn_that_failed_or_was_restored_is_not_asked_about(tmp_path):
 
 def test_an_engine_that_cannot_be_asked_quietly_is_not_asked_and_nothing_goes_to_another_provider(tmp_path):
     async def scenario():
-        core, factory, events, _, _ = await ready_core(tmp_path, memory=MemoryLaunch(tmp_path / "memory", python=sys.executable))
-        assert await core._extract_for_memory("droid", str(tmp_path), "prompt") is None
-        assert await core._extract_for_memory("chatgpt", str(tmp_path), "prompt") is None, "no ChatGPT engine here"
-        assert await core._extract_for_memory("codex", str(tmp_path), "prompt") is None, "no Codex engine here"
+        core, factory, events, _, _ = await ready_core(tmp_path, plan=False, memory=MemoryLaunch(tmp_path / "memory", python=sys.executable))
+        assert await core._extract_for_memory("some-other-engine", str(tmp_path), "prompt") is None
+        assert await core._extract_for_memory("chatgpt", str(tmp_path), "prompt") is None, "no own loop here"
         assert await core._extract_for_memory("devin", str(tmp_path), "prompt") is None, "no Devin engine here"
         await core.shutdown()
 
     run(scenario())
 
 
-def test_a_droid_turn_does_not_take_the_curators_allowance(tmp_path):
-    """Droid has no side channel (``_extract_for_memory``), so its turns must not count as "asked": a few of them would use
-    the hour's limit and leave the ChatGPT, Codex and Devin turns unread."""
+def test_a_turn_of_an_engine_without_a_side_channel_does_not_take_the_curators_allowance(tmp_path):
+    """An engine that cannot be asked aside (``_extract_for_memory``: here Devin, which this core does not have) must not
+    count as "asked": a few of its turns would use the hour's limit and leave the others unread."""
 
     async def scenario():
         from tests.app_support import make_core
 
         core, _, _, _, _ = make_core(tmp_path, memory=MemoryLaunch(tmp_path / "memory", python=sys.executable))
         assert core.curator is not None
-        assert core.curator.enabled("droid") is False, "nothing would come of asking"
-        assert core.curator.worth_asking(Exchange(engine="droid", project=str(tmp_path), conversation="c", row="", user=ASK, assistant=ANSWER)) is False
+        assert core.curator.enabled("devin") is False, "nothing would come of asking"
+        assert core.curator.worth_asking(Exchange(engine="devin", project=str(tmp_path), conversation="c", row="", user=ASK, assistant=ANSWER)) is False
         assert core.curator._asked == deque(), "the allowance is untouched"
         await core.shutdown()
 
     run(scenario())
 
 
-def test_codex_and_devin_are_asked_through_their_own_side_channel(tmp_path, monkeypatch):
-    """The question goes to the engine of the conversation, over its side channel (core/codex/side, core/devin/side)."""
+def test_devin_is_asked_through_its_own_side_channel(tmp_path, monkeypatch):
+    """The question goes to the engine of the conversation, over its side channel (core/devin/side)."""
     from types import SimpleNamespace
 
-    from desktop.core.codex import side as codex_side
     from desktop.core.devin import side as devin_side
     from tests.app_support import make_core
 
@@ -281,7 +279,6 @@ def test_codex_and_devin_are_asked_through_their_own_side_channel(tmp_path, monk
             calls.append((engine.marker, project, prompt))
             return '{"notes": []}'
 
-        monkeypatch.setattr(codex_side, "ask", fake_ask)
         monkeypatch.setattr(devin_side, "ask", fake_ask)
         quiet = lambda *_args, **_kwargs: None  # noqa: E731 (a stand-in engine only takes listeners and a shutdown)
 
@@ -290,14 +287,12 @@ def test_codex_and_devin_are_asked_through_their_own_side_channel(tmp_path, monk
 
         core, _, _, _, _ = make_core(
             tmp_path,
-            codex_engine=SimpleNamespace(marker="codex", add_listener=quiet, close_all=close_all),
             devin_engine=SimpleNamespace(marker="devin", add_listener=quiet, add_account_listener=quiet, close_all=close_all),
             memory=MemoryLaunch(tmp_path / "memory", python=sys.executable),
         )
         project = str(tmp_path / "proj")
-        assert await core._extract_for_memory("codex", project, "p1") == '{"notes": []}'
         assert await core._extract_for_memory("devin", project, "p2") == '{"notes": []}'
-        assert calls == [("codex", project, "p1"), ("devin", project, "p2")]
+        assert calls == [("devin", project, "p2")]
         await core.shutdown()
 
     run(scenario())

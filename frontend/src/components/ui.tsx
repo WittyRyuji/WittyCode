@@ -23,7 +23,7 @@ export interface MenuItem {
   separator?: boolean;
   /** a group title: not clickable, the `label` is its text and `description` a second, quieter line */
   heading?: boolean;
-  /** with `heading`: a small title inside a group (the makers of Factory's models) */
+  /** with `heading`: a small title inside a group (the makers of a source's models) */
   sub?: boolean;
   /** stays at the bottom of a long, scrolling menu */
   pinned?: boolean;

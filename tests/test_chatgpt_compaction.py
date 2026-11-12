@@ -14,7 +14,7 @@ from desktop.core.harness.loop import INTERRUPTED
 from desktop.core.harness.prompt import build_instructions
 from desktop.core.harness.store import SavedTurn
 from desktop.core.harness.toolset import HarnessTools
-from desktop.core.session_manager import SessionState
+from desktop.core.session_state import SessionState
 from desktop.core.transcript import TurnStatus
 from tests.chatgpt_support import ACCESS_TOKEN, finish_turn, make_engine, until
 from tests.fake_responses import FakeResponses, call, http_error, say, usage

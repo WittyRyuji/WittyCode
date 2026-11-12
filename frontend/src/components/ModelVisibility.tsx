@@ -4,7 +4,7 @@ import { useStore } from "../store";
 import type { ModelChoice } from "../types";
 import { Switch } from "./formkit";
 
-/** A Factory model of one maker under that maker's name (like the model menu); the other sources have no makers. */
+/** The models of one maker under that maker's name (like the model menu); sources without makers have no headings. */
 function byMaker(models: ModelChoice[]): [string | null, ModelChoice[]][] {
   if (!models.some((m) => m.group)) return [[null, models]];
   const groups = new Map<string, ModelChoice[]>();
@@ -13,7 +13,7 @@ function byMaker(models: ModelChoice[]): [string | null, ModelChoice[]][] {
 }
 
 /** Which of one source's models the conversation's model menu offers: a switch for each, and show / hide all. Folded
- *  away by default (Factory alone lists a few dozen). Renders nothing while the source has no models to choose from. */
+ *  away by default (a provider may list a few dozen). Renders nothing while the source has no models to choose from. */
 export function ModelVisibility({ source }: { source: string }) {
   const models = useStore((s) => s.models);
   const hidden = useStore((s) => s.hiddenModels);

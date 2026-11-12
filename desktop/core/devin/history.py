@@ -20,7 +20,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from desktop.core.codex.items import command_result
+from desktop.core.engine_items import command_result
 from desktop.core.devin import items
 from desktop.core.transcript import Transcript, Turn, TurnStatus
 from desktop.core.usage import Tokens

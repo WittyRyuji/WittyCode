@@ -1,63 +1,50 @@
-"""API providers: Droid's BYOK ``customModels`` list, as WittyCode's settings page shows it.
+"""API providers: the ``customModels`` list of WittyCode's own models file (``models.json``), as the settings page shows it.
 
 Nothing here imports Qt. The page talks to ``ProviderStore`` through the bridge; every value that crosses is JSON-shaped
 with the camelCase keys of ``frontend/src/types.ts`` (``ApiProvider``, ``ProviderDraft``, ``ApiModel``) and no returned
 value ever holds a secret (a legacy plaintext key is only visible as a masked tail).
 
-What Droid stores (``~/.factory/settings.json`` -> ``customModels``, an array of objects)
+What the models file holds (``models.json`` -> ``customModels``, an array of objects)
 ------------------------------------------------------------------------------------
-Sources: https://docs.factory.com/model-independence/byok.md, https://docs.factory.com/droid-cli/settings.md,
-https://docs.factory.com/droid-exec/overview.md (section "Custom models"), https://docs.factory.com/sdk/typescript.md,
-https://docs.factory.com/changelog/release-notes.md (CLI 0.99.0, "Custom model stability"), and, where the docs
-disagree or say nothing, a read-only look at the strings of the droid.exe that the Factory desktop app bundles
-(``%LOCALAPPDATA%\\Factory\\app-*\\resources\\bin\\droid.exe``, ``--version`` 0.251.0 when this was written).
+The common "bring your own key" format of agent applications. WittyCode reads and writes only its own file, next to its
+settings; it never reads another program's settings.
 
 Fields of one entry (``model`` is the only one that is always there):
 
-- ``model`` (str): the id sent to the API. ``displayName`` (str): the name in Droid's model menu; Droid uses ``model``
-  when it is missing. ``baseUrl`` (str, http/https): required unless the entry has a ``bedrock`` block.
+- ``model`` (str): the id sent to the API. ``displayName`` (str): the name in the model menu; ``model`` when it is
+  missing. ``baseUrl`` (str, http/https): required unless the entry has a ``bedrock`` block.
 - ``provider``: exactly ``anthropic`` | ``openai`` | ``generic-chat-completion-api`` | ``bedrock-converse``.
   ``bedrock-converse`` requires a ``bedrock`` block; a ``bedrock`` block also goes with ``anthropic`` (InvokeModel /
   Messages) and ``openai`` (Bedrock's OpenAI endpoint), never with ``generic-chat-completion-api``.
-- ``apiKey`` (str, optional, never empty): ``${VAR_NAME}`` is expanded from the environment of the droid process (also in
-  ``extraHeaders`` values and in ``bedrock.awsRegion`` / ``awsProfile`` / ``bedrockBaseUrl`` / ``requestMetadata``); an
-  unset variable makes Droid fail with the variable's name. The literal placeholders ``YOUR_API_KEY`` and
-  ``YOUR_OPENAI_API_KEY`` make Droid ignore the whole entry. Omit it for keyless endpoints.
+- ``apiKey`` (str, optional, never empty): ``${VAR_NAME}`` is expanded from the environment (also in ``extraHeaders``
+  values and in ``bedrock.awsRegion`` / ``awsProfile`` / ``bedrockBaseUrl`` / ``requestMetadata``); an unset variable is
+  an error naming it. The literal placeholders ``YOUR_API_KEY`` and ``YOUR_OPENAI_API_KEY`` make the entry unusable.
+  Omit it for keyless endpoints.
 - ``apiKeyHelper`` (str, optional): a shell command whose trimmed stdout is the key, run from the home directory; it wins
-  over ``apiKey``; honored in user settings only. ``apiKeyHelperTtlMs`` (positive int, default 300000 = 5 min).
+  over ``apiKey``. ``apiKeyHelperTtlMs`` (positive int, default 300000 = 5 min).
 - ``authMode``: ``bearer`` (send ``Authorization: Bearer`` instead of ``x-api-key``; only valid with
   ``provider: anthropic`` and no ``bedrock``) or ``provider-default``.
-- ``maxOutputTokens``, ``maxContextLimit`` (positive ints), ``reasoningEffort`` (the default level for a model Droid does
-  not know; it also makes the menu offer off/low/medium/high), ``noImageSupport`` (bool; Droid's default is true for
-  ``generic-chat-completion-api`` and false for the other three), ``enableThinking`` / ``thinkingMaxTokens``
-  (anthropic and bedrock only), ``baseModelId`` / ``useInRouter`` (map the entry onto a built-in model),
-  ``extraHeaders`` (object of str; names unique ignoring case), ``extraArgs`` (object, merged into the request body).
+- ``maxOutputTokens``, ``maxContextLimit`` (positive ints), ``reasoningEffort`` (the default level; it also makes the
+  menu offer off/low/medium/high), ``noImageSupport`` (bool; the default is true for ``generic-chat-completion-api`` and
+  false for the other three), ``enableThinking`` / ``thinkingMaxTokens`` (anthropic and bedrock only), ``baseModelId`` /
+  ``useInRouter`` (kept as they are), ``extraHeaders`` (object of str; names unique ignoring case), ``extraArgs``
+  (object, merged into the request body).
 - ``bedrock`` (object): ``authMethod`` (``aws-credentials`` | ``credentials-command`` | ``environment-api-key``;
   ``credentials-command`` needs ``awsCredentialExport``), ``awsRegion``, ``awsProfile``, ``bedrockBaseUrl``,
   ``awsAuthRefresh``, ``awsCredentialExport``, ``requestMetadata``.
-- ``id`` (str) and ``index`` (number): optional. Droid computes both in memory when it reads the file and never needs the
-  writer to supply them; an explicit ``id`` in the file wins over the computed one. WittyCode never writes them and keeps
-  them on entries that already have them. (Whether Droid's own "Custom models" editor writes them back was not found.)
+- ``id`` (str) and ``index`` (number): optional; WittyCode never writes them and keeps them on entries that have them.
 
-Entries that Droid cannot use (no ``model``, an unknown ``provider``, neither ``baseUrl`` nor ``bedrock``, a placeholder
-key, a broken combination above) are skipped by Droid and by this module alike; they are left in the file untouched.
+Entries that cannot be used (no ``model``, an unknown ``provider``, neither ``baseUrl`` nor ``bedrock``, a placeholder
+key, a broken combination above) are skipped; they are left in the file untouched.
 
-The id Droid shows for a custom model (``ModelInfo.id`` with ``is_custom=True``; the id to pass as the session model)
--------------------------------------------------------------------------------------------------------------------
+The id of a model
+-----------------
 ``custom:<name>-<n>`` where ``name`` is ``displayName`` (``model`` when there is none) trimmed with every run of
 whitespace replaced by one ``-``, and ``n`` is how many *earlier usable entries* have the same ``name`` (0 for the first).
 So with distinct display names every id ends in ``-0`` and deleting an entry in the middle changes no other id; only the
-later ones of a group of identical names move up. This is the rule of the droid.exe above ("custom model IDs changing
-unexpectedly between sessions" was fixed in CLI 0.99.0). The docs (droid exec) still describe the older rule, ``n`` =
-the 0-based position in the array; Droid still accepts such an id when it names an entry's current position, and it
-accepts ``custom:<model>`` (the form the TypeScript SDK page shows). ``provider_of`` understands all three. The rule is in
-``custom_model_id``; change that one function if Factory changes it again. Checked against droid 0.251.0 through the SDK's
-``list_models`` (temporary USERPROFILE, no turn): the ids of entries written by this module, including two entries whose
-display names differ only in spacing and the shift of ids after an entry in the middle was removed, came back as predicted.
-
-Known SDK limit: droid-sdk 0.5.0's ``ModelProvider`` enum has no ``bedrock-converse``, so ``droid_sdk.list_models`` raises a
-pydantic ValidationError for the whole catalog as soon as one entry has ``provider: bedrock-converse`` (droid itself lists
-it). Entries with ``provider: anthropic`` plus a ``bedrock`` block are listed fine.
+later ones of a group of identical names move up. Two older forms are still understood by ``provider_of`` (``n`` = the
+0-based position in the array, and ``custom:<model>``), so conversations saved with them keep their model. The rule is in
+``custom_model_id``. The page's id is ``api:<provider id>:custom:<name>-<n>``.
 
 How WittyCode keeps its own layer
 ---------------------------------
@@ -98,7 +85,12 @@ from desktop.core.settings import default_settings_path
 
 log = logging.getLogger(__name__)
 
-FACTORY_SETTINGS_ENV = "WITTYCODE_FACTORY_SETTINGS"
+MODELS_FILE_ENV = "WITTYCODE_MODELS_FILE"
+"""A models file of its own (tests, a second profile) instead of ``%APPDATA%\\WittyCode\\models.json``."""
+MODELS_FILE = "models.json"
+"""WittyCode's own file of the API providers' model entries: ``{"customModels": [...]}`` in the format described above."""
+
+
 BACKUP_SUFFIX = ".wittycode-backup"
 KINDS = ("anthropic", "openai", "generic-chat-completion-api", "bedrock-converse")
 BEDROCK = "bedrock-converse"
@@ -124,7 +116,7 @@ _SECRET_HEADER = re.compile(r"authorization|api[-_]?key|token|secret|passw|crede
 _AUTH_SCHEME = re.compile(r"^\s*(bearer|basic|token|digest)\s+", re.IGNORECASE)
 _BULLETS = "\u2022" * 8
 
-# JavaScript's \s, which is what Droid's name rule uses; Python's differs at the edges (U+FEFF, U+001C..U+001F, U+0085).
+# JavaScript's \s, which is what the name rule uses; Python's differs at the edges (U+FEFF, U+001C..U+001F, U+0085).
 _JS_SPACE = "\t\n\v\f\r \u00a0\u1680\u2028\u2029\u202f\u205f\u3000\ufeff" + "".join(chr(c) for c in range(0x2000, 0x200B))
 _JS_SPACE_RUN = re.compile("[" + re.escape(_JS_SPACE) + "]+")
 
@@ -133,16 +125,16 @@ class ProviderError(Exception):
     """Something the user can act on; the message is one Chinese sentence."""
 
 
-# --------------------------------------------------------------------------------------------- Droid's naming rule
+# ------------------------------------------------------------------------------------------------ the naming rule
 
 
-def _droid_name(display_name: str) -> str:
+def _custom_name(display_name: str) -> str:
     return _JS_SPACE_RUN.sub("-", display_name.strip(_JS_SPACE))
 
 
 def custom_model_id(display_name: str, ordinal: int) -> str:
-    """The id Droid gives a custom model: ``ordinal`` counts earlier usable entries with the same sanitized name."""
-    return f"custom:{_droid_name(display_name)}-{ordinal}"
+    """The id of a custom model: ``ordinal`` counts earlier usable entries with the same sanitized name."""
+    return f"custom:{_custom_name(display_name)}-{ordinal}"
 
 
 # ---------------------------------------------------------------------------------------------- entries and groups
@@ -160,8 +152,8 @@ def _positive_int(value: Any) -> int | None:
     return value if isinstance(value, int) and value > 0 else None
 
 
-def _droid_keeps(entry: Any) -> bool:
-    """Whether Droid will list this entry (an approximation of its loader; see the module docstring)."""
+def _usable(entry: Any) -> bool:
+    """Whether the entry can be used (see the module docstring)."""
     if not isinstance(entry, dict) or not _text(entry.get("model")):
         return False
     provider = entry.get("provider")
@@ -245,7 +237,7 @@ def _build_groups(entries: Sequence[Any], records: Sequence[dict]) -> list[_Grou
             used.add(record["id"])
     groups: dict[tuple[str, str], _Group] = {}
     for index, entry in enumerate(entries):
-        if not _droid_keeps(entry):
+        if not _usable(entry):
             continue
         key = _group_key(entry)
         group = groups.get(key)
@@ -266,13 +258,13 @@ def _display_of(entry: dict) -> str:
     return entry["displayName"] if isinstance(entry.get("displayName"), str) else entry["model"]
 
 
-def _droid_ids(entries: Sequence[Any]) -> list[tuple[int, str, str]]:
-    """(index in the file, the id Droid uses, the id of the older position-based rule) for each usable entry."""
+def _custom_ids(entries: Sequence[Any]) -> list[tuple[int, str, str]]:
+    """(index in the file, the model's id, the id of the older position-based rule) for each usable entry."""
     seen: dict[str, int] = {}
     out: list[tuple[int, str, str]] = []
-    for position, (index, entry) in enumerate((i, e) for i, e in enumerate(entries) if _droid_keeps(e)):
+    for position, (index, entry) in enumerate((i, e) for i, e in enumerate(entries) if _usable(e)):
         display = _display_of(entry)
-        name = _droid_name(display)
+        name = _custom_name(display)
         ordinal = seen.get(name, 0)
         seen[name] = ordinal + 1
         explicit = entry.get("id") if isinstance(entry.get("id"), str) else None
@@ -303,7 +295,7 @@ class ApiModelSpec:
     """A model of an API provider as WittyCode's own agent loop needs it (``ProviderStore.api_models``)."""
 
     id: str
-    """The application's id for it: ``api:<provider id>:<Droid's custom id>``."""
+    """The application's id for it: ``api:<provider id>:<custom id>``."""
     native: str
     """The id the API knows."""
     display: str
@@ -760,7 +752,7 @@ def _kill_tree(process: subprocess.Popen) -> None:
 
 
 def run_key_command(command: str, timeout: float = COMMAND_TIMEOUT, what: str = "取密钥的命令", *, need_output: bool = True) -> str:
-    """Run an apiKeyHelper the way Droid does (shell, home directory) and return its trimmed stdout. Never echoes output.
+    """Run an apiKeyHelper (shell, home directory) and return its trimmed stdout. Never echoes output.
     ``what`` names the command in the messages; ``need_output=False`` accepts a command that prints nothing (a login)."""
     options: dict[str, Any] = {}
     if os.name == "nt":
@@ -923,7 +915,7 @@ class _State:
 class ProviderStore:
     def __init__(
         self,
-        factory_settings: Path | None = None,
+        models_file: Path | None = None,
         sidecar: Path | None = None,
         environ: Mapping[str, str] | None = None,
         registry_env: Callable[[], Mapping[str, str]] | None = None,
@@ -933,10 +925,10 @@ class ProviderStore:
         aws_home: Path | None = None,
     ) -> None:
         self._environ: Mapping[str, str] = os.environ if environ is None else environ
-        if factory_settings is None:
-            override = _text(self._environ.get(FACTORY_SETTINGS_ENV))
-            factory_settings = Path(override).expanduser() if override else Path.home() / ".factory" / "settings.json"
-        self.factory_settings = Path(factory_settings)
+        if models_file is None:
+            override = _text(self._environ.get(MODELS_FILE_ENV))
+            models_file = Path(override).expanduser() if override else default_settings_path().with_name(MODELS_FILE)
+        self.models_file = Path(models_file)
         self.sidecar = Path(sidecar) if sidecar is not None else default_settings_path().with_name("providers.json")
         self._registry_env = registry_env or _registry_environment
         self._opener = opener or urllib.request.urlopen
@@ -974,7 +966,7 @@ class ProviderStore:
         return out
 
     def custom_model_ids(self, provider_id: str) -> list[tuple[str, str]]:
-        """[(id Droid gives the model, model id sent to the API)] for the provider's entries, in file order.
+        """[(the model's custom id, model id sent to the API)] for the provider's entries, in file order.
 
         Empty when the provider is unknown or settings.json cannot be read (``list`` is where that error is reported).
         """
@@ -987,13 +979,13 @@ class ProviderStore:
             if group is None:
                 return []
             members = set(group.indices)
-            return [(cid, state.entries[i]["model"].strip()) for i, cid, _legacy in _droid_ids(state.entries) if i in members]
+            return [(cid, state.entries[i]["model"].strip()) for i, cid, _legacy in _custom_ids(state.entries) if i in members]
 
     @staticmethod
     def _entry_of(state: Any, custom_model_id: str, display_name: str = "") -> int | None:
-        """The index in ``customModels`` of the entry a Droid model id names (current id, the older position-based id,
+        """The index in ``customModels`` of the entry a custom model id names (current id, the older position-based id,
         ``custom:<model>``, and last the display name when it is unique); None when it is none of ours."""
-        ids = _droid_ids(state.entries)
+        ids = _custom_ids(state.entries)
         for index, current, _legacy in ids:
             if current == custom_model_id:
                 return index
@@ -1012,7 +1004,7 @@ class ProviderStore:
         return None
 
     def provider_of(self, custom_model_id: str, display_name: str = "") -> str | None:
-        """The id of the provider that owns a Droid model id; None when the model is not one of ours (or the file is unreadable)."""
+        """The id of the provider that owns a custom model id; None when the model is not one of ours (or the file is unreadable)."""
         with self._lock:
             try:
                 state = self._load()
@@ -1024,7 +1016,7 @@ class ProviderStore:
             return {i: g.id for g in state.groups for i in g.indices}.get(index)
 
     def limits_of(self, custom_model_id: str, display_name: str = "") -> tuple[int | None, int | None]:
-        """``(context window, largest answer)`` the user gave a Droid model id (``maxContextLimit``, ``maxOutputTokens``); each is
+        """``(context window, largest answer)`` the user gave a custom model id (``maxContextLimit``, ``maxOutputTokens``); each is
         None when there is none (or the model is not ours)."""
         with self._lock:
             try:
@@ -1038,23 +1030,8 @@ class ProviderStore:
             return _positive_int(entry.get("maxContextLimit")), _positive_int(entry.get("maxOutputTokens"))
 
     def window_of(self, custom_model_id: str, display_name: str = "") -> int | None:
-        """The context window the user gave a Droid model id (``maxContextLimit``); None when there is none (or it is not ours)."""
+        """The context window the user gave a custom model id (``maxContextLimit``); None when there is none (or it is not ours)."""
         return self.limits_of(custom_model_id, display_name)[0]
-
-    def factory_compaction(self, model_id: str) -> int | None:
-        """Where the user's own Droid settings compact a built-in model: ``compactionTokenLimitPerModel`` for it, else
-        ``compactionTokenLimit``; None when neither is set (Droid then uses 250 000, or the window when that is smaller)."""
-        with self._lock:
-            try:
-                doc = self._read_settings()
-            except ProviderError:
-                return None
-        per_model = doc.get("compactionTokenLimitPerModel")
-        if isinstance(per_model, dict):
-            value = _positive_int(per_model.get(model_id))
-            if value:
-                return value
-        return _positive_int(doc.get("compactionTokenLimit"))
 
     # ------------------------------------------------------------------------------- the models WittyCode runs itself
 
@@ -1068,7 +1045,7 @@ class ProviderStore:
                 return []
             owner = {i: g for g in state.groups for i in g.indices}
             specs: list[ApiModelSpec] = []
-            for index, custom_id, _legacy in _droid_ids(state.entries):
+            for index, custom_id, _legacy in _custom_ids(state.entries):
                 group = owner.get(index)
                 entry = state.entries[index]
                 if group is None:
@@ -1113,11 +1090,11 @@ class ProviderStore:
             except OSError:
                 return 0
 
-        return stamp(self.factory_settings), stamp(self.sidecar)
+        return stamp(self.models_file), stamp(self.sidecar)
 
     def api_key(self, spec: ApiModelSpec) -> str | None:
         """The key for a request to this model, read now: from the environment or the user's registry variables (so one set after
-        WittyCode started works at once, there being no Droid process that needs the restart), or the key command's output (kept for
+        WittyCode started works at once, there being no process that needs a restart), or the key command's output (kept for
         its time to live). ``None``: the provider needs no key. Raises ``ProviderError`` with a sentence for the user."""
         key = spec.key
         if key.mode == "env":
@@ -1392,7 +1369,7 @@ class ProviderStore:
 
     def _read_settings(self) -> dict:
         try:
-            data = self.factory_settings.read_bytes()
+            data = self.models_file.read_bytes()
         except FileNotFoundError:
             return {}
         except OSError:
@@ -1420,7 +1397,7 @@ class ProviderStore:
         return [r for r in records if _valid_record(r)] if isinstance(records, list) else []
 
     def _write_settings(self, doc: dict) -> None:
-        path = self.factory_settings
+        path = self.models_file
         backup = path.with_name(path.name + BACKUP_SUFFIX)
         try:
             if path.exists() and not backup.exists():

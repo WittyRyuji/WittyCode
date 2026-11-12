@@ -24,16 +24,16 @@ from desktop.core.settings import (
 
 def test_round_trip_keeps_every_field(tmp_path):
     original = AppSettings(
-        droid_path=str(tmp_path / "droid.exe"),
-        default_model="claude-haiku-5-5",
+        devin_path=str(tmp_path / "devin.exe"),
+        default_model="chatgpt:gpt-6.1-sol",
         reasoning_effort="low",
-        autonomy="medium",
+        chatgpt_autonomy="full",
         mode="spec",
         projects=[str(tmp_path / "a"), str(tmp_path / "b")],
         max_open_sessions=7,
         window_geometry="AAEC",
         splitter_sizes=[240, 760],
-        hidden_models=["claude-haiku-5-5", "codex:gpt-5.3-codex"],
+        hidden_models=["chatgpt:gpt-6-luna", "devin:swe-2-high"],
         chatgpt_compact=False,
         chatgpt_compact_at=70,
     )
@@ -45,10 +45,10 @@ def test_round_trip_keeps_every_field(tmp_path):
 def test_save_is_atomic_and_writes_a_version(tmp_path):
     target = tmp_path / "settings.json"
     save_settings(AppSettings(), target)
-    save_settings(AppSettings(autonomy="high"), target)
+    save_settings(AppSettings(chatgpt_autonomy="full"), target)
     assert sorted(path.name for path in tmp_path.iterdir()) == ["settings.json"]
     assert json.loads(target.read_text(encoding="utf-8"))["version"] == 2
-    assert load_settings(target).autonomy == "high"
+    assert load_settings(target).chatgpt_autonomy == "full"
 
 
 def test_chatgpt_plan_settings_default_and_are_validated():
@@ -101,16 +101,15 @@ def test_archived_sessions_their_names_and_the_last_project_survive_the_file_and
     assert len(crowded.archived_sessions) == settings_module.MAX_REMEMBERED_SESSIONS
 
 
-def test_the_shared_memory_reaches_the_chatgpt_engine_for_a_file_written_before_it_existed():
+def test_the_shared_memory_engines_are_the_ones_there_are():
     from desktop.core.settings import settings_from_dict
 
-    old_all = ["droid", "codex", "devin"]
-    assert settings_from_dict({"version": 1, "memory_engines": old_all}).memory_engines == ["droid", "codex", "devin", "chatgpt"]
-    assert settings_from_dict({"memory_engines": old_all}).memory_engines == ["droid", "codex", "devin", "chatgpt"]  # (no version: the oldest files)
-    # a choice the user made on purpose is kept: fewer than all of the old engines, or a file that already knew the new one
-    assert settings_from_dict({"version": 1, "memory_engines": ["droid", "codex"]}).memory_engines == ["droid", "codex"]
-    assert settings_from_dict({"version": 2, "memory_engines": old_all}).memory_engines == old_all
-    assert settings_from_dict({"version": 2, "memory_engines": old_all + ["chatgpt"]}).memory_engines == old_all + ["chatgpt"]
+    assert settings_from_dict({}).memory_engines == ["devin", "chatgpt"], "on for every engine to begin with"
+    assert settings_from_dict({"version": 2, "memory_engines": ["chatgpt"]}).memory_engines == ["chatgpt"], "a choice is kept"
+    # a file from before the own loop joined the memory, with every engine then known on: the own loop gets it too
+    assert settings_from_dict({"version": 1, "memory_engines": ["devin"]}).memory_engines == ["devin", "chatgpt"]
+    # names of engines this version does not have are dropped
+    assert settings_from_dict({"version": 2, "memory_engines": ["old-engine", "devin"]}).memory_engines == ["devin"]
 
 
 def test_missing_file_gives_defaults(tmp_path):
@@ -139,9 +138,9 @@ def test_session_limit_bounds_are_inclusive(value):
 
 def test_invalid_fields_fall_back_one_by_one():
     settings = settings_from_dict(
-        {"autonomy": "bogus", "mode": "spec", "splitter_sizes": [1, -2], "projects": "nope", "default_model": 5}
+        {"chatgpt_autonomy": "bogus", "mode": "spec", "splitter_sizes": [1, -2], "projects": "nope", "default_model": 5}
     )
-    assert settings.autonomy == "off"
+    assert settings.chatgpt_autonomy == "code"
     assert settings.mode == "spec"
     assert settings.splitter_sizes == []
     assert settings.projects == []
@@ -205,7 +204,7 @@ def profile(tmp_path, *, old: str | None = None, new: str | None = None):
 
 def test_the_old_settings_are_copied_to_the_new_folder_and_left_where_they_were(tmp_path):
     old_settings = AppSettings(
-        default_model="claude-haiku-5-5", autonomy="medium", projects=[str(tmp_path / "proj")], splitter_sizes=[200, 800]
+        default_model="chatgpt:gpt-6.1-sol", chatgpt_autonomy="full", projects=[str(tmp_path / "proj")], splitter_sizes=[200, 800]
     )
     save_settings(old_settings, tmp_path / "droid-desk" / "settings.json")
     env, old, new = profile(tmp_path)
@@ -219,20 +218,20 @@ def test_the_old_settings_are_copied_to_the_new_folder_and_left_where_they_were(
 
 
 def test_the_copy_happens_once_and_later_edits_of_either_file_are_left_alone(tmp_path):
-    env, old, new = profile(tmp_path, old='{"autonomy": "high"}')
+    env, old, new = profile(tmp_path, old='{"chatgpt_autonomy": "full"}')
     assert migrate_legacy_settings(env) == new
-    new.write_text('{"autonomy": "low"}', encoding="utf-8")
-    old.write_text('{"autonomy": "medium"}', encoding="utf-8")
+    new.write_text('{"chatgpt_autonomy": "ask"}', encoding="utf-8")
+    old.write_text('{"chatgpt_autonomy": "code"}', encoding="utf-8")
     assert migrate_legacy_settings(env) is None
-    assert load_settings(new).autonomy == "low"
-    assert load_settings(old).autonomy == "medium"
+    assert load_settings(new).chatgpt_autonomy == "ask"
+    assert load_settings(old).chatgpt_autonomy == "code"
 
 
 def test_existing_new_settings_win_over_the_old_ones(tmp_path):
-    env, old, new = profile(tmp_path, old='{"autonomy": "high"}', new='{"autonomy": "low"}')
+    env, old, new = profile(tmp_path, old='{"chatgpt_autonomy": "full"}', new='{"chatgpt_autonomy": "ask"}')
     assert migrate_legacy_settings(env) is None
-    assert load_settings(new).autonomy == "low"
-    assert old.read_text(encoding="utf-8") == '{"autonomy": "high"}'
+    assert load_settings(new).chatgpt_autonomy == "ask"
+    assert old.read_text(encoding="utf-8") == '{"chatgpt_autonomy": "full"}'
 
 
 def test_without_old_settings_nothing_is_created(tmp_path):
@@ -246,14 +245,14 @@ def test_without_old_settings_nothing_is_created(tmp_path):
 
 
 def test_an_explicit_settings_file_is_never_filled_from_the_old_settings(tmp_path):
-    env, old, new = profile(tmp_path, old='{"autonomy": "high"}')
+    env, old, new = profile(tmp_path, old='{"chatgpt_autonomy": "full"}')
     chosen = tmp_path / "somewhere" / "mine.json"
     assert migrate_legacy_settings({**env, SETTINGS_ENV: str(chosen)}) is None
     assert not chosen.exists() and not new.exists() and not chosen.parent.exists()
 
 
 def test_a_copy_that_fails_leaves_no_half_written_settings(tmp_path, monkeypatch):
-    env, old, new = profile(tmp_path, old='{"autonomy": "high"}')
+    env, old, new = profile(tmp_path, old='{"chatgpt_autonomy": "full"}')
 
     def dying_copy(source, destination, **_kwargs):
         with open(destination, "w", encoding="utf-8") as handle:
@@ -265,35 +264,35 @@ def test_a_copy_that_fails_leaves_no_half_written_settings(tmp_path, monkeypatch
     assert migrate_legacy_settings(env) is None
     assert not new.exists(), "a truncated file here would count as 'the new settings exist' from then on"
     assert sorted(path.name for path in new.parent.iterdir()) == []
-    assert old.read_text(encoding="utf-8") == '{"autonomy": "high"}'
+    assert old.read_text(encoding="utf-8") == '{"chatgpt_autonomy": "full"}'
     monkeypatch.setattr(settings_module, "shutil", real_shutil)
     assert migrate_legacy_settings(env) == new, "the next start tries again"
 
 
 def test_a_copy_does_not_overwrite_settings_another_instance_wrote_meanwhile(tmp_path, monkeypatch):
-    env, old, new = profile(tmp_path, old='{"autonomy": "high"}')
+    env, old, new = profile(tmp_path, old='{"chatgpt_autonomy": "full"}')
     real_copy = settings_module.shutil.copyfile
 
     def copy_then_lose_the_race(source, destination, **kwargs):
         real_copy(source, destination, **kwargs)
-        new.write_text('{"autonomy": "low"}', encoding="utf-8")
+        new.write_text('{"chatgpt_autonomy": "ask"}', encoding="utf-8")
 
     monkeypatch.setattr(settings_module, "shutil", SimpleNamespace(copyfile=copy_then_lose_the_race))
     assert migrate_legacy_settings(env) is None
-    assert load_settings(new).autonomy == "low"
+    assert load_settings(new).chatgpt_autonomy == "ask"
     assert [path.name for path in new.parent.iterdir()] == ["settings.json"]
 
 
 def test_the_default_location_is_what_the_application_loads_after_the_move(tmp_path, monkeypatch):
-    env, old, new = profile(tmp_path, old='{"autonomy": "high", "mode": "spec"}')
+    env, old, new = profile(tmp_path, old='{"chatgpt_autonomy": "full", "mode": "spec"}')
     monkeypatch.setenv("APPDATA", env["APPDATA"])
     monkeypatch.delenv(SETTINGS_ENV, raising=False)
     assert default_settings_path() == new
     assert migrate_legacy_settings() == new
     loaded = load_settings()
-    assert (loaded.autonomy, loaded.mode) == ("high", "spec")
-    save_settings(AppSettings(autonomy="off"))
-    assert load_settings(new).autonomy == "off" and load_settings(old).autonomy == "high", "saves go to the new folder only"
+    assert (loaded.chatgpt_autonomy, loaded.mode) == ("full", "spec")
+    save_settings(AppSettings(chatgpt_autonomy="ask"))
+    assert load_settings(new).chatgpt_autonomy == "ask" and load_settings(old).chatgpt_autonomy == "full", "saves go to the new folder only"
 
 
 def test_settings_to_dict_is_json_serializable():

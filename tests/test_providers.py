@@ -16,7 +16,7 @@ import pytest
 from desktop.core import providers as providers_module
 from desktop.core.providers import (
     BEDROCK_TEST_NOTE,
-    FACTORY_SETTINGS_ENV,
+    MODELS_FILE_ENV,
     ProviderError,
     ProviderStore,
     custom_model_id,
@@ -65,7 +65,7 @@ class Opener:
 
 def make_store(tmp_path: Path, *, environ=None, registry=None, opener=None, run_command=None) -> ProviderStore:
     return ProviderStore(
-        factory_settings=tmp_path / "home" / ".factory" / "settings.json",
+        models_file=tmp_path / "home" / ".factory" / "settings.json",
         sidecar=tmp_path / "app" / "providers.json",
         environ={} if environ is None else environ,
         registry_env=lambda: {} if registry is None else registry,
@@ -75,12 +75,12 @@ def make_store(tmp_path: Path, *, environ=None, registry=None, opener=None, run_
 
 
 def put_settings(store: ProviderStore, doc: object) -> None:
-    store.factory_settings.parent.mkdir(parents=True, exist_ok=True)
-    store.factory_settings.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    store.models_file.parent.mkdir(parents=True, exist_ok=True)
+    store.models_file.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
 def get_settings(store: ProviderStore) -> dict:
-    return json.loads(store.factory_settings.read_text(encoding="utf-8"))
+    return json.loads(store.models_file.read_text(encoding="utf-8"))
 
 
 def entries_of(store: ProviderStore) -> list[dict]:
@@ -329,7 +329,7 @@ def test_bedrock_credentials_command_needs_an_export_command(tmp_path):
     bad = {**BEDROCK_DRAFT, "bedrock": {"method": "credentials-command", "region": "us-west-2", "profile": ""}}
     with pytest.raises(ProviderError, match="awsCredentialExport"):
         store.save(bad)
-    assert not store.factory_settings.exists()
+    assert not store.models_file.exists()
 
 
 # ------------------------------------------------------------------------------------------- legacy plaintext keys
@@ -396,7 +396,7 @@ def test_switching_away_from_inline_removes_the_plaintext(tmp_path, mode, hint, 
     legacy_settings(store)
     (view,) = store.list()
     saved = store.save({**view, "keyMode": mode, "keyHint": hint})
-    assert SECRET not in store.factory_settings.read_text(encoding="utf-8")
+    assert SECRET not in store.models_file.read_text(encoding="utf-8")
     assert saved["keyMode"] == mode
     written = entries_of(store)[0]
     if field:
@@ -420,18 +420,18 @@ def test_a_draft_cannot_carry_a_plaintext_key(tmp_path, change):
     store = make_store(tmp_path)
     legacy_settings(store)
     (view,) = store.list()
-    before = store.factory_settings.read_bytes()
+    before = store.models_file.read_bytes()
     with pytest.raises(ProviderError) as caught:
         store.save({**view, **change})
     assert SECRET not in str(caught.value)
-    assert store.factory_settings.read_bytes() == before
+    assert store.models_file.read_bytes() == before
 
 
 def test_inline_on_a_provider_without_a_stored_key_is_refused(tmp_path):
     store = make_store(tmp_path)
     with pytest.raises(ProviderError):
         store.save(draft(keyMode="inline", keyHint=""))
-    assert not store.factory_settings.exists()
+    assert not store.models_file.exists()
 
 
 def test_secret_looking_headers_are_masked_and_kept(tmp_path):
@@ -449,7 +449,7 @@ def test_secret_looking_headers_are_masked_and_kept(tmp_path):
     store.save(view)
     assert entries_of(store)[0]["extraHeaders"]["Authorization"] == f"Bearer {SECRET}"
     store.save({**view, "headers": [{"k": "X-Team", "v": "core"}]})
-    assert SECRET not in store.factory_settings.read_text(encoding="utf-8")
+    assert SECRET not in store.models_file.read_text(encoding="utf-8")
 
 
 def test_headers_may_reference_variables(tmp_path):
@@ -491,7 +491,7 @@ def test_everything_else_in_the_file_is_kept(tmp_path):
     assert {k: v for k, v in on_disk.items() if k != "customModels"} == {k: v for k, v in original.items() if k != "customModels"}
     assert on_disk["customModels"][: 1 + len(junk)] == [foreign, *junk]
     assert on_disk["customModels"][-1]["model"] == "openai/gpt-oss-120b"
-    text = store.factory_settings.read_text(encoding="utf-8")
+    text = store.models_file.read_text(encoding="utf-8")
     assert text == json.dumps(on_disk, indent=2, ensure_ascii=False) + "\n"
     assert "\u4e2d\u6587" in text and "\\u4e2d" not in text
     assert list(on_disk) == list(original)
@@ -524,36 +524,36 @@ def test_the_first_write_makes_one_backup_and_never_replaces_it(tmp_path):
     store = make_store(tmp_path)
     original = {"model": "x", "customModels": [], "other": 1}
     put_settings(store, original)
-    first_bytes = store.factory_settings.read_bytes()
-    backup = store.factory_settings.with_name("settings.json.wittycode-backup")
+    first_bytes = store.models_file.read_bytes()
+    backup = store.models_file.with_name("settings.json.wittycode-backup")
 
     store.save(draft())
     assert backup.read_bytes() == first_bytes
     store.save(draft(id="p2", name="Two", baseUrl="https://two.example/v1"))
     store.remove("p1")
     assert backup.read_bytes() == first_bytes
-    assert sorted(p.name for p in store.factory_settings.parent.iterdir()) == ["settings.json", "settings.json.wittycode-backup"]
+    assert sorted(p.name for p in store.models_file.parent.iterdir()) == ["settings.json", "settings.json.wittycode-backup"]
 
 
 def test_no_backup_when_the_file_did_not_exist(tmp_path):
     store = make_store(tmp_path)
     store.save(draft())
-    assert not store.factory_settings.with_name("settings.json.wittycode-backup").exists()
+    assert not store.models_file.with_name("settings.json.wittycode-backup").exists()
 
 
 def test_the_file_and_its_folder_are_created(tmp_path):
     store = make_store(tmp_path)
     assert store.list() == []
     store.save(draft())
-    text = store.factory_settings.read_text(encoding="utf-8")
+    text = store.models_file.read_text(encoding="utf-8")
     assert list(json.loads(text)) == ["customModels"]
     assert text.endswith("]\n}\n")
 
 
 def test_an_empty_file_counts_as_no_settings(tmp_path):
     store = make_store(tmp_path)
-    store.factory_settings.parent.mkdir(parents=True)
-    store.factory_settings.write_text("  \n", encoding="utf-8")
+    store.models_file.parent.mkdir(parents=True)
+    store.models_file.write_text("  \n", encoding="utf-8")
     assert store.list() == []
     store.save(draft())
     assert len(entries_of(store)) == 1
@@ -566,43 +566,43 @@ def test_an_empty_file_counts_as_no_settings(tmp_path):
 )
 def test_an_unreadable_file_is_refused_and_not_touched(tmp_path, content):
     store = make_store(tmp_path)
-    store.factory_settings.parent.mkdir(parents=True)
-    store.factory_settings.write_bytes(content.encode("utf-8"))
-    before = store.factory_settings.read_bytes()
+    store.models_file.parent.mkdir(parents=True)
+    store.models_file.write_bytes(content.encode("utf-8"))
+    before = store.models_file.read_bytes()
     for action in (lambda: store.save(draft()), lambda: store.remove("p1"), store.list):
         with pytest.raises(ProviderError):
             action()
-    assert store.factory_settings.read_bytes() == before
-    assert sorted(p.name for p in store.factory_settings.parent.iterdir()) == ["settings.json"]
+    assert store.models_file.read_bytes() == before
+    assert sorted(p.name for p in store.models_file.parent.iterdir()) == ["settings.json"]
     assert not store.sidecar.exists()
 
 
 def test_a_customModels_that_is_not_an_array_is_not_overwritten(tmp_path):
     store = make_store(tmp_path)
     put_settings(store, {"customModels": {"oops": True}})
-    before = store.factory_settings.read_bytes()
+    before = store.models_file.read_bytes()
     assert store.list() == []
     with pytest.raises(ProviderError):
         store.save(draft())
-    assert store.factory_settings.read_bytes() == before
+    assert store.models_file.read_bytes() == before
 
 
 def test_a_failed_validation_writes_nothing(tmp_path):
     store = make_store(tmp_path)
     put_settings(store, {"customModels": [], "keep": 1})
-    before = store.factory_settings.read_bytes()
+    before = store.models_file.read_bytes()
     with pytest.raises(ProviderError):
         store.save(draft(name=""))
-    assert store.factory_settings.read_bytes() == before
+    assert store.models_file.read_bytes() == before
     assert not store.sidecar.exists()
 
 
 def test_unchanged_saves_do_not_rewrite_the_file(tmp_path):
     store = make_store(tmp_path)
     saved = store.save(draft())
-    mtime = store.factory_settings.stat().st_mtime_ns
+    mtime = store.models_file.stat().st_mtime_ns
     store.save(saved)
-    assert store.factory_settings.stat().st_mtime_ns == mtime
+    assert store.models_file.stat().st_mtime_ns == mtime
 
 
 # --------------------------------------------------------------------------------------------- grouping and ids
@@ -725,8 +725,8 @@ def test_models_with_new_ids_take_the_place_of_the_old_ones(tmp_path):
 
 def test_a_byte_order_mark_is_tolerated(tmp_path):
     store = make_store(tmp_path)
-    store.factory_settings.parent.mkdir(parents=True)
-    store.factory_settings.write_bytes(b"\xef\xbb\xbf" + json.dumps({"keep": 1, "customModels": [entry("https://a.example/v1", "m")]}).encode())
+    store.models_file.parent.mkdir(parents=True)
+    store.models_file.write_bytes(b"\xef\xbb\xbf" + json.dumps({"keep": 1, "customModels": [entry("https://a.example/v1", "m")]}).encode())
     assert [m["id"] for m in store.list()[0]["models"]] == ["m"]
     store.save(draft())
     assert get_settings(store)["keep"] == 1
@@ -734,8 +734,8 @@ def test_a_byte_order_mark_is_tolerated(tmp_path):
 
 def test_the_readers_of_ids_shrug_off_an_unreadable_file(tmp_path):
     store = make_store(tmp_path)
-    store.factory_settings.parent.mkdir(parents=True)
-    store.factory_settings.write_text("{broken", encoding="utf-8")
+    store.models_file.parent.mkdir(parents=True)
+    store.models_file.write_text("{broken", encoding="utf-8")
     assert store.custom_model_ids("anything") == []
     assert store.provider_of("custom:Anything-0") is None
 
@@ -762,10 +762,10 @@ def test_a_new_id_appends(tmp_path):
 def test_two_providers_cannot_share_an_address(tmp_path):
     store = make_store(tmp_path)
     store.save(draft())
-    before = store.factory_settings.read_bytes()
+    before = store.models_file.read_bytes()
     with pytest.raises(ProviderError, match="OpenRouter"):
         store.save(draft(id="p2", name="Same place", baseUrl="https://openrouter.ai/api/v1/"))
-    assert store.factory_settings.read_bytes() == before
+    assert store.models_file.read_bytes() == before
     store.save(draft(id="p2", name="Other kind", kind="openai"))
 
 
@@ -786,11 +786,11 @@ def test_removing_a_provider(tmp_path):
 def test_removing_something_that_is_not_there_changes_nothing(tmp_path):
     store = make_store(tmp_path)
     store.remove("nope")
-    assert not store.factory_settings.exists()
+    assert not store.models_file.exists()
     put_settings(store, {"customModels": []})
-    before = store.factory_settings.read_bytes()
+    before = store.models_file.read_bytes()
     store.remove("nope")
-    assert store.factory_settings.read_bytes() == before
+    assert store.models_file.read_bytes() == before
 
 
 # ------------------------------------------------------------------------------------------------- validation
@@ -830,7 +830,7 @@ def test_validation_errors_are_chinese_and_write_nothing(tmp_path, change, fragm
         store.save(draft(**change))
     assert fragment in str(caught.value)
     assert any("\u4e00" <= ch <= "\u9fff" for ch in str(caught.value))
-    assert not store.factory_settings.exists() and not store.sidecar.exists()
+    assert not store.models_file.exists() and not store.sidecar.exists()
 
 
 def test_what_the_editor_allows_is_accepted(tmp_path):
@@ -846,7 +846,7 @@ def test_a_bedrock_draft_needs_no_url_or_key(tmp_path):
     store.save({**BEDROCK_DRAFT, "keyMode": "env", "keyHint": SECRET, "baseUrl": ""})
     written = entries_of(store)[0]
     assert "apiKey" not in written and "baseUrl" not in written
-    assert SECRET not in store.factory_settings.read_text(encoding="utf-8")
+    assert SECRET not in store.models_file.read_text(encoding="utf-8")
 
 
 def test_bearer_only_applies_to_anthropic_with_a_key(tmp_path):
@@ -974,8 +974,8 @@ def test_window_of_reads_the_context_window_the_user_gave_a_model_by_any_id_droi
 
 def test_window_of_is_none_when_the_file_cannot_be_read(tmp_path):
     store = make_store(tmp_path)
-    store.factory_settings.parent.mkdir(parents=True, exist_ok=True)
-    store.factory_settings.write_text("{not json", encoding="utf-8")
+    store.models_file.parent.mkdir(parents=True, exist_ok=True)
+    store.models_file.write_text("{not json", encoding="utf-8")
     assert store.window_of("custom:Alpha-0") is None and store.provider_of("custom:Alpha-0") is None
 
 
@@ -991,7 +991,7 @@ def test_saved_models_get_the_ids_droid_will_use(tmp_path):
 
 def test_env_status():
     store = ProviderStore(
-        factory_settings=Path("unused.json"),
+        models_file=Path("unused.json"),
         sidecar=Path("unused-sidecar.json"),
         environ={"SET_VAR": "x", "EMPTY": ""},
         registry_env=lambda: {"NEW_VAR": "y", "EMPTY": "z", "BLANK": ""},
@@ -1008,7 +1008,7 @@ def test_env_status():
 def test_env_status_reads_the_registry_only_when_needed():
     calls = []
     store = ProviderStore(
-        factory_settings=Path("unused.json"),
+        models_file=Path("unused.json"),
         sidecar=Path("unused-sidecar.json"),
         environ={"A": "1"},
         registry_env=lambda: calls.append(1) or {},
@@ -1022,7 +1022,7 @@ def test_a_broken_registry_reads_as_unset():
     def boom():
         raise OSError("no registry")
 
-    store = ProviderStore(factory_settings=Path("unused.json"), sidecar=Path("unused-sidecar.json"), environ={}, registry_env=boom)
+    store = ProviderStore(models_file=Path("unused.json"), sidecar=Path("unused-sidecar.json"), environ={}, registry_env=boom)
     assert store.env_status(["X"]) == {"X": "unset"}
 
 
@@ -1032,17 +1032,30 @@ def test_the_real_registry_reader_returns_a_mapping_of_text():
     assert all(isinstance(k, str) and isinstance(v, str) for k, v in values.items())
 
 
-def test_the_factory_settings_location_can_be_overridden(tmp_path):
-    target = tmp_path / "elsewhere" / "settings.json"
-    store = ProviderStore(sidecar=tmp_path / "providers.json", environ={FACTORY_SETTINGS_ENV: str(target)})
-    assert store.factory_settings == target
+def test_the_models_file_sits_next_to_the_settings_and_its_location_can_be_overridden(tmp_path, monkeypatch):
+    target = tmp_path / "elsewhere" / "models.json"
+    store = ProviderStore(sidecar=tmp_path / "providers.json", environ={MODELS_FILE_ENV: str(target)})
+    assert store.models_file == target
+    monkeypatch.setenv("WITTYCODE_SETTINGS", str(tmp_path / "wc" / "settings.json"))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
     default = ProviderStore(sidecar=tmp_path / "providers.json", environ={})
-    assert default.factory_settings == Path.home() / ".factory" / "settings.json"
+    assert default.models_file == tmp_path / "wc" / "models.json"
+    assert not default.models_file.exists(), "nothing to copy from an older install: no file is made"
+
+
+def test_another_programs_settings_are_never_read(tmp_path, monkeypatch):
+    legacy = tmp_path / "home" / ".factory" / "settings.json"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text(json.dumps({"customModels": [{"model": "m", "baseUrl": "https://example.com/v1"}]}), encoding="utf-8")
+    monkeypatch.setenv("WITTYCODE_SETTINGS", str(tmp_path / "wc" / "settings.json"))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    store = ProviderStore(sidecar=tmp_path / "providers.json", environ={})
+    assert store.list() == [] and not store.models_file.exists(), "WittyCode's own file only: nothing is copied from elsewhere"
 
 
 def test_default_sidecar_sits_next_to_the_app_settings(tmp_path, monkeypatch):
     monkeypatch.setenv("WITTYCODE_SETTINGS", str(tmp_path / "wc" / "settings.json"))
-    store = ProviderStore(factory_settings=tmp_path / "f.json", environ={})
+    store = ProviderStore(models_file=tmp_path / "f.json", environ={})
     assert store.sidecar == tmp_path / "wc" / "providers.json"
 
 
@@ -1055,7 +1068,7 @@ def conn(**over) -> dict:
 
 def test_a_successful_test_lists_the_models():
     opener = Opener({"data": [{"id": "gpt-a"}, {"id": "gpt-b"}, {"id": "gpt-a"}, {"object": "x"}]})
-    store = ProviderStore(factory_settings=Path("u.json"), sidecar=Path("u2.json"), environ={"OPENROUTER_API_KEY": SECRET}, opener=opener)
+    store = ProviderStore(models_file=Path("u.json"), sidecar=Path("u2.json"), environ={"OPENROUTER_API_KEY": SECRET}, opener=opener)
     result = run(store.test(conn(headers=[{"k": "X-Team", "v": "core"}])))
     assert result["ok"] is True and result["models"] == ["gpt-a", "gpt-b"]
     assert isinstance(result["ms"], int)
@@ -1069,7 +1082,7 @@ def test_a_successful_test_lists_the_models():
 
 
 def test_a_server_without_a_model_list_still_connects():
-    store = ProviderStore(factory_settings=Path("u.json"), sidecar=Path("u2.json"), environ={"OPENROUTER_API_KEY": "k"}, opener=Opener(b"<html>hello</html>"))
+    store = ProviderStore(models_file=Path("u.json"), sidecar=Path("u2.json"), environ={"OPENROUTER_API_KEY": "k"}, opener=Opener(b"<html>hello</html>"))
     result = run(store.test(conn()))
     assert result["ok"] is True and result["models"] is None
     assert result["text"] == f"连接成功 · {result['ms']} ms"
@@ -1081,7 +1094,7 @@ def test_other_list_shapes(tmp_path):
         ({"models": [{"name": "models/gemini-2.5-pro"}, {"name": "models/g2"}]}, ["gemini-2.5-pro", "g2"]),
         ({"data": []}, []),
     ]:
-        store = ProviderStore(factory_settings=Path("u.json"), sidecar=Path("u2.json"), environ={"OPENROUTER_API_KEY": "k"}, opener=Opener(body))
+        store = ProviderStore(models_file=Path("u.json"), sidecar=Path("u2.json"), environ={"OPENROUTER_API_KEY": "k"}, opener=Opener(body))
         assert run(store.list_models(conn())) == expected
 
 
@@ -1091,7 +1104,7 @@ def anthropic_draft(**over) -> dict:
 
 def test_anthropic_requests():
     opener = Opener({"data": [{"id": "claude-x"}]})
-    store = ProviderStore(factory_settings=Path("u.json"), sidecar=Path("u2.json"), environ={"ANTHROPIC_API_KEY": SECRET}, opener=opener)
+    store = ProviderStore(models_file=Path("u.json"), sidecar=Path("u2.json"), environ={"ANTHROPIC_API_KEY": SECRET}, opener=opener)
     assert run(store.test(anthropic_draft()))["models"] == ["claude-x"]
     assert opener.requests[-1].full_url == "https://api.anthropic.com/v1/models"
     assert opener.headers["x-api-key"] == SECRET and "authorization" not in opener.headers
@@ -1107,7 +1120,7 @@ def test_anthropic_requests():
 
 def test_a_keyless_provider_sends_no_credentials():
     opener = Opener({"data": []})
-    store = ProviderStore(factory_settings=Path("u.json"), sidecar=Path("u2.json"), environ={}, opener=opener)
+    store = ProviderStore(models_file=Path("u.json"), sidecar=Path("u2.json"), environ={}, opener=opener)
     result = run(store.test(conn(baseUrl="http://localhost:11434/v1", keyMode="none", keyHint="")))
     assert result["ok"] is True
     assert "authorization" not in opener.headers and "x-api-key" not in opener.headers
@@ -1133,20 +1146,20 @@ def test_a_keyless_provider_sends_no_credentials():
     ],
 )
 def test_failures_are_one_line_chinese_reasons(error, text):
-    store = ProviderStore(factory_settings=Path("u.json"), sidecar=Path("u2.json"), environ={}, opener=Opener(error=error))
+    store = ProviderStore(models_file=Path("u.json"), sidecar=Path("u2.json"), environ={}, opener=Opener(error=error))
     result = run(store.test(conn(baseUrl="http://localhost:11434/v1", keyMode="none", keyHint="")))
     assert result == {"ok": False, "text": text, "ms": None, "models": None}
     assert run(store.list_models(conn(baseUrl="http://localhost:11434/v1", keyMode="none", keyHint=""))) == []
 
 
 def test_an_unexpected_error_is_reported_without_its_message():
-    store = ProviderStore(factory_settings=Path("u.json"), sidecar=Path("u2.json"), environ={"OPENROUTER_API_KEY": SECRET}, opener=Opener(error=RuntimeError(f"boom {SECRET}")))
+    store = ProviderStore(models_file=Path("u.json"), sidecar=Path("u2.json"), environ={"OPENROUTER_API_KEY": SECRET}, opener=Opener(error=RuntimeError(f"boom {SECRET}")))
     result = run(store.test(conn()))
     assert result["ok"] is False and "RuntimeError" in result["text"] and SECRET not in json.dumps(result)
 
 
 def test_garbage_drafts_never_raise():
-    store = ProviderStore(factory_settings=Path("u.json"), sidecar=Path("u2.json"), environ={}, opener=Opener({"data": []}))
+    store = ProviderStore(models_file=Path("u.json"), sidecar=Path("u2.json"), environ={}, opener=Opener({"data": []}))
     assert run(store.test("nope"))["ok"] is False
     assert run(store.test({}))["ok"] is False
     assert run(store.list_models({"kind": 5})) == []
@@ -1164,7 +1177,7 @@ def test_bedrock_cannot_be_tested_here(tmp_path):
 
 def test_an_unset_variable_stops_the_test_before_any_request():
     opener = Opener({"data": []})
-    store = ProviderStore(factory_settings=Path("u.json"), sidecar=Path("u2.json"), environ={}, registry_env=lambda: {}, opener=opener)
+    store = ProviderStore(models_file=Path("u.json"), sidecar=Path("u2.json"), environ={}, registry_env=lambda: {}, opener=opener)
     result = run(store.test(conn()))
     assert result["text"] == "环境变量 OPENROUTER_API_KEY 没有设置，请求没有带密钥" and result["ok"] is False
     assert opener.requests == []
@@ -1172,7 +1185,7 @@ def test_an_unset_variable_stops_the_test_before_any_request():
 
 def test_a_variable_set_after_the_app_started_asks_for_a_restart():
     opener = Opener({"data": []})
-    store = ProviderStore(factory_settings=Path("u.json"), sidecar=Path("u2.json"), environ={}, registry_env=lambda: {"OPENROUTER_API_KEY": SECRET}, opener=opener)
+    store = ProviderStore(models_file=Path("u.json"), sidecar=Path("u2.json"), environ={}, registry_env=lambda: {"OPENROUTER_API_KEY": SECRET}, opener=opener)
     result = run(store.test(conn()))
     assert result["text"] == "环境变量 OPENROUTER_API_KEY 是在 WittyCode 启动之后设置的：重启 WittyCode 再试"
     assert opener.requests == [] and SECRET not in json.dumps(result)
@@ -1180,7 +1193,7 @@ def test_a_variable_set_after_the_app_started_asks_for_a_restart():
 
 def test_header_variables_are_expanded_or_reported():
     opener = Opener({"data": []})
-    store = ProviderStore(factory_settings=Path("u.json"), sidecar=Path("u2.json"), environ={"TEAM": "core"}, opener=opener)
+    store = ProviderStore(models_file=Path("u.json"), sidecar=Path("u2.json"), environ={"TEAM": "core"}, opener=opener)
     d = conn(keyMode="none", keyHint="", headers=[{"k": "X-Team", "v": "t-${TEAM}"}])
     assert run(store.test(d))["ok"] is True and opener.headers["x-team"] == "t-core"
     result = run(store.test({**d, "headers": [{"k": "X-Team", "v": "${MISSING}"}]}))
@@ -1191,7 +1204,7 @@ def test_a_command_key_is_run_and_sent():
     asked = []
     opener = Opener({"data": [{"id": "m"}]})
     store = ProviderStore(
-        factory_settings=Path("u.json"),
+        models_file=Path("u.json"),
         sidecar=Path("u2.json"),
         environ={},
         opener=opener,
@@ -1208,7 +1221,7 @@ def test_a_failing_key_command_is_a_test_failure():
         raise ProviderError("取密钥的命令失败了（退出码 2）。")
 
     opener = Opener({"data": []})
-    store = ProviderStore(factory_settings=Path("u.json"), sidecar=Path("u2.json"), environ={}, opener=opener, run_command=failing)
+    store = ProviderStore(models_file=Path("u.json"), sidecar=Path("u2.json"), environ={}, opener=opener, run_command=failing)
     result = run(store.test(conn(keyMode="command", keyHint="x")))
     assert result["text"] == "取密钥的命令失败了（退出码 2）" and opener.requests == []
 
@@ -1277,7 +1290,7 @@ def test_no_returned_value_holds_the_secret(tmp_path):
         store,
         {
             "customModels": [
-                *json.loads(store.factory_settings.read_text(encoding="utf-8"))["customModels"],
+                *json.loads(store.models_file.read_text(encoding="utf-8"))["customModels"],
                 entry("https://gw/v1", "g", extraHeaders={"Authorization": f"Bearer {SECRET}"}),
             ]
         },
@@ -1312,19 +1325,6 @@ def test_a_figure_that_is_not_a_positive_whole_number_is_no_figure(tmp_path):
     put_settings(store, {"customModels": [entry("https://a.example/v1", "odd", maxContextLimit="big", maxOutputTokens=-5)]})
     ((custom_id, _),) = store.custom_model_ids(store.list()[0]["id"])
     assert store.limits_of(custom_id) == (None, None)
-
-
-def test_the_users_own_compaction_points_for_droids_built_in_models(tmp_path):
-    store = make_store(tmp_path)
-    assert store.factory_compaction("claude-haiku-5-5") is None, "no settings file"
-    put_settings(store, {"compactionTokenLimit": 250_000, "compactionTokenLimitPerModel": {"claude-opus-5-5": 800_000, "bad": "x"}})
-    assert store.factory_compaction("claude-opus-5-5") == 800_000, "the model's own"
-    assert store.factory_compaction("kimi-k3") == 250_000, "else the general one"
-    assert store.factory_compaction("bad") == 250_000
-    put_settings(store, {"compactionTokenLimitPerModel": {"claude-opus-5-5": 800_000}})
-    assert store.factory_compaction("kimi-k3") is None
-    store.factory_settings.write_text("{not json", encoding="utf-8")
-    assert store.factory_compaction("claude-opus-5-5") is None, "an unreadable file says nothing"
 
 
 # ------------------------------------------------------------------------------------------------ what a server's list says of the models
@@ -1362,9 +1362,9 @@ def test_an_answer_limit_that_is_as_big_as_the_window_is_not_an_answer_limit_and
 
 def test_the_page_gets_every_model_the_server_lists_with_the_figures_it_gave_for_some(tmp_path):
     opener = Opener({"data": [{"id": "with", "context_length": 64_000, "max_completion_tokens": 4_096}, {"id": "without"}]})
-    store = ProviderStore(factory_settings=tmp_path / "f.json", sidecar=tmp_path / "s.json", environ={"OPENROUTER_API_KEY": "k"}, opener=opener)
+    store = ProviderStore(models_file=tmp_path / "f.json", sidecar=tmp_path / "s.json", environ={"OPENROUTER_API_KEY": "k"}, opener=opener)
     assert run(store.model_details(draft())) == [{"id": "with", "contextWindow": 64_000, "maxOutput": 4_096}, {"id": "without"}]
-    broken = ProviderStore(factory_settings=tmp_path / "f.json", sidecar=tmp_path / "s.json", environ={"OPENROUTER_API_KEY": "k"}, opener=Opener(error=ConnectionRefusedError()))
+    broken = ProviderStore(models_file=tmp_path / "f.json", sidecar=tmp_path / "s.json", environ={"OPENROUTER_API_KEY": "k"}, opener=Opener(error=ConnectionRefusedError()))
     assert run(broken.model_details(draft())) == []
 
 

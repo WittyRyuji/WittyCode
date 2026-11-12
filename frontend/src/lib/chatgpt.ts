@@ -3,7 +3,7 @@
 // or the model selector with a "Manage usage" link to the user's ChatGPT usage settings (the page writes the plan with a
 // capital P, as the user asked).
 
-import type { ChatGPTAccount, CodexAccount, LimitWindow } from "../types";
+import type { ChatGPTAccount, LimitWindow } from "../types";
 
 /** Where the user sees what apps used of the plan and sets each app's limit. */
 export const CHATGPT_USAGE_URL = "https://chatgpt.com/settings/usage";
@@ -25,17 +25,13 @@ export function chatgptState(a: ChatGPTAccount): { text: string; tone: Tone } {
 export const chatgptReady = (a: ChatGPTAccount) => a.available && a.auth === "signed-in" && a.planEnabled;
 
 /** How much of the plan is used. OpenAI gives an app signed in this way no way to read it (the usage endpoint refuses its
- *  token and the responses carry no limit headers), so the figures come from a Codex login of the same ChatGPT account, whose
- *  app-server reads them; without one they are unknown, and the reason is said. */
+ *  token and the responses carry no limit headers), and WittyCode reads no other program's login to find out: the figures
+ *  are unknown, and the reason is said; "Manage usage" opens the user's ChatGPT usage page. */
 export type PlanUsage = { known: true; percent: number; plan: string; windows: LimitWindow[] } | { known: false; why: string };
 
-export function planUsage(chatgpt: ChatGPTAccount, codex: CodexAccount): PlanUsage {
-  if (codex.cli === "missing") return { known: false, why: "没有安装 Codex。" };
-  if (codex.auth === "checking") return { known: false, why: "正在检查 Codex 的登录…" };
-  if (codex.auth !== "chatgpt") return { known: false, why: "Codex 没有用 ChatGPT 账号登录。" };
-  if (chatgpt.email && codex.email && chatgpt.email.toLowerCase() !== codex.email.toLowerCase()) return { known: false, why: `Codex 登录的是另一个账号（${codex.email}）。` };
-  if (codex.limits.length === 0) return { known: false, why: "Codex 没有返回额度。" };
-  return { known: true, percent: Math.max(...codex.limits.map((l) => l.usedPercent)), plan: codex.plan ?? "", windows: codex.limits };
+export function planUsage(chatgpt: ChatGPTAccount): PlanUsage {
+  if (!chatgptReady(chatgpt)) return { known: false, why: "还没有用 ChatGPT 套餐登录。" };
+  return { known: false, why: "OpenAI 不向这种登录方式提供额度数据，请在 ChatGPT 的用量页面查看。" };
 }
 
 /** The ring's colour class: the same thresholds as the Limit figures of the status bar. */

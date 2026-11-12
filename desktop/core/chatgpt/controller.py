@@ -40,8 +40,7 @@ from desktop.core.attachments import DEFAULT_PROMPT, IMAGE, PDF, TEXT, Attachmen
 from desktop.core.chatgpt import history as saved_history
 from desktop.core.chatgpt.errors import AuthError, ChatGPTError, friendly_failure
 from desktop.core.chatgpt.responses import Usage
-from desktop.core.codex.items import attachment_block
-from desktop.core.codex.policy import APPROVAL_OPTIONS
+from desktop.core.engine_items import attachment_block
 from desktop.core.context import ContextState, format_tokens
 from desktop.core.context_envelope import wrap as wrap_context
 from desktop.core.handoff import Handoff
@@ -55,8 +54,8 @@ from desktop.core.harness.tools import ToolContext
 from desktop.core.harness.toolset import HarnessTools
 from desktop.core.hooks import PromptEvent
 from desktop.core.memory.launch import new_run
-from desktop.core.prompts import QuestionView
-from desktop.core.session_manager import SESSION_STATE_LABELS, LiveSettings, SessionState, SteerOutcome
+from desktop.core.prompts import APPROVAL_OPTIONS, QuestionView
+from desktop.core.session_state import SESSION_STATE_LABELS, LiveSettings, SessionState, SteerOutcome
 from desktop.core.toolinfo import working_label as label_for_working_state
 from desktop.core.transcript import PromptStatus, ToolStatus, Transcript, Turn, TurnStatus, UserBlock
 from desktop.core.usage import Tokens, own_output

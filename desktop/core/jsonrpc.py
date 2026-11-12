@@ -1,19 +1,14 @@
-"""JSON-RPC over the stdio of ``codex app-server``: one JSON message per line, in both directions.
+"""JSON-RPC over the stdio of an engine's process (``devin acp``): one JSON message per line, in both directions.
 
-What the wire looks like (checked against codex-cli 0.165.0, see ``desktop.core.codex``): requests are
-``{"id", "method", "params"}``, and nobody sends ``"jsonrpc": "2.0"``; answers carry ``result`` or ``error``
-(``{code, message}``, e.g. ``-32600 Not initialized`` before the handshake); notifications have no ``id`` (the server puts
-``emittedAtMs`` next to their ``params``); the server also sends requests of its own (approvals), answered with the same
-``id``. Lines can be large (whole command outputs, diffs, history pages), so stdout is read in chunks, not with
-``readline`` and its 64 KiB limit.
+Requests are ``{"id", "method", "params"}``; answers carry ``result`` or ``error`` (``{code, message}``); notifications
+have no ``id``; the process also sends requests of its own (approvals, questions), answered with the same ``id``. Lines
+can be large (whole command outputs, diffs, history pages), so stdout is read in chunks, not with ``readline`` and its
+64 KiB limit.
 
-Shutting down: the server exits by itself (code 0, within a fraction of a second) when its stdin is closed, so
-``close`` does that first and only then terminates, and finally kills, the process.
+Shutting down: a well-behaved server exits by itself when its stdin is closed, so ``close`` does that first and only then
+terminates, and finally kills, the process.
 
-Windows: the process gets ``CREATE_NO_WINDOW`` so that no console window opens under ``pythonw.exe``. npm installs Codex
-as ``codex.cmd`` / ``codex.ps1`` shims that ``create_subprocess_exec`` cannot run and that ``terminate`` would not take
-down with them (cmd.exe -> node.exe -> codex.exe): ``launch_command`` finds the native ``codex.exe`` in the npm
-package instead, falling back to ``node codex.js`` and, last, ``cmd.exe /d /c``.
+Windows: the process gets ``CREATE_NO_WINDOW`` so that no console window opens under ``pythonw.exe``.
 """
 
 from __future__ import annotations
@@ -34,21 +29,11 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from desktop.core.codex.errors import CodexError, CodexProcessError, CodexRpcError, CodexTimeoutError
+from desktop.core.engine_errors import EngineError, EngineProcessError, EngineRpcError, EngineTimeoutError
 
-__all__ = [
-    "CREATE_NO_WINDOW",
-    "CodexError",
-    "CodexProcessError",
-    "CodexRpcError",
-    "CodexTimeoutError",
-    "JsonRpcClient",
-    "launch_command",
-    "native_codex",
-    "shim_script",
-]
+__all__ = ["CREATE_NO_WINDOW", "INTERNAL_ERROR", "METHOD_NOT_FOUND", "JsonRpcClient"]
 
-log = logging.getLogger("desktop.codex.rpc")
+log = logging.getLogger("desktop.jsonrpc")
 
 CREATE_NO_WINDOW = 0x08000000
 READ_CHUNK = 1 << 16
@@ -60,8 +45,8 @@ METHOD_NOT_FOUND = -32601
 
 NotificationHandler = Callable[[str, Any], "Awaitable[None] | None"]
 RequestHandler = Callable[[str, Any, Any], Awaitable[Any]]
-"""``(method, params, request id) -> result``; raising ``CodexRpcError`` answers with that error."""
-ExitHandler = Callable[[CodexProcessError], None]
+"""``(method, params, request id) -> result``; raising ``EngineRpcError`` answers with that error."""
+ExitHandler = Callable[[EngineProcessError], None]
 
 
 class JsonRpcClient:
@@ -101,7 +86,7 @@ class JsonRpcClient:
         self._stderr: collections.deque[str] = collections.deque(maxlen=STDERR_LINES)
         self._stderr_task: asyncio.Task[None] | None = None
         self._write_lock: asyncio.Lock | None = None
-        self._ended: CodexProcessError | None = None
+        self._ended: EngineProcessError | None = None
         self._closing = False
         self._close_task: asyncio.Task[None] | None = None
 
@@ -127,12 +112,12 @@ class JsonRpcClient:
         task.add_done_callback(self._tasks.discard)
         return task
 
-    def _gone(self) -> CodexProcessError:
+    def _gone(self) -> EngineProcessError:
         """A fresh error saying why requests cannot be sent (one instance per raise keeps tracebacks apart)."""
         ended = self._ended
         if ended is None:
-            return CodexProcessError(f"{self.name} is not running", closed=self._closing)
-        return CodexProcessError(ended.message, exit_code=ended.exit_code, stderr=ended.stderr, closed=ended.closed)
+            return EngineProcessError(f"{self.name} is not running", closed=self._closing)
+        return EngineProcessError(ended.message, exit_code=ended.exit_code, stderr=ended.stderr, closed=ended.closed)
 
     # ------------------------------------------------------------------ start
 
@@ -153,7 +138,7 @@ class JsonRpcClient:
                 **options,
             )
         except (OSError, ValueError) as error:
-            raise CodexProcessError(f"cannot start {self.name} ({self.argv[0]}): {error}") from error
+            raise EngineProcessError(f"cannot start {self.name} ({self.argv[0]}): {error}") from error
         self._inbox = asyncio.Queue()
         self._write_lock = asyncio.Lock()
         self._spawn(self._read_stdout())
@@ -179,7 +164,7 @@ class JsonRpcClient:
             try:
                 return await asyncio.wait_for(future, timeout)
             except asyncio.TimeoutError:
-                raise CodexTimeoutError(f"{method} got no answer within {timeout:g} s") from None
+                raise EngineTimeoutError(f"{method} got no answer within {timeout:g} s") from None
         finally:
             self._pending.pop(request_id, None)
 
@@ -198,12 +183,12 @@ class JsonRpcClient:
             if self._ended is not None:
                 raise self._gone()
             if process.stdin.is_closing():
-                raise CodexProcessError(f"{self.name} is closing", closed=True)
+                raise EngineProcessError(f"{self.name} is closing", closed=True)
             try:
                 process.stdin.write(data)
                 await process.stdin.drain()
             except (ConnectionError, OSError, RuntimeError) as error:
-                raise CodexProcessError(f"cannot write to {self.name}: {error}") from error
+                raise EngineProcessError(f"cannot write to {self.name}: {error}") from error
 
     # ------------------------------------------------------------------ incoming
 
@@ -280,7 +265,7 @@ class JsonRpcClient:
             details = error if isinstance(error, Mapping) else {"message": str(error)}
             code = details.get("code")
             future.set_exception(
-                CodexRpcError(
+                EngineRpcError(
                     code if isinstance(code, int) and not isinstance(code, bool) else INTERNAL_ERROR,
                     str(details.get("message") or ""),
                     details.get("data"),
@@ -299,20 +284,20 @@ class JsonRpcClient:
             await asyncio.wait({self._stderr_task}, timeout=0.5)
         self.exit_code = process.returncode
         if self._closing:
-            error = CodexProcessError(f"{self.name} was closed", exit_code=self.exit_code, closed=True)
+            error = EngineProcessError(f"{self.name} was closed", exit_code=self.exit_code, closed=True)
         else:
             code = f" with code {self.exit_code}" if self.exit_code is not None else ""
-            error = CodexProcessError(f"{self.name} exited{code}", exit_code=self.exit_code, stderr=self.stderr_tail)
+            error = EngineProcessError(f"{self.name} exited{code}", exit_code=self.exit_code, stderr=self.stderr_tail)
         self._ended = error
         self._fail_pending(error)
         self._inbox.put_nowait(("exit", error))
 
-    def _fail_pending(self, error: CodexProcessError) -> None:
+    def _fail_pending(self, error: EngineProcessError) -> None:
         pending, self._pending = self._pending, {}
         for future in pending.values():
             if not future.done():
                 future.set_exception(
-                    CodexProcessError(error.message, exit_code=error.exit_code, stderr=error.stderr, closed=error.closed)
+                    EngineProcessError(error.message, exit_code=error.exit_code, stderr=error.stderr, closed=error.closed)
                 )
 
     async def _dispatch(self) -> None:
@@ -353,17 +338,17 @@ class JsonRpcClient:
         reply: dict[str, Any]
         try:
             if self.on_request is None:
-                raise CodexRpcError(METHOD_NOT_FOUND, f"this client does not handle {method}")
+                raise EngineRpcError(METHOD_NOT_FOUND, f"this client does not handle {method}")
             result = await self.on_request(method, message.get("params"), request_id)
             reply = {"id": request_id, "result": result}
-        except CodexRpcError as error:
+        except EngineRpcError as error:
             reply = {"id": request_id, "error": {"code": error.code, "message": error.message}}
         except asyncio.CancelledError:
             raise  # closing: there is nobody left to answer
         except Exception as error:
             log.exception("serving %s from %s failed", method, self.name)
             reply = {"id": request_id, "error": {"code": INTERNAL_ERROR, "message": f"{type(error).__name__}: {error}"}}
-        with contextlib.suppress(CodexError):
+        with contextlib.suppress(EngineError):
             await self._write(reply)
 
     # ------------------------------------------------------------------ close
@@ -396,7 +381,7 @@ class JsonRpcClient:
                         with contextlib.suppress(asyncio.TimeoutError):
                             await asyncio.wait_for(process.wait(), KILL_WAIT_SECONDS)
             self.exit_code = process.returncode
-        self._fail_pending(self._ended or CodexProcessError(f"{self.name} was closed", exit_code=self.exit_code, closed=True))
+        self._fail_pending(self._ended or EngineProcessError(f"{self.name} was closed", exit_code=self.exit_code, closed=True))
         # The readers end by themselves at EOF; whatever still runs (a request waiting for the user) is cancelled.
         if self._tasks:
             with contextlib.suppress(asyncio.TimeoutError):
@@ -414,88 +399,3 @@ class JsonRpcClient:
 
 
 # ---------------------------------------------------------------------------------------------- launching
-
-_SHIM_SCRIPT = re.compile(r"(?:%~?dp0%?|\$basedir)[\\/]+([^\"'\r\n%$]*?codex\.js)", re.IGNORECASE)
-_WINDOWS_TRIPLES = {
-    "amd64": "x86_64-pc-windows-msvc",
-    "x86_64": "x86_64-pc-windows-msvc",
-    "arm64": "aarch64-pc-windows-msvc",
-    "aarch64": "aarch64-pc-windows-msvc",
-}
-
-
-def shim_script(shim: str | Path) -> Path | None:
-    """The ``codex.js`` that an npm shim (``codex.cmd``, ``codex.ps1`` or the extensionless sh one) runs with node."""
-    path = Path(shim)
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return None
-    match = _SHIM_SCRIPT.search(text)
-    if match is None:
-        return None
-    script = path.parent / match.group(1).replace("\\", "/").lstrip("/")
-    with contextlib.suppress(OSError):
-        script = script.resolve()
-    return script if script.is_file() else None
-
-
-def native_codex(package_root: str | Path) -> Path | None:
-    """The native executable of an ``@openai/codex`` npm package (``.../node_modules/@openai/codex``).
-
-    npm puts it in an optional platform package next to it (``@openai/codex-win32-x64/vendor/<triple>/bin/codex.exe``
-    in 0.165.0) or, in older releases, in the package's own ``vendor/<triple>/codex/``.
-    """
-    root = Path(package_root)
-    windows = sys.platform == "win32"
-    executable = "codex.exe" if windows else "codex"
-    preferred = _WINDOWS_TRIPLES.get(platform.machine().lower(), "x86_64-pc-windows-msvc") if windows else ""
-    roots = [root]
-    for scope in (root.parent, root / "node_modules" / "@openai"):
-        with contextlib.suppress(OSError):
-            roots.extend(sorted(entry for entry in scope.iterdir() if entry.is_dir() and entry.name.startswith("codex-")))
-    found: list[tuple[bool, Path]] = []
-    for base in roots:
-        with contextlib.suppress(OSError):
-            for triple in sorted((base / "vendor").iterdir()):
-                if windows and not triple.name.endswith("-pc-windows-msvc"):
-                    continue
-                for folder in ("bin", "codex"):
-                    candidate = triple / folder / executable
-                    if candidate.is_file():
-                        found.append((triple.name != preferred, candidate))
-    if not found:
-        return None
-    found.sort(key=lambda entry: entry[0])
-    return found[0][1]
-
-
-def _node_beside(shim: Path) -> str | None:
-    local = shim.parent / ("node.exe" if sys.platform == "win32" else "node")
-    if local.is_file():
-        return str(local)
-    return shutil.which("node")
-
-
-def launch_command(path: str | Path) -> list[str]:
-    """The command line that runs ``path`` (a Codex executable or an npm shim for one) without a shell in between."""
-    target = Path(path)
-    suffix = target.suffix.lower()
-    if suffix in (".exe", ".com"):
-        return [str(target)]
-    if sys.platform != "win32" and suffix not in (".cmd", ".bat", ".ps1"):
-        return [str(target)]
-    script = shim_script(target)
-    if script is not None:
-        native = native_codex(script.parent.parent)
-        if native is not None:
-            return [str(native)]
-        node = _node_beside(target)
-        if node is not None:
-            return [node, str(script)]
-    if suffix in (".cmd", ".bat"):
-        # Last resort: the shim through cmd.exe. Closing stdin still ends the chain (codex exits, then node, then cmd).
-        return [os.environ.get("COMSPEC") or "cmd.exe", "/d", "/c", str(target)]
-    if suffix == ".ps1":
-        return ["powershell.exe", "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(target)]
-    return [str(target)]

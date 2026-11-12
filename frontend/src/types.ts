@@ -4,7 +4,7 @@
 export type ThemeChoice = "system" | "light" | "dark";
 export type FontScale = "sm" | "md" | "lg";
 
-/** What Droid calls a reasoning level (droid_sdk ReasoningEffort); a model offers some of them. */
+/** A reasoning level; a model offers some of them. */
 export type Effort = "none" | "dynamic" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 
 /** The dot of a session: open and idle, working, waiting for the user, disconnected, connecting. */
@@ -87,7 +87,7 @@ export interface UserBlock {
   who?: string;
   /** said to the turn while it was running, to steer it (not the message that began the turn) */
   steer?: boolean;
-  /** a steer the engine has not taken in yet (Droid reads it after the step it is on) */
+  /** a steer the engine has not taken in yet (the own loop reads it before its next request) */
   pending?: boolean;
 }
 
@@ -125,7 +125,7 @@ export interface NoticeBlock {
   text: string;
 }
 
-/** The line where a conversation changed engine (Droid ⇄ Codex): what carries over and what does not. */
+/** The line where a conversation changed engine (the own loop ⇄ Devin): what carries over and what does not. */
 export interface SwitchBlock {
   kind: "switch";
   id: string;
@@ -225,7 +225,7 @@ export interface PendingHandoff {
   to: string;
 }
 
-/** A sub-agent Codex started for the conversation's thread: its own thread, run by Codex, shown in the side panel. */
+/** A sub-agent an engine started for the conversation: its own thread, shown in the side panel (no engine of this version starts one). */
 export interface AgentInfo {
   /** its thread id */
   id: string;
@@ -258,7 +258,7 @@ export interface Session {
   projectId: string;
   title: string;
   handoff?: PendingHandoff;
-  /** the sub-agents of an open Codex conversation, oldest first */
+  /** the sub-agents of an open conversation, oldest first */
   agents?: AgentInfo[];
   /** undefined: saved on disk, not open. Otherwise the open session's state. */
   mark?: SessionMark;
@@ -327,18 +327,16 @@ export interface Project {
   sessionIds: string[];
 }
 
-/** Which program runs a session. Droid (Factory's agent, through droid-sdk) runs the Factory models and the API
- *  providers' models; Codex (OpenAI's `codex app-server`) runs the models of a ChatGPT subscription; Devin (Cognition's
- *  `devin acp`) runs the models of a Devin account; ChatGPT Plan is WittyCode's own agent loop calling OpenAI with the
- *  user's ChatGPT plan ("Sign in with ChatGPT"), so its sessions are WittyCode's own files. Each keeps its own native
- *  sessions, and none can read the others' context. A conversation can still change engine: WittyCode starts a fresh
- *  native session on the other side and puts the earlier conversation's text (not its tool calls) in front of the next
- *  message, see `lib/handoff.ts`. */
-export type Engine = "droid" | "codex" | "devin" | "chatgpt";
+/** Which program runs a session. "chatgpt" is WittyCode's own agent loop: it calls OpenAI with the user's ChatGPT plan
+ *  ("Sign in with ChatGPT") and the user's API providers directly, so its sessions are WittyCode's own files. Devin
+ *  (Cognition's `devin acp`, optional) runs the models of a Devin account. Each keeps its own native sessions, and neither
+ *  can read the other's context. A conversation can still change engine: WittyCode starts a fresh native session on the
+ *  other side and puts the earlier conversation's text (not its tool calls) in front of the next message, see
+ *  `lib/handoff.ts`. */
+export type Engine = "devin" | "chatgpt";
 
-/** Where a model comes from: "factory" (Factory's own, billed in Factory credits), "codex" (ChatGPT subscription through
- *  Codex), "devin" (a Devin account), "chatgpt" (the ChatGPT plan through WittyCode's own harness) or "api:<providerId>"
- *  (one of the user's API providers). */
+/** Where a model comes from: "chatgpt" (the ChatGPT plan through WittyCode's own loop), "devin" (a Devin account) or
+ *  "api:<providerId>" (one of the user's API providers, also run by the own loop). */
 export type SourceId = string;
 
 export interface ModelChoice {
@@ -346,53 +344,28 @@ export interface ModelChoice {
   label: string;
   note?: string;
   source: SourceId;
-  /** the reasoning levels this model supports (ModelInfo.supported_reasoning_efforts), in Droid's order; empty: none.
-   *  Codex may name levels Droid does not have, so this is any string. */
+  /** the reasoning levels this model supports, weakest first; empty: none. Engines name their own levels, so this is any
+   *  string. */
   efforts: string[];
   defaultEffort: string;
   /** the context window, in tokens; 0: not known yet */
   window: number;
-  /** who made a Factory model ("Anthropic", "OpenAI", ...): the model menu groups by it */
+  /** who made the model ("Anthropic", "OpenAI", ...): the model menu groups by it */
   group?: string;
   /** the model cannot see pictures */
   noImages?: boolean;
-  /** Droid lists it but it cannot be used now (not part of the plan, ...): not offered in the menu */
+  /** the engine lists it but it cannot be used now (not part of the plan, ...): not offered in the menu */
   disabled?: boolean;
   disabledReason?: string;
 }
 
 // ---------------------------------------------------------------------------------------------- accounts and providers
 
-/** Droid's side. The live app knows whether droid.exe was found, where, and its version; the design mock also shows
- *  an account (email, plan), which the real droid does not report. */
-export interface FactoryAccount {
-  signedIn: boolean;
-  email?: string;
-  plan?: string;
-  droidPath?: string;
-  version?: string;
-}
-
 export interface LimitWindow {
   label: string; // "5 小时", "每周"
   short: string; // "5h", "1w": the status bar
   usedPercent: number;
   resetsIn: string; // "2 小时 10 分后"
-}
-
-/** The Codex subscription (account/read and account/rateLimits/read of `codex app-server`). */
-export interface CodexAccount {
-  cli: "missing" | "found";
-  cliPath?: string;
-  version?: string;
-  /** checking (still asking Codex at start-up); signed-out; signing-in (the browser is open); chatgpt (subscription);
-   *  api-key (Codex uses an API key: no limits) */
-  auth: "checking" | "signed-out" | "signing-in" | "chatgpt" | "api-key";
-  email?: string;
-  plan?: string;
-  limits: LimitWindow[];
-  /** show the Codex models in the model menu */
-  enabled: boolean;
 }
 
 /** The Devin account (`devin auth status` of the Devin CLI, which the desktop app's sign-in serves too). */
@@ -603,18 +576,18 @@ export interface ImportResult {
   skipped: { key: string; title: string; reason: string }[];
 }
 
-/** The API formats Droid's `customModels[].provider` accepts. */
+/** The API formats an API provider's model entry (`customModels[].provider`) can name. */
 export type ApiKind = "anthropic" | "openai" | "generic-chat-completion-api" | "bedrock-converse";
 
 /** How the key reaches the request: read from an environment variable (`${NAME}` in `apiKey`), printed by a command
  *  (`apiKeyHelper`), or not needed (local servers, gateways that authenticate otherwise).
  *
- *  "inline" is only what an existing settings.json may already contain (Droid's own BYOK setup writes keys there).
+ *  "inline" is only what an existing settings.json may already contain (older setups wrote keys there).
  *  The editor shows it with a warning and offers the way out; it never lets you choose it, and the page never receives
  *  the key, only a masked `keyHint`. WittyCode itself never writes a key into settings.json. */
 export type KeyMode = "inline" | "env" | "command" | "none";
 
-/** Whether an environment variable is there for a droid that WittyCode starts: set; "pending" is set in the user's
+/** Whether an environment variable is there for the requests WittyCode makes: set; "pending" is set in the user's
  *  environment (registry) but WittyCode started before that, so a restart is needed; or not set at all. */
 export type EnvState = "set" | "pending" | "unset";
 
@@ -636,8 +609,8 @@ export interface RemoteModel {
   maxOutput?: number;
 }
 
-/** A skill or a custom command the message box offers after a slash (`skills.list`; the files are Factory's: `.factory/skills`,
- *  `.factory/commands`, the ones in plugins). Naming one in a message makes its instructions go with the message, on every engine. */
+/** A skill or a custom command the message box offers after a slash (`skills.list`; the files are in `.wittycode`, `.agents` and the
+ *  other agents' skill folders, and in plugins). Naming one in a message makes its instructions go with the message, on every engine. */
 export interface SkillItem {
   name: string;
   description: string;
@@ -648,7 +621,7 @@ export interface SkillItem {
   source: string;
 }
 
-/** One API provider as the page shows it. WittyCode's own grouping: Droid's `customModels` is a flat list, the models
+/** One API provider as the page shows it. WittyCode's own grouping: the models file's `customModels` is a flat list, the models
  *  of one base URL and format are shown together under a name that WittyCode keeps. `keyHint` is the variable
  *  (`${OPENROUTER_API_KEY}`), the command, or for a legacy inline key a masked tail: no key ever reaches the page. */
 export interface ApiProvider {

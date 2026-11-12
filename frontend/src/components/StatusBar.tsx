@@ -1,7 +1,6 @@
 import { currentSession, useStore } from "../store";
-import type { CodexAccount, ContextState, Speed, Usage } from "../types";
+import type { ContextState, Speed, Usage } from "../types";
 import { cacheHitRate, formatCount, formatSpeed, formatTokens, usageTotal } from "../lib/format";
-import { engineOfSession } from "../lib/models";
 import { StateDot, Tip } from "./ui";
 
 const UNKNOWN = "—";
@@ -128,52 +127,9 @@ function UsageText({ u }: { u: Usage | null }) {
   );
 }
 
-/** `Limit 5h 17% 1w 41%`: how much of the ChatGPT subscription's windows is used. Only in Codex sessions. */
-function LimitText({ codex }: { codex: CodexAccount }) {
-  if (codex.auth !== "chatgpt" || codex.limits.length === 0) return null;
-  const level = (p: number) => (p >= 95 ? " crit" : p >= 80 ? " warn" : "");
-  return (
-    <>
-      <span className="st-sep" aria-hidden />
-      <Tip
-        className="usage"
-        text={
-          <div className="tip-lines">
-            <b>Codex 订阅额度（{codex.plan}）</b>
-            <dl className="tip-table">
-              {codex.limits.map((l) => (
-                <div key={l.label} className="tip-row">
-                  <dt>{l.label}</dt>
-                  <dd>已用 {l.usedPercent}%</dd>
-                </div>
-              ))}
-            </dl>
-            {codex.limits.map((l) => (
-              <div key={l.label} className="tip-note">
-                {l.label}窗口：{l.resetsIn}
-              </div>
-            ))}
-          </div>
-        }
-      >
-        <span className="k">Limit</span>
-        {codex.limits.map((l) => (
-          <span key={l.short} className={`lim${level(l.usedPercent)}`}>
-            <span className="k">{l.short}</span>
-            <span className="v">{l.usedPercent}%</span>
-          </span>
-        ))}
-      </Tip>
-    </>
-  );
-}
-
 export function StatusBar() {
   const session = useStore(currentSession);
   const notice = useStore((s) => s.notice);
-  const codex = useStore((s) => s.codex);
-  const models = useStore((s) => s.models);
-  const isCodex = !!session && engineOfSession(models, session) === "codex";
   return (
     <footer className="statusbar" role="status">
       <div className="st-left">
@@ -197,7 +153,6 @@ export function StatusBar() {
           <SpeedText s={session.speed} />
           <span className="st-sep" aria-hidden />
           <UsageText u={session.usage} />
-          {isCodex && <LimitText codex={codex} />}
         </div>
       )}
     </footer>

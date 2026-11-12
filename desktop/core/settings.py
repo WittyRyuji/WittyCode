@@ -27,9 +27,6 @@ SETTINGS_FILE = "settings.json"
 SETTINGS_VERSION = 2
 """2: the ChatGPT Plan engine joined the shared memory (``MEMORY_ENGINES``); a file written before that, with every engine
 then known switched on, gets it switched on too (``settings_from_dict``)."""
-AUTONOMY_LEVELS = ("off", "low", "medium", "high")
-CODEX_PERMISSIONS = ("readonly", "workspace", "full")
-"""The permission scale of Codex sessions (the page's 只读 / 工作区 / 完全访问); Droid's is ``AUTONOMY_LEVELS``."""
 DEVIN_PERMISSIONS = ("ask", "plan", "code", "smart", "full")
 """The permission scale of Devin sessions: its modes (Ask / Plan / Code / Smart / Bypass), see ``core/devin/policy``."""
 CHATGPT_PERMISSIONS = ("ask", "code", "full")
@@ -49,24 +46,17 @@ MAX_SESSION_TITLE = 120
 COMPACT_AT_RANGE = (50, 95)
 DEFAULT_COMPACT_AT = 85
 """Percent of a model's context window at which a ChatGPT Plan conversation is summarised (``harness/compact``)."""
-MEMORY_ENGINES = ("droid", "codex", "devin", "chatgpt")
-LEGACY_MEMORY_ENGINES = ("droid", "codex", "devin")
+MEMORY_ENGINES = ("devin", "chatgpt")
 
 
 @dataclass
 class AppSettings:
-    droid_path: str = ""
-    """Explicit droid.exe path; empty means auto-detect."""
-    codex_path: str = ""
-    """Explicit Codex CLI path; empty means auto-detect."""
-    codex_enabled: bool = True
-    """Show the Codex subscription's models in the model menu."""
     devin_path: str = ""
     """Explicit Devin CLI path; empty means auto-detect."""
     devin_enabled: bool = True
     """Show the Devin account's models in the model menu."""
     hidden_models: list[str] = field(default_factory=list)
-    """Page ids of models (Factory, Codex or API) the user does not want in the conversation's model menu. A model in
+    """Page ids of models (ChatGPT Plan, Devin or API) the user does not want in the conversation's model menu. A model in
     use is shown anyway; ids that no longer exist stay, so a model that comes back is still hidden."""
     memory_enabled: bool = True
     """The shared memory (``core/memory``): notes common to all engines, given to each conversation as an MCP server."""
@@ -85,12 +75,9 @@ class AppSettings:
     """One of ``FOLLOW_UPS``: what Enter does while a turn is running."""
     sidebar_width: int = 288
     default_model: str = ""
-    """Model id for new sessions; empty lets Droid pick the account default."""
+    """Model id for new sessions; empty: the first model of the menu."""
     reasoning_effort: str = ""
     """Reasoning effort for new sessions; empty uses the model default."""
-    autonomy: str = "off"
-    codex_autonomy: str = "readonly"
-    """Permission level for new Codex sessions (one of ``CODEX_PERMISSIONS``)."""
     devin_autonomy: str = "code"
     """Permission level for new Devin sessions (one of ``DEVIN_PERMISSIONS``)."""
     chatgpt_enabled: bool = True
@@ -220,9 +207,6 @@ def settings_from_dict(raw: object) -> AppSettings:
     low_w, high_w = SIDEBAR_WIDTH_RANGE
     if not isinstance(sidebar, int) or isinstance(sidebar, bool) or not low_w <= sidebar <= high_w:
         sidebar = defaults.sidebar_width
-    enabled = raw.get("codex_enabled")
-    if not isinstance(enabled, bool):
-        enabled = defaults.codex_enabled
     devin_enabled = raw.get("devin_enabled")
     if not isinstance(devin_enabled, bool):
         devin_enabled = defaults.devin_enabled
@@ -250,8 +234,8 @@ def settings_from_dict(raw: object) -> AppSettings:
     if isinstance(memory_engines, list):
         chosen = [name for name in MEMORY_ENGINES if name in memory_engines]
         version = raw.get("version")
-        if (not isinstance(version, int) or version < 2) and tuple(chosen) == LEGACY_MEMORY_ENGINES:
-            chosen.append("chatgpt")
+        if (not isinstance(version, int) or version < 2) and "chatgpt" not in chosen and "devin" in chosen:
+            chosen.append("chatgpt")  # (a file from before the own loop joined the memory, with every engine then known on)
         memory_engines = chosen
     else:
         memory_engines = list(defaults.memory_engines)
@@ -293,9 +277,6 @@ def settings_from_dict(raw: object) -> AppSettings:
                 titles[key] = " ".join(name.split())[:MAX_SESSION_TITLE]
 
     return AppSettings(
-        droid_path=text("droid_path"),
-        codex_path=text("codex_path"),
-        codex_enabled=enabled,
         devin_path=text("devin_path"),
         devin_enabled=devin_enabled,
         hidden_models=hidden,
@@ -310,8 +291,6 @@ def settings_from_dict(raw: object) -> AppSettings:
         sidebar_width=sidebar,
         default_model=text("default_model"),
         reasoning_effort=text("reasoning_effort"),
-        autonomy=text("autonomy", AUTONOMY_LEVELS),
-        codex_autonomy=text("codex_autonomy", CODEX_PERMISSIONS),
         devin_autonomy=text("devin_autonomy", DEVIN_PERMISSIONS),
         chatgpt_enabled=chatgpt_enabled,
         chatgpt_autonomy=text("chatgpt_autonomy", CHATGPT_PERMISSIONS),

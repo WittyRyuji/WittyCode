@@ -151,26 +151,38 @@ function fakeBackend(config) {
   // ------------------------------------------------------------------ AppCore, scripted
   const PROJECT = "D:\\Work\\demo-project";
   const OTHER = "D:\\Work\\second-project";
-  const DROID = "C:\\Users\\dev\\AppData\\Local\\Factory\\bin\\droid.exe";
-  const FACTORY_MODELS = [
-    { id: "claude-haiku-5-5", label: "Claude Haiku 5.5", source: "factory", efforts: ["off", "low", "medium", "high"], defaultEffort: "low", window: 0, group: "Anthropic", note: "×0.4" },
-    { id: "claude-opus-5-5", label: "Claude Opus 5.5", source: "factory", efforts: ["low", "medium", "high", "max"], defaultEffort: "high", window: 0, group: "Anthropic", note: "×2" },
-    { id: "gpt-5.4", label: "GPT-5.4", source: "factory", efforts: ["none", "low", "medium", "high"], defaultEffort: "medium", window: 0, group: "OpenAI" },
-    { id: "gemini-3-pro", label: "Gemini 3 Pro", source: "factory", efforts: ["dynamic", "low", "high"], defaultEffort: "dynamic", window: 0, group: "Google" },
-    { id: "glm-legacy", label: "GLM Legacy", source: "factory", efforts: [], defaultEffort: "", window: 0, group: "Factory", disabled: true, disabledReason: "not in your plan" },
+  /** the models of the user's API provider "Gateway", run by WittyCode's own loop (the window is not known yet) */
+  const GW_MODELS = [
+    { id: "api:gw:claude-haiku-5-5", label: "Claude Haiku 5.5", source: "api:gw", efforts: ["off", "low", "medium", "high"], defaultEffort: "low", window: 0 },
+    { id: "api:gw:claude-opus-5-5", label: "Claude Opus 5.5", source: "api:gw", efforts: ["low", "medium", "high", "max"], defaultEffort: "high", window: 0 },
+    { id: "api:gw:gpt-5.4", label: "GPT-5.4", source: "api:gw", efforts: ["none", "low", "medium", "high"], defaultEffort: "medium", window: 0 },
+    { id: "api:gw:gemini-3-pro", label: "Gemini 3 Pro", source: "api:gw", efforts: ["dynamic", "low", "high"], defaultEffort: "dynamic", window: 0 },
+    { id: "api:gw:glm-legacy", label: "GLM Legacy", source: "api:gw", efforts: [], defaultEffort: "", window: 0, disabled: true, disabledReason: "not offered by the gateway" },
   ];
-  const CODEX_MODELS = [{ id: "codex:gpt-5.3-codex", label: "GPT-5.3 Codex", source: "codex", efforts: ["low", "medium", "high", "xhigh"], defaultEffort: "medium", window: 400000 }];
-  const SIGNED_IN = {
+  const GATEWAY = {
+    id: "gw",
+    name: "Gateway",
+    kind: "openai",
+    baseUrl: "https://gateway.example.com/v1",
+    keyMode: "env",
+    keyHint: "${GATEWAY_API_KEY}",
+    models: GW_MODELS.map((m) => ({ id: m.id.slice(7), displayName: m.label, reasoning: m.defaultEffort, images: true })),
+    headers: [],
+    extraArgs: "",
+  };
+  /** a Devin account's models, sorted under their makers like Python's list */
+  const DEVIN_MODELS = [
+    { id: "devin:swe-2-high", label: "SWE-2", source: "devin", efforts: ["medium", "high", "max"], defaultEffort: "high", window: 262000, group: "Cognition" },
+    { id: "devin:claude-opus-5-5-medium", label: "Claude Opus 5.5", source: "devin", efforts: ["low", "medium", "high", "xhigh", "max"], defaultEffort: "medium", window: 400000, group: "Anthropic" },
+    { id: "devin:gpt-6-sol-medium", label: "GPT-6 Sol", source: "devin", efforts: ["low", "medium", "high", "xhigh"], defaultEffort: "medium", window: 400000, group: "OpenAI" },
+  ];
+  const DEVIN_IN = {
     cli: "found",
-    auth: "chatgpt",
+    auth: "signed-in",
     email: "dev@example.com",
-    plan: "ChatGPT Plus",
-    version: "0.60.1",
-    cliPath: "C:\\Users\\dev\\AppData\\Roaming\\npm\\codex.cmd",
-    limits: [
-      { label: "5 小时", short: "5h", usedPercent: 12, resetsIn: "3 小时后重置" },
-      { label: "每周", short: "1w", usedPercent: 30, resetsIn: "5 天后重置" },
-    ],
+    plan: "Devin Pro",
+    version: "3000.11.238",
+    cliPath: "C:\\Users\\dev\\AppData\\Local\\Programs\\devin\\devin.exe",
     enabled: true,
   };
   const CHATGPT_MODELS = [{ id: "chatgpt:gpt-6.1-sol", label: "GPT-6.1-Sol", source: "chatgpt", efforts: ["low", "medium", "high"], defaultEffort: "medium", window: 400000 }];
@@ -186,10 +198,10 @@ function fakeBackend(config) {
     enabled: true,
     welcomed: false,
   };
-  const engineOf = (model) => (model.startsWith("codex:") ? "codex" : model.startsWith("chatgpt:") ? "chatgpt" : "droid");
-  const START = { droid: "off", codex: "readonly", chatgpt: "code" };
+  const engineOf = (model) => (model.startsWith("devin:") ? "devin" : "chatgpt");
+  const START = { devin: "code", chatgpt: "code" };
   const ago = (minutes) => Date.now() - minutes * 60_000;
-  const savedRow = (id, projectId, title, modifiedAt, engine = "droid") => ({
+  const savedRow = (id, projectId, title, modifiedAt, engine = "chatgpt") => ({
     id,
     projectId,
     title,
@@ -219,11 +231,11 @@ function fakeBackend(config) {
     draft: 0,
     id: 0,
     maximized: false,
-    models: [...FACTORY_MODELS],
-    defaults: { model: "", reasoning: "", autonomy: "off", mode: "auto" },
-    settings: { maxOpen: 4, droidPath: "", droidFound: DROID, codexPath: "", hiddenModels: [], theme: "dark", fontScale: "md", sidebarWidth: 300, memoryEnabled: true, memoryRecall: true, memoryCapture: true, memoryCurate: true, memoryEngines: ["droid", "codex", "devin", "chatgpt"], compactAuto: true, compactAt: 85, lastProject: "" },
-    factory: { signedIn: true, droidPath: DROID, version: "0.262.1" },
-    codex: { cli: "found", auth: "checking", limits: [], enabled: true },
+    models: [...GW_MODELS],
+    providers: [clone(GATEWAY)],
+    defaults: { model: "", reasoning: "", autonomy: "code", mode: "auto" },
+    settings: { maxOpen: 4, devinPath: "", hiddenModels: [], theme: "dark", fontScale: "md", sidebarWidth: 300, memoryEnabled: true, memoryRecall: true, memoryCapture: true, memoryCurate: true, memoryEngines: ["devin", "chatgpt"], compactAuto: true, compactAt: 85, lastProject: "" },
+    devin: { cli: "found", auth: "checking", enabled: true },
     chatgpt: clone(CHATGPT_OUT),
   };
   const nid = (prefix) => `${prefix}${++S.id}`;
@@ -251,7 +263,7 @@ function fakeBackend(config) {
     Promise.resolve()
       .then(() => handler(params))
       .then(async (result) => {
-        // a slow call (droid.exe takes a second or two to start): what it does is done, the answer comes late
+        // a slow call (an engine's process takes a second or two to start): what it does is done, the answer comes late
         const wait = S.replyDelay[method];
         if (wait) {
           delete S.replyDelay[method];
@@ -278,7 +290,7 @@ function fakeBackend(config) {
   const emitSidebar = () => emit("sidebar", { projects: projectRows(), sessions: Object.fromEntries(S.saved.filter((r) => !S.archived.includes(r.id)).map((r) => [r.id, shownRow(r)])), archived: clone(archivedRows()) });
   const emitTabs = (select) => emit("tabs", { tabs: [...S.order], select });
   const emitTurns = (c, turns, all = false) => emit("turns", { id: c.cid, turns: clone(turns), all });
-  const modelOf = (id) => [...S.models, ...CODEX_MODELS, ...CHATGPT_MODELS].find((m) => m.id === id);
+  const modelOf = (id) => [...S.models, ...DEVIN_MODELS, ...CHATGPT_MODELS].find((m) => m.id === id);
 
   const metaOf = (c) => ({
     id: c.cid,
@@ -316,7 +328,7 @@ function fakeBackend(config) {
       model,
       engine,
       reasoning: info?.defaultEffort ?? "",
-      autonomy: engine === "droid" ? S.defaults.autonomy : START[engine],
+      autonomy: engine === "chatgpt" && S.defaults.autonomy ? S.defaults.autonomy : START[engine],
       mode: "auto",
       mark: "opening",
       title: "新会话",
@@ -395,9 +407,9 @@ function fakeBackend(config) {
     turn.prompts = [];
     c.mark = "ready";
     c.workingLabel = "就绪";
-    c.usage = { input: 1200 * c.sends, output: 340 * c.sends, cacheWrite: c.engine === "codex" ? null : 800, cacheRead: 5000 * c.sends };
+    c.usage = { input: 1200 * c.sends, output: 340 * c.sends, cacheWrite: c.engine === "chatgpt" ? null : 800, cacheRead: 5000 * c.sends };
     c.speed = { tps: 42.3 + c.sends, tokens: 340 * c.sends, seconds: 8, first: 1.2, genTps: 50.1 };
-    c.context = { used: 12345, window: c.engine === "codex" ? 400000 : 0, model: c.model, compacted: false };
+    c.context = { used: 12345, window: c.engine === "devin" ? 262000 : 0, model: c.model, compacted: false };
     emitTurns(c, [turn]);
     flush(c);
   }
@@ -582,11 +594,11 @@ function fakeBackend(config) {
     "app.init": async () => {
       if (config.initDelay) await sleep(config.initDelay);
       later(60, () => {
-        S.defaults = { model: "claude-haiku-5-5", reasoning: "low", autonomy: "off", mode: "auto" };
+        S.defaults = { model: "api:gw:claude-haiku-5-5", reasoning: "low", autonomy: "code", mode: "auto" };
         emit("models", { models: clone(S.models), defaults: S.defaults });
       });
       later(120, () => {
-        S.saved = [savedRow("s-saved-1", PROJECT, "整理发布说明", ago(5)), savedRow("cx:th-9", PROJECT, "Codex 线程：迁移脚本", ago(40), "codex"), savedRow("s-saved-2", OTHER, "旧的会话", ago(60 * 24 * 3))];
+        S.saved = [savedRow("s-saved-1", PROJECT, "整理发布说明", ago(5)), savedRow("dv:th-9", PROJECT, "Devin 会话：迁移脚本", ago(40), "devin"), savedRow("s-saved-2", OTHER, "旧的会话", ago(60 * 24 * 3))];
         S.savedLoaded = true;
         emitSidebar();
       });
@@ -600,10 +612,9 @@ function fakeBackend(config) {
         models: [],
         defaults: S.defaults,
         settings: { ...S.settings },
-        factory: S.factory,
-        codex: S.codex,
+        devin: S.devin,
         chatgpt: S.chatgpt,
-        providers: [],
+        providers: clone(S.providers),
         maximized: S.maximized,
         offline: false,
       };
@@ -629,7 +640,7 @@ function fakeBackend(config) {
       const already = S.order.find((cid) => S.convs[cid].savedId === p.id);
       if (already) return { id: already };
       const row = S.saved.find((r) => r.id === p.id);
-      const c = open(p.projectId, row?.engine === "codex" ? "codex:gpt-5.3-codex" : "claude-haiku-5-5", { title: p.title || row?.title || "（无标题）", savedId: p.id, nativeId: p.id });
+      const c = open(p.projectId, row?.engine === "devin" ? "devin:swe-2-high" : "api:gw:claude-haiku-5-5", { title: p.title || row?.title || "（无标题）", savedId: p.id, nativeId: p.id });
       // Python sends the restored history before the conversation's first session event
       c.turns = [{ id: nid("t"), status: "done", seconds: 4.2, blocks: [{ kind: "user", id: nid("b"), text: "上次的问题" }, { kind: "text", id: nid("b"), markdown: "上次的回答，见 `docs/notes.md:5`，另有 `docs/report.pdf`、`docs/long.pdf`、`docs/broken.pdf` 和 `shots/ui.png`。", streaming: false }], prompts: [] }];
       later(20, () => emitTurns(c, c.turns));
@@ -784,7 +795,7 @@ function fakeBackend(config) {
         .map((a) => {
           const words = a.kind === "text" || (a.kind === "pdf" && !/scan/i.test(a.name));
           const item = { id: a.id, name: a.name, kind: a.kind, as: words ? "text" : a.kind, bytes: a.size };
-          if (!words && a.kind === "pdf" && engine === "codex") Object.assign(item, { as: "", reason: "Codex 只能读 PDF 里的文字，这个 PDF 里没有提取到文字。" });
+          if (!words && a.kind === "pdf") Object.assign(item, { as: "", reason: "模型只能读 PDF 里的文字，这个 PDF 里没有提取到文字。" });
           return item;
         });
       const inBox = { count: c.drafts.length, bytes: c.drafts.reduce((n, a) => n + (a.size || 0), 0) };
@@ -807,12 +818,13 @@ function fakeBackend(config) {
       const from = modelOf(c.model);
       const to = modelOf(p.value);
       const carried = c.turns.flatMap((t) => t.blocks).filter((b) => b.kind === "user" || (b.kind === "text" && b.markdown)).length;
-      const names = { droid: "Droid", codex: "Codex", chatgpt: "ChatGPT Plan" };
+      const names = { devin: "Devin", chatgpt: "ChatGPT Plan" };
+      const shownEngine = (m) => (m.source.startsWith("api:") ? "API" : names[engineOf(m.id)]);
       Object.assign(c, { engine, model: p.value, reasoning: to.defaultEffort, autonomy: START[engine], usage: null, speed: null, context: { used: null, window: to.window, model: "", compacted: false }, handoff: carried || chosen.length ? { carried, truncated: false, attachments: chosen.length, to: to.label } : null, sent: {} });
       setDefault("model", p.value);
       emitSidebar();
       if (carried) {
-        const turn = { id: nid("t"), status: "done", blocks: [{ kind: "switch", id: nid("b"), from: { model: from.label, engine: names[engineOf(from.id)] }, to: { model: to.label, engine: names[engine] }, carried, total: carried, bytes: 180, truncated: false }], prompts: [] };
+        const turn = { id: nid("t"), status: "done", blocks: [{ kind: "switch", id: nid("b"), from: { model: from.label, engine: shownEngine(from) }, to: { model: to.label, engine: shownEngine(to) }, carried, total: carried, bytes: 180, truncated: false }], prompts: [] };
         c.turns.push(turn);
         emitTurns(c, [turn]);
       }
@@ -825,7 +837,7 @@ function fakeBackend(config) {
         .filter(([n]) => n)
         .map(([n, what]) => `${n} ${what}`);
       const filesNote = along.length ? `${along.join("、")}一起带过去。` : "";
-      emit("notice", { text: `已换到 ${to.label}（${names[engine]}）。${carried ? `之前 ${carried} 条对话的文字会随下一条消息交给它。` : ""}${filesNote}` });
+      emit("notice", { text: `已换到 ${to.label}（${shownEngine(to)}）。${carried ? `之前 ${carried} 条对话的文字会随下一条消息交给它。` : ""}${filesNote}` });
       return { ok: true, switched: true };
     },
     "attachments.add": (p) => {
@@ -884,13 +896,12 @@ function fakeBackend(config) {
       else if (p.key === "fontScale" && ["sm", "md", "lg"].includes(v)) s.fontScale = v;
       else if (p.key === "maxOpen" && Number.isInteger(v) && v >= 1 && v <= 16) s.maxOpen = v;
       else if (p.key === "sidebarWidth" && Number.isInteger(v) && v >= 220 && v <= 440) s.sidebarWidth = v;
-      else if (p.key === "droidPath" && typeof v === "string") s.droidPath = v.trim();
-      else if (p.key === "codexPath" && typeof v === "string") s.codexPath = v.trim();
+      else if (p.key === "devinPath" && typeof v === "string") s.devinPath = v.trim();
       else if (p.key === "memoryEnabled" && typeof v === "boolean") s.memoryEnabled = v;
       else if (p.key === "memoryRecall" && typeof v === "boolean") s.memoryRecall = v;
       else if (p.key === "memoryCapture" && typeof v === "boolean") s.memoryCapture = v;
       else if (p.key === "memoryCurate" && typeof v === "boolean") s.memoryCurate = v;
-      else if (p.key === "memoryEngines" && Array.isArray(v) && v.every((e) => ["droid", "codex", "devin", "chatgpt"].includes(e))) s.memoryEngines = [...new Set(v)];
+      else if (p.key === "memoryEngines" && Array.isArray(v) && v.every((e) => ["devin", "chatgpt"].includes(e))) s.memoryEngines = [...new Set(v)];
       else if (p.key === "compactAuto" && typeof v === "boolean") s.compactAuto = v;
       else if (p.key === "compactAt" && Number.isInteger(v) && v >= 50 && v <= 95) s.compactAt = v;
       else throw new Error("这个设置的值不合法。");
@@ -905,21 +916,20 @@ function fakeBackend(config) {
       emit("settings", { settings: { ...s } });
       return { ...s };
     },
-    "factory.account": () => S.factory,
-    "codex.account": () => S.codex,
-    "codex.login": async () => {
+    "devin.account": () => S.devin,
+    "devin.login": async () => {
       await sleep(200);
-      S.codex = clone(SIGNED_IN);
-      emit("accounts", { codex: S.codex });
+      S.devin = clone(DEVIN_IN);
+      emit("accounts", { devin: S.devin });
       later(30, () => {
-        S.models = [...FACTORY_MODELS, ...CODEX_MODELS];
+        S.models = [...S.models.filter((m) => m.source !== "devin"), ...DEVIN_MODELS];
         emit("models", { models: clone(S.models), defaults: S.defaults });
       });
-      return S.codex;
+      return S.devin;
     },
-    "codex.cancelLogin": () => S.codex,
-    "codex.logout": () => (S.codex = { cli: "found", auth: "signed-out", limits: [], enabled: true }),
-    "codex.setEnabled": (p) => (S.codex = { ...S.codex, enabled: !!p.on }),
+    "devin.cancelLogin": () => S.devin,
+    "devin.logout": () => (S.devin = { cli: "found", auth: "signed-out", enabled: true }),
+    "devin.setEnabled": (p) => (S.devin = { ...S.devin, enabled: !!p.on }),
     "chatgpt.account": () => S.chatgpt,
     "chatgpt.login": async () => {
       emit("accounts", { chatgpt: { ...S.chatgpt, signingIn: true } });

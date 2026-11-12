@@ -23,7 +23,7 @@ function useTick(every = 30_000) {
   }, [every]);
 }
 
-/** The id the engine itself knows (what `droid --resume` or Codex would take). */
+/** The id the engine itself knows (what the engine would take to resume the session). */
 const nativeIdOf = (s: Session) => s.nativeId || (s.id.startsWith("cx:") || s.id.startsWith("dv:") ? s.id.slice(3) : s.id);
 
 function SessionRow({ session, current, onMenu }: { session: Session; current: boolean; onMenu: (s: Session, a: Anchor) => void }) {
@@ -32,10 +32,10 @@ function SessionRow({ session, current, onMenu }: { session: Session; current: b
   const models = useStore((s) => s.models);
   const providers = useStore((s) => s.providers);
   const open = !!session.mark;
-  // Sessions that are not Factory's say where they run: "已打开 · 刚刚 · Codex". A saved row does not know its model,
-  // only its engine.
-  const source = findModel(models, session.settings.model)?.source ?? (session.engine === "codex" || session.engine === "devin" || session.engine === "chatgpt" ? session.engine : "factory");
-  const from = sourceLabel(source, providers);
+  // Sessions say where they run: "已打开 · 刚刚 · Devin". A saved row of the own loop that does not know its model cannot
+  // tell the plan from an API provider, so it says nothing.
+  const source = findModel(models, session.settings.model)?.source ?? (session.engine === "devin" ? "devin" : "");
+  const from = source ? sourceLabel(source, providers) : "";
   // Measured from this moment, not from the last tick: a row that has just arrived is never a tick behind.
   const when = session.modifiedAt ? formatRelative(session.modifiedAt, Date.now()) : session.modified;
   const sub = [open ? MARK_TEXT[session.mark!] : "", when, from].filter(Boolean).join(" · ");
@@ -237,7 +237,7 @@ export function Sidebar() {
         <ArchivedGroup />
       </div>
       <div className="side-foot">
-        <button type="button" className="foot-btn" onClick={() => openSettings("memory")} title="Droid、Codex、Devin 和 ChatGPT Plan 共享的笔记">
+        <button type="button" className="foot-btn" onClick={() => openSettings("memory")} title="所有引擎共享的笔记">
           <Brain size={15} />
           共享记忆
           {unseen > 0 && (

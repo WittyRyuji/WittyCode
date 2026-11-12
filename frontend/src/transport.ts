@@ -18,7 +18,7 @@ export class CallError extends Error {
 export const CALL_TIMEOUT_MS = 120_000;
 
 /** Calls that wait for the user (the browser sign-in, the native file dialogs) have no safety timeout. */
-const WAITS_FOR_USER = new Set(["codex.login", "devin.login", "chatgpt.login", "project.add", "attachments.pick"]);
+const WAITS_FOR_USER = new Set(["devin.login", "chatgpt.login", "project.add", "attachments.pick"]);
 
 interface Signal<A extends unknown[]> {
   connect(callback: (...args: A) => void): void;

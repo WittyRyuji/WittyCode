@@ -12,7 +12,7 @@ import { ImportWizard } from "./ImportWizard";
 import { MemoryStarMap } from "./MemoryStarMap";
 import type { MenuItem } from "./ui";
 
-const ENGINES: Engine[] = ["droid", "codex", "devin", "chatgpt"];
+const ENGINES: Engine[] = ["chatgpt", "devin"];
 const MAX_TITLE = 80;
 const MAX_TEXT = 2000;
 const RECENT_SHOWN = 5;
@@ -61,7 +61,7 @@ function Switches() {
   const setEngines = useStore((s) => s.setMemoryEngines);
   return (
     <>
-      <Field label="共享记忆" hint="打开后，Droid、Codex、Devin 和 ChatGPT Plan 读写同一份笔记：你的偏好、项目的约定、踩过的坑。新会话开头会带一份标题清单，需要细节时它们自己去查。">
+      <Field label="共享记忆" hint="打开后，WittyCode 自己的代理循环（ChatGPT Plan、API Provider）和 Devin 读写同一份笔记：你的偏好、项目的约定、踩过的坑。新会话开头会带一份标题清单，需要细节时它们自己去查。">
         <Switch on={enabled} onChange={setEnabled} label="共享记忆" />
       </Field>
       {enabled && (
@@ -87,7 +87,7 @@ function Switches() {
         </Field>
       )}
       {enabled && (
-        <Field label="自动记笔记，每周回顾一次" hint="一轮结束后，WittyCode 用同一个引擎再问一次这一轮里有没有值得长期记住的事。把握够大的直接写成笔记，马上生效，不再逐条问你；攒到每周一次，让你一次看完、一次确认。你留下和丢掉的选择会让它越来越会筛。每次是一个很小的请求：ChatGPT Plan 用它的快速模型；Codex、Devin 用各自便宜的模型、不留在会话列表里；Droid 的会话暂时不能整理。">
+        <Field label="自动记笔记，每周回顾一次" hint="一轮结束后，WittyCode 用同一个引擎再问一次这一轮里有没有值得长期记住的事。把握够大的直接写成笔记，马上生效，不再逐条问你；攒到每周一次，让你一次看完、一次确认。你留下和丢掉的选择会让它越来越会筛。每次是一个很小的请求：ChatGPT Plan 用它的快速模型；Devin 用便宜的模型、不留在会话列表里。">
           <Switch on={curate} onChange={setCurate} label="自动记笔记，每周回顾一次" />
         </Field>
       )}
@@ -610,7 +610,7 @@ function Notes({ onImport }: { onImport: () => void }) {
     { id: "user", label: "我" },
     { id: "app", label: "应用整理" },
     ...ENGINES.map((e) => ({ id: e as string, label: engineName(e) })),
-    // (what an import brought in: Claude Code, Factory Droid and whatever else the files came from)
+    // (what an import brought in: whatever other application the files came from)
     ...[...present].filter((id) => id !== "user" && id !== "app" && !ENGINES.some((known) => known === id)).sort().map((id) => ({ id, label: engineName(id) })),
   ];
   const sourceItems: MenuItem[] = sources.map((s) => ({ id: s.id, label: s.label, checked: engine === s.id, onSelect: () => setEngine(s.id) }));

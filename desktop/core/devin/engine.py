@@ -1,5 +1,5 @@
-"""The Devin engine: the Devin account (Cognition's agent) through ``devin acp``, next to Droid's ``SessionManager`` and the
-Codex engine.
+"""The optional Devin engine: the user's Devin account (Cognition's agent) through ``devin acp``, next to WittyCode's own
+loop (``core/chatgpt``).
 
 One long-lived ``devin acp`` process serves everything: the model list, the session list and every open session (every
 notification and request carries ``sessionId``; two sessions at once on one connection were exercised on the real
@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from desktop import __version__
-from desktop.core.codex.rpc import CREATE_NO_WINDOW
+from desktop.core.jsonrpc import CREATE_NO_WINDOW
 from desktop.core.devin import items
 from desktop.core.devin.account import DevinStatus, account_json, parse_status
 from desktop.core.devin.controller import DevinController
@@ -51,7 +51,7 @@ from desktop.core.devin.rpc import AcpClient
 from desktop.core.handoff import Handoff
 from desktop.core.hooks import Hooks
 from desktop.core.memory.launch import MemoryLaunch
-from desktop.core.session_manager import SessionState
+from desktop.core.session_state import SessionState
 from desktop.core.settings import AppSettings, normalize_folder
 from desktop.core.transcript import Transcript
 
@@ -78,7 +78,7 @@ def default_client_factory(binary: DevinBinary, **handlers: Any) -> AcpClient:
 
 @dataclass(frozen=True, slots=True)
 class DevinSavedSession:
-    """A saved session for the sidebar, with the attributes the backend reads from Droid's ``SavedSession``."""
+    """A saved session for the sidebar, with the attributes the backend reads of every engine's saved sessions."""
 
     id: str
     title: str
@@ -586,7 +586,7 @@ class DevinEngine:
     ) -> DevinController:
         """Start a session in ``project``. ``transcript`` / ``handoff`` continue a conversation from another engine.
 
-        A failure leaves the controller CLOSED with ``last_error`` (and an error block in the transcript), like Droid's."""
+        A failure leaves the controller CLOSED with ``last_error`` (and an error block in the transcript), like the own loop's."""
         controller = DevinController(
             manager=self,
             project=Path(normalize_folder(project)),

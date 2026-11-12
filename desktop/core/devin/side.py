@@ -23,7 +23,7 @@ import logging
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
-from desktop.core.codex.side import cheapness, finish, lowest_effort, reason, settle
+from desktop.core.side_helpers import cheapness, finish, lowest_effort, reason, settle
 from desktop.core.devin.controller import CONFIG_SECONDS, NEW_SESSION_SECONDS
 from desktop.core.devin.errors import DevinError, DevinRpcError
 from desktop.core.devin.items import prompt_blocks

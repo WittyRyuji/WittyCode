@@ -24,7 +24,8 @@ What a prompt does depends on markers in its text:
 
 Environment: ``FAKE_DEVIN_ACCOUNT`` = signed-in | signed-out (until the state file has one); ``FAKE_DEVIN_LOGIN_DELAY``
 (seconds, default 0.2, or ``never``); ``FAKE_DEVIN_BROKEN=1`` (``acp`` exits 2 at once); ``FAKE_DEVIN_NO_MODELS_JSON=1``
-(``models list`` fails).
+(``models list`` fails); ``FAKE_DEVIN_OPEN_DELAY`` (seconds ``session/new`` and ``session/load`` take) and
+``FAKE_DEVIN_OPEN_FAIL=1`` (both answer with an error).
 """
 
 from __future__ import annotations
@@ -208,6 +209,12 @@ class Fake:
                 if result is None:
                     return  # answered later, with the turn
             else:
+                if method in ("session/new", "session/load"):
+                    delay = float(os.environ.get("FAKE_DEVIN_OPEN_DELAY") or 0)
+                    if delay:
+                        await asyncio.sleep(delay)
+                    if os.environ.get("FAKE_DEVIN_OPEN_FAIL") == "1":
+                        raise RpcError(-32603, "cannot open the session")
                 handler = getattr(self, "m_" + method.replace("/", "_"), None)
                 if handler is None:
                     raise RpcError(-32601, f"Method not found: {method}")

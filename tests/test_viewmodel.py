@@ -1,26 +1,17 @@
-"""The transcript as JSON for the React page: shapes the page relies on, and that nothing breaks on real recordings."""
+"""The transcript as JSON for the React page: the shapes the page relies on."""
 
 from __future__ import annotations
-
-import json
 
 from desktop.core.attachments import Thumbnail, image_attachment
 from desktop.core.handoff import build_handoff
 from desktop.core.transcript import Transcript
 from desktop.core.viewmodel import OUTPUT_LIMIT, context_json, turn_json, turns_json, usage_json
 from desktop.core.context import ContextState
-from tests.support import (
-    complete,
-    delta,
-    permission_request,
-    question_request,
-    replay_fixture,
-    success,
-    tiny_png,
-    tool_call,
-    tool_result,
-    usage,
-)
+from types import SimpleNamespace
+
+from tests.support import tiny_png
+from tests.transcript_support import ask_permission, ask_question, finish, result, say
+from tests.transcript_support import tool as use_tool
 
 
 def activity_of(turn_data):
@@ -30,11 +21,10 @@ def activity_of(turn_data):
 def test_a_finished_turn_has_user_text_activity_and_a_summary():
     transcript = Transcript()
     transcript.start_turn("List the files")
-    transcript.apply(delta("Looking.", "m1"))
-    transcript.apply(complete("m1"))
-    transcript.apply(tool_call("t1", "Read", file_path="README.md"))
-    transcript.apply(tool_result("t1", "Read", "hello"))
-    transcript.apply(success("done", seconds=12.34))
+    say(transcript, "Looking.")
+    use_tool(transcript, "t1", "Read", file_path="README.md")
+    result(transcript, "t1", "hello")
+    finish(transcript, seconds=12.34)
     data = turn_json(transcript.turns[0])
     assert data["status"] == "done" and data["seconds"] == 12.3 and data["steps"] == 1
     assert [block["kind"] for block in data["blocks"]] == ["user", "text", "activity"]
@@ -48,10 +38,10 @@ def test_a_finished_turn_has_user_text_activity_and_a_summary():
 def test_a_running_turn_streams_and_reports_progress_as_output():
     transcript = Transcript()
     transcript.start_turn("go")
-    transcript.apply(delta("Hel", "m1"))
+    say(transcript, "Hel", done=False)
     data = turn_json(transcript.turns[0])
     assert data["status"] == "running" and data["blocks"][1]["streaming"] is True and "seconds" not in data
-    transcript.apply(tool_call("t1", "Execute", command="dir"))
+    use_tool(transcript, "t1", "Execute", command="dir")
     item = transcript.turns[0].tools["t1"]
     item.progress = "line 1\nline 2"
     tool = activity_of(turn_json(transcript.turns[0]))["entries"][0]
@@ -62,10 +52,10 @@ def test_long_output_is_cut_at_the_end_for_commands_and_the_start_otherwise():
     transcript = Transcript()
     transcript.start_turn("go")
     big = "".join(f"{n}\n" for n in range(40_000))
-    transcript.apply(tool_call("t1", "Execute", command="dir"))
-    transcript.apply(tool_result("t1", "Execute", big))
-    transcript.apply(tool_call("t2", "Read", file_path="a"))
-    transcript.apply(tool_result("t2", "Read", big))
+    use_tool(transcript, "t1", "Execute", command="dir")
+    result(transcript, "t1", big)
+    use_tool(transcript, "t2", "Read", file_path="a")
+    result(transcript, "t2", big)
     entries = activity_of(turn_json(transcript.turns[0]))["entries"]
     command, read = entries
     assert command["output"].startswith("（已省略") and command["output"].rstrip().endswith("39999")
@@ -76,7 +66,7 @@ def test_long_output_is_cut_at_the_end_for_commands_and_the_start_otherwise():
 def test_an_edit_carries_its_diff_and_no_input_dump():
     transcript = Transcript()
     transcript.start_turn("go")
-    transcript.apply(tool_call("t1", "Edit", file_path="a.py", old_str="x = 1\n", new_str="x = 2\n"))
+    use_tool(transcript, "t1", "Edit", file_path="a.py", old_str="x = 1\n", new_str="x = 2\n")
     tool = activity_of(turn_json(transcript.turns[0]))["entries"][0]
     assert "meta" not in tool
     (diff,) = tool["diffs"]
@@ -88,7 +78,7 @@ def test_a_todo_list_becomes_todo_rows():
     transcript = Transcript()
     transcript.start_turn("go")
     todos = "1. [completed] first\n2. [in_progress] second\n3. [pending] third"
-    transcript.apply(tool_call("t1", "TodoWrite", todos=todos))
+    use_tool(transcript, "t1", "TodoWrite", todos=todos)
     tool = activity_of(turn_json(transcript.turns[0]))["entries"][0]
     assert [row["state"] for row in tool["todos"]] == ["completed", "in_progress", "pending"]
 
@@ -96,9 +86,8 @@ def test_a_todo_list_becomes_todo_rows():
 def test_prompts_are_listed_while_pending_and_settled_ones_are_dropped():
     transcript = Transcript()
     transcript.start_turn("go")
-    transcript.apply(tool_call("t0", "Execute", command="del x"))
-    request = permission_request()
-    prompt = transcript.add_permission(request)
+    use_tool(transcript, "t0", "Execute", command="del x")
+    prompt = ask_permission(transcript, "t0")
     data = turn_json(transcript.turns[0])
     (shown,) = data["prompts"]
     assert shown["kind"] == "permission" and shown["status"] == "pending" and shown["id"] == prompt.id
@@ -111,7 +100,7 @@ def test_prompts_are_listed_while_pending_and_settled_ones_are_dropped():
 def test_a_question_prompt_and_its_answer_block():
     transcript = Transcript()
     transcript.start_turn("go")
-    prompt = transcript.add_question(question_request())
+    prompt = ask_question(transcript)
     (shown,) = turn_json(transcript.turns[0])["prompts"]
     assert shown["kind"] == "question" and shown["questions"] and {"topic", "question", "options", "multiSelect"} <= set(shown["questions"][0])
     answers = ["a"] * len(prompt.questions)
@@ -160,17 +149,17 @@ def test_a_truncated_diff_says_so_in_a_gap_line_the_page_shows():
 def test_a_change_of_engine_is_a_turn_of_its_own_and_marks_the_next_message():
     transcript = Transcript()
     transcript.start_turn("hello")
-    transcript.apply(delta("Hi there.", "m1"))
-    transcript.apply(success("Hi there."))
+    say(transcript, "Hi there.")
+    finish(transcript)
     handoff = build_handoff(transcript.turns)
     transcript.add_switch(
-        from_model="Haiku 5.5", from_engine="Droid", to_model="GPT-5.3 Codex", to_engine="Codex",
+        from_model="GPT-6.1-Sol", from_engine="ChatGPT Plan", to_model="SWE-2", to_engine="Devin",
         carried=handoff.carried, total=handoff.total, size=handoff.size, truncated=handoff.truncated,
     )
     transcript.start_turn("continue", handoff=(handoff.carried, handoff.truncated))
     data = turns_json(transcript.turns)
     switch = data[1]["blocks"][0]
-    assert switch["kind"] == "switch" and switch["from"] == {"model": "Haiku 5.5", "engine": "Droid"} and switch["to"]["engine"] == "Codex"
+    assert switch["kind"] == "switch" and switch["from"] == {"model": "GPT-6.1-Sol", "engine": "ChatGPT Plan"} and switch["to"]["engine"] == "Devin"
     assert switch["carried"] == 2 and switch["total"] == 2 and switch["truncated"] is False and switch["bytes"] > 0
     assert data[2]["blocks"][0]["handoff"] == {"carried": 2, "truncated": False}
     assert data[1]["status"] == "done"
@@ -178,22 +167,13 @@ def test_a_change_of_engine_is_a_turn_of_its_own_and_marks_the_next_message():
 
 def test_usage_and_context_figures():
     assert usage_json(None) is None
-    figures = usage_json(usage(input_tokens=394, output_tokens=498, cache_read=68_300))
+    figures = usage_json(SimpleNamespace(input_tokens=394, output_tokens=498, cache_creation_tokens=0, cache_read_tokens=68_300))
     assert figures["input"] == 394 and figures["output"] == 498 and figures["cacheRead"] == 68_300
     assert isinstance(figures["cacheWrite"], int) or figures["cacheWrite"] is None
 
-    class Codexish:
+    class NoCacheWrites:
         input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens = 10, 5, None, 3
 
-    assert usage_json(Codexish())["cacheWrite"] is None
+    assert usage_json(NoCacheWrites())["cacheWrite"] is None
     assert context_json(ContextState(used=22_518, window=872_000, model="m")) == {"used": 22_518, "window": 872_000, "model": "m", "compacted": False}
     assert context_json(ContextState(), window_hint=250_000)["window"] == 250_000
-
-
-def test_a_real_recording_serializes_to_valid_json_for_every_turn():
-    transcript = replay_fixture("stream_turn.jsonl")
-    data = turns_json(transcript.turns)
-    text = json.dumps(data, ensure_ascii=False)
-    assert json.loads(text) == data
-    kinds = {block["kind"] for turn in data for block in turn["blocks"]}
-    assert {"user", "text", "activity"} <= kinds

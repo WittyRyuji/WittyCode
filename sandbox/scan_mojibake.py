@@ -2,7 +2,7 @@
 import pathlib
 import re
 
-root = pathlib.Path(r"D:\Develop\Factory\droid-desk")
+root = pathlib.Path(__file__).resolve().parents[1]  # the repository
 skip = {".venv", "node_modules", ".git", "ui_dist", "__pycache__", "dist", "sandbox"}
 suffixes = {".py", ".ts", ".tsx", ".mjs", ".js", ".css", ".md", ".json", ".html", ".toml", ".yml", ".yaml", ".txt"}
 # what "的" "你" "是" ... become: a lead byte E4-E9 read as cp1252, then two more characters

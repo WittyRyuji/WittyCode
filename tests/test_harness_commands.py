@@ -18,7 +18,7 @@ from desktop.core.harness.prompt import PLAN_RULES, build_instructions
 from desktop.core.harness.store import SavedSession, SavedTurn, SessionStore
 from desktop.core.harness.tools import ToolContext, ToolRegistry
 from desktop.core.harness.toolset import PLAN_REFUSAL, HarnessTools
-from desktop.core.session_manager import SessionState
+from desktop.core.session_state import SessionState
 from desktop.core.transcript import TurnStatus
 from tests.chatgpt_support import ACCESS_TOKEN, finish_turn, until
 from tests.fake_responses import FakeResponses, call, cut, http_error, say, usage

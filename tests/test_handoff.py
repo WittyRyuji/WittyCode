@@ -8,7 +8,7 @@ import json
 import pytest
 
 from desktop.core.attachments import SOFT_ATTACHMENTS, SOFT_TOTAL_BYTES, Attachment, Overage, image_attachment, pdf_attachment, text_attachment
-from desktop.core.codex.items import split_handoff
+from desktop.core.engine_items import split_handoff
 from desktop.core.handoff import (
     AS_IMAGE,
     AS_PDF,

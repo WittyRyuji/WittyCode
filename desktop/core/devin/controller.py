@@ -39,8 +39,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from desktop.core.attachments import DEFAULT_PROMPT, IMAGE, PDF, Attachment
-from desktop.core.codex.elicit import plan_of, reply_for
-from desktop.core.codex.items import command_result
+from desktop.core.elicit import plan_of, reply_for
+from desktop.core.engine_items import command_result
 from desktop.core.context import ContextState
 from desktop.core.devin import items
 from desktop.core.devin.errors import DevinError, DevinProcessError, DevinRpcError, friendly_failure
@@ -60,7 +60,7 @@ from desktop.core.handoff import Handoff
 from desktop.core.hooks import PromptEvent
 from desktop.core.memory.launch import new_run
 from desktop.core.prompts import ActionView
-from desktop.core.session_manager import SESSION_STATE_LABELS, LiveSettings, SessionState, SteerOutcome
+from desktop.core.session_state import SESSION_STATE_LABELS, LiveSettings, SessionState, SteerOutcome
 from desktop.core.toolinfo import working_label as label_for_working_state
 from desktop.core.harness.asking import answer_text
 from desktop.core.transcript import PromptStatus, ToolItem, ToolStatus, Transcript, Turn, TurnStatus, UserBlock

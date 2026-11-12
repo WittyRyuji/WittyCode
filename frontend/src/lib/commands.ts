@@ -82,7 +82,6 @@ export function unavailable(name: string, scene: Scene, args = ""): string | nul
       if (scene.running) return "本轮还在运行，结束后再压缩。";
       return null;
     case "plan":
-      if (scene.engine === "codex") return "Codex 在 WittyCode 里没有 Plan 模式。";
       return null;
     case "goal":
       if (!scene.session) return "先打开一个会话，再给它一个目标。";

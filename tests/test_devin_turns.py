@@ -5,11 +5,11 @@ from __future__ import annotations
 import asyncio
 
 from desktop.core.attachments import image_attachment, pdf_attachment, text_attachment
-from desktop.core.codex.elicit import DENY, OPEN
+from desktop.core.elicit import DENY, OPEN
 from desktop.core.devin import controller as devin_controller
 from desktop.core.devin.controller import DevinController
 from desktop.core.handoff import build_handoff
-from desktop.core.session_manager import LiveSettings, SessionState
+from desktop.core.session_state import LiveSettings, SessionState
 from desktop.core.transcript import (
     ActivityBlock,
     ErrorBlock,

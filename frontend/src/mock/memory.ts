@@ -35,10 +35,10 @@ function seed(n: number, init: Partial<MemoryEntry> & Pick<MemoryEntry, "title" 
 
 let entries: MemoryEntry[] = [
   seed(1, { title: "回答用中文，代码标识符保持英文", text: "和我说话用中文；变量名、函数名、命令、报错原文保持英文，不要翻译。", kind: "preference", source: user, created: now - 72 * HOUR }),
-  seed(2, { title: "旧结论：Codex 数据在 ~/.codex", text: "这是旧目录。现在的 Codex 数据目录是 CODEX_HOME=E:\\tools\\codex。", kind: "fact", scope: "project", source: agent("codex", "修复缓存"), created: now - 48 * HOUR, status: "forgotten", updated: now - 10 * MIN, rev: 2 }),
-  seed(3, { title: "PowerShell 5.1 不支持 && 和 ||", text: "这台机器的 shell 是 Windows PowerShell 5.1：用分号串联命令，用 $LASTEXITCODE 判断结果。", kind: "pitfall", source: agent("droid", "整理测试", "s-tests"), created: now - 26 * HOUR, tags: ["shell", "windows"] }),
-  seed(4, { title: "Codex 的 rollout 文件在 E:\\tools\\codex\\sessions", text: "读线程文件要用 thread/list 给的 path，别去猜目录。时间戳是 UTC。", kind: "fact", source: agent("devin"), created: now - 3 * HOUR }),
-  seed(5, { title: "改了 frontend 要先 npm run build:app", text: "界面是单文件页面，不构建的话应用和 e2e 跑的都是旧页面。构建后再跑 node scripts/check.mjs。", kind: "convention", scope: "project", source: agent("codex", "修复缓存"), created: now - 40 * MIN, tags: ["frontend"] }),
+  seed(2, { title: "旧结论：缓存数据在 ~/.cache/inventory", text: "这是旧目录。现在的缓存目录是 INVENTORY_CACHE=D:\\cache\\inventory。", kind: "fact", scope: "project", source: agent("devin", "修复缓存"), created: now - 48 * HOUR, status: "forgotten", updated: now - 10 * MIN, rev: 2 }),
+  seed(3, { title: "PowerShell 5.1 不支持 && 和 ||", text: "这台机器的 shell 是 Windows PowerShell 5.1：用分号串联命令，用 $LASTEXITCODE 判断结果。", kind: "pitfall", source: agent("chatgpt", "整理测试", "s-tests"), created: now - 26 * HOUR, tags: ["shell", "windows"] }),
+  seed(4, { title: "索引快照在 D:\\cache\\inventory\\snapshots", text: "读快照要用 index/list 给的 path，别去猜目录。时间戳是 UTC。", kind: "fact", source: agent("devin"), created: now - 3 * HOUR }),
+  seed(5, { title: "改了 frontend 要先 npm run build:app", text: "界面是单文件页面，不构建的话应用和 e2e 跑的都是旧页面。构建后再跑 node scripts/check.mjs。", kind: "convention", scope: "project", source: agent("devin", "修复缓存"), created: now - 40 * MIN, tags: ["frontend"] }),
 ];
 
 interface Logged {
@@ -52,11 +52,11 @@ interface Logged {
 
 let journal: Logged[] = [
   { seq: 1, op: "create", id: "m1", by: user, at: now - 72 * HOUR, before: null },
-  { seq: 2, op: "create", id: "m2", by: agent("codex", "修复缓存"), at: now - 48 * HOUR, before: null },
-  { seq: 3, op: "create", id: "m3", by: agent("droid", "整理测试", "s-tests"), at: now - 26 * HOUR, before: null },
+  { seq: 2, op: "create", id: "m2", by: agent("devin", "修复缓存"), at: now - 48 * HOUR, before: null },
+  { seq: 3, op: "create", id: "m3", by: agent("chatgpt", "整理测试", "s-tests"), at: now - 26 * HOUR, before: null },
   { seq: 4, op: "create", id: "m4", by: agent("devin"), at: now - 3 * HOUR, before: null },
-  { seq: 5, op: "create", id: "m5", by: agent("codex", "修复缓存"), at: now - 40 * MIN, before: null },
-  { seq: 6, op: "forget", id: "m2", by: agent("codex", "修复缓存"), at: now - 10 * MIN, before: { ...entries[1]!, status: "active", rev: 1, updated: entries[1]!.created } },
+  { seq: 5, op: "create", id: "m5", by: agent("devin", "修复缓存"), at: now - 40 * MIN, before: null },
+  { seq: 6, op: "forget", id: "m2", by: agent("devin", "修复缓存"), at: now - 10 * MIN, before: { ...entries[1]!, status: "active", rev: 1, updated: entries[1]!.created } },
 ];
 
 // What the application wrote by itself after turns (desktop/core/memory/review): already notes, in use, and waiting for

@@ -1,14 +1,12 @@
-import type { ApiProvider, ChatGPTAccount, CodexAccount, DevinAccount, Engine, FactoryAccount, ModelChoice } from "../types";
+import type { ApiProvider, ChatGPTAccount, DevinAccount, Engine, ModelChoice } from "../types";
 import { engineLabel, engineOfSource } from "../lib/models.ts"; // (with the extension: scripts/unit.mjs runs this file in Node)
 import type { MenuItem } from "./ui";
 
 export interface ModelMenuInput {
   models: ModelChoice[];
   providers: ApiProvider[];
-  codex: CodexAccount;
   devin: DevinAccount;
   chatgpt: ChatGPTAccount;
-  factory: FactoryAccount;
   current: string;
   /** model ids the user chose to leave out (settings → 账号与模型). The model in use (`current`) is offered anyway. */
   hidden?: string[];
@@ -27,8 +25,8 @@ export interface ModelMenuInput {
 
 const host = (url: string) => url.replace(/^https?:\/\//, "").replace(/\/.*$/, "");
 
-/** Droid's own models of one maker under a small heading each, in the order Droid lists them. No headings when no
- *  model says who made it (the design mock). */
+/** The models of one maker under a small heading each, in the order the engine lists them. No headings when no model
+ *  says who made it. */
 function byGroup(models: ModelChoice[]): [string | null, ModelChoice[]][] {
   if (!models.some((m) => m.group)) return [[null, models]];
   const groups = new Map<string, ModelChoice[]>();
@@ -39,15 +37,8 @@ function byGroup(models: ModelChoice[]): [string | null, ModelChoice[]][] {
   return [...groups];
 }
 
-/** The second line of the FACTORY heading: the mock's plan; in the live app nothing, or that droid is missing. */
-function factoryNote(f: FactoryAccount): string | undefined {
-  if (f.plan) return f.plan;
-  if (f.signedIn) return undefined;
-  return f.droidPath === undefined ? "未登录" : "没有找到 droid";
-}
-
-/** The model menu: Factory's models, then Codex's and Devin's (or the way to sign in), then each API provider's, then the way to add one.
- *  Models Droid lists as disabled are left out, and so are the ones the user hid (unless one is the model in use). */
+/** The model menu: ChatGPT Plan's models and Devin's (or the way to sign in), then each API provider's, then the way to add one.
+ *  Models an engine lists as disabled are left out, and so are the ones the user hid (unless one is the model in use). */
 export function buildModelMenu(i: ModelMenuInput): MenuItem[] {
   const items: MenuItem[] = [];
   const hidden = new Set(i.hidden ?? []);
@@ -76,30 +67,6 @@ export function buildModelMenu(i: ModelMenuInput): MenuItem[] {
     onSelect: () => i.onPick(m.id),
   });
 
-  items.push({ id: "h-factory", heading: true, label: "FACTORY", description: factoryNote(i.factory) });
-  for (const [group, list] of byGroup(usable.filter((m) => m.source === "factory"))) {
-    if (group) items.push({ id: `g-factory-${group}`, heading: true, sub: true, label: group });
-    items.push(...list.map(modelItem));
-  }
-  if (allHidden("factory")) items.push(noneShown("factory"));
-
-  if (i.codex.enabled) {
-    const checking = i.codex.auth === "checking";
-    const ready = i.codex.auth === "chatgpt" || i.codex.auth === "api-key";
-    const note = checking ? "正在检测…" : ready ? (i.codex.auth === "chatgpt" ? i.codex.plan : "API Key") : "未登录";
-    items.push({ id: "h-codex", heading: true, label: "CODEX 订阅", description: note });
-    if (ready) {
-      items.push(...usable.filter((m) => m.source === "codex").map(modelItem));
-      if (allHidden("codex")) items.push(noneShown("codex"));
-    } else if (!checking)
-      items.push({
-        id: "codex-login",
-        label: i.codex.cli === "missing" ? "没有找到 codex 命令行…" : "登录 Codex…",
-        description: i.codex.cli === "missing" ? "先安装 Codex CLI，再用 ChatGPT 账号登录" : "用 ChatGPT 订阅，不需要 API Key",
-        onSelect: () => i.onManage(null),
-      });
-  }
-
   if (i.chatgpt.available && i.chatgpt.enabled) {
     const ready = i.chatgpt.auth === "signed-in" && i.chatgpt.planEnabled;
     const waiting = i.chatgpt.auth === "signing-in";
@@ -125,7 +92,7 @@ export function buildModelMenu(i: ModelMenuInput): MenuItem[] {
     const note = checking ? "正在检测…" : ready ? i.devin.plan : "未登录";
     items.push({ id: "h-devin", heading: true, label: "DEVIN", description: note });
     if (ready) {
-      // a model menu of fifty needs the makers as small headings, like Factory's
+      // a model menu of fifty needs the makers as small headings, like a long model list does
       for (const [group, list] of byGroup(usable.filter((m) => m.source === "devin"))) {
         if (group) items.push({ id: `g-devin-${group}`, heading: true, sub: true, label: group });
         items.push(...list.map(modelItem));
@@ -150,7 +117,7 @@ export function buildModelMenu(i: ModelMenuInput): MenuItem[] {
     items.push(...own.map(modelItem));
     if (allHidden(source)) items.push(noneShown(source));
   }
-  // Droid custom models that none of the providers owns (added with the CLI): Python names their source "api:other".
+  // Model entries that none of the providers owns (added by hand to the models file): Python names their source "api:other".
   const orphans = new Map<string, ModelChoice[]>();
   for (const m of available) if (m.source.startsWith("api:") && !listed.has(m.source) && !orphans.has(m.source)) orphans.set(m.source, []);
   for (const m of usable) if (orphans.has(m.source)) orphans.get(m.source)!.push(m);

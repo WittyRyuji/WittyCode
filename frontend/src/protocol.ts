@@ -9,12 +9,10 @@ import type {
   ApiProvider,
   AttachmentView,
   ChatGPTAccount,
-  CodexAccount,
   ContextState,
   DevinAccount,
   Engine,
   EnvState,
-  FactoryAccount,
   FileView,
   FontScale,
   MemoryChange,
@@ -45,13 +43,9 @@ import type {
 } from "./types";
 import type { TestResult } from "./bridge";
 
-/** AppCore.settings_view(). `droidPath` / `codexPath` / `devinPath` are what the user set ("" = find it); `droidFound` is the
- *  droid.exe in use. */
+/** AppCore.settings_view(). `devinPath` is what the user set ("" = find it). */
 export interface SettingsView {
   maxOpen: number;
-  droidPath: string;
-  droidFound: string;
-  codexPath: string;
   devinPath: string;
   /** page model ids the user left out of the conversation's model menu */
   hiddenModels: string[];
@@ -79,7 +73,7 @@ export interface SettingsView {
   lastProject?: string;
 }
 export type FollowUp = "queue" | "steer";
-export type SettingKey = "theme" | "fontScale" | "followUp" | "maxOpen" | "sidebarWidth" | "droidPath" | "codexPath" | "devinPath" | "memoryEnabled" | "memoryRecall" | "memoryCapture" | "memoryCurate" | "memoryEngines" | "compactAuto" | "compactAt" | "thinkChinese";
+export type SettingKey = "theme" | "fontScale" | "followUp" | "maxOpen" | "sidebarWidth" | "devinPath" | "memoryEnabled" | "memoryRecall" | "memoryCapture" | "memoryCurate" | "memoryEngines" | "compactAuto" | "compactAt" | "thinkChinese";
 export type SettingValue = string | number | boolean | string[];
 
 /** What `memory.list` can be narrowed by (all optional). `query`: words to look for; `status` "all" lists forgotten notes too. */
@@ -114,7 +108,7 @@ export interface MemoryEdit {
   project?: string;
 }
 
-/** AppCore._saved_json(): a saved session listed in the sidebar, not open. Codex threads have ids "cx:<thread id>", Devin
+/** AppCore._saved_json(): a saved session listed in the sidebar, not open. Own-loop conversations have ids "cg:<id>", Devin
  *  sessions "dv:<session id>". */
 export interface SavedRow {
   id: string;
@@ -154,9 +148,9 @@ export interface ConversationMeta {
 }
 
 /** What `app.init` answers, from the application's own cache (`core/cache.py`): the saved sessions, the model list and the
- *  Codex account as they were last seen, so the window is full before anything is connected. The real ones follow as
+ *  Devin account as they were last seen, so the window is full before anything is connected. The real ones follow as
  *  `sidebar`, `models` and `accounts` events a moment later and replace them. With no cache yet (the very first start)
- *  `sessions` is empty, `models` may be, and Codex is auth "checking". */
+ *  `sessions` is empty, `models` may be, and Devin is auth "checking". */
 export interface InitResult {
   version: number;
   /** the shared memory's state; null where the application has none */
@@ -170,8 +164,6 @@ export interface InitResult {
   models: ModelChoice[];
   defaults: SessionSettings;
   settings: SettingsView;
-  factory: FactoryAccount;
-  codex: CodexAccount;
   devin: DevinAccount;
   /** read from the credential files, no network: ready at once */
   chatgpt: ChatGPTAccount;
@@ -303,7 +295,7 @@ export interface Calls {
   /** the whole picture as a data: URI, for the big view; null when Python no longer has it */
   "attachments.full": { params: { id?: string; attachmentId: string }; result: { url: string | null } };
   "settings.set": { params: { key: SettingKey; value: SettingValue }; result: SettingsView };
-  /** the shared memory (desktop/core/memory): notes that Droid, Codex and Devin read and write, and the user too.
+  /** the shared memory (desktop/core/memory): notes that the own loop and Devin read and write, and the user too.
    *  Nothing is ever deleted: forgetting marks a note, every change is in a journal and `memory.undo` takes one back. */
   "memory.list": { params: MemoryFilter; result: { entries: MemoryEntry[]; counts: Record<string, number> } & MemoryState };
   /** the newest changes made by agents (newest first); `since`: only those after this change number */
@@ -333,13 +325,6 @@ export interface Calls {
   /** show (`visible`) or hide models in the conversation's model menu; the answer is the settings with the new list.
    *  The default model follows as a `defaults` event when hiding it changes what new sessions start with. */
   "models.setVisible": { params: { ids: string[]; visible: boolean }; result: SettingsView };
-  "factory.account": { params: None; result: FactoryAccount };
-  "codex.account": { params: None; result: CodexAccount };
-  /** opens the browser; answers once the user has signed in or cancelled */
-  "codex.login": { params: None; result: CodexAccount };
-  "codex.cancelLogin": { params: None; result: CodexAccount };
-  "codex.logout": { params: None; result: CodexAccount };
-  "codex.setEnabled": { params: { on: boolean }; result: CodexAccount };
   "devin.account": { params: None; result: DevinAccount };
   /** runs `devin auth login` (it opens the browser); answers once the user has signed in or cancelled */
   "devin.login": { params: None; result: DevinAccount };
@@ -398,7 +383,7 @@ export interface Events {
   settings: { settings: SettingsView };
   /** the shared memory was written to (by an agent, or elsewhere) or looked at */
   memory: MemoryState;
-  accounts: { factory?: FactoryAccount; codex?: CodexAccount; devin?: DevinAccount; chatgpt?: ChatGPTAccount };
+  accounts: { devin?: DevinAccount; chatgpt?: ChatGPTAccount };
   /** the window was maximized or restored (also from outside: double click, Win+Up) */
   window: { maximized: boolean };
   /** the user closed the window from outside (Alt+F4, the taskbar): ask if needed, then call window.close */

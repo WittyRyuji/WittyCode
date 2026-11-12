@@ -12,7 +12,7 @@ from desktop.core.chatgpt.accounts import AccountRecord, AccountStore
 from desktop.core.chatgpt.engine import ChatGPTEngine
 from desktop.core.chatgpt.http import HttpClient
 from desktop.core.chatgpt.oauth import PLAN_SCOPE, Endpoints
-from desktop.core.session_manager import SessionState
+from desktop.core.session_state import SessionState
 from desktop.core.settings import AppSettings
 from tests.fake_responses import FakeResponses
 

@@ -45,7 +45,7 @@
 .chip-k { color: var(--muted); }
 .chip-v { font-weight: 700; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .chip-c { color: var(--muted); margin-left: -1px; }
-/* where a model is billed, when that is not Factory */
+/* where a model is billed */
 .src-tag { padding: 0 4px; border: 1px solid var(--line-strong); font-size: 10.5px; font-weight: 600; color: var(--muted); line-height: 15px; }
 /* "Using ChatGPT plan" at the right end of the line under the box of a ChatGPT Plan conversation (OpenAI's UI guideline), with the
    way to its usage page. Not among the controls: there it pushed the send button onto a line of its own. */

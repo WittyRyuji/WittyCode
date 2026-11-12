@@ -3,7 +3,6 @@ transcript keeps for it)."""
 
 from __future__ import annotations
 
-from datetime import timedelta
 from types import SimpleNamespace
 
 from desktop.core.prompts import OptionView
@@ -11,7 +10,6 @@ from desktop.core.speed import MIN_SECONDS, MIN_TOKENS, speed_of, speed_of_turn
 from desktop.core.toolinfo import Category
 from desktop.core.transcript import PromptStatus, ToolStatus, Transcript, TurnStatus
 from desktop.core.usage import Tokens, own_output
-from droid_sdk import RunFailure, RunInterrupted, RunSuccess, Usage
 
 ALLOW = OptionView("proceed_once", "允许", "accept", "primary")
 
@@ -202,18 +200,6 @@ def test_a_total_that_did_not_grow_or_a_probe_that_fails_is_no_figure():
     turn = transcript.start_turn("write")
     transcript.finish_turn(turn, TurnStatus.DONE)
     assert turn.output_tokens is None
-
-
-def test_a_droid_run_result_brings_its_usage_and_its_duration():
-    transcript, clock = make()
-    turn = transcript.start_turn("write")
-    clock.advance(1)
-    transcript.append_text(turn, "m", 0, "answer")
-    clock.advance(4)
-    used = Usage(input_tokens=4, output_tokens=380, cache_creation_tokens=0, cache_read_tokens=0, thinking_tokens=244)
-    transcript.apply(RunSuccess(text="answer", messages=(), usage=used, duration=timedelta(seconds=8), turn_count=1, session_id="s"))
-    assert (turn.output_tokens, turn.duration, turn.model_seconds) == (380, 8.0, 8.0)
-    assert speed_of_turn(turn).tps == 47.5
 
 
 # ------------------------------------------------------------------------------------------------------ which turns tell

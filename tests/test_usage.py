@@ -5,9 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-from droid_sdk import TokenUsageUpdate
 
-from desktop.core.codex.controller import CodexUsage
 from desktop.core.usage import Tokens, UsageLedger
 
 
@@ -16,13 +14,13 @@ def tokens(i=0, o=0, w=0, r=0) -> Tokens:
 
 
 def test_tokens_read_what_each_engine_reports():
-    droid = TokenUsageUpdate(input_tokens=5, output_tokens=6, cache_creation_tokens=7, cache_read_tokens=8, thinking_tokens=1, factory_credits=2.0)
-    assert Tokens.of(droid) == Tokens(5, 6, 7, 8)
-    codex = CodexUsage(input_tokens=1, output_tokens=2, cache_creation_tokens=None, cache_read_tokens=3, thinking_tokens=0, total_tokens=6)
-    assert Tokens.of(codex) == Tokens(1, 2, None, 3), "Codex has no cache writes: None, not 0"
-    assert Tokens.of({"inputTokens": 1, "outputTokens": 2, "cacheCreationTokens": 3, "cacheReadTokens": 4}) == Tokens(1, 2, 3, 4), "a droid notification"
+    attributes = SimpleNamespace(input_tokens=5, output_tokens=6, cache_creation_tokens=7, cache_read_tokens=8, thinking_tokens=1)
+    assert Tokens.of(attributes) == Tokens(5, 6, 7, 8)
+    no_writes = SimpleNamespace(input_tokens=1, output_tokens=2, cache_creation_tokens=None, cache_read_tokens=3)
+    assert Tokens.of(no_writes) == Tokens(1, 2, None, 3), "an engine without cache writes: None, not 0"
+    assert Tokens.of({"inputTokens": 1, "outputTokens": 2, "cacheCreationTokens": 3, "cacheReadTokens": 4}) == Tokens(1, 2, 3, 4), "a notification"
     assert Tokens.of({"input": 1, "output": 2, "cacheWrite": None, "cacheRead": 4}) == Tokens(1, 2, None, 4), "the page / cache JSON"
-    assert Tokens.of(SimpleNamespace(input_tokens=9, output_tokens=1, cache_creation_tokens=0, cache_read_tokens=2)) == Tokens(9, 1, 0, 2), "the SDK's TokenUsage"
+    assert Tokens.of(SimpleNamespace(input_tokens=9, output_tokens=1, cache_creation_tokens=0, cache_read_tokens=2)) == Tokens(9, 1, 0, 2)
     for nothing in (None, {}, {"inputTokens": "many"}, {"inputTokens": -3}, SimpleNamespace(), True):
         assert Tokens.of(nothing) is None, nothing
 
@@ -68,7 +66,7 @@ def test_a_session_that_goes_on_after_a_restart_adds_only_the_part_after_the_cac
 
 
 def test_use_elsewhere_since_the_cache_is_added_too():
-    """The cached copy is old: the session was used in Droid's own app meanwhile (the engine's total includes that)."""
+    """The cached copy is old: the session was used in the engine's own app meanwhile (the engine's total includes that)."""
     ledger = UsageLedger(tokens(100, 10), {"self": tokens(100, 10)})
     ledger.feed({"self": tokens(900, 90)})
     assert ledger.total == tokens(900, 90)
@@ -82,9 +80,9 @@ def test_a_session_nobody_cached_starts_from_what_the_engine_says():
 
 def test_an_engine_change_keeps_the_total_and_counts_the_new_session_from_its_own_zero():
     ledger = UsageLedger()
-    ledger.feed({"self": tokens(1000, 100, 0, 5000)})  # Droid
+    ledger.feed({"self": tokens(1000, 100, 0, 5000)})  # the own loop
     ledger.restart()
-    ledger.feed({"self": Tokens(300, 30, None, 200)})  # Codex, a new thread
+    ledger.feed({"self": Tokens(300, 30, None, 200)})  # Devin, a new session
     assert ledger.total == Tokens(1300, 130, 0, 5200)
     ledger.feed({"self": Tokens(400, 50, None, 900)})
     assert ledger.total == Tokens(1400, 150, 0, 5900)

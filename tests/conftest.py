@@ -26,6 +26,13 @@ def _no_skills_of_the_real_user(tmp_path_factory, monkeypatch):
     monkeypatch.setattr(skills, "USER_HOME", tmp_path_factory.mktemp("no-home"))
 
 
+@pytest.fixture(autouse=True)
+def _no_files_of_the_real_user(tmp_path_factory, monkeypatch):
+    """WittyCode's own folder (the settings, the API providers' models file) is the test's, never the user's: whatever a
+    test builds with the default locations reads and writes a folder of its own."""
+    monkeypatch.setenv("WITTYCODE_SETTINGS", str(tmp_path_factory.mktemp("app") / "settings.json"))
+
+
 @pytest.fixture(scope="session")
 def qapp():
     pytest.importorskip("PySide6.QtWebEngineWidgets")

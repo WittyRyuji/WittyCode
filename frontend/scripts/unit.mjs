@@ -34,7 +34,7 @@ const Q = "D:\\Work\\other";
 const NOW = Date.now();
 
 /** AppCore._saved_json */
-const saved = (id, projectId, title, minutesAgo, engine = "droid") => ({
+const saved = (id, projectId, title, minutesAgo, engine = "chatgpt") => ({
   id,
   projectId,
   title,
@@ -56,9 +56,9 @@ const meta = (id, extra = {}) => ({
   workingLabel: "正在连接…",
   modified: "刚刚",
   modifiedAt: NOW,
-  engine: "droid",
+  engine: "chatgpt",
   nativeId: "",
-  settings: { model: "claude-haiku-5-5", reasoning: "low", autonomy: "off", mode: "auto" },
+  settings: { model: "chatgpt:gpt-6.1-sol", reasoning: "low", autonomy: "code", mode: "auto" },
   usage: null,
   context: { used: null, window: 0, model: "", compacted: false },
   handoff: null,
@@ -70,11 +70,11 @@ const userTurn = (id, text, status = "running") => ({ id, status, blocks: [{ kin
 const textTurn = (id, markdown, status = "done") => ({ id, status, blocks: [{ kind: "text", id: `${id}-x`, markdown, streaming: status === "running" }], prompts: [] });
 
 const MODELS = [
-  { id: "claude-haiku-5-5", label: "Haiku 5.5", source: "factory", efforts: ["low", "high"], defaultEffort: "low", window: 0, group: "Anthropic" },
-  { id: "codex:gpt-5.3-codex", label: "GPT-5.3 Codex", source: "codex", efforts: ["low", "medium", "high"], defaultEffort: "medium", window: 400000 },
+  { id: "chatgpt:gpt-6.1-sol", label: "GPT-6.1-Sol", source: "chatgpt", efforts: ["low", "high"], defaultEffort: "low", window: 0, group: "Anthropic" },
+  { id: "devin:swe-2-high", label: "SWE-2", source: "devin", efforts: ["low", "medium", "high"], defaultEffort: "medium", window: 400000 },
 ];
-const DEFAULTS = { model: "claude-haiku-5-5", reasoning: "low", autonomy: "off", mode: "auto" };
-const SETTINGS = { maxOpen: 4, droidPath: "", droidFound: "C:\\droid\\droid.exe", codexPath: "", devinPath: "", hiddenModels: [], theme: "dark", fontScale: "lg", followUp: "queue", sidebarWidth: 300 };
+const DEFAULTS = { model: "chatgpt:gpt-6.1-sol", reasoning: "low", autonomy: "off", mode: "auto" };
+const SETTINGS = { maxOpen: 4, devinPath: "", hiddenModels: [], theme: "dark", fontScale: "lg", followUp: "queue", sidebarWidth: 300 };
 
 /** AppCore._m_app_init */
 const INIT = {
@@ -85,8 +85,6 @@ const INIT = {
   models: [],
   defaults: { model: "", reasoning: "", autonomy: "off", mode: "auto" },
   settings: SETTINGS,
-  factory: { signedIn: true, droidPath: "C:\\droid\\droid.exe", version: "0.251.0" },
-  codex: { cli: "found", auth: "checking", limits: [], enabled: true },
   devin: { cli: "found", auth: "checking", enabled: true },
   providers: [],
   maximized: false,
@@ -117,9 +115,8 @@ test("before app.init the page holds nothing at all", () => {
   const s = emptyLiveData();
   assert.deepEqual([s.projects, s.sessions, s.tabs, s.models, s.providers], [[], {}, [], [], []]);
   assert.equal(s.currentId, null);
-  assert.equal(s.factory.signedIn, false);
-  assert.equal(s.codex.auth, "checking");
-  assert.equal(s.codex.enabled, false, "no Codex section in the model menu before Python has said anything");
+  assert.equal(s.devin.auth, "checking");
+  assert.equal("factory" in s || "codex" in s, false, "no other program's account");
 });
 
 test("app.init: projects, settings, accounts and defaults come from the snapshot", () => {
@@ -130,9 +127,7 @@ test("app.init: projects, settings, accounts and defaults come from the snapshot
   assert.equal(s.themeChoice, "dark");
   assert.equal(s.fontScale, "lg");
   assert.equal(s.sidebarWidth, 300);
-  assert.equal(s.droidFound, "C:\\droid\\droid.exe");
-  assert.equal(s.factory.version, "0.251.0");
-  assert.equal(s.codex.auth, "checking");
+  assert.equal(s.devin.auth, "checking");
   assert.equal(s.defaults.model, "");
   assert.equal(s.maximized, false);
 });
@@ -199,9 +194,9 @@ test("sidebar: the saved rows are replaced, the open conversations stay", () => 
   assert.equal(state.sessions["s-1"].mark, undefined, "a saved row is not open");
   assert.equal(state.sessions["s-1"].modifiedAt, NOW - 5 * 60_000);
   assert.deepEqual(state.sessions["s-1"].turns, []);
-  ({ state } = play(state, ["sidebar", { projects: [project(P, ["c1", "s-2"]), project(Q, ["cx:t1"])], sessions: { "s-2": saved("s-2", P, "Second", 90), "cx:t1": saved("cx:t1", Q, "Codex thread", 3, "codex") } }]));
+  ({ state } = play(state, ["sidebar", { projects: [project(P, ["c1", "s-2"]), project(Q, ["dv:t1"])], sessions: { "s-2": saved("s-2", P, "Second", 90), "dv:t1": saved("dv:t1", Q, "Devin session", 3, "devin") } }]));
   assert.equal(state.sessions["s-1"], undefined, "a row Python no longer lists is gone");
-  assert.equal(state.sessions["cx:t1"].engine, "codex");
+  assert.equal(state.sessions["dv:t1"].engine, "devin");
   assert.equal(state.sessions.c1.draft, "half a sentence", "the open conversation is untouched");
   assert.deepEqual(state.projects.map((p) => p.id), [P, Q]);
 });
@@ -244,15 +239,15 @@ test("session: a patch changes only its keys", () => {
 
 test("session: settings, usage and context are replaced as a whole; handoff null means none", () => {
   let s = withConversation();
-  s = play(s, ["session", { id: "c1", patch: { id: "c1", engine: "codex", settings: { model: "codex:gpt-5.3-codex", reasoning: "medium", autonomy: "readonly", mode: "auto" }, handoff: { carried: 2, truncated: false, to: "GPT-5.3 Codex" } } }]).state;
-  assert.equal(s.sessions.c1.engine, "codex");
-  assert.equal(s.sessions.c1.settings.autonomy, "readonly");
-  assert.deepEqual(s.sessions.c1.handoff, { carried: 2, truncated: false, to: "GPT-5.3 Codex" });
-  s = play(s, ["session", { id: "c1", patch: { id: "c1", handoff: null, usage: { input: 10, output: 20, cacheWrite: null, cacheRead: 5 }, context: { used: 12000, window: 0, model: "gpt-5.3-codex", compacted: false } } }]).state;
+  s = play(s, ["session", { id: "c1", patch: { id: "c1", engine: "devin", settings: { model: "devin:swe-2-high", reasoning: "medium", autonomy: "smart", mode: "auto" }, handoff: { carried: 2, truncated: false, to: "SWE-2" } } }]).state;
+  assert.equal(s.sessions.c1.engine, "devin");
+  assert.equal(s.sessions.c1.settings.autonomy, "smart");
+  assert.deepEqual(s.sessions.c1.handoff, { carried: 2, truncated: false, to: "SWE-2" });
+  s = play(s, ["session", { id: "c1", patch: { id: "c1", handoff: null, usage: { input: 10, output: 20, cacheWrite: null, cacheRead: 5 }, context: { used: 12000, window: 0, model: "swe-2-high", compacted: false } } }]).state;
   assert.equal(s.sessions.c1.handoff, undefined);
   assert.deepEqual(s.sessions.c1.usage, { input: 10, output: 20, cacheWrite: null, cacheRead: 5 });
   assert.equal(s.sessions.c1.context.window, 0);
-  assert.equal(s.sessions.c1.engine, "codex", "keys that were not in the patch stay");
+  assert.equal(s.sessions.c1.engine, "devin", "keys that were not in the patch stay");
 });
 
 const agent = (id, status = "working", extra = {}) => ({ id, name: "Dirac", role: "coder", model: "GPT-6.1-Sol", effort: "max", task: "Write sub.txt", status, startedAt: NOW, finishedAt: null, ...extra });
@@ -337,7 +332,7 @@ test("file panel: it goes with its conversation's tab and stays when another tab
 
 test("session: the attachments that go along at an engine change are counted in the hand-over", () => {
   let s = withConversation();
-  const handoff = { carried: 2, truncated: false, attachments: 3, to: "GPT-5.3 Codex" };
+  const handoff = { carried: 2, truncated: false, attachments: 3, to: "SWE-2" };
   s = play(s, ["session", { id: "c1", patch: { id: "c1", handoff } }]).state;
   assert.deepEqual(s.sessions.c1.handoff, handoff);
 });
@@ -400,7 +395,7 @@ test("carry: what the message box already holds takes its share, and the sentenc
   assert.equal(carryOverage({ ...three, drafts: undefined }, ["a", "b", "c"]).over, "", "a page talking to an older Python: the box counts as empty");
 });
 
-test("providers: pictures are on by default for every API format but the generic one (Droid's own default)", () => {
+test("providers: pictures are on by default for every API format but the generic one (the usual default)", () => {
   assert.equal(imagesByDefault("anthropic"), true);
   assert.equal(imagesByDefault("openai"), true);
   assert.equal(imagesByDefault("bedrock-converse"), true);
@@ -497,13 +492,14 @@ test("models brings the list and the defaults; defaults only the defaults", () =
 
 test("accounts changes only the accounts it names", () => {
   const s = started();
-  const signedIn = { cli: "found", auth: "chatgpt", email: "a@b.c", plan: "Plus", limits: [], enabled: true };
-  let { state } = play(s, ["accounts", { codex: signedIn }]);
-  assert.deepEqual(state.codex, signedIn);
-  assert.deepEqual(state.factory, s.factory);
-  ({ state } = play(state, ["accounts", { factory: { signedIn: false, droidPath: "", version: "" } }]));
-  assert.equal(state.factory.signedIn, false);
-  assert.deepEqual(state.codex, signedIn);
+  const signedIn = { cli: "found", auth: "signed-in", email: "demo@example.com", enabled: true };
+  let { state } = play(s, ["accounts", { devin: signedIn }]);
+  assert.deepEqual(state.devin, signedIn);
+  assert.deepEqual(state.chatgpt, s.chatgpt);
+  const chatgpt = { ...s.chatgpt, auth: "signed-in", email: "demo@example.com" };
+  ({ state } = play(state, ["accounts", { chatgpt }]));
+  assert.deepEqual(state.chatgpt, chatgpt);
+  assert.deepEqual(state.devin, signedIn);
 });
 
 test("the Devin account: checking before Python has said anything, then what init and later events bring", () => {
@@ -514,8 +510,8 @@ test("the Devin account: checking before Python has said anything, then what ini
   const signedIn = { cli: "found", auth: "signed-in", email: "a@b.c", plan: "Devin Pro", enabled: true };
   let { state } = play(s, ["accounts", { devin: signedIn }]);
   assert.deepEqual(state.devin, signedIn);
-  assert.deepEqual(state.codex, s.codex, "the other accounts are left as they were");
-  ({ state } = play(state, ["accounts", { codex: { cli: "missing", auth: "signed-out", limits: [], enabled: true } }]));
+  assert.deepEqual(state.chatgpt, s.chatgpt, "the other accounts are left as they were");
+  ({ state } = play(state, ["accounts", { chatgpt: { ...s.chatgpt, auth: "signed-out" } }]));
   assert.deepEqual(state.devin, signedIn);
   // an older Python that does not know Devin: nothing to show
   const { devin, ...older } = INIT;
@@ -562,10 +558,10 @@ test("a ChatGPT Plan model, session and permission scale are told apart from the
 
 test("the model menu: a ChatGPT Plan section with its models, or the way to sign in", () => {
   const models = [
-    { id: "claude-haiku-5-5", label: "Haiku 5.5", source: "factory", efforts: [], defaultEffort: "", window: 0 },
+    { id: "api:p1:qwen", label: "Qwen", source: "api:p1", efforts: [], defaultEffort: "", window: 0 },
     { id: "chatgpt:gpt-6.1-sol", label: "GPT-6.1-Sol", source: "chatgpt", efforts: ["low"], defaultEffort: "low", window: 0 },
   ];
-  const input = { models, providers: [], codex: { cli: "found", auth: "signed-out", limits: [], enabled: false }, devin: { cli: "found", auth: "signed-out", enabled: false }, factory: { signedIn: true }, current: "claude-haiku-5-5", onPick() {}, onManage() {} };
+  const input = { models, providers: [], devin: { cli: "found", auth: "signed-out", enabled: false }, current: "api:p1:qwen", onPick() {}, onManage() {} };
   const ids = (menu) => menu.map((i) => i.id);
   const ready = buildModelMenu({ ...input, chatgpt: PLAN });
   assert.ok(ids(ready).includes("h-chatgpt") && ids(ready).includes("chatgpt:gpt-6.1-sol"));
@@ -607,7 +603,7 @@ test("a call that waits for the user has no timeout; any other call gives up aft
     );
     return box;
   };
-  const kinds = ["codex.login", "devin.login", "project.add", "attachments.pick", "factory.account", "devin.account"];
+  const kinds = ["chatgpt.login", "devin.login", "project.add", "attachments.pick", "providers.list", "devin.account"];
   const boxes = kinds.map((method) => outcome(transport.call(method)));
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(calls, kinds, "all of them were sent");
@@ -615,7 +611,7 @@ test("a call that waits for the user has no timeout; any other call gives up aft
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(
     boxes.map((b) => b.state),
-    ["waiting", "waiting", "waiting", "waiting", "WittyCode 后台 120 秒没有回应（factory.account）。", "WittyCode 后台 120 秒没有回应（devin.account）。"],
+    ["waiting", "waiting", "waiting", "waiting", "WittyCode 后台 120 秒没有回应（providers.list）。", "WittyCode 后台 120 秒没有回应（devin.account）。"],
     "the sign-ins and the file dialogs wait for as long as the user takes",
   );
 });
@@ -627,55 +623,47 @@ test("Devin's program path is a setting like the others", () => {
   assert.equal(applyInit(emptyLiveData(), { ...INIT, settings: { ...SETTINGS, devinPath: undefined } }).devinPath, "", "a Python without the key");
 });
 
-test("a Devin model, session and permission scale are told apart from Codex's", () => {
-  assert.deepEqual(["factory", "codex", "devin", "api:x", "chatgpt"].map(engineOfSource), ["droid", "codex", "devin", "chatgpt", "chatgpt"], "an API provider's models run in the own loop");
-  assert.deepEqual(["factory", "codex", "devin", "chatgpt", "api:x", "api:p1"].map(engineLabel), ["Droid", "Codex", "Devin", "ChatGPT Plan", "API", "API"], "to the user they are API, never Droid or the plan");
+test("a Devin model, session and permission scale are told apart from the own loop's", () => {
+  assert.deepEqual(["devin", "api:x", "chatgpt"].map(engineOfSource), ["devin", "chatgpt", "chatgpt"], "an API provider's models run in the own loop");
+  assert.deepEqual(["devin", "chatgpt", "api:x", "api:p1"].map(engineLabel), ["Devin", "ChatGPT Plan", "API", "API"], "to the user they are API, never the plan");
   assert.equal(sourceLabel("devin", []), "Devin");
-  assert.equal(sourceLabel("codex", []), "Codex");
+  assert.equal(sourceLabel("chatgpt", []), "ChatGPT Plan");
   assert.equal(sourceTag("devin"), "订阅");
   assert.equal(sourceTag("api:x"), "API");
   assert.deepEqual(permissionsFor("devin").map((l) => l.value), ["ask", "plan", "code", "smart", "full"], "the order of Devin's modes, least to most");
-  assert.deepEqual(["droid", "codex", "devin", "chatgpt"].map(startingLevel), ["off", "readonly", "code", "code"], "Devin and ChatGPT Plan start at Code, not at the head of the list");
+  assert.deepEqual(["devin", "chatgpt"].map(startingLevel), ["code", "code"], "Devin and ChatGPT Plan start at Code, not at the head of the list");
   assert.ok(permissionsFor("devin").every((l) => l.label && l.hint));
 });
 
-test("planUsage: the plan's use is known only from a Codex login of the same ChatGPT account", () => {
-  const chatgpt = { ...NO_CHATGPT, auth: "signed-in", email: "Dev@Example.com", planEnabled: true, available: true };
-  const limits = [{ label: "5 小时", short: "5h", usedPercent: 17, resetsIn: "x" }, { label: "每周", short: "1w", usedPercent: 41, resetsIn: "y" }];
-  const codex = { cli: "found", auth: "chatgpt", email: "dev@example.com", plan: "Pro", limits, enabled: true };
-  assert.deepEqual(planUsage(chatgpt, codex), { known: true, percent: 41, plan: "Pro", windows: limits }, "the highest window, the e-mail compared without case");
-  assert.deepEqual(planUsage(chatgpt, { ...codex, limits: [limits[1]] }), { known: true, percent: 41, plan: "Pro", windows: [limits[1]] }, "a plan with only the weekly window");
-  const why = (c) => planUsage(chatgpt, c).known === false && planUsage(chatgpt, c).why;
-  assert.equal(why({ ...codex, cli: "missing" }), "没有安装 Codex。");
-  assert.equal(why({ ...codex, auth: "checking" }), "正在检查 Codex 的登录…");
-  assert.equal(why({ ...codex, auth: "signed-out" }), "Codex 没有用 ChatGPT 账号登录。");
-  assert.equal(why({ ...codex, auth: "api-key" }), "Codex 没有用 ChatGPT 账号登录。");
-  assert.equal(why({ ...codex, email: "other@example.com" }), "Codex 登录的是另一个账号（other@example.com）。", "another account's figures are not this one's");
-  assert.equal(why({ ...codex, limits: [] }), "Codex 没有返回额度。");
-  assert.equal(planUsage({ ...chatgpt, email: "" }, codex).known, true, "an e-mail that is not known cannot disagree");
+test("planUsage: the plan's use is not known (OpenAI gives no figures to this sign-in), and the reason is said", () => {
+  const chatgpt = { ...NO_CHATGPT, auth: "signed-in", email: "demo@example.com", planEnabled: true, available: true };
+  const usage = planUsage(chatgpt);
+  assert.equal(usage.known, false);
+  assert.match(usage.why, /用量页面/);
+  assert.match(planUsage({ ...chatgpt, auth: "signed-out" }).why, /还没有用 ChatGPT 套餐登录/);
   assert.deepEqual([0, 79, 80, 94, 95, 100].map(usageLevel), ["", "", "warn", "warn", "crit", "crit"]);
 });
 test("reasoning levels are written with a capital, also the ones the menu has no word for", () => {
-  assert.equal(effortLabel("ultra"), "Ultra", "Codex offers ultra");
+  assert.equal(effortLabel("ultra"), "Ultra", "an engine may offer ultra");
   assert.deepEqual(["low", "medium", "high", "xhigh", "max"].map(effortLabel), ["Low", "Medium", "High", "XHigh", "Max"]);
   assert.equal(effortLabel("turbo"), "Turbo", "a level nobody knew yet still reads like the others");
   assert.equal(effortLabel(""), "");
-  const choices = reasoningChoices({ id: "codex:x", label: "X", source: "codex", efforts: ["low", "xhigh", "ultra", "turbo"], defaultEffort: "low", window: 1 });
+  const choices = reasoningChoices({ id: "devin:x", label: "X", source: "devin", efforts: ["low", "xhigh", "ultra", "turbo"], defaultEffort: "low", window: 1 });
   assert.deepEqual(choices.map((c) => [c.value, c.label]), [["low", "Low"], ["xhigh", "XHigh"], ["ultra", "Ultra"], ["turbo", "Turbo"]]);
 });
 test("settings: every field of the settings view", () => {
-  const { state } = play(started(), ["settings", { settings: { ...SETTINGS, theme: "light", fontScale: "sm", maxOpen: 6, sidebarWidth: 240, droidPath: "C:\\x\\droid.exe", codexPath: "C:\\y\\codex.cmd" } }]);
+  const { state } = play(started(), ["settings", { settings: { ...SETTINGS, theme: "light", fontScale: "sm", maxOpen: 6, sidebarWidth: 240, devinPath: "C:\\x\\devin.exe" } }]);
   assert.deepEqual(
-    [state.themeChoice, state.fontScale, state.maxOpen, state.sidebarWidth, state.droidPath, state.codexPath],
-    ["light", "sm", 6, 240, "C:\\x\\droid.exe", "C:\\y\\codex.cmd"],
+    [state.themeChoice, state.fontScale, state.maxOpen, state.sidebarWidth, state.devinPath],
+    ["light", "sm", 6, 240, "C:\\x\\devin.exe"],
   );
 });
 
 test("hidden models: nothing before Python says, then what its settings list (at init and in later events)", () => {
   assert.deepEqual(emptyLiveData().hiddenModels, []);
   assert.deepEqual(started().hiddenModels, []);
-  const init = applyInit(emptyLiveData(), { ...INIT, settings: { ...SETTINGS, hiddenModels: ["gpt-5.4", "codex:gpt-5.3-codex"] } });
-  assert.deepEqual(init.hiddenModels, ["gpt-5.4", "codex:gpt-5.3-codex"]);
+  const init = applyInit(emptyLiveData(), { ...INIT, settings: { ...SETTINGS, hiddenModels: ["gpt-5.4", "devin:swe-2-high"] } });
+  assert.deepEqual(init.hiddenModels, ["gpt-5.4", "devin:swe-2-high"]);
   const { state } = play(started(), ["settings", { settings: { ...SETTINGS, hiddenModels: ["kimi-k3"] } }]);
   assert.deepEqual(state.hiddenModels, ["kimi-k3"]);
   assert.deepEqual(play(state, ["settings", { settings: { ...SETTINGS, hiddenModels: [] } }]).state.hiddenModels, [], "showing them again");
@@ -698,12 +686,12 @@ test("ChatGPT Plan compaction: the switch and the percent come with the settings
 
 test("shared memory: switches come with the settings, the badge with app.init and the memory event", () => {
   const empty = emptyLiveData();
-  assert.deepEqual([empty.memoryEnabled, empty.memoryRecall, empty.memoryCapture, empty.memoryCurate, empty.memoryEngines, empty.memory], [true, true, true, true, ["droid", "codex", "devin", "chatgpt"], { latest: 0, unseen: 0, seen: 0, pending: 0 }]);
-  const off = { ...SETTINGS, memoryEnabled: false, memoryRecall: false, memoryCapture: false, memoryCurate: false, memoryEngines: ["codex"] };
+  assert.deepEqual([empty.memoryEnabled, empty.memoryRecall, empty.memoryCapture, empty.memoryCurate, empty.memoryEngines, empty.memory], [true, true, true, true, ["devin", "chatgpt"], { latest: 0, unseen: 0, seen: 0, pending: 0 }]);
+  const off = { ...SETTINGS, memoryEnabled: false, memoryRecall: false, memoryCapture: false, memoryCurate: false, memoryEngines: ["devin"] };
   const { state } = play(started(), ["settings", { settings: off }]);
-  assert.deepEqual([state.memoryEnabled, state.memoryRecall, state.memoryCapture, state.memoryCurate, state.memoryEngines], [false, false, false, false, ["codex"]]);
+  assert.deepEqual([state.memoryEnabled, state.memoryRecall, state.memoryCapture, state.memoryCurate, state.memoryEngines], [false, false, false, false, ["devin"]]);
   const defaults = play(state, ["settings", { settings: SETTINGS }]).state;
-  assert.deepEqual([defaults.memoryEnabled, defaults.memoryRecall, defaults.memoryCapture, defaults.memoryCurate, defaults.memoryEngines], [true, true, true, true, ["droid", "codex", "devin", "chatgpt"]], "a settings view without the keys is the default: on, for every engine");
+  assert.deepEqual([defaults.memoryEnabled, defaults.memoryRecall, defaults.memoryCapture, defaults.memoryCurate, defaults.memoryEngines], [true, true, true, true, ["devin", "chatgpt"]], "a settings view without the keys is the default: on, for every engine");
   const init = applyInit(emptyLiveData(), { ...INIT, memory: { latest: 7, unseen: 2, seen: 5, pending: 3 } });
   assert.deepEqual(init.memory, { latest: 7, unseen: 2, seen: 5, pending: 3 });
   assert.deepEqual(applyInit(emptyLiveData(), { ...INIT, memory: null }).memory, { latest: 0, unseen: 0, seen: 0, pending: 0 }, "an application without memory");
@@ -714,19 +702,19 @@ test("shared memory: switches come with the settings, the badge with app.init an
 });
 
 test("shared memory: who wrote a note, and how a change and a source line read", () => {
-  const codex = { kind: "agent", engine: "codex", conversation: { title: "修复缓存", rowId: "cx:1", projectId: "D:\\a" } };
-  assert.deepEqual([{ kind: "user" }, codex, { kind: "agent", engine: "devin" }, { kind: "unknown" }].map(whoName), ["我", "Codex", "Devin", "未知"]);
-  assert.deepEqual(whoConversation(codex), { title: "修复缓存", rowId: "cx:1" });
-  assert.equal(whoConversation({ kind: "agent", engine: "codex", conversation: { title: "x", rowId: "", projectId: "" } }), null, "a conversation that cannot be opened is not a link");
+  const devin = { kind: "agent", engine: "devin", conversation: { title: "修复缓存", rowId: "dv:1", projectId: "D:\\a" } };
+  assert.deepEqual([{ kind: "user" }, devin, { kind: "agent", engine: "chatgpt" }, { kind: "unknown" }].map(whoName), ["我", "Devin", "ChatGPT Plan", "未知"]);
+  assert.deepEqual(whoConversation(devin), { title: "修复缓存", rowId: "dv:1" });
+  assert.equal(whoConversation({ kind: "agent", engine: "devin", conversation: { title: "x", rowId: "", projectId: "" } }), null, "a conversation that cannot be opened is not a link");
   assert.equal(whoConversation({ kind: "user" }), null);
   assert.deepEqual(["create", "update", "forget", "restore"].map(changeVerb), ["记住了", "修改了", "忘记了", "恢复了"]);
   assert.equal(isUnseen({ seq: 6 }, 5), true);
   assert.equal(isUnseen({ seq: 5 }, 5), false);
-  const note = { source: codex, editor: codex, rev: 1 };
-  assert.equal(sourceLine(note), "Codex 写入");
-  assert.equal(sourceLine({ ...note, rev: 3 }), "Codex 写入", "changed again by the same engine");
-  assert.equal(sourceLine({ ...note, editor: { kind: "user" }, rev: 2 }), "Codex 写入，我改过");
-  assert.equal(sourceLine({ ...note, editor: { kind: "agent", engine: "droid" }, rev: 2 }), "Codex 写入，Droid 改过");
+  const note = { source: devin, editor: devin, rev: 1 };
+  assert.equal(sourceLine(note), "Devin 写入");
+  assert.equal(sourceLine({ ...note, rev: 3 }), "Devin 写入", "changed again by the same engine");
+  assert.equal(sourceLine({ ...note, editor: { kind: "user" }, rev: 2 }), "Devin 写入，我改过");
+  assert.equal(sourceLine({ ...note, editor: { kind: "agent", engine: "chatgpt" }, rev: 2 }), "Devin 写入，ChatGPT Plan 改过");
   assert.deepEqual([{ scope: "global", projectName: "" }, { scope: "project", projectName: "wittycode" }].map(scopeLabel), ["全局", "wittycode"]);
 });
 
@@ -749,7 +737,7 @@ test("shared memory: its tools read the same whichever way the engine names them
 
 test("usageTotal: everything sent (new, cache written, cache read) and everything that came back", () => {
   assert.equal(usageTotal({ input: 10, output: 20, cacheWrite: 5, cacheRead: 100 }), 135);
-  assert.equal(usageTotal({ input: 10, output: 20, cacheWrite: null, cacheRead: 100 }), 130, "Codex has no cache writes");
+  assert.equal(usageTotal({ input: 10, output: 20, cacheWrite: null, cacheRead: 100 }), 130, "Devin reports no cache writes");
 });
 
 test("provider presets: every one has a usable address, the bearer key only where the format allows it, models that fit", () => {
@@ -757,7 +745,7 @@ test("provider presets: every one has a usable address, the bearer key only wher
   assert.equal(new Set(ids).size, ids.length, "ids are unique");
   for (const p of PRESETS) {
     if (p.kind !== "bedrock-converse" && p.id !== "custom") assert.match(p.baseUrl, /^https?:\/\/\S+$/, p.id);
-    if (p.bearer) assert.equal(p.kind, "anthropic", `${p.id}: Droid sends a bearer key only in the Anthropic format`);
+    if (p.bearer) assert.equal(p.kind, "anthropic", `${p.id}: a bearer key goes only in the Anthropic format`);
     if (p.models) {
       assert.ok(p.models.length > 0 && p.models.every((m) => m.id.trim()), p.id);
       assert.equal(new Set(p.models.map((m) => m.id)).size, p.models.length, `${p.id}: duplicate model`);
@@ -900,12 +888,12 @@ test("unavailable: why a command cannot run, and null when it can", () => {
 
   assert.match(unavailable("compact", { ...own, session: false }), /打开一个会话/);
   assert.match(unavailable("compact", { ...own, running: true }), /运行/);
-  for (const engine of ["droid", "codex", "chatgpt"]) assert.equal(unavailable("compact", { ...own, engine }), null, `${engine} compacts by its own means`);
+  assert.equal(unavailable("compact", { ...own, engine: "chatgpt" }), null, "the own loop compacts");
   assert.match(unavailable("compact", { ...own, engine: "devin" }), /Devin 没有提供手动压缩/);
 
   assert.match(unavailable("goal", { ...own, session: false }, "x"), /打开一个会话/);
   assert.match(unavailable("goal", { ...own, running: true }, "x"), /运行/);
-  for (const engine of ["droid", "codex", "devin", "chatgpt"]) assert.equal(unavailable("goal", { ...own, engine }, "x"), null, `a goal goes on any engine: ${engine}`);
+  for (const engine of ["devin", "chatgpt"]) assert.equal(unavailable("goal", { ...own, engine }, "x"), null, `a goal goes on any engine: ${engine}`);
   assert.match(unavailable("goal", { ...own, plan: true }, "x"), /Plan 模式/);
   assert.match(unavailable("goal", own, ""), /用法/);
   assert.match(unavailable("goal", own, "   "), /用法/);
@@ -914,9 +902,8 @@ test("unavailable: why a command cannot run, and null when it can", () => {
   }
   assert.match(unavailable("goal", { ...own, session: false }, "off"), /打开一个会话/);
 
-  assert.match(unavailable("plan", { ...own, engine: "codex" }), /Codex/);
-  for (const engine of ["droid", "devin", "chatgpt"]) assert.equal(unavailable("plan", { ...own, engine }), null, engine);
-  assert.equal(unavailable("plan", { session: false, engine: "droid", running: true, plan: false }), null, "Plan flips the next message, so it needs no session");
+  for (const engine of ["devin", "chatgpt"]) assert.equal(unavailable("plan", { ...own, engine }), null, engine);
+  assert.equal(unavailable("plan", { session: false, engine: "chatgpt", running: true, plan: false }), null, "Plan flips the next message, so it needs no session");
 });
 
 test("the page's own commands are /compact, /plan and /goal: the new-conversation button does not need a /new", () => {

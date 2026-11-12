@@ -21,7 +21,6 @@ import qasync
 from desktop.core.app_core import AppCore
 from desktop.core.cache import Cache
 from desktop.core.memory.launch import MemoryLaunch
-from desktop.core.session_manager import SessionManager
 from desktop.core.settings import SETTINGS_ENV, AppSettings, default_settings_path, load_settings, migrate_legacy_settings
 from desktop.ui.shell import APP_TITLE, MainWindow, release_profile
 from desktop.ui.tasks import cancel_all, kill_pending_timers
@@ -35,7 +34,6 @@ LOG_FILE_NAME = "WittyCode.log"
 class AppContext:
     app: QApplication
     loop: qasync.QEventLoop
-    manager: SessionManager
     core: AppCore
     window: MainWindow
     options: argparse.Namespace
@@ -46,8 +44,6 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
         prog=APP_TITLE,
         description="WittyCode：编程代理的桌面客户端，把工具调用折叠起来，优先展示助手的回答和阶段结果。",
     )
-    parser.add_argument("--replay", metavar="FIXTURE", help="离线演示：回放一份录制的会话（fixtures/*.jsonl），不启动 droid，也不调用模型")
-    parser.add_argument("--speed", type=float, default=1.0, help="回放速度倍数（默认 1）")
     parser.add_argument("--settings", metavar="FILE", help="使用指定的设置文件，而不是 %%APPDATA%%\\WittyCode\\settings.json")
     parser.add_argument("--project", action="append", default=[], metavar="DIR", help="启动时加入的项目文件夹（可重复）")
     parser.add_argument("--page", metavar="FILE", help="使用指定的界面文件（开发用），而不是 desktop/ui_dist/index.html")
@@ -96,15 +92,6 @@ def _set_app_user_model_id() -> None:
         pass
 
 
-def make_codex(settings: AppSettings) -> Any:
-    """The Codex engine, or ``None`` when it is not part of this build."""
-    try:
-        from desktop.core.codex import CodexEngine
-    except ImportError:
-        return None
-    return CodexEngine(settings)
-
-
 def make_devin(settings: AppSettings) -> Any:
     """The Devin engine, or ``None`` when it is not part of this build."""
     try:
@@ -116,7 +103,7 @@ def make_devin(settings: AppSettings) -> Any:
 
 def make_chatgpt(settings: AppSettings, open_url: Any, providers: Any = None) -> Any:
     """The engine of the application's own harness, or ``None``: the user's ChatGPT plan, and with ``providers`` the models of the
-    API providers, which it asks itself (no Droid in between)."""
+    API providers, which it asks itself."""
     try:
         from desktop.core.chatgpt.engine import ChatGPTEngine
         from desktop.core.llm.backend import ApiBackend
@@ -144,48 +131,30 @@ def build_application(options: argparse.Namespace, qt_args: list[str] | None = N
     loop.set_exception_handler(_log_loop_exception)
 
     apply_settings_option(options)
-    replay = bool(options.replay)
-    if not replay:
-        migrate_legacy_settings()
-    settings = AppSettings() if replay else load_settings()
+    migrate_legacy_settings()
+    settings = load_settings()
     for folder in options.project:
         settings.add_project(folder)
-    factory = None
-    if replay:
-        from desktop.devtools.replay import ReplayFactory
-
-        factory = ReplayFactory(options.replay, speed=options.speed)
-    manager = SessionManager(settings, factory)
-    memory = None
-    if not replay:
-        memory = MemoryLaunch(
-            default_settings_path().parent / "memory",
-            enabled=lambda engine: settings.memory_enabled and engine in settings.memory_engines,
-            recall=lambda: settings.memory_recall,
-            capture=lambda: settings.memory_capture,
-            learn=lambda: settings.memory_curate,
-        )
-    window = MainWindow(
-        settings,
-        persist=not replay,
-        page_file=Path(options.page) if options.page else None,
-        subtitle="离线回放" if replay else "",
+    memory = MemoryLaunch(
+        default_settings_path().parent / "memory",
+        enabled=lambda engine: settings.memory_enabled and engine in settings.memory_engines,
+        recall=lambda: settings.memory_recall,
+        capture=lambda: settings.memory_capture,
+        learn=lambda: settings.memory_curate,
     )
-    providers = None if replay else make_providers()
+    window = MainWindow(settings, persist=True, page_file=Path(options.page) if options.page else None)
+    providers = make_providers()
     core = AppCore(
-        manager,
+        settings,
         window.platform,
-        codex=None if replay else make_codex(settings),
-        devin=None if replay else make_devin(settings),
-        chatgpt=None if replay else make_chatgpt(settings, window.platform.open_url, providers),
+        devin=make_devin(settings),
+        chatgpt=make_chatgpt(settings, window.platform.open_url, providers),
         providers=providers,
-        persist=not replay,
-        offline=replay,
-        cache=Cache(None if replay else default_settings_path().parent / "cache"),
+        cache=Cache(default_settings_path().parent / "cache"),
         memory=memory,
     )
     window.attach(core)
-    return AppContext(app, loop, manager, core, window, options)
+    return AppContext(app, loop, core, window, options)
 
 
 def cleanup(app: QApplication) -> None:
@@ -220,11 +189,4 @@ def main(argv: list[str] | None = None) -> int:
     options, qt_args = parse_args(argv[1:])
     apply_settings_option(options)
     setup_logging(options.debug)
-    if options.replay and not Path(options.replay).is_file():
-        message = f"找不到回放文件：{options.replay}"
-        if sys.stderr is None:  # started without a console: the log file is the only place to say it
-            log.error(message)
-        else:
-            print(message, file=sys.stderr)
-        return 2
     return run(build_application(options, qt_args))

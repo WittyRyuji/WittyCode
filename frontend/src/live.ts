@@ -14,7 +14,7 @@ import type { AttachmentsResult, FileUpload, HandoffChoice, SendOver, SettingKey
 export const MAX_FILE_BYTES = 64 * 1024 * 1024;
 const EXTERNAL = /^(https?:|mailto:)/i;
 const FAILED = Symbol("failed");
-/** The plan's usage is read from Codex's app-server: asking on every hover would be a request each time. */
+/** The ChatGPT account is read again at most this often: asking on every hover would be a request each time. */
 const PLAN_USAGE_EVERY_MS = 20_000;
 let planUsageAsked = 0;
 
@@ -178,7 +178,7 @@ function known(id: string): Promise<void> {
 function liveActions(): Partial<Store> {
   const opening = new Set<string>(); // saved rows on their way open: a double click opens them once
   const sending = new Set<string>(); // conversations whose message is on its way
-  // How many times the conversation on show has changed. A slow open (droid.exe takes a second or two) answers late;
+  // How many times the conversation on show has changed. A slow open (an engine's process takes a second or two) answers late;
   // when the user has gone elsewhere meanwhile, the answer must not take them back to the new tab.
   let moved = 0;
   useStore.subscribe((now, before) => {
@@ -266,7 +266,7 @@ function liveActions(): Partial<Store> {
       if (now - planUsageAsked < PLAN_USAGE_EVERY_MS) return;
       planUsageAsked = now;
       try {
-        set({ codex: await liveCall("codex.account") });
+        set({ chatgpt: await liveCall("chatgpt.account") });
       } catch {
         /* the figures stay as they were; the badge says why it has none */
       }
@@ -416,8 +416,6 @@ function liveActions(): Partial<Store> {
     setCompactAuto: (on) => void setting("compactAuto", on),
     setThinkChinese: (on) => void setting("thinkChinese", on),
     setCompactAt: (percent) => void setting("compactAt", clampCompactAt(percent)),
-    setDroidPath: (path) => void setting("droidPath", path),
-    setCodexPath: (path) => void setting("codexPath", path),
     setDevinPath: (path) => void setting("devinPath", path),
     setSidebarWidth: (px, commit = false) => {
       set({ sidebarWidth: px });
@@ -448,28 +446,6 @@ function liveActions(): Partial<Store> {
       show({ ok: true, text: "正在测试…" });
       const r = await attempt(liveCall("providers.test", { draft: withoutStatus(p) }));
       show(r === FAILED ? p.status : { ok: r.ok, text: r.text });
-    },
-    codexLogin: async () => {
-      const before = get().codex;
-      set({ codex: { ...before, auth: "signing-in" } });
-      const codex = await attempt(liveCall("codex.login"));
-      if (codex === FAILED) return set({ codex: before });
-      set({ codex });
-      if (codex.auth === "chatgpt") say(`已登录 Codex${codex.email ? `：${codex.email}` : ""}${codex.plan ? `（${codex.plan}）` : ""}。`);
-    },
-    codexCancel: async () => {
-      const codex = await attempt(liveCall("codex.cancelLogin"));
-      if (codex !== FAILED) set({ codex });
-    },
-    codexLogout: async () => {
-      const codex = await attempt(liveCall("codex.logout"));
-      if (codex === FAILED) return;
-      set({ codex });
-      say("已退出 Codex。打开着的 Codex 会话在下次发送时会提示重新登录。");
-    },
-    codexEnable: async (on) => {
-      const codex = await attempt(liveCall("codex.setEnabled", { on }));
-      if (codex !== FAILED) set({ codex });
     },
     devinLogin: async () => {
       const before = get().devin;
@@ -529,18 +505,6 @@ function liveActions(): Partial<Store> {
       if (devin === FAILED) return;
       set({ devin });
       say(devin.cli === "missing" ? "已重新检测：仍然没有找到 devin。" : "已重新检测：找到了 devin。");
-    },
-    recheckDroid: async () => {
-      const factory = await attempt(liveCall("factory.account"));
-      if (factory === FAILED) return;
-      set({ factory, droidFound: factory.droidPath ?? "" });
-      say(factory.droidPath ? `已重新检测：找到 droid${factory.version ? ` ${factory.version}` : ""}。` : "已重新检测：没有找到 droid.exe。");
-    },
-    recheckCodex: async () => {
-      const codex = await attempt(liveCall("codex.account"));
-      if (codex === FAILED) return;
-      set({ codex });
-      say(codex.cli === "missing" ? "已重新检测：仍然没有找到 codex。" : "已重新检测：找到了 codex。");
     },
     openLightbox: (a) => {
       set({ lightbox: a });
