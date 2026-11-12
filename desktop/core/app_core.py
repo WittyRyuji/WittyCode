@@ -100,13 +100,12 @@ MEMORY_POLL_SECONDS = 1.0
 QUEUE_SECONDS = 180.0
 """How long a message typed while a session connects waits for it."""
 ACTIVITY_STEP = 10.0
-"""A running turn moves its session's activity time (sidebar order and age) at most this often, in seconds: output
-arrives many times a second, and every move re-sorts the list and patches the row."""
+"""A running turn updates its displayed activity age at most this often, in seconds. Activity never changes row order."""
 EVICTION_NOTICE = "已自动关闭最久未使用的会话"
 RETRY_NOTICE = "这条消息没有发送成功：附件已放回输入框，可以直接重试。"
 RETRY_OVER_NOTICE = "这条消息没有发送成功：附件已放回输入框。"
-SESSION_LIST_LIMIT = 50
-"""How many saved sessions of a project each engine is asked for."""
+SESSION_LIST_LIMIT = None
+"""List all sessions: an activity-based cutoff would still make manually ordered rows appear and disappear."""
 DEVIN_ROW_PREFIX = "dv:"
 """Row ids of saved Devin sessions in the sidebar."""
 CHATGPT_ROW_PREFIX = "cg:"
@@ -214,8 +213,12 @@ class Conversation:
     dirty: bool = True
     switching: bool = False
     """A change of engine is under way: the new controller failing to open must not close the conversation."""
+    created_at: float = field(default_factory=time.time)
+    sidebar_key: str = ""
+    """Stable sidebar identity, migrated to the native row id once it is known (also across engine changes)."""
     preview: bool = False
     """The page shows the cached conversation while the real history is still being loaded."""
+    cached_turns: list[dict[str, Any]] = field(default_factory=list)
     cached_meta: dict[str, Any] = field(default_factory=dict)
     """Settings, token use and context size as they were when the session was last cached: shown until the live ones are known."""
     json_cache: dict[str, tuple[int, dict[str, Any]]] = field(default_factory=dict)
@@ -253,6 +256,7 @@ class SavedRow:
     count: int = 0
     model: str = ""
     """The page's id of the model, where the engine's list of conversations says which one it was on (the own loop's does)."""
+    created: datetime | None = None
 
 
 def _aware(stamp: datetime | None) -> datetime:
@@ -267,7 +271,7 @@ def json_copy(value: Any) -> Any:
 
 
 def _row_to_cache(row: SavedRow) -> dict[str, Any]:
-    return {"id": row.id, "native": row.native, "engine": row.engine, "title": row.title, "modified": row.modified.timestamp(), "count": row.count, "model": row.model}
+    return {"id": row.id, "native": row.native, "engine": row.engine, "title": row.title, "modified": row.modified.timestamp(), "count": row.count, "model": row.model, "created": row.created.timestamp() if row.created else None}
 
 
 def _row_from_cache(raw: Any) -> SavedRow | None:
@@ -280,6 +284,7 @@ def _row_from_cache(raw: Any) -> SavedRow | None:
             datetime.fromtimestamp(float(raw["modified"]), timezone.utc),
             int(raw.get("count") or 0),
             str(raw.get("model") or ""),
+            datetime.fromtimestamp(float(raw["created"]), timezone.utc) if raw.get("created") else None,
         )
     except (KeyError, TypeError, ValueError, OSError, OverflowError, AttributeError):
         return None
@@ -537,16 +542,51 @@ class AppCore:
             if native:
                 taken.add(native)
                 taken.update(prefix + native for prefix in ROW_PREFIXES.values())
-        rows: list[tuple[datetime, dict[str, Any]]] = []
+        rows: list[tuple[str, float, dict[str, Any]]] = []
         for saved in self._saved.get(normalize_folder(folder), []):
             if saved.native in taken or saved.id in taken or saved.id in self.settings.archived_sessions:
                 continue
-            rows.append((saved.modified, self._saved_json(saved, folder)))
+            created = self.settings.session_created.get(saved.id, _aware(saved.created).timestamp())
+            rows.append((saved.id, created, self._saved_json(saved, folder)))
         for conv in open_here:
-            stamp = datetime.fromtimestamp(getattr(conv.controller, "active_at", time.time()), timezone.utc)
-            rows.append((stamp, {"id": conv.cid}))
-        rows.sort(key=lambda pair: pair[0], reverse=True)
-        return [row for _, row in rows]
+            rows.append((conv.sidebar_key, conv.created_at, {"id": conv.cid}))
+        ranks = {key: i for i, key in enumerate(self.settings.session_order)}
+        rows.sort(key=lambda row: (1, ranks[row[0]], row[0]) if row[0] in ranks else (0, -row[1], row[0]))
+        return [row for _, _, row in rows]
+
+    def _sync_sidebar_key(self, conv: Conversation) -> None:
+        key = self._row_of(conv) or conv.cid
+        if key == conv.sidebar_key:
+            return
+        previous = conv.sidebar_key
+        conv.sidebar_key = key
+        if previous in self.settings.session_order:
+            self.settings.session_order = list(dict.fromkeys(key if item == previous else item for item in self.settings.session_order))
+        if previous:
+            self.settings.session_created.pop(previous, None)
+        self.settings.session_created[key] = conv.created_at
+        self._save()
+
+    async def _m_session_reorder(self, params: dict[str, Any]) -> dict[str, Any]:
+        folder = params.get("projectId")
+        ident, target, after = params.get("id"), params.get("targetId"), params.get("after", False)
+        if not isinstance(folder, str) or not any(same_folder(folder, p) for p in self.settings.projects):
+            raise AppError("找不到这个项目。")
+        if not isinstance(ident, str) or not isinstance(target, str) or not isinstance(after, bool):
+            raise AppError("会话顺序不合法。")
+        rows = self._rows_for(folder)
+        ids = [row["id"] for row in rows]
+        if ident not in ids or target not in ids:
+            raise AppError("只能在同一个项目内拖动仍在列表中的会话。")
+        if ident == target:
+            return {"ok": True}
+        ids.remove(ident)
+        ids.insert(ids.index(target) + int(after), ident)
+        keys = [self._by_cid[item].sidebar_key if item in self._by_cid else item for item in ids]
+        self.settings.session_order = keys + [item for item in self.settings.session_order if item not in keys]
+        self._save()
+        self._emit_sidebar()
+        return {"ok": True}
 
     def _saved_json(self, saved: SavedRow, folder: str) -> dict[str, Any]:
         return {
@@ -609,14 +649,15 @@ class AppCore:
             with contextlib.suppress(Exception):
                 for item in await self.devin.list_sessions(folder, SESSION_LIST_LIMIT):
                     devin_row = DEVIN_ROW_PREFIX + item.id
-                    rows.append(SavedRow(devin_row, item.id, "devin", item.title or "", self._latest(devin_row, item.modified_at), item.message_count or 0))
+                    rows.append(SavedRow(devin_row, item.id, "devin", item.title or "", self._latest(devin_row, item.modified_at), item.message_count or 0, created=_aware(item.created_at)))
         if self.chatgpt is not None and (self.settings.chatgpt_enabled or self._has_api_models()):
             with contextlib.suppress(Exception):
                 for item in await self.chatgpt.list_sessions(folder, SESSION_LIST_LIMIT):
                     chatgpt_row = CHATGPT_ROW_PREFIX + item.id
                     stamp = datetime.fromtimestamp(item.modified_at, timezone.utc)
                     page_model = self.catalog.page_id("chatgpt", item.model) if item.model and self.catalog is not None else ""
-                    rows.append(SavedRow(chatgpt_row, item.id, "chatgpt", item.title or "", self._latest(chatgpt_row, stamp), item.messages, page_model))
+                    created = datetime.fromtimestamp(item.created_at, timezone.utc)
+                    rows.append(SavedRow(chatgpt_row, item.id, "chatgpt", item.title or "", self._latest(chatgpt_row, stamp), item.messages, page_model, created))
         self._saved[normalize_folder(folder)] = rows
         self._remember_rows(folder, rows)
         self._schedule_sidebar(folder)
@@ -834,8 +875,8 @@ class AppCore:
         controller = conv.controller
         native = getattr(controller, "session_id", None)
         turns = controller.transcript.turns
-        if not native or not turns:
-            return None
+        if not native or not turns or conv.preview or not getattr(controller, "_history_loaded", True):
+            return None  # a failed/incomplete load must never overwrite the last usable local history
         listed = []
         for turn in turns:
             entry = conv.json_cache.get(turn.id)
@@ -881,7 +922,7 @@ class AppCore:
         if not self.cache.enabled:
             return
         conv.cache_dirty = True
-        if conv.cache_handle is None and not self._shutting_down and conv.controller.state in (SessionState.READY, SessionState.DEAD):
+        if conv.cache_handle is None and not self._shutting_down and conv.controller.state in (SessionState.READY, SessionState.RUNNING, SessionState.DEAD):
             conv.cache_handle = asyncio.get_running_loop().call_later(SNAPSHOT_SECONDS, self._write_snapshot, conv)
 
     def _write_snapshot(self, conv: Conversation) -> None:
@@ -899,7 +940,7 @@ class AppCore:
             if conv.cache_handle is not None:
                 conv.cache_handle.cancel()
                 conv.cache_handle = None
-            if conv.cache_dirty and conv.controller.state is not SessionState.RUNNING:
+            if conv.cache_dirty:
                 built = self._snapshot(conv)
                 conv.cache_dirty = False
                 if built is not None:
@@ -913,6 +954,7 @@ class AppCore:
     def _show_preview(self, conv: Conversation, snapshot: Mapping[str, Any]) -> None:
         """The conversation as it was last time, at once; the real history replaces it when the engine has loaded it."""
         conv.preview = True
+        conv.cached_turns = list(snapshot["turns"])
         conv.cached_meta = dict(snapshot.get("meta") or {})
         conv.sent_ids = ["preview"]  # whatever is sent next replaces the list instead of adding to it
         patch = {
@@ -992,12 +1034,14 @@ class AppCore:
         if controller.state is SessionState.CLOSED:
             self._drop(conv, controller)
             return
+        self._sync_sidebar_key(conv)
         conv.dirty = True
         if kind == "state":
             self._schedule_sidebar(conv.project, reload=controller.state is SessionState.READY)
+            if conv.preview and controller.state is SessionState.DEAD:
+                self.say(f"{controller.last_error}；仍显示本地缓存，可以重新连接。")
         elif controller.state is SessionState.RUNNING and time.time() - controller.active_at >= ACTIVITY_STEP:
-            # A long turn is conversation too: its time follows the latest output, or a session still working for ten
-            # minutes would sink below one that said a word meanwhile.
+            # A long turn is conversation too: keep its displayed activity age current without changing its position.
             controller.active_at = time.time()
             self._schedule_sidebar(conv.project)
         if kind == "steer":
@@ -1026,6 +1070,12 @@ class AppCore:
             project=normalize_folder(controller.project),
             requested=dict(self._opening_meta or {}),
         )
+        key = self._row_of(conv)
+        saved = next((row for row in self._saved.get(conv.project, []) if row.id == key), None)
+        conv.created_at = self.settings.session_created.get(key) or (
+            _aware(saved.created).timestamp() if saved is not None and saved.created else conv.created_at
+        )
+        self._sync_sidebar_key(conv)
         if self._ledger_seed is not None:
             conv.ledger = self._ledger_of(self._ledger_seed)
         self.order.append(conv)
@@ -1199,7 +1249,7 @@ class AppCore:
             "projectId": conv.project,
             "title": self._title_of(conv),
             "mark": self._mark(conv),
-            "workingLabel": controller.working_label,
+            "workingLabel": ("本地缓存 · " if conv.preview else "") + controller.working_label,
             "modified": format_relative(active),
             "modifiedAt": int(controller.active_at * 1000),
             "engine": conv.engine,
@@ -1228,10 +1278,14 @@ class AppCore:
         controller = conv.controller
         transcript = controller.transcript
         turns = transcript.turns
-        # The cached conversation stays up until the real history has arrived (or the session is open without any).
-        hold = conv.preview and not turns and controller.state is SessionState.OPENING
+        # Keep the local history through connection failures as well as loading. An error turn is not loaded history.
+        hold = conv.preview and (controller.state is SessionState.OPENING or not getattr(controller, "_history_loaded", True))
+        if hold and not conv.sent_ids:  # a reloaded page needs the local history again, even while still offline
+            self.emit("turns", {"id": conv.cid, "turns": conv.cached_turns, "all": True})
+            conv.sent_ids = ["preview"]
         if conv.preview and not hold:
             conv.preview = False
+            conv.cached_turns = []
         ids = [turn.id for turn in turns]
         replace = ids[: len(conv.sent_ids)] != conv.sent_ids
         if replace:
@@ -1480,9 +1534,8 @@ class AppCore:
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         """The cached copy of a saved session: ``(the copy, the copy if it is also fit to be shown)``.
 
-        It is shown only when it is as new as the session itself (one that was used elsewhere since would be replaced a
-        moment later by a very different one). Its token ledger is used whatever its age: the engine's figure includes
-        what happened elsewhere, and only the part after the ledger's last figure is added."""
+        Even an older copy is useful while offline; the status label says it is local, and loaded history replaces it.
+        Its token ledger is used whatever its age: only the part after the ledger's last figure is added."""
         if not self.cache.enabled:
             return None, None
         snapshot = await asyncio.to_thread(self.cache.load_session, row_id)
@@ -1490,7 +1543,8 @@ class AppCore:
             return None, None
         if not snapshot.get("turns"):
             return snapshot, None
-        return snapshot, (snapshot if _is_fresh(snapshot, modified) else None)
+        self._learn_window_from(snapshot)
+        return snapshot, snapshot
 
     @staticmethod
     def _ledger_of(snapshot: Mapping[str, Any]) -> UsageLedger:

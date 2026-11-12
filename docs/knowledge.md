@@ -76,8 +76,11 @@
 68. 整轮中文只表达一次、Devin 表单去重与实际提问者
 69. GitHub Actions 的 startup_failure 与官方 Action 允许列表
 70. API 上下文的完整模型规格兜底、未知窗口必填和完整推理档位
+71. 会话静态排序、原生拖拽与加载失败时保留本地缓存
 
 ## 条目
+
+- 会话静态排序、原生拖拽与加载失败时保留本地缓存（2026-11-12，用户：「按照 Session 创建时间来静态排序，用户可以手动拖拽排序」「没连接上之前，对话里面是空的」）：现行排序覆盖下面「侧边栏的顺序和时间」的旧规则；默认按创建时间倒序，`active_at` 只给活动时间文案，`used_at` 仍只管驱逐。`session_order` 保存用户在同项目内拖出的原生行 ID 顺序；新发现的会话放前面，控制器临时 ID 与换引擎时迁移顺序键，`session_created` 保留原始创建时刻。自有会话索引携带 `created_at`，旧索引从归档重建；不再按最近活动截取 50 条，避免手动排好的行因活动掉出列表。缓存即使稍旧也显示，状态写「本地缓存」，不是要求先连接或重新查模型；成功加载的完整历史才整批替换。Devin 的 `_history_loaded` 区分真实历史与加载失败生成的错误回合；后者不得清空预览或覆盖快照。预览回合留在 `Conversation.cached_turns`，页面重载仍可重新推送。运行中也定期缓存，避免长回合从未有快照；从未缓存过的外部会话仍须首次连接，不后台打开外部会话来预读。原生拖拽检查：构建前端后，在 `frontend/` 跑 `node scripts/sidebar.test.mjs`；前后端持久化与离线回归在 `test_app_session_order.py`、`test_app_cache_preview.py`、`test_app_sidebar_e2e.py`，只用临时设置与本机模拟服务。
 
 - 每个 Session 一个 droid.exe（约 300 MB）；一个会话同时只能跑一轮；SDK 只支持 asyncio（用 qasync 接 Qt）。
 - 事件顺序：ThinkingDelta 一次性到达 → 同一 tool_use_id 的 ToolCallDelta 反复到达、输入逐步变长（没有 message_id，并行调用会交错）→ ToolCall + AssistantMessage → 可能有审批（PermissionResolved）→ ToolProgress（只有 Execute；`update.full_output` 是累计输出）→ ToolResult（并行时可能乱序）。

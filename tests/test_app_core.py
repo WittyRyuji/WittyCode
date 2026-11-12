@@ -401,7 +401,7 @@ def test_a_session_whose_row_is_not_in_the_list_still_opens_and_counts_from_now(
     run(scenario())
 
 
-def test_a_message_moves_a_session_to_the_top_and_so_does_the_end_of_its_answer(tmp_path):
+def test_messages_and_answers_update_the_time_without_moving_the_session(tmp_path):
     async def scenario():
         core, plan, events, _, _ = await ready_core(tmp_path, projects=False)
         proj, before = await three_saved(core, events, tmp_path)
@@ -412,7 +412,7 @@ def test_a_message_moves_a_session_to_the_top_and_so_does_the_end_of_its_answer(
         await core.call("session.send", {"id": cid, "text": "hello"})
         await until(lambda: plan.requests)
         core._emit_sidebar()
-        assert listed(events) == [cid, "cg:new", "cg:mid"], "the one just talked to is the newest"
+        assert listed(events) == ["cg:new", "cg:mid", cid], "activity does not change creation order"
         await until(lambda: sessions_of(events)[cid]["modifiedAt"] > old_ms)
 
         controller = core._by_cid[cid].controller
@@ -421,7 +421,7 @@ def test_a_message_moves_a_session_to_the_top_and_so_does_the_end_of_its_answer(
         await idle(core, cid)
         assert controller.active_at > 1.0
         core._emit_sidebar()
-        assert listed(events)[0] == cid
+        assert listed(events) == ["cg:new", "cg:mid", cid]
         await core.shutdown()
 
     run(scenario())
@@ -437,7 +437,7 @@ def test_a_closed_session_keeps_the_time_of_its_last_message(tmp_path):
         await talk(core, plan, cid, "hello", "Hi")
         await core.call("session.close", {"id": cid})
         await until(lambda: events.last("sidebar")["sessions"].get("cg:old", {}).get("modifiedAt", 0) > old_ms)
-        assert listed(events) == ["cg:old", "cg:new", "cg:mid"], "closing does not drop the row back to where it was"
+        assert listed(events) == ["cg:new", "cg:mid", "cg:old"], "closing keeps creation order despite newer activity"
         row = events.last("sidebar")["sessions"]["cg:old"]
         assert row["modifiedAt"] > int((time.time() - 60) * 1000) and row["modified"] == "刚刚"
         await core.shutdown()
@@ -458,12 +458,12 @@ def test_a_new_empty_session_is_the_newest_and_changing_engine_does_not_change_i
         spoken = time.time() - 7200
         controller.active_at = spoken
         core._emit_sidebar()
-        assert listed(events) == ["cg:new", "cg:mid", cid, "cg:old"]
+        assert listed(events) == [cid, "cg:new", "cg:mid", "cg:old"]
         assert (await core.call("session.choose", {"id": cid, "field": "model", "value": "devin:swe-2-high"}))["switched"]
         after = core._by_cid[cid].controller
         assert after is not controller and after.active_at == spoken
         core._emit_sidebar()
-        assert listed(events) == ["cg:new", "cg:mid", cid, "cg:old"], "the switch is not a message"
+        assert listed(events) == [cid, "cg:new", "cg:mid", "cg:old"], "the switch keeps the original creation time"
         assert sessions_of(events)[cid]["modifiedAt"] == int(spoken * 1000)
         await core.shutdown()
 

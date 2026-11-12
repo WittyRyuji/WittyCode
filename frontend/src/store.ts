@@ -112,6 +112,8 @@ export interface Store extends LiveData {
   quit: () => void;
   select: (id: string | null) => void;
   openSaved: (id: string) => void;
+  /** move a sidebar row within its project; the live backend persists the order */
+  reorderSession: (projectId: string, id: string, targetId: string, after: boolean) => void;
   /** show the first message box (in `projectId` when given); the conversation itself is made when the first message goes */
   newSession: (projectId?: string) => void;
   setLandingDraft: (draft: string) => void;
@@ -340,6 +342,15 @@ export const useStore = create<Store>((set, get) => ({
     set((st) => ({ tabs: [...st.tabs, id], currentId: id }));
     window.setTimeout(() => get().patchSession(id, (x) => ({ ...x, mark: "ready", workingLabel: "就绪" })), 700);
   },
+
+  reorderSession: (projectId, id, targetId, after) => set((s) => ({
+    projects: s.projects.map((p) => {
+      if (p.id !== projectId || id === targetId || !p.sessionIds.includes(id) || !p.sessionIds.includes(targetId)) return p;
+      const ids = p.sessionIds.filter((item) => item !== id);
+      ids.splice(ids.indexOf(targetId) + Number(after), 0, id);
+      return { ...p, sessionIds: ids };
+    }),
+  })),
 
   newSession: (projectId) => {
     // (from a conversation: its project is where the next one starts, as it always was)

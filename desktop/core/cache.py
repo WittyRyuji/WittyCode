@@ -5,7 +5,7 @@ Lives in ``<settings folder>\\cache\\`` (``%APPDATA%\\WittyCode\\cache``):
 * ``index.json``: the saved-session rows of every project, the model list, the Codex account (plan, limits) and the
   Droid version, as they were last seen;
 * ``sessions\\<id>.json``: one session's conversation as the page shows it (the view model's turns) with its title,
-  settings, token use and context size, written when it is idle and when it closes.
+  settings, token use and context size, written periodically while it runs as well as when it is idle or closes.
 
 Nothing here is the truth: the engines are. The page is shown the cached state first, and the real state replaces it
 as soon as it arrives (a moment later, in the background). A file that is missing, unreadable, from another version or

@@ -109,6 +109,7 @@ class SavedRow:
     messages: int
     model: str = ""
     """The model the conversation was last on (empty in an index written before it was kept)."""
+    created_at: float = 0.0
 
 
 def diff_to_json(diff: FileDiff) -> dict[str, Any]:
@@ -402,7 +403,7 @@ class SessionStore:
             rows.append(
                 SavedRow(
                     session_id, str(raw.get("project") or ""), str(raw.get("title") or ""), float(raw.get("modified_at") or 0.0),
-                    int(raw.get("messages") or 0), str(raw.get("model") or ""),
+                    int(raw.get("messages") or 0), str(raw.get("model") or ""), float(raw.get("created_at") or 0.0),
                 )
             )
         rows.sort(key=lambda row: row.modified_at, reverse=True)
@@ -412,7 +413,7 @@ class SessionStore:
 
     @staticmethod
     def _row_json(session: SavedSession) -> dict[str, Any]:
-        return {"project": session.project, "title": session.title, "modified_at": session.modified_at, "messages": session.messages, "model": session.model}
+        return {"project": session.project, "title": session.title, "created_at": session.created_at, "modified_at": session.modified_at, "messages": session.messages, "model": session.model}
 
     def _index(self) -> dict[str, dict[str, Any]]:
         path = self.root / INDEX
@@ -426,6 +427,8 @@ class SessionStore:
         return self._rebuild()
 
     def _consistent(self, index: Mapping[str, Any]) -> bool:
+        if any(isinstance(row, Mapping) and "created_at" not in row for row in index.values()):
+            return False  # rebuild old indices from the archives' real creation times, not their latest activity
         folder = self.root / SESSIONS
         try:
             names = {entry.stem for entry in folder.glob("*.json")}

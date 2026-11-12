@@ -106,6 +106,10 @@ class AppSettings:
     own files is touched, and the conversation can be brought back."""
     session_titles: dict[str, str] = field(default_factory=dict)
     """The names the user gave conversations here (row id -> name). The engines keep their own titles."""
+    session_order: list[str] = field(default_factory=list)
+    """Sidebar row ids in the order the user dragged them; newly discovered sessions precede these."""
+    session_created: dict[str, float] = field(default_factory=dict)
+    """Stable creation times, including old rows without one and conversations that changed engine."""
 
     def add_project(self, folder: str | Path) -> bool:
         normalized = normalize_folder(folder)
@@ -276,6 +280,17 @@ def settings_from_dict(raw: object) -> AppSettings:
             if isinstance(key, str) and key and isinstance(name, str) and name.strip() and len(titles) < MAX_REMEMBERED_SESSIONS:
                 titles[key] = " ".join(name.split())[:MAX_SESSION_TITLE]
 
+    order: list[str] = []
+    raw_order = raw.get("session_order")
+    if isinstance(raw_order, list):
+        order = list(dict.fromkeys(item for item in raw_order if isinstance(item, str) and item))[:MAX_REMEMBERED_SESSIONS]
+    created: dict[str, float] = {}
+    raw_created = raw.get("session_created")
+    if isinstance(raw_created, dict):
+        for key, stamp in raw_created.items():
+            if isinstance(key, str) and key and isinstance(stamp, (int, float)) and not isinstance(stamp, bool) and 0 < stamp < 253402300800 and len(created) < MAX_REMEMBERED_SESSIONS:
+                created[key] = float(stamp)
+
     return AppSettings(
         devin_path=text("devin_path"),
         devin_enabled=devin_enabled,
@@ -306,6 +321,8 @@ def settings_from_dict(raw: object) -> AppSettings:
         last_project=text("last_project"),
         archived_sessions=archived,
         session_titles=titles,
+        session_order=order,
+        session_created=created,
     )
 
 

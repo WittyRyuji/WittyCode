@@ -240,6 +240,7 @@ export interface Calls {
   /** `fromId`: the conversation whose project to use when there is no `projectId` */
   "session.new": { params: { projectId?: string; modelId?: string; fromId?: string }; result: { id: string | null } };
   "session.openSaved": { params: { id: string; projectId: string; title?: string }; result: { id: string | null } };
+  "session.reorder": { params: { projectId: string; id: string; targetId: string; after: boolean }; result: { ok: boolean } };
   "session.close": { params: { id: string }; result: null };
   /** hide the conversation from the lists (an open one is closed first; one that is running is refused). Nothing of the
    *  engine's own files is touched; `session.unarchive` brings it back. `id`: an open conversation's, or a saved row's. */

@@ -270,6 +270,7 @@ class ChatGPTController:
         self._ready()
 
     async def open_saved(self) -> None:
+        self._notify("state")  # announce the opening tab so its cached history can be shown before reading the archive
         saved = await asyncio.to_thread(self.manager.sessions.load, self.session_id)
         if saved is None:
             raise ChatGPTError("这个会话的存档找不到了。", code="missing_session")

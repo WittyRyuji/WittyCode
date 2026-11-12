@@ -219,6 +219,7 @@ function liveActions(): Partial<Store> {
       await known(r.id);
       return r.id;
     },
+    reorderSession: (projectId, id, targetId, after) => void attempt(liveCall("session.reorder", { projectId, id, targetId, after })),
     archiveSession: async (id) => {
       const s = get().sessions[id];
       if (s && (s.mark === "running" || s.mark === "attention")) return say("这个会话还在运行：先停止它，再归档。");

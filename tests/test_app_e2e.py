@@ -506,7 +506,7 @@ def test_a_saved_session_opens_with_its_history_and_is_resumed(qapp, loop, tmp_p
     run(loop, scenario())
 
 
-def test_the_sidebar_is_ordered_by_the_last_message_not_by_what_was_clicked(qapp, loop, tmp_path):
+def test_the_sidebar_keeps_creation_order_while_clicks_and_messages_update_status(qapp, loop, tmp_path):
     async def scenario():
         rig = await open_rig(tmp_path, saved=SAVED)
         model = Model(rig)
@@ -539,14 +539,15 @@ def test_the_sidebar_is_ordered_by_the_last_message_not_by_what_was_clicked(qapp
             await rig.send("继续 go on")
             await model.asked()
 
-            async def first_is_the_one_talked_to() -> bool:
-                return "刚刚" in (await rig.texts(".srow .ssub"))[0]
+            async def older_row_has_new_activity() -> bool:
+                return "刚刚" in (await rig.texts(".srow .ssub"))[1]
 
-            await wait_for(first_is_the_one_talked_to, 10, "the session talked to moves to the top")
+            await wait_for(older_row_has_new_activity, 10, "the older row's activity time to update in place")
             titles, subs = await where()
-            assert "刚刚" not in subs[1] and titles[1] == "修复点击闪烁", "the one not talked to is now second"
+            assert titles == order and "刚刚" not in subs[0], "the older session stays second while running"
             model.go()
             await rig.wait_text(".statusbar .st-left", "就绪")
+            assert await rig.texts(".srow .stitle") == order, "finishing the answer does not reorder the rows either"
         finally:
             await finish(rig, model)
 
