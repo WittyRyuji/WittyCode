@@ -347,8 +347,8 @@ def _skill_of(path: Path, source: Source) -> Skill | None:
     )
 
 
-def discover(project: Path | str, home: Path | None = None) -> list[Skill]:
-    """The skills the conversation in ``project`` can use, the winner of each name, in the order the sources are searched."""
+def discover(project: Path | str, home: Path | None = None, *, include_disabled: bool = False) -> list[Skill]:
+    """The winner of each name, in source order. Management can ignore WittyCode switches without changing runtime rules."""
     project = Path(project)
     home = _home(home)
     off = _disabled(project, home)
@@ -360,7 +360,7 @@ def discover(project: Path | str, home: Path | None = None) -> list[Skill]:
             continue
         for folder in _walk_for(source.folder, SKILL_FILE):
             skill = _skill_of(folder / SKILL_FILE, source)
-            if skill is not None and skill.name not in found and skill.name not in off and connections.skill_allowed(skill.path, project):
+            if skill is not None and skill.name not in found and skill.name not in off and (include_disabled or connections.skill_allowed(skill.path, project, name=skill.name, source=source.label)):
                 found[skill.name] = skill
     return list(found.values())
 

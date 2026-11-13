@@ -220,7 +220,7 @@ function fakeBackend(config) {
   const initReady = new Promise((resolve) => { releaseInit = resolve; if (!config.initHold) resolve(); });
   const S = {
     factory: { cli: "missing", cliPath: "", path: "", enabled: false },
-    connections: [
+    connections: config.connectionItems || [
       { id: "local-skill", kind: "skill", name: "summarize-diff", source: "C:\\Users\\me\\.agents\\skills\\summarize-diff\\SKILL.md", project: "", config: { path: "C:\\Users\\me\\.agents\\skills\\summarize-diff\\SKILL.md" }, enabled: true, imported: false },
       { id: "local-mcp", kind: "mcp", name: "local-tools", source: "C:\\Users\\me\\.codex\\config.toml", project: "", config: { command: "python", args: ["-m", "demo_mcp"] }, enabled: false, imported: false },
     ],

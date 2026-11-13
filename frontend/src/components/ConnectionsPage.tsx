@@ -76,7 +76,7 @@ export function ConnectionsPage() {
     catch (e) { setError(messageOf(e)); }
     finally { setBusy(false); }
   };
-  const entries = scan.items.filter((e) => e.kind === kind);
+  const entries = scan.items.filter((e) => e.kind === kind).sort((a, b) => a.name.localeCompare(b.name, "en", { sensitivity: "base" }) || a.source.localeCompare(b.source) || a.id.localeCompare(b.id));
   return (
     <div className="connections">
       <p className="page-note">管理本地 Skills、Plugins、Hooks 和 MCP。只读发现个人／项目技能、直接放置的本地插件与已导入项；不把 Codex 市场源码、历史版本缓存或临时下载计入列表。兼容 Codex 本地格式的受支持部分，不修改其他客户端的配置。</p>

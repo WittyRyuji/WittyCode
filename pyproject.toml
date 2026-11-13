@@ -1,6 +1,6 @@
 [project]
 name = "wittycode"
-version = "0.1.0a1"
+version = "0.2.1"
 description = "WittyCode: a Windows desktop app for coding agents, with its own agent loop (ChatGPT Plan, API providers, Bedrock) and optional Devin, PySide6 + Qt WebEngine + React"
 readme = "README.md"
 license = { text = "Apache-2.0" }

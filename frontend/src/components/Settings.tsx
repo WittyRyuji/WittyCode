@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { version } from "../../package.json";
 import { Brain, Brush, Cpu, FolderOpen, Info, Keyboard, KeyRound, Layers, Minus, Plus, SlidersHorizontal, Trash2, X } from "lucide-react";
 import { useStore } from "../store";
 import { MODES, effortLabel, permissionsFor, reasoningChoices } from "../lib/vocab";
@@ -57,10 +58,6 @@ function AppearancePage() {
           ]}
         />
       </Field>
-      <div className="preview">
-        <div className="preview-k">预览</div>
-        <p>整个界面都用 React，Python 只做后端。先看第 1、2 项，再决定要不要改 <code>session_manager.py</code>。</p>
-      </div>
     </>
   );
 }
@@ -310,7 +307,7 @@ function AboutPage() {
         <div className="kvs">
           <div>
             <span>版本</span>
-            <b>0.2.0</b>
+            <b>{version}</b>
           </div>
           <div>
             <span>日志</span>

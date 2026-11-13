@@ -141,3 +141,69 @@ def test_qt_opens_a_real_catalog_without_counting_cached_copies_or_covering_it_w
             await rig.finish()
 
     run(loop, scenario())
+
+
+@pytest.mark.parametrize("theme,width", [("light", 1500), ("dark", 900)])
+def test_qt_skill_switches_keep_sorted_rows_scroll_and_runtime_state_and_settings_have_no_preview(qapp, loop, tmp_path, monkeypatch, theme, width):
+    from desktop.core.harness import skills
+    from tests.test_connection_skill_order import make_skill
+    from tests.test_connections import trust
+    from tests.ui_support import wait_for
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(skills, "USER_HOME", home)
+    names = ["zeta", "Alpha", "middle", *(f"demo-{index:02}" for index in range(10))]
+    for name in names:
+        make_skill(home / ".agents/skills", name)
+    make_skill(home / ".codex/skills", "middle")
+    first = make_skill(home / "first-import", "shared")
+    selected = make_skill(home / "second-import", "shared")
+    expected = sorted([name.lower() for name in names] + ["shared"])
+
+    async def scenario():
+        rig = await open_rig(tmp_path, size=(width, 960))
+        try:
+            trust(rig.core.connections, first)
+            trust(rig.core.connections, selected)
+            await rig.core.call("settings.set", {"key": "theme", "value": theme})
+            await rig.press(",", Qt.KeyboardModifier.ControlModifier)
+            await rig.wait_for(".settings")
+            await rig.click_text(".snav", "Connections")
+            await rig.wait_for(".connection-row", len(expected))
+            assert await rig.texts(".connection-info b") == expected
+            at = expected.index("middle")
+            selector = f".connection-row:nth-child({at + 1}) .switch"
+            await rig.js(f"document.querySelector({selector!r}).scrollIntoView({{block:'center'}})")
+            await asyncio.sleep(.1)
+            await rig.js("window.__skillRows = [...document.querySelectorAll('.connection-row')]; window.__skillScroll = document.querySelector('.settings-scroll').scrollTop")
+            for enabled in (False, True, False, True):
+                await rig.click(selector)
+                await wait_for(lambda: rig.js(f"!document.querySelector({selector!r}).disabled && document.querySelector({selector!r}).getAttribute('aria-checked') === '{str(enabled).lower()}'"), 5, "skill switch result")
+                assert await rig.texts(".connection-info b") == expected
+                assert await rig.js("__skillRows.every((e, i) => e === document.querySelectorAll('.connection-row')[i])")
+                assert await rig.js("Math.abs(document.querySelector('.settings-scroll').scrollTop - __skillScroll) < 2")
+                assert await rig.text(".connection-tabs .num") == str(len(expected))
+                available = skills.discover(rig.project, home)
+                assert ("middle" in [item.name for item in available]) is enabled
+                assert next(item.path for item in available if item.name == "shared") == selected
+            await rig.click_text(".connection-toolbar .btn", "刷新发现")
+            assert await rig.texts(".connection-info b") == expected
+            await rig.press("Escape")
+            await rig.wait_for(".settings", 0)
+            await rig.press(",", Qt.KeyboardModifier.ControlModifier)
+            await rig.click_text(".snav", "Connections")
+            await rig.wait_for(".connection-row", len(expected))
+            assert await rig.texts(".connection-info b") == expected
+            await rig.click_text(".snav", "外观")
+            assert await rig.texts(".field-label") == ["主题", "文字大小"]
+            assert not await rig.exists(".preview, .preview-k")
+            assert "session_manager.py" not in await rig.text(".settings-scroll")
+            await rig.click_text(".snav", "关于")
+            assert await rig.text(".about .kvs b") == "0.2.1"
+            assert rig.plan.requests == []
+            assert not any(line.startswith("error:") for line in rig.window.page.console)
+        finally:
+            await rig.finish()
+
+    run(loop, scenario())

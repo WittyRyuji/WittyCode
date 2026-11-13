@@ -89,3 +89,38 @@ for (const live of [false, true]) for (const theme of ["light", "dark"]) {
     console.log(`PASS Connections and optional Factory UI: ${live ? "real QWebChannel" : "design"}, ${theme}, consent, edit, MCP test and switches`);
   } finally { await page.close(); }
 }
+
+for (const theme of ["light", "dark"]) {
+  const connectionItems = ["Zeta", "alpha", "Beta"].map((name) => ({ id: `order-${name}`, kind: "skill", name, source: `C:/Users/me/.agents/skills/${name}/SKILL.md`, project: "", config: { path: `C:/Users/me/.agents/skills/${name}/SKILL.md` }, enabled: true, imported: false }));
+  const { scripts } = fakeBackendScripts({ initDelay: 0, accountDelay: 0, connectionItems });
+  const page = await openPage(`${index}?live=1&theme=${theme}`, { init: scripts, width: theme === "light" ? 1500 : 900, height: 950 });
+  const clickText = async (selector, text) => page.click(selector, await page.eval(`[...document.querySelectorAll(${JSON.stringify(selector)})].findIndex(e => e.textContent.trim() === ${JSON.stringify(text)})`));
+  try {
+    await page.waitFor("!!document.querySelector('.sidebar')", 6000);
+    await page.key(",", { code: "Comma", vk: 188, modifiers: 2 });
+    await clickText(".snav", "外观");
+    await clickText(".segc button", theme === "light" ? "浅色" : "深色");
+    await page.waitFor(`document.documentElement.dataset.theme === '${theme}'`, 3000);
+    await clickText(".snav", "Connections");
+    await page.waitFor("document.querySelectorAll('.connection-row').length === 3", 6000);
+    assert.deepEqual(await page.eval("[...document.querySelectorAll('.connection-info b')].map(e => e.textContent)"), ["alpha", "Beta", "Zeta"], "sorting must not depend on discovery order or case");
+    await page.eval("window.__orderRows = [...document.querySelectorAll('.connection-row')]; true");
+    for (const enabled of [false, true, false, true]) {
+      await page.click('.connection-row .switch', 1);
+      await page.waitFor(`!document.querySelector('.connection-row .switch').disabled && document.querySelectorAll('.connection-row .switch')[1].getAttribute('aria-checked') === '${enabled}'`, 3000);
+      assert(await page.eval("document.querySelectorAll('.connection-row').length === 3 && __orderRows.every((e, i) => e === document.querySelectorAll('.connection-row')[i])"), "switches keep the same DOM rows in the same order");
+      assert.equal(await page.eval("document.querySelector('.connection-tabs .num').textContent"), "3");
+    }
+    await clickText(".snav", "外观");
+    assert.deepEqual(await page.eval("[...document.querySelectorAll('.settings-scroll .field-label')].map(e => e.textContent)"), ["主题", "文字大小"]);
+    assert(await page.eval("!document.querySelector('.preview, .preview-k') && !document.querySelector('.settings-scroll').textContent.includes('session_manager.py')"));
+    await clickText('.settings-scroll .segc button', '大');
+    await page.waitFor("[...document.querySelectorAll('.segc button[aria-pressed=true]')].some(e => e.textContent === '大')", 3000);
+    await page.shot(resolve(`shots/appearance-clean-${theme}.png`));
+    await clickText(".snav", "关于");
+    assert.equal(await page.eval("document.querySelector('.about .kvs b').textContent"), "0.2.1");
+    assert.equal(page.consoleErrors().length, 0);
+    assert.equal(page.cspViolations().length, 0);
+    console.log(`PASS stable alphabetical connection rows, repeated switches, clean appearance and version: ${theme}`);
+  } finally { await page.close(); }
+}

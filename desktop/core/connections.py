@@ -107,8 +107,19 @@ def codex_home(home: Path) -> Path:
     return home / ".codex"
 
 
+def _skill_name(path, fallback):
+    from desktop.core.harness.skills import _read as read_skill, slug, split_front_matter
+    text = read_skill(path)
+    if text is None:
+        return fallback
+    data, _ = split_front_matter(text)
+    return slug(str(data.get("name") or path.parent.name)) or fallback
+
+
 def _entry(kind, name, source, config, project="", parent="", *, fingerprint=True):
     source = _local(source)
+    if kind == "skill":
+        name = _skill_name(source, name)
     return {"id": _digest([kind, str(source), name, project])[:24], "kind": kind, "name": str(name), "source": str(source), "project": str(project), "config": config, "parent": parent, "enabled": False, "imported": False, "fingerprint": _source_hash(source) if fingerprint else ""}
 
 
@@ -139,6 +150,28 @@ class ConnectionStore:
             return [dict(e) for e in entries if isinstance(e, Mapping) and e.get("kind") in KINDS and isinstance(e.get("config"), Mapping) and all(isinstance(e.get(k), str) for k in ("id", "source", "name", "project", "fingerprint")) and isinstance(e.get("enabled"), bool) and not e["source"].startswith(("\\\\", "//"))]
         except ConnectionError:
             return []
+
+    @staticmethod
+    def _skill_key(entry):
+        from desktop.core.harness.skills import slug
+        return slug(entry["name"]) or entry["name"].casefold(), os.path.normcase(entry["project"])
+
+    def _selected_entries(self, entries, project=""):
+        # Normalize only this scope's metadata; preserve IDs and never migrate records during listing.
+        entries = [dict(entry) for entry in entries if not entry["project"] or entry["project"] == str(project)]
+        names, paths = {}, {}
+        for entry in entries:
+            if entry["kind"] == "skill":
+                try:
+                    entry["name"] = _skill_name(_local(entry["source"]), entry["name"])
+                except (ConnectionError, OSError):
+                    pass
+                names[self._skill_key(entry)] = entry["id"]
+                paths[(os.path.normcase(entry["source"]), os.path.normcase(entry["project"]))] = entry["id"]
+        return [entry for entry in entries if entry["kind"] != "skill" or (
+            names[self._skill_key(entry)] == entry["id"]
+            and paths[(os.path.normcase(entry["source"]), os.path.normcase(entry["project"]))] == entry["id"]
+        )]
 
     def _save(self, entries):
         if self.file.exists():
@@ -331,7 +364,10 @@ class ConnectionStore:
             if _source_hash(Path(entry["source"])) != entry["fingerprint"]:
                 raise ConnectionError("预览后源文件发生变化，请重新预览和确认。")
         old = {entry["id"]: entry for entry in self._load()}
-        old.update({entry["id"]: {**entry, "enabled": True, "imported": True} for entry in entries})
+        for entry in entries:
+            if entry["kind"] == "skill":
+                old.pop(entry["id"], None)
+            old[entry["id"]] = {**entry, "enabled": True, "imported": True}
         self._save(list(old.values()))
         self._preview.pop(key, None)
         return {"ok": True, "count": len(entries)}
@@ -339,9 +375,9 @@ class ConnectionStore:
     def scan(self, project=""):
         from desktop.core.harness import skills
 
-        stored = {e["id"]: e for e in self._load() if not e.get("project") or e["project"] == str(project)}
+        stored = {e["id"]: e for e in self._selected_entries(self._load(), project)}
         detected, errors = [], []
-        for skill in skills.discover(project or self.home, self.home):
+        for skill in skills.discover(project or self.home, self.home, include_disabled=True):
             try:
                 entry = _entry("skill", skill.name, skill.path, {"path": str(skill.path)}, project if skill.source == "project" else "", fingerprint=False)
                 entry["enabled"] = True
@@ -393,8 +429,9 @@ class ConnectionStore:
             except OSError:
                 errors.append({"source": str(plugins), "text": "插件目录不可访问，请检查文件权限。"})
         managed_skills = {os.path.normcase(entry["source"]) for entry in stored.values() if entry["kind"] == "skill"}
+        managed_names = {self._skill_key(entry) for entry in stored.values() if entry["kind"] == "skill"}
         for entry in detected:
-            if entry["kind"] == "skill" and os.path.normcase(entry["source"]) in managed_skills:
+            if entry["kind"] == "skill" and (self._skill_key(entry) in managed_names or os.path.normcase(entry["source"]) in managed_skills):
                 continue
             try:
                 self._validate(entry)
@@ -405,7 +442,7 @@ class ConnectionStore:
         items = []
         seen_items = set()
         for entry in stored.values():
-            identity = (entry["kind"], os.path.normcase(entry["source"]), "" if entry["kind"] == "skill" else entry["name"], os.path.normcase(entry["project"]))
+            identity = (entry["kind"], *self._skill_key(entry)) if entry["kind"] == "skill" else (entry["kind"], os.path.normcase(entry["source"]), entry["name"], os.path.normcase(entry["project"]))
             if identity in seen_items:
                 continue
             seen_items.add(identity)
@@ -415,6 +452,7 @@ class ConnectionStore:
             except (OSError, ConnectionError):
                 entry["changed"] = True
             items.append(entry)
+        items.sort(key=lambda entry: (entry["name"].casefold(), os.path.normcase(entry["source"]), os.path.normcase(entry["project"]), entry["id"]))
         unique_errors = {(os.path.normcase(error["source"]), error["text"]): error for error in errors}
         return {"items": items, "errors": list(unique_errors.values()), "hookEvents": sorted(HOOK_EVENTS)}
 
@@ -435,10 +473,10 @@ class ConnectionStore:
         if entry["kind"] in ("hook", "mcp", "plugin") and (config is not None or (enabled is True and not entry.get("imported"))) and not confirmed:
             raise ConnectionError("启用或更改可执行配置前，需要确认命令。")
         self._validate(entry)
-        if entry["kind"] == "skill" and config is not None:
+        if entry["kind"] == "skill":
             file = _local(entry["config"]["path"])
             entry["config"]["path"] = entry["source"] = str(file)
-            entry["name"] = file.parent.name
+            entry["name"] = _skill_name(file, file.parent.name)
         if entry["kind"] == "plugin" and config is not None:
             raise ConnectionError("请用导入预览更新插件，以便一次确认它包含的全部命令。")
         if entry["kind"] != "skill" and (enabled is True or config is not None) and _source_hash(Path(entry["source"])) != entry["fingerprint"]:
@@ -450,6 +488,8 @@ class ConnectionStore:
         if config is not None or enabled is True:
             entry["imported"] = True
             entry["fingerprint"] = _source_hash(Path(entry["source"]))
+        if entry["kind"] == "skill":
+            stored.pop(entry_id, None)
         stored[entry_id] = entry
         self._save(list(stored.values()))
         return {"ok": True}
@@ -471,7 +511,7 @@ class ConnectionStore:
             parent = by_id.get(entry.get("parent"))
             return False if entry.get("parent") and parent is None else allowed(parent, trail | {entry["id"]}) if parent is not None else True
         kept = []
-        for entry in entries:
+        for entry in self._selected_entries(entries, project) if kind == "skill" else entries:
             if entry["kind"] == kind:
                 try:
                     self._validate(entry)
@@ -481,9 +521,18 @@ class ConnectionStore:
                     continue
         return kept
 
-    def skill_allowed(self, path, project):
-        matches = [e for e in self._load() if e["kind"] == "skill" and e["config"].get("path") == str(path)]
-        return not matches or any(e["id"] in {item["id"] for item in self.active("skill", project)} for e in matches)
+    def skill_allowed(self, path, project, *, name="", source=""):
+        from desktop.core.harness.skills import slug
+        key = os.path.normcase(str(path))
+        matches = [entry for entry in self._selected_entries(self._load(), project) if entry["kind"] == "skill"
+                   and (not entry["project"] or entry["project"] == str(project))
+                   and (os.path.normcase(entry["source"]) == key or (
+                       name and self._skill_key(entry)[0] == slug(name) and (source != "project" or entry["project"])
+                   ))]
+        if not matches:
+            return True
+        selected = max(matches, key=lambda entry: bool(entry["project"]))
+        return os.path.normcase(selected["source"]) == key and selected["id"] in {entry["id"] for entry in self.active("skill", project)}
 
     def skill_sources(self, project):
         from desktop.core.harness.skills import Source

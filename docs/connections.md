@@ -8,9 +8,9 @@ WittyHarness 是 WittyCode 自己的循环，运行 ChatGPT Plan 与 API Provide
 
 ## 设置 → Connections
 
-可选「全局」或一个已添加的项目，分别查看 Skills、Plugins、Hooks、MCP。项目下同名的 MCP 覆盖全局定义；单独点某一行「测试连接」，测试的是那一行，不是它的同名覆盖项。
+可选「全局」或一个已添加的项目，分别查看 Skills、Plugins、Hooks、MCP。各列表按名称 A–Z 排列，不区分大小写，不按是否导入／启用分组；开关后保留原行、顺序和滚动位置。项目下同名的 MCP 覆盖全局定义；单独点某一行「测试连接」，测试的是那一行，不是它的同名覆盖项。
 
-- **Skills**：兼容 `SKILL.md`，包括 `.agents/skills`、`.codex/skills` 与原有技能目录。既有技能仍按原规则发现和使用；开关可将其停用，不修改源文件。
+- **Skills**：兼容 `SKILL.md`，包括 `.agents/skills`、`.codex/skills` 与原有技能目录。名称取 front matter，管理页保留本应用关闭的项，不复用运行时的「仅可用」列表。同一作用范围内的同名副本共用一个开关；明确选择的导入／更新来源优先；已有多个旧记录时按保存顺序取最后一项，之后的明确导入／更新会记为新的选择，旧记录不删除。关闭后不显示或运行其他同名备用副本。项目来源仍优先于全局，项目开关不修改全局状态；源文件不改写。
 - **Plugins**：支持本地目录中的 `.codex-plugin/plugin.json`，以及已有 Claude / Factory 清单标记。读取清单的 `skills`、`hooks`、`mcpServers`，插件总开关同时约束其子项。导入目录内的路径不能越界，链接目录不进入。
 - **Hooks**：读取 `hooks.json` 的 `hooks → 事件 → 分组 → hooks`，支持 `type: command`、`command`、Windows 的 `command_windows`、`matcher`、`timeout`（最多 120 秒）。支持 `SessionStart`、`UserPromptSubmit`、`PreToolUse`、`PostToolUse`、`Stop`、`SessionEnd`。当前只在 WittyHarness 执行；启动事件在会话首次发消息时运行。常见 OpenAI 工具别名可用于匹配；启动／发消息事件可附加上下文，发送前与工具执行前可拒绝操作，但不会越过应用自己的权限判定。执行后的 Hook 失败只附加提示，不撤销已发生的操作；结束事件不实现自动续跑。
 - **MCP**：读取 Codex `config.toml` 的 `[mcp_servers.NAME]` 和 JSON 的 `mcpServers`。本批支持 stdio 的 `command`、`args`、`env` 和 `env_vars`；环境值用 `${变量名}`，不导入明文密钥。会话里的进程以项目目录启动；全局行未选项目时，连接测试以来源文件夹启动。独立 `cwd`、工具白／黑名单和自定义 MCP 超时选项暂不实现，发现这些配置会明确拒绝，不把忽略后的结果当成兼容。
@@ -18,7 +18,7 @@ WittyHarness 是 WittyCode 自己的循环，运行 ChatGPT Plan 与 API Provide
 ### 发现范围与计数
 
 - 设置了 `CODEX_HOME` 时，它替代默认的 `~/.codex`，不同时合并两个 Codex 用户目录；技能列表和连接列表使用同一个来源规则。
-- 自动发现个人／项目技能、`plugins/插件名/.codex-plugin/plugin.json` 形式的直接本地插件，以及 WittyCode 已导入的项目。同一作用范围内，同一个技能文件不重复计数。
+- 自动发现个人／项目技能、`plugins/插件名/.codex-plugin/plugin.json` 形式的直接本地插件，以及 WittyCode 已导入的项目。同一作用范围内，同一个技能文件与同名副本不重复计数；切换开关不改变总数。
 - Codex `plugins/cache` 的历史版本、`plugins/marketplaces` 的市场源码与临时下载不是可靠的安装清单，不自动遍历、统计或执行。不会凭缓存目录猜测当前安装了哪一个版本；需要使用缓存中的某个具体插件时，可粘贴该插件目录预览导入。此前明确导入过的来源仍保留，不删除记录或外部文件。
 - 只读发现只读取定义，不递归计算未受信任插件的资源指纹。实际预览／导入仍检查整个来源、目录链接及上限（1000 个文件／12 MB），没有为了让列表正常打开而绕过信任检查。
 - 不支持或不可读的来源按「来源＋原因」去重，在可展开的「发现提示」中列明，不覆盖连接列表；其余可用项仍可操作。不支持的格式不会因此被启用。
