@@ -28,6 +28,7 @@ import codecs
 import contextlib
 import difflib
 import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -64,8 +65,8 @@ MAX_READ_BYTES = 5 * 1024 * 1024
 MAX_GREP_FILE_BYTES = 2 * 1024 * 1024
 DEFAULT_READ_LIMIT = 2000
 MAX_LINE_CHARS = 2000
-MAX_READ_CHARS = 250_000
-"""Guard for a page of very long lines; ordinary files stop at the line limit long before this."""
+MAX_READ_CHARS = 48_000
+"""A page stays below the loop's output cap, with room for the pagination footer and reminders."""
 MAX_LIST_ENTRIES = 500
 MAX_GLOB_RESULTS = 200
 MAX_GLOB_COLLECT = 20_000
@@ -237,6 +238,11 @@ def _decode(data: bytes) -> _Decoded:
     try:
         return _Decoded(data.decode(codec), codec, bom, False)
     except UnicodeDecodeError:
+        if not bom:
+            try:
+                return _Decoded(data.decode("gb18030"), "gb18030", b"", False)
+            except UnicodeDecodeError:
+                pass
         return _Decoded(data.decode(codec, "replace"), codec, bom, True)
 
 
@@ -325,6 +331,8 @@ def read_file(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
             more = offset - 1 + limit < total
     except OSError as error:
         raise _io_error("read", path, error) from None
+    if info.st_size <= MAX_READ_BYTES and (total == 0 or window):
+        ctx.read_files[_fold(str(path))] = hashlib.sha256(data).hexdigest()
     if total == 0:
         return ToolResult(f"{note}(The file is empty.)")
     if not window:
@@ -467,12 +475,9 @@ class _Globber:
         if self._under_protected(path):
             return
         try:
-            info = os.stat(path)
+            info = os.lstat(path)  # listing a link does not grant permission to stat its target
         except OSError:
-            try:
-                info = os.lstat(path)
-            except OSError:
-                return
+            return
         if is_dir is None:
             is_dir = stat.S_ISDIR(info.st_mode)
         if len(self.found) >= MAX_GLOB_COLLECT:
@@ -507,6 +512,14 @@ class _Globber:
             return
         if not has_magic(segment):
             target = os.path.join(directory, segment)
+            # A literal after a wildcard is still discovered implicitly, not part of policy's approved prefix.
+            if not last and any(has_magic(part) for part in segments[:index]):
+                try:
+                    info = os.lstat(target)
+                except OSError:
+                    return
+                if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & FILE_ATTRIBUTE_REPARSE_POINT:
+                    return
             if last:
                 if os.path.lexists(target):
                     self._emit(target, rel + segment)
@@ -522,25 +535,92 @@ class _Globber:
         for entry in entries:
             if not matches(entry.name):
                 continue
+            if not last and _is_link_dir(entry):
+                continue
             try:
-                is_dir = entry.is_dir()
+                is_dir = entry.is_dir(follow_symlinks=False)
             except OSError:
                 is_dir = False
             if is_dir and self._skipped(entry.name):
                 continue
             if last:
                 self._emit(entry.path, rel + entry.name, is_dir)
-            elif is_dir and not self._under_protected(entry.path):
+            elif is_dir and not _is_link_dir(entry) and not self._under_protected(entry.path):
                 self.walk(entry.path, f"{rel}{entry.name}/", segments, index + 1)
+
+
+def _git_inventory(folder: Path, blocked: Sequence[str] = (), *, directories: bool = False) -> list[str] | None:
+    """Git's tracked and non-ignored untracked paths, only when its metadata is safe to inspect/run."""
+    from desktop.core.harness.permissions import _GitUnknown, _git_dir_of, git_runs_own_programs
+    from desktop.core.harness.shell import _git_env
+
+    try:
+        if _git_dir_of(folder) is None:
+            return None
+    except _GitUnknown:
+        return None
+    executable = shutil.which("git")
+    if executable is None or git_runs_own_programs(folder) is not None:
+        return None
+    env = dict(os.environ)
+    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES"):
+        env.pop(name, None)
+    _git_env(env)
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    argv = [executable, "--no-optional-locks", "-c", "core.hooksPath=" + os.devnull, "ls-files", "--cached", "--others", "--exclude-standard", "-z"]
+    kwargs = {"creationflags": CREATE_NO_WINDOW} if IS_WINDOWS else {}
+    try:
+        result = subprocess.run(argv, cwd=folder, env=env, stdin=subprocess.DEVNULL, capture_output=True, timeout=3, **kwargs)
+        if result.returncode:
+            return None
+        names = set(os.fsdecode(result.stdout).split("\0")) - {""}
+        if directories:
+            listed = subprocess.run([*argv, "--directory"], cwd=folder, env=env, stdin=subprocess.DEVNULL, capture_output=True, timeout=3, **kwargs)
+            names.update(name.rstrip("/") for name in os.fsdecode(listed.stdout).split("\0") if name.endswith("/"))
+            names.update(parent.as_posix() for name in list(names) for parent in Path(name).parents if parent != Path("."))
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    safe = []
+    for name in sorted(names):
+        relative = Path(name)
+        if relative.is_absolute() or ".." in relative.parts:
+            continue
+        target = folder / relative
+        folded = _fold(str(target))
+        if any(folded == root or folded.startswith(root + os.sep) for root in blocked):
+            continue
+        # Git lists tracked links and paths below junctions too. Do not turn an inventory into a way out of the root.
+        current = folder
+        linked = False
+        try:
+            for part in relative.parts:
+                current /= part
+                info = current.lstat()
+                if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & FILE_ATTRIBUTE_REPARSE_POINT:
+                    linked = True
+                    break
+        except OSError:
+            continue
+        if not linked:
+            safe.append(name.replace("\\", "/"))
+    return safe
 
 
 def glob(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     folder = _folder(ctx, args.get("folder"))
     patterns = [item for raw in args["patterns"] for item in expand_braces(raw)]
     globber = _Globber(ctx, _named_dirs(patterns))
-    for pattern in patterns:
-        segments = _normalise_pattern(pattern)
-        globber.walk(str(folder), "", segments, 0)
+    segments_of = [_normalise_pattern(pattern) for pattern in patterns]
+    explicit = folder != _resolve_quietly(ctx.project) or bool(globber.allow) or any(not has_magic(parts[0]) and parts[0] != "**" for parts in segments_of)
+    inventory = None if explicit else _git_inventory(folder, globber._blocked, directories=True)
+    if inventory is not None:
+        matches = [_glob_matcher("/".join(parts)) for parts in segments_of]
+        for name in inventory:
+            if not any(part.lower() in SKIP_DIRS for part in Path(name).parts[:-1]) and any(match(name) for match in matches):
+                globber._emit(str(folder / name), name)
+    else:
+        for segments in segments_of:
+            globber.walk(str(folder), "", segments, 0)
     found = globber.found
     if ctx.protected:
         found = {rel: value for rel, value in found.items() if not is_protected(ctx, _resolve_quietly(folder / rel))}
@@ -753,11 +833,8 @@ def _walk_files(root: str, rel: str, allow: frozenset[str], aborted: Callable[[]
                 if _is_link_dir(entry) or (lowered in SKIP_DIRS and lowered not in allow):
                     continue
                 yield from _walk_files(path, f"{rel}{entry.name}/", allow, aborted, blocked)
-            elif entry.is_file():
-                if blocked and entry.is_symlink():
-                    real = _fold(os.path.realpath(path))
-                    if any(real == item or real.startswith(item + os.sep) for item in blocked):
-                        continue
+            elif not _is_link_dir(entry) and entry.is_file(follow_symlinks=False):
+                # An implicit walk has no approval to read a link's target. Naming it explicitly is checked by policy.
                 yield path, rel + entry.name
         except OSError:
             continue
@@ -836,7 +913,11 @@ def _search(request: Mapping[str, Any], aborted: Callable[[], bool]) -> tuple[li
     if target.is_file():
         files: Iterator[tuple[str, str]] = iter([(str(target), target.name)])
     else:
-        files = _walk_files(str(target), "", allow, aborted, list(request["blocked"]))
+        inventory = _git_inventory(target, list(request["blocked"])) if target == project and not allow else None
+        if inventory is None:
+            files = _walk_files(str(target), "", allow, aborted, list(request["blocked"]))
+        else:
+            files = ((str(target / name), name) for name in inventory if not any(part.lower() in SKIP_DIRS for part in Path(name).parts[:-1]) and (target / name).is_file())
         if accepts:
             files = ((path, rel) for path, rel in files if accepts(rel))
 
@@ -927,9 +1008,9 @@ def _wait_for_search(process: subprocess.Popen[bytes], abort: threading.Event, p
             raise ToolError("Stopped by the user.")
         if time.monotonic() >= deadline:
             raise ToolError(
-                f"The search took too long (more than {GREP_TIMEOUT_SECONDS:g} s) and was stopped. The regular expression "
-                f"{pattern!r} probably makes Python's regex engine backtrack, as nested or overlapping repetition such "
-                "as (a+)+ or (a|a)* does. Use a simpler pattern, or plain text, which is matched directly."
+                f"The search took too long (more than {GREP_TIMEOUT_SECONDS:g} s) and was stopped. A large file set, slow "
+                "storage or regular-expression backtracking can all cause this. Narrow the path or glob_pattern first; "
+                "for nested/overlapping repetition use a simpler pattern or plain text."
             )
 
 
@@ -1096,10 +1177,24 @@ def create_file(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     with _one_writer(path):
         existed = path.exists()
         try:
-            before = _existing_text(path) if existed else None
+            before = None
+            if existed:
+                if path.stat().st_size > MAX_READ_BYTES:
+                    raise ToolError("The existing file is too large to replace safely; read and edit a smaller part instead.")
+                original = path.read_bytes()
+                if ctx.read_files.get(_fold(str(path))) != hashlib.sha256(original).hexdigest():
+                    raise ToolError("The existing file has not been read in this conversation or has changed since it was read. Use read_file first, then retry with the current content.")
+                decoded = _decode(original)
+                if _is_binary(original) or decoded.lossy:
+                    raise ToolError("The existing file cannot be decoded safely; it was not overwritten.")
+                before = decoded.text
+                normal = content.replace("\r\n", "\n")
+                crlf = before.count("\r\n") > before.count("\n") - before.count("\r\n")
+                data = decoded.bom + (normal.replace("\n", "\r\n") if crlf else normal).encode(decoded.codec)
             _refuse_if_stopped(ctx)
             path.parent.mkdir(parents=True, exist_ok=True)
             _write(path, data, ctx)
+            ctx.read_files[_fold(str(path))] = hashlib.sha256(data).hexdigest()
         except OSError as error:
             raise _io_error("write", path, error) from None
     diff = diff_from_contents(str(path), before, content) if existed else diff_for_new_file(str(path), content)
@@ -1229,6 +1324,7 @@ def edit_file(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
             raise ToolError("new_str has characters that cannot be written back in the file's encoding.") from None
         try:
             _write(plan.path, data, ctx)
+            ctx.read_files[_fold(str(plan.path))] = hashlib.sha256(data).hexdigest()
         except OSError as error:
             raise _io_error("write", plan.path, error) from None
     diff = diff_from_contents(str(plan.path), plan.before, plan.after)
@@ -1263,7 +1359,7 @@ READ_FILE = ToolSpec(
     description=(
         "Read a text file and return its lines numbered like `{line number}<TAB>{text}`. "
         f"{_PATH_NOTE} Returns up to 2000 lines from the start unless offset/limit are given; use them to page through "
-        "a long file (the result says how to continue). Lines longer than 2000 characters are cut. UTF-8 and UTF-16 "
+        "a long file (the result says how to continue). Lines longer than 2000 characters are cut. UTF-8, GB18030 and UTF-16 "
         "(with BOM) are read. Binary files are refused, and so are files over 5 MB unless offset and limit narrow the read. "
         "To look at a folder use list_dir."
     ),
@@ -1345,9 +1441,9 @@ GREP = ToolSpec(
 CREATE_FILE = ToolSpec(
     name="create_file",
     description=(
-        "Create a file with the given content, or replace the whole content if it already exists. Missing parent folders are "
-        "created. Written as UTF-8 without BOM; line endings are written exactly as given. To change part of an existing "
-        "file use edit_file instead."
+        "Create a file with the given content. Replacing an existing file requires read_file in this conversation and "
+        "refuses a file changed since that read; its encoding, BOM and line endings are preserved. Missing parent folders "
+        "are created. New files use UTF-8 without BOM and the given line endings. To change part of a file use edit_file."
     ),
     parameters={
         "type": "object",

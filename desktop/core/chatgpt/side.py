@@ -21,19 +21,27 @@ SYSTEM = "You are a careful assistant. Follow the instructions in the user messa
 SECONDS = 90.0
 
 
-async def ask(engine: ChatGPTEngine, prompt: str, *, timeout: float = SECONDS) -> str | None:
+async def ask(engine: ChatGPTEngine, prompt: str, *, timeout: float = SECONDS, model_id: str = "", instructions: str = SYSTEM) -> str | None:
     """The model's answer to ``prompt``, or ``None`` when the plan cannot be used now (not signed in, no permission, an
     error: the reason is only logged, it is not the user's turn that failed)."""
+    from desktop.core.llm.backend import is_api_model
+
+    api = is_api_model(model_id)
     account = engine.cached_account()
-    if account.get("auth") != "signed-in" or not account.get("planEnabled"):
+    if not api and (account.get("auth") != "signed-in" or not account.get("planEnabled")):
         return None
     try:
-        models = await engine.list_models()
-        model = next((m for m in models if m.id == PREFERRED_MODEL), None) or (models[0] if models else None)
-        if model is None:
-            return None
+        if model_id:
+            model = engine.model_info(model_id)
+            if model is None:
+                return None
+        else:
+            models = await engine.list_models()
+            model = next((m for m in models if m.id == PREFERRED_MODEL), None) or (models[0] if models else None)
+            if model is None:
+                return None
         effort = "low" if "low" in model.efforts else None
-        request = build_request(model=model.id, instructions=SYSTEM, items=[user_message(prompt)], tools=[], reasoning=effort, shape=engine.shape)
+        request = build_request(model=model_id or model.id, instructions=instructions, items=[user_message(prompt)], tools=[], reasoning=effort, shape=engine.shape)
         text = ""
         async with asyncio.timeout(timeout):
             async for event in engine.stream(request):

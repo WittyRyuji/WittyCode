@@ -33,12 +33,14 @@ import asyncio
 import json
 import logging
 import re
+import time
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from desktop.core.chatgpt.errors import is_transient
-from desktop.core.chatgpt.responses import Finished, Shape, TextDone, build_request, declare_tools, user_message
+from desktop.core.chatgpt.responses import Finished, Shape, Started, TextDone, build_request, declare_tools, user_message
+from desktop.core.harness.prompt import context_update
 
 log = logging.getLogger("desktop.harness.compact")
 
@@ -185,7 +187,7 @@ def summary_text(item: Mapping[str, Any]) -> str:
 
 def synthetic_count(compaction: Mapping[str, Any] | None) -> int:
     """How many items ``view_of`` puts before the log: one, the summary, when there is a compaction."""
-    return 1 if compaction else 0
+    return (1 + bool(compaction.get("rules"))) if compaction else 0
 
 
 def kept_of(compaction: Mapping[str, Any]) -> str:
@@ -199,7 +201,8 @@ def view_of(items: Sequence[dict[str, Any]], compaction: Mapping[str, Any] | Non
     if not compaction:
         return list(items)
     upto = max(0, min(int(compaction.get("upto") or 0), len(items)))
-    return [summary_item(str(compaction.get("summary") or ""), kept_of(compaction)), *items[upto:]]
+    rules = str(compaction.get("rules") or "")
+    return [summary_item(str(compaction.get("summary") or ""), kept_of(compaction)), *([context_update(rules)] if rules else []), *items[upto:]]
 
 
 def log_index(cut: int, upto: int, synthetic: int) -> int:
@@ -317,11 +320,14 @@ def render(item: Mapping[str, Any]) -> str:
         text = _said(item)
         if not text:
             return ""
-        if item.get("role") == "user":
-            return f"USER: {text}"
+        if item.get("role") in ("user", "developer"):
+            return f"{str(item['role']).upper()}: {text}"
         return f"ASSISTANT: {_clip(text, TEXT_LIMIT)}"
     if kind == "function_call":
-        return f"ASSISTANT CALLED TOOL {item.get('name')}: {_clip(str(item.get('arguments') or ''), ARGS_LIMIT)}"
+        name = str(item.get("name") or "")
+        args = str(item.get("arguments") or "")
+        # Plans and edit parameters are the durable state, not disposable tool output. Chunk rather than clip them.
+        return f"ASSISTANT CALLED TOOL {name}: " + (args if name in ("todo_write", "edit_file", "create_file") else _clip(args, ARGS_LIMIT))
     if kind == "function_call_output":
         return f"TOOL RESULT: {_clip(str(item.get('output') or ''), RESULT_LIMIT)}"
     return ""
@@ -367,9 +373,11 @@ def summary_parts(items: Sequence[Mapping[str, Any]], budget: int) -> list[str]:
         text = render(item)
         if not text:
             continue
-        if is_user(item) and estimate_text(text) > budget:
-            split = pieces(_said(item), budget - PIECE_LABEL)
-            parts += [f"USER (one message, part {number} of {len(split)}): {piece}" for number, piece in enumerate(split, 1)]
+        if estimate_text(text) > budget:
+            body = _said(item) if is_user(item) else text
+            label = "USER (one message" if is_user(item) else "CONTEXT (one item"
+            split = pieces(body, budget - PIECE_LABEL)
+            parts += [f"{label}, part {number} of {len(split)}): {piece}" for number, piece in enumerate(split, 1)]
         else:
             parts.append(text)
     return parts
@@ -444,27 +452,51 @@ RETRY_LONGEST = 60.0
 _sleep = asyncio.sleep
 
 
-async def ask(stream: Stream, model: str, reasoning: str | None, previous: str, part: Sequence[str], on_usage: OnUsage | None = None) -> str:
+SUMMARY_TASK = "WittyCode summary task: write a summary of the conversation above, not an answer or a tool call.\n\n"
+OnRequest = Callable[[dict[str, Any], Finished | None, float, bool], None]
+
+
+def prefix_summary_request(base: Mapping[str, Any], items: Sequence[Mapping[str, Any]], window: int) -> dict[str, Any] | None:
+    """Reuse the main Responses prefix when it fits; no experimental cache or server-compaction parameters."""
+    request = {**base, "input": [*items, user_message(SUMMARY_TASK + INSTRUCTIONS)], "tool_choice": "none"}
+    size = estimate_items(request["input"]) + estimate_text(str(request.get("instructions") or ""))
+    size += estimate_text(json.dumps(request.get("tools") or [], ensure_ascii=False))
+    return request if size <= budget(window) else None
+
+
+async def ask(
+    stream: Stream, model: str, reasoning: str | None, previous: str, part: Sequence[str], on_usage: OnUsage | None = None,
+    *, request: dict[str, Any] | None = None, on_request: OnRequest | None = None,
+) -> str:
     repeats = 0
     while True:
         texts: list[str] = []
         finished = False
+        acknowledged = False
+        sent = request if request is not None else _request(model, reasoning, previous, part)
+        started = time.monotonic()
+        response: Finished | None = None
+        failed = True
         try:
-            async for event in stream(_request(model, reasoning, previous, part)):
-                if isinstance(event, TextDone):
+            async for event in stream(sent):
+                if isinstance(event, Started):
+                    acknowledged = True
+                elif isinstance(event, TextDone):
                     texts.append(event.text)
                 elif isinstance(event, Finished):
                     finished = True
+                    response = event
                     if event.usage is not None and on_usage is not None:
                         on_usage(event.usage)
                     if event.incomplete:
                         raise CompactionFailed(f"the summary was cut short ({event.incomplete})")
+            failed = False
         except CompactionFailed:
             raise
         except Exception as error:  # (a stop is a CancelledError and passes)
             # Nothing of a summary is used before it is whole, so asking again is the same request; one whose answer was
             # finished (and counted) is not asked twice.
-            if finished or repeats >= len(RETRY_DELAYS) or not is_transient(error):
+            if (acknowledged and getattr(error, "code", None) in ("network", "stream", "stream_idle", "timeout")) or finished or repeats >= len(RETRY_DELAYS) or not is_transient(error):
                 raise
             delay = RETRY_DELAYS[repeats]
             asked = getattr(error, "retry_after", None)
@@ -474,6 +506,9 @@ async def ask(stream: Stream, model: str, reasoning: str | None, previous: str, 
             log.warning("the summary request failed (%s); asking again in %.1f s (%d of %d)", error, delay, repeats, len(RETRY_DELAYS))
             await _sleep(delay)
             continue
+        finally:
+            if on_request is not None:
+                on_request(sent, response, time.monotonic() - started, failed)
         text = "\n".join(texts).strip()
         if not text:
             raise CompactionFailed("the summary came back empty")
@@ -481,11 +516,12 @@ async def ask(stream: Stream, model: str, reasoning: str | None, previous: str, 
 
 
 async def summarise(
-    stream: Stream, model: str, reasoning: str | None, previous: str, parts: Sequence[str], budget: int, on_usage: OnUsage | None = None
+    stream: Stream, model: str, reasoning: str | None, previous: str, parts: Sequence[str], budget: int, on_usage: OnUsage | None = None,
+    on_request: OnRequest | None = None,
 ) -> str:
     summary = previous
     for group in chunks(parts, budget):
-        summary = await ask(stream, model, reasoning, summary, group, on_usage)
+        summary = await ask(stream, model, reasoning, summary, group, on_usage, on_request=on_request)
     return summary
 
 
@@ -528,6 +564,9 @@ async def compact(
     on_usage: OnUsage | None = None,
     whole: bool = False,
     fallback: bool = True,
+    rules: str = "",
+    prefix_request: Mapping[str, Any] | None = None,
+    on_request: OnRequest | None = None,
 ) -> Compacted | None:
     """Summarise the front of ``view`` so that a request of it fits ``window``; ``fixed``: the tokens every request holds
     besides the view (instructions, tools). ``None``: there is nothing that could be cut.
@@ -563,7 +602,11 @@ async def compact(
     problem = ""
     mechanical = False
     try:
-        summary = await summarise(stream, model, reasoning, told, parts, chunk, on_usage)
+        reused = prefix_summary_request(prefix_request, view[:cut], window) if prefix_request is not None else None
+        if reused is not None:
+            summary = await ask(stream, model, reasoning, told, parts, on_usage, request=reused, on_request=on_request)
+        else:
+            summary = await summarise(stream, model, reasoning, told, parts, chunk, on_usage, on_request)
     except CompactionFailed as error:
         if not fallback:
             raise
@@ -577,7 +620,7 @@ async def compact(
         summary = digest(covered, told)
     words = _joined(carried, *(_said(item) for item in view[max(turn, synthetic) : cut] if is_user(item)))
     rest = list(view[cut:])
-    new_view = [summary_item(summary, words), *rest]
+    new_view = [summary_item(summary, words), *([context_update(rules)] if rules else []), *rest]
     before, after = estimate_items(view), estimate_items(new_view)
     return Compacted(new_view, cut, summary, before, after, mechanical, problem, words, after < before and after <= room)
 

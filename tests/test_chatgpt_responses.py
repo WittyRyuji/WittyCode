@@ -187,18 +187,19 @@ def test_a_cache_key_is_sent_only_when_asked_for():
     assert on["prompt_cache_key"] == "abc" and "prompt_cache_key" not in off
 
 
-def test_kept_items_lose_their_ids_because_nothing_is_stored_server_side():
-    message = history_item({"type": "message", "id": "msg_1", "role": "assistant", "status": "completed", "content": [{"type": "output_text", "text": "x"}]})
-    assert message == {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "x"}]}
-    function = history_item({"type": "function_call", "id": "fc_1", "call_id": "c1", "name": "n", "arguments": "{}", "status": "completed"})
-    assert function == {"type": "function_call", "call_id": "c1", "name": "n", "arguments": "{}"}
-    reasoning = history_item({"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "blob", "status": "completed"})
-    assert reasoning == {"type": "reasoning", "summary": [], "encrypted_content": "blob"}
+def test_complete_output_items_are_replayed_with_their_ids_and_status():
+    items = [
+        {"type": "message", "id": "msg_1", "role": "assistant", "status": "completed", "phase": "commentary", "content": [{"type": "output_text", "text": "x"}]},
+        {"type": "function_call", "id": "fc_1", "call_id": "c1", "name": "n", "arguments": "{}", "status": "completed"},
+        {"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "blob", "status": "completed"},
+    ]
+    for item in items:
+        assert history_item(item) == item and history_item(item) is not item
 
 
 def test_reasoning_without_its_encrypted_content_cannot_be_sent_back_and_is_dropped():
     assert history_item({"type": "reasoning", "id": "rs_1", "summary": [{"text": "x"}]}) is None
-    assert history_item({"type": "web_search_call", "id": "w"}) is None
+    assert history_item({"type": "web_search_call", "id": "w"}) == {"type": "web_search_call", "id": "w"}
 
 
 def test_item_builders():

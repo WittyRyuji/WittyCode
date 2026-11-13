@@ -115,7 +115,7 @@ def test_archived_sessions_their_names_and_the_last_project_survive_the_file_and
 def test_the_shared_memory_engines_are_the_ones_there_are():
     from desktop.core.settings import settings_from_dict
 
-    assert settings_from_dict({}).memory_engines == ["devin", "chatgpt"], "on for every engine to begin with"
+    assert settings_from_dict({}).memory_engines == ["devin", "chatgpt", "factory"], "on for every engine to begin with"
     assert settings_from_dict({"version": 2, "memory_engines": ["chatgpt"]}).memory_engines == ["chatgpt"], "a choice is kept"
     # a file from before the own loop joined the memory, with every engine then known on: the own loop gets it too
     assert settings_from_dict({"version": 1, "memory_engines": ["devin"]}).memory_engines == ["devin", "chatgpt"]

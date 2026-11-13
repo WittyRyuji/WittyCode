@@ -200,12 +200,6 @@ class DevinController:
     def title(self) -> str:
         if self.transcript.title:
             return self.transcript.title
-        first = next((t for t in self.transcript.turns if t.user_block), None)
-        if first is not None and first.user_block is not None:
-            lines = first.user_block.text.strip().splitlines()
-            text = lines[0] if lines else ""
-            if text:
-                return text[:60]
         return self.saved_title or "新会话"
 
     @property

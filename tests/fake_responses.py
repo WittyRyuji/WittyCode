@@ -116,6 +116,9 @@ class FakeResponses:
         """When set, a request without ``Bearer <token>`` is answered 401."""
         self.requests: list[dict[str, Any]] = []
         self.headers: list[dict[str, str]] = []
+        self.title_requests: list[dict[str, Any]] = []
+        self.title_answer = "会话主题摘要"
+        self.title_turn: Any = None
         self.model_requests = 0
         self.models_status = 200
         """The HTTP status of the model list (its body is the list whatever the status: a client must not trust it)."""
@@ -180,10 +183,17 @@ class FakeResponses:
                     return
                 if not self._authorized():
                     return
+                from desktop.core.session_title import SYSTEM as TITLE_SYSTEM
+
                 with fake._lock:
-                    fake.requests.append(body)
-                    fake.headers.append({key.lower(): value for key, value in self.headers.items()})
-                    turn = fake._turns.pop(0) if fake._turns else say("(nothing was scripted)")
+                    if body.get("instructions") == TITLE_SYSTEM:
+                        # Independent scripts keep a title request from taking a main conversation's held answer.
+                        fake.title_requests.append(body)
+                        turn = fake.title_turn if fake.title_turn is not None else say(fake.title_answer)
+                    else:
+                        fake.requests.append(body)
+                        fake.headers.append({key.lower(): value for key, value in self.headers.items()})
+                        turn = fake._turns.pop(0) if fake._turns else say("(nothing was scripted)")
                 if isinstance(turn, http_error):
                     self._reply(turn.status, json.dumps(turn.body).encode(), extra=turn.headers)
                     return

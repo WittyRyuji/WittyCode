@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from desktop.core.cache import Cache
 from desktop.core.session_state import SessionState
 from desktop.core.usage import Tokens
@@ -137,6 +139,41 @@ def test_an_engine_change_preserves_model_shares_and_caches_them_with_the_total(
             await again.call("session.send", {"id": reopened, "text": "third"})
             await done(events2, reopened, 2534)
             assert meta(events2, reopened)["usageModels"] == {"chatgpt:gpt-6.1-sol": 110, "devin:swe-2-high": 2424}
+        finally:
+            await again.shutdown()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("with_cache", [False, True])
+def test_restarting_the_app_keeps_both_models_before_the_next_message(tmp_path, with_cache):
+    async def scenario():
+        cache = Cache(tmp_path / "cache") if with_cache else None
+        core, plan, events, _, engine = await ready_core(tmp_path, cache=cache)
+        try:
+            cid = await new(core, events, tmp_path)
+            plan.script(say("first answer", used=usage(100, 10, cached=20)))
+            await core.call("session.send", {"id": cid, "text": "first"})
+            await done(events, cid, 110)
+            await core.call("session.choose", {"id": cid, "field": "model", "value": "chatgpt:gpt-6-luna"})
+            plan.script(say("second answer", used=usage(200, 20, cached=50)))
+            await core.call("session.send", {"id": cid, "text": "second"})
+            await done(events, cid, 330)
+            native = core._by_cid[cid].controller.session_id
+        finally:
+            await core.shutdown()
+        # New core, engine, backend and events: no state survives in memory. The archive alone must suffice, too.
+        again, next_plan, next_events, _, _ = await ready_core(tmp_path, cache=cache)
+        try:
+            reopened = (await again.call("session.openSaved", {"projectId": str(tmp_path / "proj"), "id": "cg:" + native}))["id"]
+            await done(next_events, reopened, 330)
+            expected = {"chatgpt:gpt-6.1-sol": 110, "chatgpt:gpt-6-luna": 220}
+            assert meta(next_events, reopened)["usageModels"] == expected
+            assert not next_plan.requests, "opening the chart must not consume tokens to recover attribution"
+            next_plan.script(say("third answer", used=usage(50, 5)))
+            await again.call("session.send", {"id": reopened, "text": "third"})
+            await done(next_events, reopened, 385)
+            assert meta(next_events, reopened)["usageModels"] == {**expected, "chatgpt:gpt-6-luna": 275}
         finally:
             await again.shutdown()
 

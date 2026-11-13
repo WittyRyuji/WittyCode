@@ -221,7 +221,7 @@ def test_a_chatgpt_plan_session_opens_runs_and_reports_its_settings_and_total(tm
             await until(lambda: (meta(events, cid).get("usage") or {}).get("input") == 600)
             assert meta(events, cid)["usage"] == {"input": 600, "output": 12, "cacheWrite": None, "cacheRead": 300}
             assert meta(events, cid)["context"]["used"] == 912 and meta(events, cid)["context"]["window"] == 400000
-            assert meta(events, cid)["title"] == "hello"
+            await until(lambda: meta(events, cid)["title"] == fake.title_answer)
             await core.shutdown()
 
     run(scenario())
@@ -272,8 +272,9 @@ def test_saved_chatgpt_sessions_are_in_the_sidebar_and_open_from_there(tmp_path)
             await core.call("session.close", {"id": cid})
             await core.call("project.refresh", {"id": str(tmp_path / "proj")})
             await until(lambda: ("cg:" + session_id) in events.last("sidebar")["sessions"])
+            await until(lambda: events.last("sidebar")["sessions"]["cg:" + session_id]["title"] == fake.title_answer)
             row = events.last("sidebar")["sessions"]["cg:" + session_id]
-            assert row["title"] == "first question" and row["engine"] == "chatgpt"
+            assert row["title"] == fake.title_answer and row["engine"] == "chatgpt"
             again = (await core.call("session.openSaved", {"id": "cg:" + session_id, "projectId": str(tmp_path / "proj"), "title": "first question"}))["id"]
             await until(lambda: meta(events, again).get("mark") == "ready")
             assert meta(events, again)["engine"] == "chatgpt" and meta(events, again)["nativeId"] == session_id

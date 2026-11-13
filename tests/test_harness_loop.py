@@ -153,7 +153,7 @@ def test_a_tool_call_is_run_and_its_result_goes_back_to_the_model():
     assert history[3] == {"type": "function_call_output", "call_id": "c1", "output": "echo:hi"}
     second = script.requests[1]["input"]
     assert second[-1]["type"] == "function_call_output" and second[-2]["type"] == "function_call"
-    assert "id" not in second[-2]  # (ids are not sent back: nothing is stored server-side)
+    assert second[-2]["id"] == "fc_1" and second[-2]["status"] == "completed", "replay the complete output, not a reference"
     assert [entry for entry in observer.log if entry[0] in ("ready", "done")] == [("ready", "echo", False), ("done", "echo", "echo:hi", False, False)]
     assert_paired(history)
 
@@ -458,7 +458,8 @@ def test_an_answer_that_had_begun_is_not_repeated():
     loop = AgentLoop(stream, FakeTools(), Recorder(), model="m", reasoning=None, instructions="", pause=Pauses())
     with pytest.raises(ChatGPTError):
         asyncio.run(loop.run(history))
-    assert len(stream.requests) == 1 and kinds(history) == ["message:user"]
+    assert len(stream.requests) == 1 and kinds(history) == ["message:user", "message:assistant"]
+    assert history[-1]["content"][0]["text"] == "par", "visible completed output survives a later stream failure"
 
 
 def test_a_stop_during_the_pause_leaves_the_history_as_it_was():

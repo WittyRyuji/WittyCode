@@ -171,6 +171,7 @@ def test_words_arrive_in_pieces_then_the_message_and_the_usage_counts_what_the_c
         stop(0),
         *end("end_turn", 12),
     ])
+    assert type(events.pop(0)).__name__ == "Started"
     assert kinds(events) == ["TextDelta", "TextDelta", "TextDone", "ItemDone", "Finished"]
     assert events[2] == TextDone("msg_0", "Hello.")
     assert events[3].item == {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Hello."}]}
@@ -195,6 +196,7 @@ def test_thinking_keeps_its_signature_and_a_tool_call_arrives_as_json_in_pieces(
         stop(1),
         *end("tool_use"),
     ])
+    assert type(events.pop(0)).__name__ == "Started"
     assert kinds(events) == ["ReasoningDelta", "ReasoningDelta", "ReasoningDone", "ItemDone", "CallBegun", "CallDone", "ItemDone", "Finished"]
     assert events[2] == ReasoningDone("rs_0", "Let me look.")
     assert events[3].item == {"type": "reasoning", "summary": [{"type": "summary_text", "text": "Let me look."}], "wc_reasoning": "Let me look.", "wc_signature": "SIG==", "wc_origin": ORIGIN}
@@ -205,6 +207,7 @@ def test_thinking_keeps_its_signature_and_a_tool_call_arrives_as_json_in_pieces(
 
 def test_a_call_without_arguments_has_an_empty_object_and_a_redacted_block_is_kept():
     events = read([start(), block(0, {"type": "redacted_thinking", "data": "XYZ"}), stop(0), block(1, {"type": "tool_use", "id": "t", "name": "ls", "input": {}}), stop(1), *end("tool_use")])
+    assert type(events.pop(0)).__name__ == "Started"
     assert events[0].item == {"type": "reasoning", "summary": [], "wc_data": "XYZ", "wc_origin": ORIGIN}
     assert [e for e in events if isinstance(e, CallDone)][0].arguments == "{}"
 
@@ -225,5 +228,5 @@ def test_an_error_event_is_raised_and_a_stream_that_stops_early_is_an_error():
 
 def test_pings_and_unknown_events_are_ignored():
     events = read([start(), ("ping", {"type": "ping"}), ("something_new", {"type": "something_new"}), *end()])
-    assert kinds(events) == ["Finished"]
+    assert kinds(events) == ["Started", "Finished"]
     assert ReasoningDelta("a", "b").text == "b" and TextDelta("a", "b").text == "b"

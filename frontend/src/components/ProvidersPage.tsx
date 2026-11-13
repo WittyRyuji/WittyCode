@@ -8,6 +8,7 @@ import { messageOf } from "../lib/errors";
 import { CHATGPT_USAGE_URL, chatgptState } from "../lib/chatgpt";
 import type { ApiProvider, DevinAccount, EnvState } from "../types";
 import { Switch } from "./formkit";
+import { FactorySettings } from "./FactorySettings";
 import { ModelVisibility } from "./ModelVisibility";
 
 function Card({ title, state, tone, children, actions }: { title: string; state: string; tone: "ok" | "warn" | "off" | "busy"; children?: ReactNode; actions?: ReactNode }) {
@@ -295,6 +296,7 @@ export function ProvidersPage() {
           <ExternalLink size={12} /> 支持 Anthropic、OpenAI、OpenRouter、Fireworks、Groq、Gemini 兼容接口、Ollama、LM Studio、AWS Bedrock，以及任何 OpenAI 兼容的服务。
         </div>
       </section>
+      <FactorySettings />
     </div>
   );
 }

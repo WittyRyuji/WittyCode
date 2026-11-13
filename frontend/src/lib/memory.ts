@@ -11,7 +11,7 @@ export const KINDS: { id: MemoryKind; label: string; hint: string }[] = [
 
 export const kindLabel = (kind: string) => KINDS.find((k) => k.id === kind)?.label ?? kind;
 
-const ENGINE_NAMES: Record<string, string> = { droid: "Droid", codex: "Codex", devin: "Devin", chatgpt: "ChatGPT Plan", claude: "Claude Code", factory: "Factory Droid" };
+const ENGINE_NAMES: Record<string, string> = { droid: "Droid", codex: "Codex", devin: "Devin", chatgpt: "WittyHarness", claude: "Claude Code", factory: "Factory" };
 
 export const engineName = (engine: string) => ENGINE_NAMES[engine] ?? (engine || "代理");
 

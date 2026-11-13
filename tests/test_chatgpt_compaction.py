@@ -54,7 +54,7 @@ def inputs(request: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def is_summary_request(request: dict[str, Any]) -> bool:
-    return request["instructions"] == compact.INSTRUCTIONS
+    return request["instructions"] == compact.INSTRUCTIONS or (request.get("tool_choice") == "none" and request["input"][-1]["content"][0]["text"].startswith(compact.SUMMARY_TASK))
 
 
 # ----------------------------------------------------------------------------------------------- the next request does not fit

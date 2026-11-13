@@ -72,15 +72,15 @@ kbd { font-family: var(--font-mono); font-size: 11px; }
 .newbtn kbd { margin-left: auto; opacity: 0.7; font-weight: 500; }
 .side-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px 2px 16px; font-size: 11px; font-weight: 700; letter-spacing: 0.08em; color: var(--muted); }
 .side-head-actions { display: flex; gap: 2px; }
-.side-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 2px 8px 14px; }
+.side-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 2px 12px 14px; }
 .side-empty { margin: 24px 12px; display: flex; flex-direction: column; align-items: center; gap: 8px; text-align: center; color: var(--muted); }
-.side-foot { flex: none; border-top: 1px solid var(--line-strong); padding: 8px 10px; }
+.side-foot { flex: none; border-top: 1px solid var(--line-strong); padding: 8px 12px; }
 .foot-btn { width: 100%; height: 34px; display: flex; align-items: center; gap: 10px; padding: 0 10px; color: var(--fg-2); font-weight: 600; }
 .foot-btn:hover { background: var(--hover); color: var(--fg); }
 .foot-btn kbd { margin-left: auto; color: var(--muted); font-weight: 400; }
 
 .proj { margin-bottom: 6px; }
-.phead-row { display: flex; align-items: center; padding-right: 2px; }
+.phead-row { display: flex; align-items: center; padding-right: 2px; transition: background-color 0.12s ease; }
 .phead-row:hover { background: var(--hover); }
 .phead-row .icon-btn { opacity: 0; }
 .phead-row:hover .icon-btn, .phead-row:focus-within .icon-btn { opacity: 1; }
@@ -90,10 +90,11 @@ kbd { font-family: var(--font-mono); font-size: 11px; }
 .proj-text { min-width: 0; display: flex; flex-direction: column; }
 .pname { font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ppath { font: 10.5px var(--font-mono); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.slist { padding: 1px 0 4px 8px; }
-.snote { padding: 6px 12px; font-size: 12px; color: var(--muted); }
+/* Indent the contents, not the highlight: project and session backgrounds share one gutter. */
+.slist { padding: 1px 0 4px; }
+.snote { padding: 6px 16px; font-size: 12px; color: var(--muted); }
 
-.srow { display: flex; align-items: center; gap: 10px; padding: 7px 4px 7px 12px; margin: 1px 0; cursor: pointer; }
+.srow { display: flex; align-items: center; gap: 10px; padding: 7px 4px 7px 16px; margin: 1px 0; cursor: pointer; }
 .srow:hover { background: var(--hover); }
 .srow.drop-before { box-shadow: 0 -2px 0 var(--fg); }
 .srow.drop-after { box-shadow: 0 2px 0 var(--fg); }
@@ -103,7 +104,7 @@ kbd { font-family: var(--font-mono); font-size: 11px; }
 .ssub { font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .srow.m-attention .ssub { color: var(--fg); font-weight: 600; }
 .srow.m-dead .ssub { color: var(--st-dead); }
-.srow .more { width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center; color: var(--muted); opacity: 0; flex: none; }
+.srow .more { width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center; color: var(--muted); opacity: 0; flex: none; transition: opacity 0.12s ease; }
 .srow:hover .more, .srow:focus-within .more { opacity: 1; }
 .srow .more:hover { background: var(--press); color: var(--fg); }
 /* the current session is inverted, like the label of the logo */

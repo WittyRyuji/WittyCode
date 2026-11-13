@@ -198,7 +198,8 @@ def test_each_message_to_devin_asks_for_chinese_thinking_until_the_setting_is_of
         cid = await new_devin(core, events, tmp_path)
 
         def sent(index):
-            return "".join(block.get("text", "") for block in harness.requests("session/prompt")[index]["prompt"])
+            prompts = [p for p in harness.requests("session/prompt") if p["sessionId"] == core._by_cid[cid].controller.session_id]
+            return "".join(block.get("text", "") for block in prompts[index]["prompt"])
 
         await core.call("session.send", {"id": cid, "text": "hello"})
         await until(lambda: meta(events, cid).get("mark") == "ready" and answer_of(events, cid).startswith("echo: hello"))
@@ -224,14 +225,16 @@ def test_steering_carries_the_chinese_rule_without_showing_it_and_reads_the_sett
         try:
             await core.call("settings.set", {"key": "thinkChinese", "value": True})
             cid = await new_devin(core, events, tmp_path)
+            def prompts():
+                return [p for p in harness.requests("session/prompt") if p["sessionId"] == core._by_cid[cid].controller.session_id]
             for index, enabled in enumerate((True, False)):
                 await core.call("session.send", {"id": cid, "text": "[slow] wait"})
-                await until(lambda: len(harness.requests("session/prompt")) == index * 2 + 1)
+                await until(lambda: len(prompts()) == index * 2 + 1)
                 await core.call("settings.set", {"key": "thinkChinese", "value": enabled})
                 text = f"continue {index}"
                 assert await core.call("session.send", {"id": cid, "text": text, "how": "steer"}) == {"ok": True, "steered": True}
-                await until(lambda: len(harness.requests("session/prompt")) == index * 2 + 2)
-                sent = harness.requests("session/prompt")[-1]["prompt"][0]["text"]
+                await until(lambda: len(prompts()) == index * 2 + 2)
+                sent = prompts()[-1]["prompt"][0]["text"]
                 assert sent.startswith(text) and (THINK_CHINESE in sent) is enabled
                 if enabled:
                     assert sent.count(THINK_CHINESE) == 1 and "<wittycode-context>" in sent

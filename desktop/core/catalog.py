@@ -19,7 +19,7 @@ DEVIN_PREFIX = "devin:"
 CHATGPT_PREFIX = "chatgpt:"
 API_PREFIX = "api:"
 OWN_ENGINE = "chatgpt"
-ENGINE_PREFIXES = {"devin": DEVIN_PREFIX, "chatgpt": CHATGPT_PREFIX}
+ENGINE_PREFIXES = {"devin": DEVIN_PREFIX, "chatgpt": CHATGPT_PREFIX, "factory": "factory:"}
 """The page-id prefix of each engine's own models."""
 
 
@@ -115,6 +115,7 @@ def _efforts(values: Iterable[Any] | None) -> list[str]:
 
 def build_catalog(
     *,
+    factory_models: Sequence[Any] = (),
     devin_models: Sequence[Any] = (),
     chatgpt_models: Sequence[Any] = (),
     api_models: Sequence[Any] = (),
@@ -131,6 +132,13 @@ def build_catalog(
         catalog.models.append(item)
         catalog._targets[item["id"]] = target
         catalog._page_ids[(target.engine, native)] = item["id"]
+
+    for model in factory_models:
+        native = model["id"]
+        item = {"id": "factory:" + native, "label": model.get("displayName") or native, "source": "factory", "efforts": model.get("supportedReasoningEfforts") or [], "defaultEffort": model.get("defaultReasoningEffort") or "", "window": model.get("contextWindow") or 0}
+        if model.get("noImageSupport"):
+            item["noImages"] = True
+        add(item, Target("factory", native), native)
 
     for model in devin_models:
         item = {

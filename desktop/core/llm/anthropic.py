@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Any
 
@@ -30,6 +31,7 @@ from desktop.core.chatgpt.responses import (
     ItemDone,
     ReasoningDelta,
     ReasoningDone,
+    Started,
     TextDelta,
     TextDone,
     Usage,
@@ -86,8 +88,8 @@ def anthropic_messages(items: Sequence[Mapping[str, Any]], origin: str) -> list[
                 continue
             if item.get("wc_data"):
                 push("assistant", [{"type": "redacted_thinking", "data": item["wc_data"]}])
-            elif item.get("wc_reasoning") and item.get("wc_signature"):
-                push("assistant", [{"type": "thinking", "thinking": item["wc_reasoning"], "signature": item["wc_signature"]}])
+            elif item.get("wc_signature"):
+                push("assistant", [{"type": "thinking", "thinking": item.get("wc_reasoning", ""), "signature": item["wc_signature"]}])
         elif kind == "message" and item.get("role") == "assistant":
             text = text_of(item)
             push("assistant", [{"type": "text", "text": text}] if text.strip() else [])
@@ -114,6 +116,37 @@ def thinking_for(effort: str | None, max_tokens: int, budget: int | None = None)
     return {"type": "enabled", "budget_tokens": room} if room >= MIN_BUDGET else None
 
 
+def thinking_effort(request: Mapping[str, Any]) -> str | None:
+    """Off is internal metadata: the Responses wire format has no such effort enum."""
+    reasoning = request.get("reasoning")
+    return request.get("wc_reasoning_effort") or (reasoning.get("effort") if isinstance(reasoning, Mapping) else None)
+
+
+def thinking_fields(model: str, effort: str | None, max_tokens: int, budget: int | None = None) -> dict[str, Any]:
+    """Claude 4.6+ supports adaptive thinking; 4.7+ rejects manual budgets. Compatible third-party models keep theirs."""
+    version = re.search(r"claude-(?:(opus|sonnet|haiku|fable|mythos)-)?(\d+)(?:[-.](\d+))?", model.lower())
+    number = (int(version[2]), int(version[3] or 0)) if version else (0, 0)
+    preview = "claude-mythos-preview" in model.lower()
+    adaptive = number >= (4, 6) or preview
+    if effort in ("none", "off"):
+        always = preview or (version and (
+            (version[1] in ("fable", "mythos") and number in ((5, 0), (5, 1), (5, 2)))
+            or (version[1] in ("opus", "sonnet") and number == (5, 5))
+        ))
+        if always:
+            raise ChatGPTError("当前模型不能关闭 thinking；请改用 low 推理强度，或换一个支持关闭思考的模型。", code="api")
+        return {"thinking": {"type": "disabled"}}
+    if adaptive and (effort or budget):
+        fields: dict[str, Any] = {"thinking": {"type": "adaptive"}}
+        if effort:
+            if effort == "minimal" or (effort == "xhigh" and (number == (4, 6) or preview)):
+                raise ChatGPTError(f"当前模型不支持 {effort} 推理强度；请明确选择它支持的 low、medium、high 或 max，不会自动改档。", code="api")
+            fields["output_config"] = {"effort": effort}
+        return fields
+    thinking = thinking_for(effort, max_tokens, budget)
+    return {"thinking": thinking} if thinking is not None else {}
+
+
 def anthropic_body(request: Mapping[str, Any], route: Route) -> dict[str, Any]:
     """The JSON body for the route, from the loop's request."""
     max_tokens = route.max_output or DEFAULT_MAX_OUTPUT
@@ -128,10 +161,7 @@ def anthropic_body(request: Mapping[str, Any], route: Route) -> dict[str, Any]:
     if functions:
         body["tools"] = [{"name": f["name"], "description": f.get("description", ""), "input_schema": f.get("parameters") or {"type": "object", "properties": {}}} for f in functions]
         body["tool_choice"] = {"type": "auto"}
-    reasoning = request.get("reasoning")
-    thinking = thinking_for(reasoning.get("effort") if isinstance(reasoning, Mapping) else None, max_tokens, route.thinking)
-    if thinking is not None:
-        body["thinking"] = thinking
+    body.update(thinking_fields(route.model, thinking_effort(request), max_tokens, route.thinking))
     body.update(route.extra_args)
     return body
 
@@ -186,12 +216,16 @@ async def read_anthropic(lines: AsyncIterator[str], origin: str = "") -> AsyncIt
         if kind == "message_start":
             message = payload.get("message") if isinstance(payload.get("message"), Mapping) else {}
             response_id = str(message.get("id") or "")
+            yield Started()
             usage = _usage(message.get("usage") if isinstance(message.get("usage"), Mapping) else {}, usage)
         elif kind == "content_block_start":
             index = payload.get("index") if isinstance(payload.get("index"), int) else len(blocks)
             start = payload.get("content_block") if isinstance(payload.get("content_block"), Mapping) else {}
             block = _Block(str(start.get("type") or "text"), id=str(start.get("id") or ""), name=str(start.get("name") or ""), data=start.get("data"))
             blocks[index] = block
+            if block.kind == "thinking":
+                block.text = str(start.get("thinking") or "")
+                block.signature = str(start.get("signature") or "")
             if block.kind == "tool_use":
                 yield CallBegun(f"toolu_{index}", block.fields["id"], block.fields["name"])
             elif block.kind == "text" and isinstance(start.get("text"), str):

@@ -339,7 +339,7 @@ export interface Project {
  *  can read the other's context. A conversation can still change engine: WittyCode starts a fresh native session on the
  *  other side and puts the earlier conversation's text (not its tool calls) in front of the next message, see
  *  `lib/handoff.ts`. */
-export type Engine = "devin" | "chatgpt";
+export type Engine = "devin" | "chatgpt" | "factory";
 
 /** Where a model comes from: "chatgpt" (the ChatGPT plan through WittyCode's own loop), "devin" (a Devin account) or
  *  "api:<providerId>" (one of the user's API providers, also run by the own loop). */

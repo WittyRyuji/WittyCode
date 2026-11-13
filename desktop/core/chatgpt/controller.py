@@ -39,16 +39,18 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from desktop.core.attachments import DEFAULT_PROMPT, IMAGE, PDF, TEXT, Attachment, sniff_image
 from desktop.core.chatgpt import history as saved_history
 from desktop.core.chatgpt.errors import AuthError, ChatGPTError, friendly_failure
-from desktop.core.chatgpt.responses import Usage
+from desktop.core.chatgpt.responses import Finished, Usage, build_request
 from desktop.core.engine_items import attachment_block
+from desktop.core.connections import ConnectionError as ExtensionError
 from desktop.core.context import ContextState, format_tokens
 from desktop.core.context_envelope import wrap as wrap_context
 from desktop.core.handoff import Handoff
 from desktop.core.harness import asking, compact, skills
 from desktop.core.harness.loop import INTERRUPTED, AgentLoop, Call, Observer, Outcome, Steer, Verdict
-from desktop.core.harness.mcp import McpClient, McpError
+from desktop.core.harness.mcp import McpClient, McpError, McpTool
 from desktop.core.harness.permissions import LEVELS
-from desktop.core.harness.prompt import build_instructions
+from desktop.core.harness.diagnostics import MAX_RECORDS, RequestTrace
+from desktop.core.harness.prompt import build_instructions, context_update
 from desktop.core.harness.store import SavedSession, SavedTurn, diff_to_json, pair_in_place, paired, recover
 from desktop.core.harness.tools import ToolContext
 from desktop.core.harness.toolset import HarnessTools
@@ -72,6 +74,7 @@ SAVE_DELAY_SECONDS = 2.0
 STOP_NOTES = {
     "max_output_tokens": "回答太长，被截断了；可以回复「继续」。",
     "content_filter": "回答被内容过滤停止了。",
+    "empty_response": "模型连续两次没有给出文字或工具调用，本轮未完成；可以换模型或回复「继续」。",
 }
 CONTEXT_FULL = "context_full"
 """The code of the failure that ends a turn whose next request cannot be made to fit the model's window."""
@@ -137,6 +140,9 @@ class ChatGPTController:
     saved: SavedSession = field(init=False)
     _usage_total: Tokens | None = None
     _usage_models: dict[str, Tokens] = field(default_factory=dict)
+    _trace: RequestTrace = field(default_factory=RequestTrace)
+    _connection_started: bool = False
+    _connection_context: str = ""
     _turn: Turn | None = None
     _turn_task: asyncio.Task[Any] | None = None
     _turn_done: asyncio.Event | None = None
@@ -158,6 +164,7 @@ class ChatGPTController:
     _steers: list[Steer] = field(default_factory=list)
     _unadopted: list[tuple[str, tuple[Attachment, ...]]] = field(default_factory=list)
     _clients: list[McpClient] = field(default_factory=list)
+    _mcp_restarted: set[str] = field(default_factory=set)
     _mcp_task: asyncio.Task[None] | None = None
     _tools: HarnessTools | None = None
     _context: ToolContext | None = None
@@ -218,12 +225,6 @@ class ChatGPTController:
             # (a saved conversation keeps the name it was saved under: its first message is not its title, and an
             # imported one is named after the conversation it came from)
             return stored
-        first = next((t for t in self.transcript.turns if t.user_block), None)
-        if first is not None and first.user_block is not None:
-            lines = first.user_block.text.strip().splitlines()
-            text = lines[0] if lines else ""
-            if text:
-                return text[:60]
         return self.saved_title or "新会话"
 
     @property
@@ -289,8 +290,17 @@ class ChatGPTController:
         self.transcript.add_history_turns(saved_history.build_turns(self.transcript, self.manager.registry, saved))
         usage = saved.usage
         if usage:
-            self._usage_total = Tokens(usage.get("input", 0), usage.get("output", 0), None, usage.get("cacheRead", 0))
+            self._usage_total = Tokens.of(usage)
         self._usage_models = {model: tokens for model, raw in saved.usage_models.items() if (tokens := Tokens.of(raw)) is not None}
+        if self._usage_total is not None and "cacheWrite" not in usage and self._usage_models:
+            attributed = Tokens()
+            for tokens in self._usage_models.values():
+                attributed = attributed.plus(tokens)
+            total = self._usage_total
+            if (attributed.input_tokens, attributed.output_tokens, attributed.cache_read_tokens) == (total.input_tokens, total.output_tokens, total.cache_read_tokens):
+                # Older archives omitted Cache Write from the total, but their complete per-model counters may know it.
+                self._usage_total = replace(total, cache_creation_tokens=attributed.cache_creation_tokens)
+                saved.usage = self._usage_total.to_json()
         self.context = ContextState(used=saved.context_used or None, window=self.manager.model_window(self.model), model=self.model)
         self.saved_settings = LiveSettings(model=self.model, reasoning=self.reasoning, autonomy=self.autonomy, mode=self.mode)
         if recovered:
@@ -310,22 +320,39 @@ class ChatGPTController:
 
     async def _start_servers(self) -> None:
         """The shared memory's server. Without it the conversation works the same, without the memory."""
+        from desktop.core.memory.server import INSTRUCTIONS, SERVER_NAME, TOOLS
+
         for command in self.manager.memory_servers(self):
-            client = McpClient(command.name, command.command, command.args, command.env)
+            client = McpClient(command.name, command.command, command.args, command.env, cwd=str(self.project))
+            if command.name == SERVER_NAME:
+                # The built-in contract is available even before initialize completes or if startup fails.
+                client.instructions = INSTRUCTIONS
+                client.tools = [McpTool(SERVER_NAME, tool["name"], tool["description"], tool["inputSchema"], tool["annotations"]) for tool in TOOLS]
+            self._clients.append(client)
             try:
                 await client.start()
-            except McpError as error:
-                log.warning("the shared memory could not be started for a ChatGPT conversation: %s", error)
-                continue
+            except McpError:
+                log.warning("a tool server could not be started for a conversation")
+                self.transcript.add_notice("工具服务器未能启动，相关调用会返回不可用；不会静默移除工具。")
+                self._changed()
             if self._close_requested:
                 await client.close()
                 return
-            self._clients.append(client)
 
     async def _ensure_tools(self) -> HarnessTools:
         if self._mcp_task is not None and not self._mcp_task.done():
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(asyncio.shield(self._mcp_task), MCP_WAIT_SECONDS)
+        if self._mcp_task is None or self._mcp_task.done():
+            for client in self._clients:
+                if client.name == "wittycode-memory" and not client.running and client.name not in self._mcp_restarted:
+                    self._mcp_restarted.add(client.name)
+                    self.transcript.add_notice("共享记忆连接已断开，正在尝试重启一次；工具声明保持不变。")
+                    try:
+                        await client.start()
+                    except McpError:
+                        self.transcript.add_notice("共享记忆重启失败，本会话的记忆工具暂不可用。")
+                    self._changed()
         self._context = self._context or ToolContext(self.project, threading.Event(), protected=(self.manager.root,))
         if self._tools is None:
             self._tools = HarnessTools(self.manager.registry, self._context, self.autonomy, self._clients, asker=self._ask_questions)
@@ -364,6 +391,10 @@ class ChatGPTController:
             with contextlib.suppress(Exception):
                 await client.close()
         self._clients.clear()
+        connections = getattr(self.manager, "connections", None)
+        if connections is not None and self._connection_started:
+            with contextlib.suppress(Exception):
+                await connections.hooks("SessionEnd", self.project, {"session_id": self.session_id, "reason": "other"})
         self._save_now()
         self.state = SessionState.CLOSED
         self.manager._forget(self)
@@ -447,6 +478,7 @@ class ChatGPTController:
         self.used_at = self.active_at = time.time()
         self.state = SessionState.RUNNING
         self._turn_model, self._turn_reasoning, self._turn_mode = self.model, self.reasoning, self.mode
+        self._turn_start = len(self.saved.items)  # even setup failures belong to a new boundary, never the previous turn
         context = self.manager.hooks.prompt(PromptEvent(self.engine, self.project, text, frozenset(self.recalled), first=bool(self.preface)))
         sent, carried, outgoing = text, None, attachments
         handoff = self.handoff if self.handoff is not None and not self.handoff.empty else None
@@ -479,17 +511,19 @@ class ChatGPTController:
         try:
             tools = await self._ensure_tools()
             tools.plan = plan
+            tools.connections = getattr(self.manager, "connections", None)
             assert self._context is not None
             self._context.abort = threading.Event()
             # (read again every turn: a skill made during the conversation is there for the next message)
             found = await asyncio.to_thread(skills.discover, self.project)
             self._context.readable = skills.read_roots(found)
+            if tools.connections is not None:
+                if not self._connection_started:
+                    self._connection_context = await tools.connections.hooks("SessionStart", self.project, {"session_id": self.session_id, "source": "resume" if self.saved.items else "startup"})
+                    self._connection_started = True
+                extra = await tools.connections.hooks("UserPromptSubmit", self.project, {"session_id": self.session_id, "prompt": turn.user_block.text if turn.user_block else sent})
+                sent += wrap_context(self._connection_context, extra)
             item = user_item(sent, attachments)
-            self._turn_start = len(self.saved.items)
-            self.saved.items.append(item)
-            self.saved.turns.append(SavedTurn(self._turn_start, time.time(), None, "running", "", model))
-            self.saved.model, self.saved.reasoning, self.saved.autonomy = self.model, self.reasoning, self.autonomy
-            self.saved.mode = PLAN if self.mode == PLAN else ""
             notes: list[str] = []
             instructions = build_instructions(
                 self.project,
@@ -501,6 +535,18 @@ class ChatGPTController:
                 skills=found,
                 think_chinese=self.manager.settings.think_chinese,
             )
+            snapshot = self.saved.prompt
+            if not snapshot.get("instructions"):
+                self.saved.prompt = snapshot = {"instructions": instructions, "current": instructions}
+            elif snapshot.get("current") != instructions:
+                self.saved.items.append(context_update(instructions))
+                snapshot["current"] = instructions
+            instructions = snapshot["instructions"]
+            self._turn_start = len(self.saved.items)
+            self.saved.items.append(item)
+            self.saved.turns.append(SavedTurn(self._turn_start, time.time(), None, "running", "", model))
+            self.saved.model, self.saved.reasoning, self.saved.autonomy = self.model, self.reasoning, self.autonomy
+            self.saved.mode = PLAN if self.mode == PLAN else ""
             if tuple(notes) != self._prompt_notes:
                 self._prompt_notes = tuple(notes)
                 for note in notes:
@@ -520,6 +566,8 @@ class ChatGPTController:
             # The loop works on the view (what the model reads: the summary of the early part, then the rest); what it adds
             # reaches the log (``saved.items``) through ``_Watch.history_grew``.
             end = await loop.run(compact.view_of(self.saved.items, self.saved.compaction))
+            if tools.connections is not None:
+                await tools.connections.hooks("Stop", self.project, {"session_id": self.session_id, "stop_hook_active": True})
         except asyncio.CancelledError:
             if self._turn is turn:
                 self._release_steers()
@@ -557,12 +605,15 @@ class ChatGPTController:
             log.warning("a ChatGPT turn failed: %s", error)
             if isinstance(error, AuthError) and error.terminal:
                 self.manager._emit_account()
+        elif isinstance(error, ExtensionError):
+            message = f"扩展连接未完成：{error}"
         elif isinstance(error, ValueError):
             message = f"附件无法发送：{error}。"
         else:
             log.error("a ChatGPT turn failed unexpectedly", exc_info=error)
             message = f"出现内部错误：{type(error).__name__}: {error}"
-        if len(self.saved.items) == self._turn_start + 1 and self.saved.turns:
+        if (len(self.saved.items) == self._turn_start + 1 and self.saved.turns
+                and self.saved.turns[-1].start == self._turn_start and self.saved.turns[-1].finished is None):
             # (nothing came of the turn: the message is not left in the history, the next try is not a repeat of it)
             del self.saved.items[self._turn_start :]
             self.saved.turns.pop()
@@ -573,7 +624,7 @@ class ChatGPTController:
         self._end_turn(turn)
 
     def _record_turn(self, status: str, error: str = "", note: str = "") -> None:
-        if self.saved.turns and self.saved.turns[-1].finished is None:
+        if self.saved.turns and self.saved.turns[-1].start == self._turn_start and self.saved.turns[-1].finished is None:
             record = self.saved.turns[-1]
             record.finished, record.status, record.error, record.note = time.time(), status, error, note
 
@@ -593,6 +644,8 @@ class ChatGPTController:
             if turn.status is TurnStatus.DONE:
                 self.recalled |= self._recall_ids
             self._recall_turn, self._recall_ids = None, frozenset()
+        if turn.status is TurnStatus.DONE:
+            self._connection_context = ""
         self._turn = None
         self._turn_model = self._turn_reasoning = self._turn_mode = ""
         if self._turn_done is not None:
@@ -683,6 +736,7 @@ class ChatGPTController:
         self.used_at = time.time()
         self.state = SessionState.RUNNING
         self._turn_model, self._turn_reasoning, self._turn_mode = self.model, self.reasoning, self.mode
+        self._turn_start = len(self.saved.items)  # even setup failures belong to a new boundary, never the previous turn
         self.transcript.output_probe = self._output_so_far
         turn = self.transcript.start_turn("/compact")
         self._turn = turn
@@ -762,7 +816,7 @@ class ChatGPTController:
             self._usage_models[model] = self._usage_models.get(model, Tokens()).plus(tokens)
             self.saved.usage_models = {name: value.to_json() for name, value in self._usage_models.items()}
         total = self._usage_total
-        self.saved.usage = {"input": total.input_tokens, "output": total.output_tokens, "cacheRead": total.cache_read_tokens}
+        self.saved.usage = total.to_json()
         if not measures_context:  # (a summary request: it counts, but it says nothing about how full the conversation is)
             self._changed()
             return
@@ -807,6 +861,21 @@ class ChatGPTController:
         start = int(record.get("upto") or 0) if record else 0
         self.transcript.set_working_state("compacting_conversation")
         self._changed()
+        prefix = None
+        if self._tools is not None and self.saved.prompt.get("instructions") and not model.startswith("api:"):
+            prefix = build_request(
+                model=model, instructions=self.saved.prompt["instructions"], items=[], tools=self._tools.declarations(),
+                reasoning=(self._turn_reasoning if self._turn_model else self.reasoning) or None, shape=self.manager.shape, conversation=self.session_id,
+            )
+        def used(usage: Usage) -> None:
+            if self._turn is owner:
+                self._add_usage(usage, measures_context=False)
+        def requested(request: dict[str, Any], response: Finished | None, seconds: float, failed: bool) -> None:
+            if self._turn is owner:
+                entry = self._trace.record(request, response, seconds, failed)
+                entry["kind"] = "summary"
+                self.saved.requests.append(entry)
+                del self.saved.requests[:-MAX_RECORDS]
         try:
             result = await compact.compact(
                 history,
@@ -819,13 +888,17 @@ class ChatGPTController:
                 previous=str(record.get("summary") or "") if record else "",
                 kept=compact.kept_of(record) if record else "",
                 turn=len(history) if manual else synthetic + self._turn_start - start,
-                on_usage=lambda usage: self._add_usage(usage, measures_context=False),
+                on_usage=used,
                 whole=manual,
                 fallback=not manual,
+                rules=self.saved.prompt.get("current", "") if self.saved.prompt.get("current") != self.saved.prompt.get("instructions") else "",
+                prefix_request=prefix,
+                on_request=requested,
             )
         finally:
-            self.transcript.set_working_state("thinking")
-            self._changed()
+            if self._turn is owner:
+                self.transcript.set_working_state("thinking")
+                self._changed()
         if self._turn is not owner:
             return False
         entry: dict[str, Any] | None = None
@@ -835,6 +908,8 @@ class ChatGPTController:
                 "upto": upto, "summary": result.summary, "kept": result.kept, "at": time.time(), "before": result.before,
                 "after": result.after, "model": model, "mechanical": result.mechanical,
             }
+            if self.saved.prompt.get("current") != self.saved.prompt.get("instructions"):
+                entry["rules"] = self.saved.prompt.get("current", "")
             if not compact.boundary_ok(self.saved.items, upto) or compact.view_of(self.saved.items, entry) != result.view:
                 # (the view and the log disagree: kept, this summary would give the next turn a different conversation,
                 # or one with a tool result whose call is gone)
@@ -1119,6 +1194,12 @@ class _Watch(Observer):
     def usage(self, usage: Usage) -> None:
         if self.current:
             self.ctl._add_usage(usage)
+
+    def request_done(self, request: dict[str, Any], finished: Finished | None, seconds: float, failed: bool) -> None:
+        if self.current:
+            self.ctl.saved.requests.append(self.ctl._trace.record(request, finished, seconds, failed))
+            del self.ctl.saved.requests[:-MAX_RECORDS]
+            self.ctl._save_soon()
 
     def history_grew(self, items: Sequence[dict[str, Any]]) -> None:
         if self.current:

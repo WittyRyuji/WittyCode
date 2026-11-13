@@ -106,6 +106,12 @@ export function buildModelMenu(i: ModelMenuInput): MenuItem[] {
       });
   }
 
+  if (available.some((m) => m.source === "factory")) {
+    items.push({ id: "h-factory", heading: true, label: "FACTORY", description: "可选 CLI · Factory 账号" });
+    items.push(...usable.filter((m) => m.source === "factory").map(modelItem));
+    if (allHidden("factory")) items.push(noneShown("factory"));
+  }
+
   const listed = new Set(i.providers.map((p) => `api:${p.id}`));
   for (const p of i.providers) {
     const source = `api:${p.id}`;

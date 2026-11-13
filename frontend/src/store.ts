@@ -285,7 +285,7 @@ function mockData(): LiveData {
     memoryRecall: true,
     memoryCapture: true,
     memoryCurate: true,
-    memoryEngines: ["devin", "chatgpt"],
+    memoryEngines: ["devin", "chatgpt", "factory"],
     compactAuto: true,
     compactAt: COMPACT_AT_DEFAULT,
     thinkChinese: true,

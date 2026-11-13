@@ -331,23 +331,23 @@ test("forgotten notes are stars flagged forgotten", () => {
 
 test("who wrote a note: the user, an engine, another agent, or unknown", () => {
   assert.deepEqual(
-    [{ kind: "user" }, { kind: "agent", engine: "chatgpt" }, { kind: "agent", engine: "devin" }, { kind: "agent", engine: "cursor" }, { kind: "unknown" }, undefined].map(sourceKey),
-    ["user", "chatgpt", "devin", "other", "unknown", "unknown"],
+    [{ kind: "user" }, { kind: "agent", engine: "chatgpt" }, { kind: "agent", engine: "devin" }, { kind: "agent", engine: "factory" }, { kind: "agent", engine: "cursor" }, { kind: "unknown" }, undefined].map(sourceKey),
+    ["user", "chatgpt", "devin", "factory", "other", "unknown", "unknown"],
   );
 });
 
-test("colours: four hues for the kinds, five for the sources, silver for the branches", () => {
+test("colours: four hues for the kinds, six for the sources, silver for the branches", () => {
   const kinds = ["preference", "convention", "pitfall", "fact"].map((kind) => starColor({ type: "note", kind, source: "user" }, "kind"));
   assert.equal(new Set(kinds).size, 4);
-  const sources = ["user", "chatgpt", "devin", "other", "unknown"].map((source) => starColor({ type: "note", kind: "fact", source }, "source"));
-  assert.equal(new Set(sources).size, 5);
+  const sources = ["user", "chatgpt", "devin", "factory", "other", "unknown"].map((source) => starColor({ type: "note", kind: "fact", source }, "source"));
+  assert.equal(new Set(sources).size, 6);
   assert.equal(colorKey({ type: "scope", kind: null, source: null }, "kind"), "branch");
   assert.equal(colorKey({ type: "kind", kind: "pitfall", source: null }, "kind"), "k-pitfall", "a kind node in its kind's hue");
   assert.equal(colorKey({ type: "kind", kind: "pitfall", source: null }, "source"), "branch", "…and silver when the colours tell the source");
   assert.equal(colorKey({ type: "note", kind: "workflow", source: "user" }, "kind"), "k-other");
   const legend = legendItems(fewNotes(), "kind").map((i) => i.label);
   assert.deepEqual(legend, ["偏好", "约定", "坑"], "only the kinds there are, in their usual order");
-  assert.deepEqual(legendItems(fewNotes(), "source").map((i) => i.label), ["我", "ChatGPT Plan", "Devin"]);
+  assert.deepEqual(legendItems(fewNotes(), "source").map((i) => i.label), ["我", "WittyHarness", "Devin"]);
 });
 
 // ---------------------------------------------------------------------------------- search, selection, titles

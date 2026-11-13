@@ -7,7 +7,7 @@ import { CodeBlock } from "./Markdown";
 import { Diff } from "./Diff";
 
 const IMPACT: Record<string, string> = { low: "低", medium: "中", high: "高" };
-const WHO = { devin: "Devin", chatgpt: "ChatGPT Plan" } as const;
+const WHO = { devin: "Devin", chatgpt: "ChatGPT Plan", factory: "Factory" } as const;
 
 export function PermissionCard({ sessionId, prompt }: { sessionId: string; prompt: PermissionPrompt }) {
   const answer = useStore((s) => s.answerPermission);

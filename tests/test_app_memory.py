@@ -254,6 +254,7 @@ def test_nothing_is_added_when_nothing_bears_on_the_message_or_the_recall_is_off
         for recall_on, text in ((True, "good morning"), (False, ASK)):
             memory = own_launch(tmp_path / f"r{recall_on}", recall=lambda on=recall_on: on)
             proj = (tmp_path / "proj").resolve()
+            proj.mkdir(exist_ok=True)
             deploy_note(memory, proj)
             core, plan, events, _, _ = await ready_core(tmp_path / f"r{recall_on}", memory=memory)
             plan.script(say("ok"))
@@ -399,7 +400,7 @@ def test_the_page_is_told_when_an_agent_writes_and_how_many_notes_it_has_not_see
         core, factory, events, _, _ = await ready_core(tmp_path, memory=memory)
         init = await core.call("app.init")
         assert init["memory"] == {"latest": 0, "unseen": 0, "seen": 0, "pending": 0} and init["settings"]["memoryEnabled"] is True
-        assert init["settings"]["memoryEngines"] == ["devin", "chatgpt"]
+        assert init["settings"]["memoryEngines"] == ["devin", "chatgpt", "factory"]
         store = MemoryStore(memory.root)
         store.create(title="By the user", text="The user wrote this.", scope="global", by="user")
         await until(lambda: events.of("memory"), timeout=3)
@@ -456,10 +457,10 @@ def test_without_a_memory_the_calls_say_so(tmp_path):
 def test_a_settings_file_without_the_memory_keys_gets_the_defaults_and_a_bad_one_too():
     from desktop.core.settings import settings_from_dict, settings_to_dict
 
-    assert settings_from_dict({}).memory_enabled is True and settings_from_dict({}).memory_engines == ["devin", "chatgpt"]
+    assert settings_from_dict({}).memory_enabled is True and settings_from_dict({}).memory_engines == ["devin", "chatgpt", "factory"]
     odd = settings_from_dict({"memory_enabled": "yes", "memory_engines": ["chatgpt", "bogus", "chatgpt"]})
     assert odd.memory_enabled is True and odd.memory_engines == ["chatgpt"]
-    assert settings_from_dict({"memory_engines": "devin"}).memory_engines == ["devin", "chatgpt"]
+    assert settings_from_dict({"memory_engines": "devin"}).memory_engines == ["devin", "chatgpt", "factory"]
     assert settings_from_dict(settings_to_dict(odd)).memory_engines == ["chatgpt"]
     assert settings_from_dict({}).memory_recall is True and settings_from_dict({"memory_recall": "no"}).memory_recall is True
     assert settings_from_dict(settings_to_dict(settings_from_dict({"memory_recall": False}))).memory_recall is False

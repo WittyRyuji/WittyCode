@@ -521,10 +521,11 @@ class DevinEngine:
         """``mcpServers`` of ``session/new`` and ``session/load``: the shared memory's server (ACP's stdio form; the
         environment is a list of name / value pairs). Empty when the memory is off."""
         command = self.memory.server_for("devin", controller.project, controller.run) if self.memory is not None else None
-        if command is None:
-            return []
-        env = [{"name": name, "value": value} for name, value in command.env.items()]
-        return [{"name": command.name, "command": command.command, "args": list(command.args), "env": env}]
+        commands = [command] if command is not None else []
+        connections = getattr(self, "connections", None)
+        if connections is not None:
+            commands += connections.mcp_commands(controller.project)
+        return [{"name": c.name, "command": c.command, "args": list(c.args), "env": [{"name": k, "value": v} for k, v in c.env.items()]} for c in commands]
 
     def _with_window(self, model: DevinModel) -> DevinModel:
         window = self._windows.get(model.id)

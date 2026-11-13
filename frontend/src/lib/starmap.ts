@@ -7,7 +7,7 @@ import type { MemoryEntry, MemoryWho } from "../types";
 import { KINDS, engineName, kindLabel } from "./memory.ts";
 
 export type ColorBy = "kind" | "source";
-export type SourceKey = "user" | "chatgpt" | "devin" | "other" | "unknown";
+export type SourceKey = "user" | "chatgpt" | "devin" | "factory" | "other" | "unknown";
 export type StarType = "root" | "scope" | "kind" | "note" | "cluster";
 export type Direction = "left" | "right" | "up" | "down";
 
@@ -199,6 +199,7 @@ export const SOURCE_COLORS: Record<SourceKey, string> = {
   user: "#ffd66b",
   chatgpt: "#b99dff",
   devin: "#ff8fae",
+  factory: "#84dcb7",
   other: "#86b4ff",
   unknown: "#a9b2c6",
 };
@@ -207,11 +208,12 @@ export const SOURCES: { id: SourceKey; label: string }[] = [
   { id: "user", label: "我" },
   { id: "chatgpt", label: engineName("chatgpt") },
   { id: "devin", label: engineName("devin") },
+  { id: "factory", label: engineName("factory") },
   { id: "other", label: "其他代理" },
   { id: "unknown", label: "未知" },
 ];
 
-const AGENTS = new Set<string>(["devin", "chatgpt"]);
+const AGENTS = new Set<string>(["devin", "chatgpt", "factory"]);
 
 /** Who wrote a note, as a colour of the chart: the user, one of the engines, another agent (a note brought in by an import,
  *  or written by an engine of an earlier version), or unknown. */

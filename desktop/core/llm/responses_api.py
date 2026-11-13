@@ -17,6 +17,7 @@ from desktop.core.llm.wire import Route
 def responses_body(request: Mapping[str, Any], route: Route) -> dict[str, Any]:
     """The JSON body for the route, from the loop's request."""
     body = dict(request)
+    body.pop("wc_reasoning_effort", None)
     body["model"] = route.model
     body["input"] = for_responses(body.get("input") or ())
     reasoning = body.get("reasoning")

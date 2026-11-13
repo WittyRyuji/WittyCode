@@ -193,6 +193,7 @@ async def open_rig(
     frame: str = "",
     cache: Any = None,
     devin_engine: Any = None,
+    factory_engine: Any = None,
     chatgpt_engine: Any = None,
     chatgpt_welcomed: bool = True,
     plan: bool = True,
@@ -203,7 +204,7 @@ async def open_rig(
     page = require_page()
     core, service, _events, _platform, engine = make_core(
         tmp_path, providers=providers, max_open=max_open, projects=projects, cache=cache,
-        devin_engine=devin_engine, chatgpt_engine=chatgpt_engine, plan=plan, memory=memory,
+        devin_engine=devin_engine, factory_engine=factory_engine, chatgpt_engine=chatgpt_engine, plan=plan, memory=memory,
     )
     if devin_engine is not None:
         devin_engine.settings = core.settings  # (one settings object in the application)

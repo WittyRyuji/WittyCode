@@ -60,6 +60,7 @@ class HarnessTools:
         self.context = context
         self.level = level
         self.clients = list(clients)
+        self.connections = None
         self.asker = asker
         self.plan = False
         """Plan mode (set by the controller for the turn): only reading, searching and read-only commands run."""
@@ -69,7 +70,8 @@ class HarnessTools:
 
     def refresh(self) -> None:
         """Read the connected servers' tools again (a server may have come up since)."""
-        self._mcp = {mcp_name(tool.server, tool.name): (client, tool) for client in self.clients if client.running for tool in client.tools}
+        # A disconnected server is an unavailable tool, not a different prompt. Keep known schemas and their order.
+        self._mcp = {mcp_name(tool.server, tool.name): (client, tool) for client in self.clients for tool in client.tools}
 
     # ------------------------------------------------------------------ loop.Tools
 
@@ -113,11 +115,38 @@ class HarnessTools:
                 return verdict
         return Verdict(DENY, PLAN_REFUSAL)
 
+    def parallel_safe(self, call: Call) -> bool:
+        """Only approved, independent filesystem reads; hooks, commands and memory writes retain serial ordering."""
+        if self.connections is not None:
+            active = getattr(self.connections, "active", None)
+            if active is None or any(entry.get("config", {}).get("event") in ("PreToolUse", "PostToolUse") for entry in active("hook", self.context.project)):
+                return False
+        return (
+            not call.problem and call.name in ("read_file", "list_dir", "glob", "grep")
+            and self.known(call.name) and self.check(call).verdict == ALLOW
+        )
+
     def remember(self, call: Call) -> None:
         spec = self.registry.get(call.name)
         self.remembered.add(remember_key(spec, call.args, self.context) if spec is not None else f"mcp:{call.name}")
 
     async def run(self, call: Call) -> Outcome:
+        if self.connections is not None:
+            from desktop.core.connections import ConnectionError
+            try:
+                await self.connections.hooks("PreToolUse", self.context.project, {"tool_name": call.name, "tool_input": call.args})
+            except ConnectionError as error:
+                return Outcome(str(error), True, cancelled=True)
+        outcome = await self._run(call)
+        if self.connections is not None:
+            from desktop.core.connections import ConnectionError
+            try:
+                await self.connections.hooks("PostToolUse", self.context.project, {"tool_name": call.name, "tool_input": call.args, "tool_response": outcome.output})
+            except ConnectionError as error:
+                outcome.output += "\n" + str(error)
+        return outcome
+
+    async def _run(self, call: Call) -> Outcome:
         if call.name == asking.NAME and self.asker is not None:
             views, problem = asking.parse(call.args)
             if problem:
@@ -150,4 +179,4 @@ class HarnessTools:
 
     def servers(self) -> list[tuple[str, str]]:
         """``(name, instructions)`` of the connected servers, for the system prompt."""
-        return [(client.name, client.instructions) for client in self.clients if client.running]
+        return [(client.name, client.instructions) for client in self.clients]

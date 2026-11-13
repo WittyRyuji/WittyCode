@@ -32,6 +32,7 @@ from desktop.core.chatgpt.errors import ChatGPTError, error_from_body
 
 USER_AGENT = "WittyCode"
 DEFAULT_TIMEOUT = 30.0
+STREAM_CONNECT_SECONDS = 20.0
 STREAM_IDLE_SECONDS = 120.0
 """A stream that sends nothing (not even a keep-alive) for this long is dead."""
 STREAM_QUEUE_LINES = 256
@@ -179,9 +180,11 @@ class _StreamCall:
             try:
                 if self.cancelled.is_set():
                     return
-                held = self._opener.open(self._request, timeout=self._timeout)
+                held = self._opener.open(self._request, timeout=min(self._timeout, STREAM_CONNECT_SECONDS))
                 if not self._adopt(held):
                     return
+                with contextlib.suppress(AttributeError, OSError):
+                    _socket_of(held).settimeout(self._timeout)
                 if self._chunk:
                     while True:
                         data = held.read1(self._chunk)
@@ -200,7 +203,12 @@ class _StreamCall:
                 if self._adopt(error):
                     self._put("error", error_from_body(error.code, error.read(), _headers_of(error.headers)))
         except (urllib.error.URLError, OSError, TimeoutError, ValueError, http.client.HTTPException) as error:
-            self._put("error", _network_error(error))
+            if held is not None and 200 <= getattr(held, "status", 0) < 300:
+                timed_out = isinstance(error, TimeoutError)
+                message = "模型长时间没有输出，已停止等待；请求可能已在处理，未自动重发。" if timed_out else "响应流中断；请求已被服务端接受，未自动重发。"
+                self._put("error", ChatGPTError(message, code="stream_idle" if timed_out else "stream", transient=False))
+            else:
+                self._put("error", _network_error(error))
         except BaseException as error:  # the consumer must not hang on anything
             self._put("error", error)
         finally:

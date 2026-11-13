@@ -82,7 +82,7 @@ export interface Applied {
 }
 
 const NO_SETTINGS: SessionSettings = { model: "", reasoning: "", autonomy: "", mode: "auto" };
-export const ALL_ENGINES: Engine[] = ["devin", "chatgpt"];
+export const ALL_ENGINES: Engine[] = ["devin", "chatgpt", "factory"];
 /** The percent of a model's window at which a ChatGPT Plan conversation is summarised: what the bridge accepts, and the default. */
 export const COMPACT_AT_MIN = 50;
 export const COMPACT_AT_MAX = 95;

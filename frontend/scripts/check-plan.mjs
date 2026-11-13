@@ -12,6 +12,8 @@ for (const [theme, width] of [["light", 1500], ["dark", 1500], ["light", 1100], 
   try {
     await page.waitFor("document.querySelectorAll('.plan-step').length === 3", 3000);
     assert.equal(await page.eval("document.querySelector('.plan-count').textContent"), "1/3");
+    assert(await page.eval("['.planpanel', '.plan-toggle', '.plan-head', '.plan-meter'].every(s => parseFloat(getComputedStyle(document.querySelector(s)).borderRadius) === 0)"), "the plan retains square controls and a square drawer");
+    assert(await page.eval("(() => { const s = getComputedStyle(document.querySelector('.planpanel')); return s.position !== 'absolute' || (s.borderTopWidth === '2px' && s.boxShadow.includes('4px 4px 0px')); })()"), "the narrow plan drawer uses the original outline and offset shadow");
     const aligned = "(() => { const t = document.querySelector('.transcript').getBoundingClientRect(); const c = document.querySelector('.composer').getBoundingClientRect(); return Math.abs(t.left - c.left) < 1 && Math.abs(t.right - c.right) < 1 && document.documentElement.scrollWidth <= innerWidth; })()";
     assert(await page.eval(aligned), "messages and composer share both edges, including the real scrollbar gutter");
     assert(await page.eval("(() => { const p = document.querySelector('.planpanel').getBoundingClientRect(); const t = document.querySelector('.stage').getBoundingClientRect(); const c = document.querySelector('.composer').getBoundingClientRect(); const narrow = getComputedStyle(document.querySelector('.planpanel')).position === 'absolute'; return narrow ? p.top >= t.top && p.bottom < c.top && p.right <= t.right : p.left >= t.right - 1; })()"), "the plan is a separate column on wide windows and a bounded drawer on narrow ones");

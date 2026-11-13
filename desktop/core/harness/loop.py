@@ -25,6 +25,8 @@ import asyncio
 import json
 import logging
 import random
+import re
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -38,6 +40,7 @@ from desktop.core.chatgpt.responses import (
     ReasoningDelta,
     ReasoningDone,
     Shape,
+    Started,
     TextDelta,
     TextDone,
     Usage,
@@ -58,6 +61,7 @@ RETRY_LONGEST = 60.0
 """The longest pause a server's ``Retry-After`` is obeyed for (a turn that waits longer is better stopped and said so)."""
 OUTPUT_LIMIT = 60_000
 """A tool result longer than this is cut (head and tail kept) before the model sees it."""
+MAX_PARALLEL_READS = 4
 OUTPUT_FLOOR = 1_000
 """Tokens one tool result keeps however little room the next request has left (``Observer.tool_room``)."""
 REPEAT_AFTER = 3
@@ -156,6 +160,9 @@ class Observer:
 
     def usage(self, usage: Usage) -> None: ...
 
+    def request_done(self, request: dict[str, Any], finished: Finished | None, seconds: float, failed: bool) -> None:
+        """A request ended (also a failed attempt); observers must not persist raw request/response content as diagnostics."""
+
     def history_grew(self, items: Sequence[dict[str, Any]]) -> None:
         """Items were appended to the history (to be saved)."""
 
@@ -231,6 +238,28 @@ def clip_tokens(text: str, tokens: int) -> str:
     return kept(low)
 
 
+def clip_read_output(text: str, tokens: int) -> str:
+    """A read page is a consecutive line range, never a head/tail splice with a misleading EOF footer."""
+    if estimate_text(text) <= tokens:
+        return text
+    numbered = [(int(match[1]), line) for line in text.splitlines() if (match := re.match(r"^\s*(\d+)\t", line))]
+    if not numbered:
+        return clip_tokens(text, tokens)
+    kept: list[str] = []
+    used = 0
+    last = numbered[0][0] - 1
+    for number, line in numbered:
+        cost = estimate_text(line + "\n")
+        if used + cost > max(tokens - 120, 0):
+            break
+        kept.append(line)
+        used += cost
+        last = number
+    if not kept:
+        return f"No file lines fit in this step's remaining context. Read a smaller part with offset={last + 1}, limit=1, or use grep; a very long single line may need a shell command."
+    return "\n".join(kept) + f"\n[Showing lines {numbered[0][0]}-{last} only: the results of this step had to share what is left of the context window. Later lines were not shown. Call read_file again with offset={last + 1} to continue.]"
+
+
 _OUTPUT_ITEM = estimate_item(call_output("", "")) - estimate_text("")
 """What a ``function_call_output`` costs besides its text."""
 
@@ -288,6 +317,7 @@ class AgentLoop:
         """Tokens the conversation was known to hold at some earlier time, by another model's count or before a restart: not
         exact for this request, but it cannot have shrunk since, so the estimate is never below it."""
         self._events = 0
+        self._acknowledged = False
         self._answer = 0
         """Tokens of the items the last response added to the history."""
         self._last_call = ""
@@ -319,6 +349,7 @@ class AgentLoop:
         request the observer may shorten ``history`` (``Observer.prepare``)."""
         incomplete = ""
         step = 0
+        recovered_empty = False
         # A callable lets the app apply a saved change to an already running turn, without interrupting a request or tool.
         while step < (self.max_steps() if callable(self.max_steps) else self.max_steps):
             step += 1
@@ -327,6 +358,17 @@ class AgentLoop:
             calls, incomplete = await self._step(history)
             if not calls:
                 if self.observer.has_steer():
+                    continue
+                if not incomplete and not self._visible_text:
+                    if recovered_empty:
+                        return TurnEnd("incomplete", "empty_response", step)
+                    recovered_empty = True
+                    update = {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": (
+                        "Your last response had no visible answer and no tool call. Give the user an answer now, or call "
+                        "a tool if work remains. Do not repeat completed actions."
+                    )}]}
+                    history.append(update)
+                    self.observer.history_grew([update])
                     continue
                 return TurnEnd("incomplete" if incomplete else "done", incomplete, step)
             await self._run_calls(history, calls)
@@ -370,6 +412,8 @@ class AgentLoop:
                     if shortened or not await self._prepare(history, overflow=True):
                         raise
                     shortened = True
+                elif self._acknowledged and getattr(error, "code", None) in ("network", "stream", "stream_idle", "timeout"):
+                    raise  # no blind resend after an accepted request goes silent; an explicit busy refusal can retry
                 elif repeats < len(self._retry_delays) and is_transient(error):
                     delay = self._retry_pause(repeats, error)
                     repeats += 1
@@ -403,38 +447,63 @@ class AgentLoop:
         incomplete = ""
         context = 0
         self._events = 0
-        async for event in self.stream(request):
-            if not isinstance(event, Finished):
-                self._events += 1
-            if isinstance(event, TextDelta):
-                self.observer.text_delta(event.item_id, event.text)
-            elif isinstance(event, TextDone):
-                self.observer.text_done(event.item_id, event.text)
-            elif isinstance(event, ReasoningDelta):
-                self.observer.thinking_delta(event.item_id, event.text)
-            elif isinstance(event, ReasoningDone):
-                self.observer.thinking_done(event.item_id, event.text)
-            elif isinstance(event, CallBegun):
-                self.observer.call_begun(event.item_id, event.call_id, event.name)
-            elif isinstance(event, CallDone):
-                call = parse_call(event)
-                calls.append(call)
-                self.observer.call_ready(call)
-            elif isinstance(event, ItemDone):
-                item = history_item(event.item)
-                if item is not None:
-                    kept.append(item)
-            elif isinstance(event, Finished):
-                incomplete = event.incomplete
-                if event.usage is not None:
-                    context = event.usage.context
-                    self.observer.usage(event.usage)
-        history.extend(kept)
-        self._answer = estimate_items(kept)
-        if context:
-            self._measured = (len(history), context)
-        if kept:
-            self.observer.history_grew(kept)
+        self._acknowledged = False
+        finished: Finished | None = None
+        started = time.monotonic()
+        texts: dict[str, str] = {}
+        self._visible_text = False
+        failed = True
+        try:
+            async for event in self.stream(request):
+                if isinstance(event, Started):
+                    self._acknowledged = True
+                elif not isinstance(event, Finished):
+                    self._events += 1
+                if isinstance(event, TextDelta):
+                    texts[event.item_id] = texts.get(event.item_id, "") + event.text
+                    self.observer.text_delta(event.item_id, event.text)
+                elif isinstance(event, TextDone):
+                    texts[event.item_id] = event.text
+                    self.observer.text_done(event.item_id, event.text)
+                elif isinstance(event, ReasoningDelta):
+                    self.observer.thinking_delta(event.item_id, event.text)
+                elif isinstance(event, ReasoningDone):
+                    self.observer.thinking_done(event.item_id, event.text)
+                elif isinstance(event, CallBegun):
+                    self.observer.call_begun(event.item_id, event.call_id, event.name)
+                elif isinstance(event, CallDone):
+                    call = parse_call(event)
+                    calls.append(call)
+                    self.observer.call_ready(call)
+                elif isinstance(event, ItemDone):
+                    item = history_item(event.item)
+                    if item is not None:
+                        kept.append(item)
+                elif isinstance(event, Finished):
+                    finished = event
+                    incomplete = event.incomplete
+                    if event.usage is not None:
+                        context = event.usage.context
+                        self.observer.usage(event.usage)
+            self._visible_text = any(text.strip() for text in texts.values())
+            failed = False
+        finally:
+            if failed:
+                # Completed output is useful even if the response never finished. Preserve visible partial text, but
+                # never execute an incomplete call. Completed calls receive an explicit unknown/interrupted result.
+                for item_id, text in texts.items():
+                    if text and not any(item.get("type") == "message" and (
+                        item.get("id") == item_id or "".join(str(p.get("text") or "") for p in item.get("content") or ()) == text
+                    ) for item in kept):
+                        kept.append({"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": text}]})
+                kept.extend(call_output(str(item.get("call_id") or ""), INTERRUPTED) for item in list(kept) if item.get("type") == "function_call")
+            history.extend(kept)
+            self._answer = estimate_items(kept)
+            if context and not failed:
+                self._measured = (len(history), context)
+            if kept:
+                self.observer.history_grew(kept)
+            self.observer.request_done(request, finished, time.monotonic() - started, failed)
         return calls, incomplete
 
     # ------------------------------------------------------------------ tools
@@ -444,25 +513,56 @@ class AgentLoop:
         # (the results of one step share the room the next request has: one long result must not crowd out the others,
         # nor all of them together make a request that cannot be sent)
         room = self.observer.tool_room(self.estimate(history), self._answer)
+        outcomes: dict[int, Outcome] = {}
+        tasks: list[asyncio.Task[Any]] = []
+        safe = getattr(self.tools, "parallel_safe", lambda call: False)
+
+        def commit(index: int, call: Call, outcome: Outcome) -> None:
+            nonlocal room
+            self.observer.call_done(call, outcome)
+            output = clip_output(outcome.output) + self.reminder(call, outcome)
+            if room is not None:
+                clip = clip_read_output if call.name == "read_file" and not outcome.is_error else clip_tokens
+                output = clip(output, max(OUTPUT_FLOOR, room // (len(calls) - index)) - _OUTPUT_ITEM)
+            item = call_output(call.call_id, output)
+            if room is not None:
+                room = max(0, room - estimate_item(item))
+            history.append(item)
+            answered.add(call.call_id)
+            self.observer.history_grew([item])
+
+        async def execute(index: int) -> None:
+            outcomes[index] = await self._execute(calls[index])
+
         try:
-            for index, call in enumerate(calls):
-                outcome = await self._execute(call)
-                self.observer.call_done(call, outcome)
-                output = clip_output(outcome.output) + self.reminder(call, outcome)
-                if room is not None:
-                    output = clip_tokens(output, max(OUTPUT_FLOOR, room // (len(calls) - index)) - _OUTPUT_ITEM)
-                item = call_output(call.call_id, output)
-                if room is not None:
-                    room = max(0, room - estimate_item(item))
-                history.append(item)
-                answered.add(call.call_id)
-                self.observer.history_grew([item])
+            index = 0
+            while index < len(calls):
+                end = index + 1
+                if safe(calls[index]):
+                    while end < min(index + MAX_PARALLEL_READS, len(calls)) and safe(calls[end]):
+                        end += 1
+                tasks = [asyncio.create_task(execute(position)) for position in range(index, end)]
+                await asyncio.gather(*tasks)
+                for position in range(index, end):
+                    commit(position, calls[position], outcomes.pop(position))
+                tasks = []
+                index = end
         except BaseException:
-            # (a stop, or a bug: the history must stay valid for the next turn)
-            rest = [call_output(call.call_id, INTERRUPTED) for call in calls if call.call_id not in answered]
-            history.extend(rest)
-            if rest:
-                self.observer.history_grew(rest)
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            # Keep completed concurrent reads, and pair every unfinished call without executing it again.
+            for index, call in enumerate(calls):
+                if call.call_id in answered:
+                    continue
+                outcome = outcomes.get(index)
+                if outcome is not None:
+                    commit(index, call, outcome)
+                else:
+                    item = call_output(call.call_id, INTERRUPTED)
+                    history.append(item)
+                    self.observer.history_grew([item])
             raise
 
     def reminder(self, call: Call, outcome: Outcome) -> str:

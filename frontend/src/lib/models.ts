@@ -2,9 +2,9 @@ import type { ApiProvider, Engine, ModelChoice, Session } from "../types";
 
 /** The engine that runs a model of this source. An API provider's models are run by the application's own loop, the engine
  *  that also runs the ChatGPT plan's (Bedrock's too: it signs its own requests with the user's AWS credentials). */
-export const engineOfSource = (source: string): Engine => (source === "devin" ? "devin" : "chatgpt");
+export const engineOfSource = (source: string): Engine => (source === "devin" ? "devin" : source === "factory" ? "factory" : "chatgpt");
 
-const ENGINE_NAMES: Record<Engine, string> = { devin: "Devin", chatgpt: "ChatGPT Plan" };
+const ENGINE_NAMES: Record<Engine, string> = { devin: "Devin", chatgpt: "ChatGPT Plan", factory: "Factory" };
 
 /** What the page calls the place a model runs. An API provider's model runs in the own loop, but to the user it is
  *  "API" (the word on the model chip). */
@@ -23,6 +23,7 @@ export function engineOfSession(models: ModelChoice[], s: Pick<Session, "setting
 
 /** `Devin` / `ChatGPT Plan` / `OpenRouter` / "": what the sidebar and the model chip add. */
 export function sourceLabel(source: string, providers: ApiProvider[]): string {
+  if (source === "factory") return "Factory";
   if (source === "devin") return "Devin";
   if (source === "chatgpt") return "ChatGPT Plan";
   return providers.find((p) => `api:${p.id}` === source)?.name.replace(/[（(].*$/, "") ?? "API";
@@ -49,5 +50,5 @@ export function envHintOf(typed: string): string {
 
 /** The little tag on the model chip: where the model is billed. */
 export function sourceTag(source: string): string {
-  return source === "devin" || source === "chatgpt" ? "订阅" : "API";
+  return source === "devin" || source === "chatgpt" || source === "factory" ? "订阅" : "API";
 }

@@ -45,7 +45,7 @@ from desktop.core.chatgpt.responses import (
     TextDelta,
     TextDone,
 )
-from desktop.core.llm.anthropic import anthropic_body, thinking_for
+from desktop.core.llm.anthropic import anthropic_body, thinking_effort, thinking_fields
 from desktop.core.llm.wire import DEFAULT_MAX_OUTPUT, Route, count, declared_functions, images_of, load_json, split_data_url, text_of, usage_of
 
 log = logging.getLogger("desktop.llm")
@@ -126,8 +126,8 @@ def converse_messages(items: Sequence[Mapping[str, Any]], origin: str) -> list[d
                 continue
             if item.get("wc_data"):
                 push("assistant", [{"reasoningContent": {"redactedContent": item["wc_data"]}}])
-            elif item.get("wc_reasoning") and item.get("wc_signature"):
-                push("assistant", [{"reasoningContent": {"reasoningText": {"text": item["wc_reasoning"], "signature": item["wc_signature"]}}}])
+            elif item.get("wc_signature"):
+                push("assistant", [{"reasoningContent": {"reasoningText": {"text": item.get("wc_reasoning", ""), "signature": item["wc_signature"]}}}])
         elif kind == "message" and item.get("role") == "assistant":
             text = text_of(item)
             push("assistant", [{"text": text}] if text.strip() else [])
@@ -176,12 +176,10 @@ def converse_body(request: Mapping[str, Any], route: Route, metadata: Mapping[st
             "toolChoice": {"auto": {}},
         }
     max_tokens = route.max_output
-    reasoning = request.get("reasoning")
-    effort = reasoning.get("effort") if isinstance(reasoning, Mapping) else None
-    thinking = thinking_for(effort, max_tokens or DEFAULT_MAX_OUTPUT, route.thinking) if is_claude(model) else None
-    if thinking is not None:
+    thinking = thinking_fields(model, thinking_effort(request), max_tokens or DEFAULT_MAX_OUTPUT, route.thinking) if is_claude(model) else {}
+    if thinking:
         max_tokens = max_tokens or DEFAULT_MAX_OUTPUT
-        body["additionalModelRequestFields"] = {"thinking": thinking}
+        body["additionalModelRequestFields"] = thinking
     if max_tokens:
         body["inferenceConfig"] = {"maxTokens": max_tokens}
     if metadata:
@@ -250,7 +248,7 @@ def parse_frame(data: bytes) -> Frame:
             headers[name], at = _header_value(data, at + 2 + name_length, kind)
         return Frame(headers, data[end : total - 4])
     except (ValueError, struct.error, IndexError):
-        raise ChatGPTError("Bedrock 的响应流损坏了（帧校验失败）。", code="stream") from None
+        raise ChatGPTError("Bedrock 的响应流损坏了（帧校验失败）。", code="stream", transient=False) from None
 
 
 async def frames(chunks: AsyncIterator[bytes]) -> AsyncIterator[Frame]:
@@ -261,14 +259,14 @@ async def frames(chunks: AsyncIterator[bytes]) -> AsyncIterator[Frame]:
         while len(buffer) >= 12:
             (total,) = struct.unpack_from(">I", buffer, 0)
             if total < 16 or total > MAX_FRAME:
-                raise ChatGPTError("Bedrock 的响应流损坏了（帧长度不对）。", code="stream")
+                raise ChatGPTError("Bedrock 的响应流损坏了（帧长度不对）。", code="stream", transient=False)
             if len(buffer) < total:
                 break
             frame = parse_frame(bytes(buffer[:total]))
             del buffer[:total]
             yield frame
     if buffer:
-        raise ChatGPTError("The stream ended before the response was complete.", code="stream")
+        raise ChatGPTError("The stream ended before the response was complete.", code="stream", transient=False)
 
 
 def failure_of(frame: Frame) -> ChatGPTError:
@@ -369,7 +367,7 @@ async def read_converse(chunks: AsyncIterator[bytes], origin: str = "") -> Async
             usage = payload.get("usage") if isinstance(payload.get("usage"), Mapping) else {}
             finished = True
     if not (stopped or finished):
-        raise ChatGPTError("The stream ended before the response was complete.", code="stream")
+        raise ChatGPTError("The stream ended before the response was complete.", code="stream", transient=False)
     cached, written = count(usage.get("cacheReadInputTokens")), count(usage.get("cacheWriteInputTokens"))
     total = (
         usage_of(count(usage.get("inputTokens")) + cached + written, usage.get("outputTokens"), cached, 0, written if "cacheWriteInputTokens" in usage else None)

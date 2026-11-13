@@ -83,8 +83,12 @@ class SavedSession:
     turns: list[SavedTurn] = field(default_factory=list)
     tools: dict[str, dict[str, Any]] = field(default_factory=dict)
     """Per ``call_id``: ``{"status": "done" | "error" | "cancelled", "diffs": [...]}``."""
-    usage: dict[str, int] = field(default_factory=dict)
-    """Tokens of the whole conversation: ``input``, ``output``, ``cacheRead``."""
+    usage: dict[str, Any] = field(default_factory=dict)
+    """Tokens of the whole conversation: ``input``, ``output``, optional ``cacheWrite``, ``cacheRead``."""
+    prompt: dict[str, str] = field(default_factory=dict)
+    """The original instructions and their latest rendered state; updates are appended to ``items``."""
+    requests: list[dict[str, Any]] = field(default_factory=list)
+    """The most recent content-free request diagnostics (``harness.diagnostics``)."""
     context_used: int = 0
     recalled: list[str] = field(default_factory=list)
     usage_models: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -154,6 +158,10 @@ def _session_json(session: SavedSession) -> dict[str, Any]:
         "recalled": session.recalled,
         "items": session.items,
     }
+    if session.prompt:
+        data["prompt"] = session.prompt
+    if session.requests:
+        data["requests"] = session.requests[-128:]
     if session.usage_models:
         data["usage_models"] = session.usage_models
     if session.origin:
@@ -197,6 +205,8 @@ def _session_from(raw: Any) -> SavedSession | None:
             turns=turns,
             tools={str(k): dict(v) for k, v in (raw.get("tools") or {}).items() if isinstance(v, Mapping)},
             usage={str(k): int(v) for k, v in (raw.get("usage") or {}).items() if isinstance(v, (int, float))},
+            prompt={key: value for key, value in raw.get("prompt", {}).items() if key in ("instructions", "current") and isinstance(value, str)} if isinstance(raw.get("prompt"), Mapping) else {},
+            requests=[dict(entry) for entry in raw.get("requests", [])[-128:] if isinstance(entry, Mapping)] if isinstance(raw.get("requests"), list) else [],
             usage_models={str(k): dict(v) for k, v in raw.get("usage_models", {}).items() if isinstance(v, Mapping)} if isinstance(raw.get("usage_models"), Mapping) else {},
             context_used=int(raw.get("context_used") or 0),
             recalled=[str(x) for x in raw.get("recalled") or ()],

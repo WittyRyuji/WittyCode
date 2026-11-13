@@ -12,7 +12,7 @@ import { ImportWizard } from "./ImportWizard";
 import { MemoryStarMap } from "./MemoryStarMap";
 import type { MenuItem } from "./ui";
 
-const ENGINES: Engine[] = ["chatgpt", "devin"];
+const ENGINES: Engine[] = ["chatgpt", "devin", "factory"];
 const MAX_TITLE = 80;
 const MAX_TEXT = 2000;
 const RECENT_SHOWN = 5;
@@ -61,7 +61,7 @@ function Switches() {
   const setEngines = useStore((s) => s.setMemoryEngines);
   return (
     <>
-      <Field label="共享记忆" hint="打开后，WittyCode 自己的代理循环（ChatGPT Plan、API Provider）和 Devin 读写同一份笔记：你的偏好、项目的约定、踩过的坑。新会话开头会带一份标题清单，需要细节时它们自己去查。">
+      <Field label="共享记忆" hint="打开后，WittyHarness（ChatGPT Plan、API Provider）、Devin 和可选的 Factory 读写同一份笔记：你的偏好、项目的约定、踩过的坑。新会话开头会带一份标题清单，需要细节时它们自己去查。">
         <Switch on={enabled} onChange={setEnabled} label="共享记忆" />
       </Field>
       {enabled && (

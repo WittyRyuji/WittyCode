@@ -403,7 +403,9 @@ def test_in_plan_mode_the_model_may_look_but_not_touch_and_auto_lets_it_through_
             controller.send_prompt("go ahead")
             await finish_turn(controller)
             assert target.read_text(encoding="utf-8") == "hello"
-            assert "Plan mode" not in fake.requests[2]["instructions"]
+            assert fake.requests[2]["instructions"] == first["instructions"], "switching mode preserves the cached prefix"
+            update = next(item for item in reversed(fake.requests[2]["input"]) if item.get("role") == "developer")
+            assert "Plan mode is on" not in update["content"][0]["text"] and "replace" in update["content"][0]["text"]
             assert controller.saved.mode == ""
             await engine.close_all()
 
@@ -424,7 +426,9 @@ def test_a_mode_chosen_while_a_turn_runs_is_the_next_turns_and_the_page_is_told(
             assert "Plan mode" not in fake.requests[0]["instructions"]
             controller.send_prompt("second")
             await finish_turn(controller)
-            assert "Plan mode is on" in fake.requests[1]["instructions"]
+            assert fake.requests[1]["instructions"] == fake.requests[0]["instructions"]
+            update = next(item for item in reversed(fake.requests[1]["input"]) if item.get("role") == "developer")
+            assert "Plan mode is on" in update["content"][0]["text"]
             await engine.close_all()
 
     run(go())

@@ -126,6 +126,12 @@ class ProviderError(Exception):
     """Something the user can act on; the message is one Chinese sentence."""
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, response, code, message, headers, url):
+        # Inference does not follow redirects either. Never forward credentials to a second destination in a probe.
+        return None
+
+
 # ------------------------------------------------------------------------------------------------ the naming rule
 
 
@@ -933,7 +939,7 @@ class ProviderStore:
         self.models_file = Path(models_file)
         self.sidecar = Path(sidecar) if sidecar is not None else default_settings_path().with_name("providers.json")
         self._registry_env = registry_env or _registry_environment
-        self._opener = opener or urllib.request.urlopen
+        self._opener = opener or urllib.request.build_opener(_NoRedirect()).open
         self._run_command = run_command or run_key_command
         self._aws = Resolver(
             self._variable_or_none,

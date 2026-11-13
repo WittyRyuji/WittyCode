@@ -4,7 +4,7 @@ import type { FollowUp } from "../protocol";
 import { currentSession, landingProjectId, useStore } from "../store";
 import { MODES, effortLabel, permissionsFor, reasoningChoices } from "../lib/vocab";
 import { engineOfSource, sourceLabel, sourceTag } from "../lib/models";
-import { CHATGPT_USAGE_URL, chatgptReady, planUsage, usageLevel, type PlanUsage } from "../lib/chatgpt";
+import { CHATGPT_USAGE_URL, chatgptReady } from "../lib/chatgpt";
 import { LIVE } from "../mode";
 import { commandNamed, fromSkills, parseSlash, suggestions, unavailable, type Scene, type SlashCommand } from "../lib/commands";
 import type { Engine, SessionSettings } from "../types";
@@ -94,69 +94,15 @@ function Controls({ values, disabled, live, onChoose }: { values: SessionSetting
  *  the line under the box, not among the controls: there it widened the row until the send button fell onto a line of its own. */
 function PlanBadge() {
   const chatgpt = useStore((s) => s.chatgpt);
-  const running = useStore((s) => currentSession(s)?.mark === "running");
-  const refresh = useStore((s) => s.refreshPlanUsage);
   const ready = chatgptReady(chatgpt);
-  // The figures move with every request: read them when the badge appears, when a turn ends and when the pointer comes to it.
-  useEffect(() => {
-    if (ready && !running) refresh();
-  }, [ready, running, refresh]);
-  const usage = planUsage(chatgpt);
   return (
-    <span className={`plan-badge${ready ? "" : " off"}`} onMouseEnter={ready ? refresh : undefined}>
+    <span className={`plan-badge${ready ? "" : " off"}`}>
       <span className="pdot" />
       {ready ? "Using ChatGPT Plan" : "ChatGPT 未登录"}
       <a className="inline-link" href={CHATGPT_USAGE_URL}>
         Manage usage
       </a>
-      {ready && (
-        <Tip text={<UsageTip usage={usage} />} className="plan-ring">
-          <UsageRing usage={usage} />
-        </Tip>
-      )}
     </span>
-  );
-}
-
-/** How much of the plan is used, as a ring (an empty grey one when it cannot be read: the tip says why). */
-function UsageRing({ usage }: { usage: PlanUsage }) {
-  const R = 5.5;
-  const C = 2 * Math.PI * R;
-  const percent = usage.known ? Math.min(100, Math.max(0, usage.percent)) : 0;
-  return (
-    <svg className={`usage-ring ${usage.known ? usageLevel(percent) : "unknown"}`} width="14" height="14" viewBox="0 0 14 14" role="img" aria-label={usage.known ? `套餐额度已用 ${Math.round(percent)}%` : "套餐额度读不到"}>
-      <circle className="ring-track" cx="7" cy="7" r={R} />
-      {percent > 0 && <circle className="ring-arc" cx="7" cy="7" r={R} strokeDasharray={`${(C * percent) / 100} ${C}`} transform="rotate(-90 7 7)" />}
-    </svg>
-  );
-}
-
-function UsageTip({ usage }: { usage: PlanUsage }) {
-  if (!usage.known)
-    return (
-      <div className="tip-lines">
-        <b>ChatGPT Plan 额度</b>
-        <div>现在读不到：{usage.why}</div>
-        <div className="tip-note">OpenAI 目前没有给「用 ChatGPT 登录」的应用开放用量接口，这里看不到额度；点 Manage usage 去 ChatGPT 的用量页面看。</div>
-      </div>
-    );
-  return (
-    <div className="tip-lines">
-      <b>{usage.plan || "ChatGPT"} 额度</b>
-      <dl className="tip-table">
-        {usage.windows.map((l) => (
-          <div key={l.label} className="tip-row">
-            <dt>{l.label}</dt>
-            <dd>已用 {l.usedPercent}%</dd>
-          </div>
-        ))}
-      </dl>
-      {usage.windows.map((l) => (
-        <div key={l.label} className="tip-note">
-          {l.label}窗口：{l.resetsIn}
-        </div>
-      ))}
-    </div>
   );
 }
 
@@ -250,8 +196,13 @@ export function Composer() {
   useEffect(() => {
     const el = area.current;
     if (!el) return;
+    // Measuring at auto height must not briefly enlarge the transcript and clamp away its scroll position.
+    const box = el.parentElement!;
+    const minimum = box.style.minHeight;
+    box.style.minHeight = `${box.getBoundingClientRect().height}px`;
     el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, 220)}px`;
+    box.style.minHeight = minimum;
   }, [draft, session?.id]);
 
   useEffect(() => {

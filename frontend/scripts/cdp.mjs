@@ -9,13 +9,20 @@
 //   await page.shot("out.png");
 //   await page.close();
 
-import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 const EDGE = process.env.EDGE_PATH ?? "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const ownedBrowsers = new Set();
+// A check can throw before its page.close(). Never leave that check's own browser tree behind on an error exit.
+process.once("exit", () => {
+  for (const child of ownedBrowsers) if (child.pid && child.exitCode === null) {
+    spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+  }
+});
 
 /** Save the PNG returned by CDP. Kept separate so filesystem behaviour can be checked without starting a browser. */
 export function writeScreenshot(file, data) {
@@ -28,17 +35,20 @@ export function writeScreenshot(file, data) {
 const CSP_WATCH = `document.addEventListener("securitypolicyviolation", (e) => console.error("CSP violation: " + e.violatedDirective + " " + (e.blockedURI || "")));`;
 
 /** `init`: script sources evaluated in every new document before the page's own scripts. */
-export async function openPage(url, { width = 1500, height = 960, port = 9333 + Math.floor(Math.random() * 400), init = [], hideScrollbars = true } = {}) {
+export async function openPage(url, { width = 1500, height = 960, port = 0, init = [], hideScrollbars = true } = {}) {
   const profile = mkdtempSync(join(tmpdir(), "wc-cdp-"));
   const proc = spawn(
     EDGE,
     ["--headless=new", "--disable-gpu", ...(hideScrollbars ? ["--hide-scrollbars"] : []), "--no-first-run", `--user-data-dir=${profile}`, `--remote-debugging-port=${port}`, `--window-size=${width},${height}`, "about:blank"],
     { stdio: "ignore" },
   );
+  ownedBrowsers.add(proc);
+  proc.once("exit", () => ownedBrowsers.delete(proc));
   let targets;
   for (let i = 0; i < 80; i++) {
     try {
-      targets = await (await fetch(`http://127.0.0.1:${port}/json`)).json();
+      const activePort = port || Number(readFileSync(join(profile, "DevToolsActivePort"), "utf8").split("\n")[0]);
+      targets = await (await fetch(`http://127.0.0.1:${activePort}/json`)).json();
       if (targets.some((t) => t.type === "page")) break;
     } catch {
       /* not up yet */
@@ -76,7 +86,6 @@ export async function openPage(url, { width = 1500, height = 960, port = 9333 + 
   for (const source of [CSP_WATCH, ...init]) await send("Page.addScriptToEvaluateOnNewDocument", { source });
   await send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
   await send("Page.navigate", { url });
-  await sleep(1200);
 
   const evalJs = async (expression) => {
     const r = await send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
@@ -85,6 +94,7 @@ export async function openPage(url, { width = 1500, height = 960, port = 9333 + 
   };
 
   const page = {
+    browserPid: proc.pid,
     send,
     eval: evalJs,
     events,
@@ -101,6 +111,7 @@ export async function openPage(url, { width = 1500, height = 960, port = 9333 + 
       return this.errorTexts().filter((t) => t.startsWith("CSP violation"));
     },
     async rect(selector, index = 0) {
+      await this.waitFor(`!!document.querySelectorAll(${JSON.stringify(selector)})[${index}]`);
       const r = await evalJs(
         `(() => { const e = document.querySelectorAll(${JSON.stringify(selector)})[${index}]; if (!e) return null; e.scrollIntoView({block: "center"}); const r = e.getBoundingClientRect(); return {x: r.left, y: r.top, w: r.width, h: r.height}; })()`,
       );
@@ -169,5 +180,15 @@ export async function openPage(url, { width = 1500, height = 960, port = 9333 + 
       }
     },
   };
+  try {
+    // A slow clean runner may still be loading the bundle after 1.2s. Wait for the actual React tree, not a stopwatch.
+    await page.waitFor("document.readyState === 'complete' && (!document.getElementById('root') || !!document.querySelector('.titlebar, .app .input'))", 30000);
+    await evalJs("document.fonts.ready");
+    await evalJs("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
+    if (page.consoleErrors().length) throw new Error(page.errorTexts().join("\n"));
+  } catch (error) {
+    await page.close();
+    throw error;
+  }
   return page;
 }

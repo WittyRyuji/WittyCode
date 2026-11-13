@@ -255,15 +255,27 @@ class ChatGPTEngine:
             async for event in self.api.stream(request):
                 yield event
             return
-        token = await self.tokens.access_token()
-        headers = {"Authorization": f"Bearer {token}", "Accept": "text/event-stream", "originator": APP_NAME.lower()}
+        client_id = self.accounts.active_id()
+        token = await self.tokens.access_token(client_id)
         body = {**request, "input": for_responses(request.get("input") or ())}
-        lines = self.http.stream_lines("POST", f"{self.base_url}/responses", headers=headers, json_body=body)
-        try:
-            async for event in read_events(lines):
-                yield event
-        finally:
-            await lines.aclose()
+        for attempt in range(2):
+            headers = {"Authorization": f"Bearer {token}", "Accept": "text/event-stream", "originator": APP_NAME.lower()}
+            lines = self.http.stream_lines("POST", f"{self.base_url}/responses", headers=headers, json_body=body)
+            begun = False
+            retry = False
+            try:
+                async for event in read_events(lines):
+                    begun = True
+                    yield event
+            except ChatGPTError as error:
+                if error.status != 401 or attempt or begun:
+                    raise
+                retry = True
+            finally:
+                await lines.aclose()
+            if not retry:
+                return
+            token = await self.tokens.access_token(client_id, rejected=token)
 
     # ------------------------------------------------------------------ models
 
@@ -321,10 +333,12 @@ class ChatGPTEngine:
         return [c for c in self.controllers if c.is_open]
 
     def memory_servers(self, controller: ChatGPTController) -> list[Any]:
-        if self.memory is None:
-            return []
-        command = self.memory.server_for("chatgpt", controller.project, controller.run)
-        return [command] if command is not None else []
+        command = self.memory.server_for("chatgpt", controller.project, controller.run) if self.memory is not None else None
+        commands = [command] if command is not None else []
+        connections = getattr(self, "connections", None)
+        if connections is not None:
+            commands += connections.mcp_commands(controller.project)
+        return commands
 
     async def open_new(
         self,

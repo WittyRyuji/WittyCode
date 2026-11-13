@@ -6,19 +6,19 @@
 .conversation-column .scroller::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 10px; background: transparent; background-clip: padding-box; }
 .conversation-column .scroller:hover::-webkit-scrollbar-thumb, .conversation-column .scroller:focus-within::-webkit-scrollbar-thumb, .conversation-column .scroller.is-scrolling::-webkit-scrollbar-thumb { background-color: color-mix(in srgb, var(--muted) 38%, transparent); }
 .conversation-column .scroller::-webkit-scrollbar-thumb:hover { background-color: var(--muted); }
-.jump { position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px; border: 1px solid var(--line); border-radius: 20px; background: var(--bg-raised); box-shadow: 0 2px 8px color-mix(in srgb, var(--ink) 8%, transparent); color: var(--fg-2); font-size: 12px; }
-.jump:hover { background: var(--soft); color: var(--fg); }
+.jump { position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px; border: var(--bw) solid var(--ink); background: var(--bg-raised); box-shadow: 3px 3px 0 var(--shadow-hard); color: var(--ink); font-size: 12.5px; font-weight: 600; }
+.jump:hover { background: var(--ink); color: var(--paper); }
 
 /* Codex-like turn outline: short, quiet marks; message previews appear only on hover or keyboard focus. */
-.turn-nav { position: absolute; z-index: 4; left: 4px; top: 50%; transform: translateY(-50%); width: 28px; max-height: calc(100% - 56px); padding: 4px 0; overflow-y: auto; scrollbar-width: none; }
+.turn-nav { position: absolute; z-index: 4; left: 4px; top: 28px; width: 28px; max-height: calc(100% - 56px); padding: 4px 0; overflow-y: auto; scrollbar-width: none; }
 .turn-nav::-webkit-scrollbar { display: none; }
-.turn-marker { display: flex; align-items: center; justify-content: center; width: 28px; height: 24px; border-radius: 6px; }
-.turn-marker > span { width: 10px; height: 3px; border-radius: 3px; background: var(--line-strong); transition: width 0.15s, background-color 0.15s; }
+.turn-marker { display: flex; align-items: center; justify-content: center; width: 28px; height: 12px; }
+.turn-marker > span { width: 10px; height: 3px; background: var(--line-strong); transition: width 0.15s, background-color 0.15s; }
 .turn-marker:hover, .turn-marker:focus-visible { background: var(--hover); }
 .turn-marker:hover > span, .turn-marker[aria-current="step"] > span { width: 18px; background: var(--fg); }
 .turn-marker.st-running > span { animation: pulse 1.4s ease-in-out infinite; }
 .turn-marker.st-failed > span { background: var(--err); }
-.turn-preview { position: fixed; z-index: 40; width: 300px; max-width: calc(100vw - 80px); padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg-raised); box-shadow: 0 4px 18px color-mix(in srgb, var(--ink) 10%, transparent); pointer-events: none; }
+.turn-preview { position: fixed; z-index: 40; width: 300px; max-width: calc(100vw - 80px); padding: 12px 14px; border: var(--bw) solid var(--ink); background: var(--bg-raised); box-shadow: 3px 3px 0 var(--shadow-hard); pointer-events: none; }
 .turn-preview-head { display: flex; justify-content: space-between; gap: 16px; margin-bottom: 5px; font-size: 11px; color: var(--muted); }
 .turn-preview-text { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; overflow-wrap: anywhere; font-size: 12.5px; line-height: 1.55; }
 
@@ -33,7 +33,7 @@
 .turn { margin: 0 0 26px; }
 .turn + .turn { padding-top: 26px; border-top: 1px solid var(--line); }
 
-.block.user { position: relative; background: var(--user-bg); border: 1px solid transparent; border-radius: 12px; padding: 10px 16px 12px; margin: 0 0 18px; }
+.block.user { position: relative; background: var(--user-bg); border: 1px solid var(--line-strong); border-left: 4px solid var(--ink); padding: 10px 16px 12px; margin: 0 0 18px; }
 .user .who { font-size: 11px; font-weight: 700; letter-spacing: 0.06em; color: var(--muted); margin-bottom: 2px; }
 .user .body { font-size: var(--fs-body); line-height: 1.65; white-space: pre-wrap; word-break: break-word; }
 .user.clamp .body { max-height: 11em; overflow: hidden; -webkit-mask-image: linear-gradient(#000 78%, transparent); mask-image: linear-gradient(#000 78%, transparent); }
@@ -41,7 +41,7 @@
 .linkbtn:hover { text-decoration-thickness: 2px; }
 .user .linkbtn { display: block; margin-top: 4px; }
 /* said to a turn that was running: smaller than the message that began it, and dashed until the engine has read it */
-.block.user.steer { margin-left: 28px; border-left: 2px solid var(--line-strong); padding-top: 6px; padding-bottom: 8px; }
+.block.user.steer { margin-left: 28px; border-left-width: 3px; padding-top: 6px; padding-bottom: 8px; }
 .block.user.steer.pending { opacity: 0.72; border-left-style: dashed; }
 
 /* attachments (a sent message and the composer share the card) */
@@ -97,13 +97,13 @@
 .codeblock code { font: inherit; background: none; padding: 0; }
 
 /* ---------------------------------------------------------------- activity groups: one quiet row per run of tool calls */
-.block.activity { margin: 12px 0; border: 1px solid var(--line); border-radius: 8px; background: transparent; overflow: hidden; }
+.block.activity { margin: 12px 0; border: 1px solid var(--line-strong); background: transparent; }
 .gsum, .irow { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; }
 .gsum { padding: 7px 12px 7px 10px; color: var(--muted); font-size: 13px; }
 .gsum:hover, .irow:hover { background: var(--hover); }
 .gtext { flex: none; }
 .gnow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); }
-.activity.live { border-color: var(--line-strong); }
+.activity.live { border-color: var(--ink); border-left-width: 4px; }
 .activity.awaiting { border-color: var(--warn-line); border-left: 4px solid var(--warn); background: var(--warn-bg); }
 .activity.awaiting .gnow { color: var(--warn); }
 .activity.has-cancel .gtext { color: var(--warn); }

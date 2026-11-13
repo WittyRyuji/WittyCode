@@ -183,7 +183,7 @@ await page.hover(".usage");
 await page.wait(700);
 ok("the Token tooltip lists In / Out / Cache Write / Cache Read / hit rate", await page.eval("(() => { const t = [...document.querySelectorAll('.tip-row dt')].map(e => e.textContent).join('|'); return t === '合计|In|Out|Cache Write|Cache Read|Cache 命中率'; })()"));
 ok("the hit rate is a percentage", await page.eval("/^\\d+(\\.\\d)?%$/.test([...document.querySelectorAll('.tip-row dd')].pop().textContent)"));
-ok("the model pie is above the token table and includes cached tokens in its shares", await page.eval("(() => { const p = document.querySelector('.usage-pie'); const r = [...document.querySelectorAll('.usage-legend li')]; return p?.getAttribute('role') === 'img' && getComputedStyle(p).backgroundImage.startsWith('conic-gradient') && p.getBoundingClientRect().bottom < document.querySelector('.usage-tip .tip-table').getBoundingClientRect().top && r.map(e => e.querySelector('.usage-percent').textContent).join('|') === '69.1%|20.7%|10.2%' && r[0].textContent.includes('GPT-6.1-Sol') && r[1].textContent.includes('Claude Opus 5.5') && r[2].textContent.includes('未归属'); })()"));
+ok("the model pie is above the token table and includes cached tokens in its shares", await page.eval("(() => { const p = document.querySelector('.usage-pie'); const r = [...document.querySelectorAll('.usage-legend li')]; return p?.getAttribute('role') === 'img' && p.querySelectorAll('linearGradient').length === r.length && p.querySelectorAll('path').length === r.length && p.getBoundingClientRect().bottom < document.querySelector('.usage-tip .tip-table').getBoundingClientRect().top && r.map(e => e.querySelector('.usage-percent').textContent).join('|') === '69.1%|20.7%|10.2%' && r[0].textContent.includes('GPT-6.1-Sol') && r[1].textContent.includes('Claude Opus 5.5') && r[2].textContent.includes('未归属'); })()"));
 await page.hover(".usage .tip");
 await page.wait(500);
 ok("the model tooltip stays open when the pointer moves onto the chart", await page.eval("!!document.querySelector('.usage-pie')"));
@@ -202,7 +202,7 @@ ok("the TPS tooltip says in its first line that the figure is an estimate", awai
 // settings: the button, the pages, and a change that takes effect at once
 await page.click(".foot-btn", 1);
 ok("the settings button opens the settings", await page.eval("!!document.querySelector('.settings')"));
-ok("the settings pages are 外观 / 账号与模型 / 新会话默认值 / … / 关于", await page.eval("[...document.querySelectorAll('.snav')].map(e => e.textContent.trim()).join(',') === '外观,账号与模型,新会话默认值,会话,共享记忆5,外部程序,项目,快捷键,关于'"));
+ok("the settings pages also include Connections", await page.eval("[...document.querySelectorAll('.snav')].map(e => e.textContent.trim()).join(',') === '外观,账号与模型,新会话默认值,会话,共享记忆5,外部程序,项目,快捷键,Connections,关于'"));
 await page.click(".snav", 2);
 ok("defaults page lists model / reasoning / permission / mode", await page.eval("document.querySelectorAll('.settings-scroll .field').length === 4"));
 await page.click(".snav", 0);
@@ -378,7 +378,7 @@ ok("its reasoning levels come from the model", (await menu(1)) === "Low,Medium,H
 await page.hover(".usage");
 await page.wait(700);
 ok("the session shows its own speed", await page.eval("/TPS ≈63\\.4 /.test(document.querySelector('.st-right').innerText.replace(/\\s+/g, ' '))"));
-ok("there is no Cache Write row when the service does not report it, and no explaining notes", await page.eval("(() => { const rows = [...document.querySelectorAll('.tip-row dt')].map(e => e.textContent).join('|'); return rows === '合计|In|Out|Cache Read|Cache 命中率' && !document.querySelector('.tip-lines .tip-note'); })()"));
+ok("there is no invented Cache Write row; unknown old model attribution is explained", await page.eval("(() => { const rows = [...document.querySelectorAll('.tip-row dt')].map(e => e.textContent).join('|'); return rows === '合计|In|Out|Cache Read|Cache 命中率' && document.querySelector('.usage-tip .tip-note')?.textContent.includes('未归属'); })()"));
 ok("the sidebar names the engine of the session", await page.eval("[...document.querySelectorAll('.srow')].some(r => r.textContent.includes('重写索引构建') && r.textContent.includes('· ChatGPT Plan'))"));
 await page.close();
 
@@ -390,7 +390,7 @@ await page.close();
 
 // accounts and models: WittyCode's own engine, Devin and the API providers, no other program's
 page = await openPage(`${index}?scene=done&settings=providers&theme=dark&review=0`);
-ok("the page has a ChatGPT Plan, a Devin and an API Provider card, and nothing of another program", await page.eval("document.querySelectorAll('.providers .pcard').length === 3 && !/Factory|Codex|Droid/.test(document.querySelector('.providers').textContent)"));
+ok("the page has the own-loop providers, Devin and an optional Factory CLI card", await page.eval("document.querySelectorAll('.providers .pcard').length === 4 && document.querySelector('.factory-card').textContent.includes('Factory CLI（可选）')"));
 ok("no console errors (accounts page)", page.consoleErrors().length === 0);
 await page.close();
 
@@ -473,10 +473,7 @@ await page.close();
 page = await openPage(`${index}?scene=chatgpt&theme=dark&review=0`);
 ok("a ChatGPT Plan session says it is using the plan, with the way to manage usage", await page.eval("(() => { const b = document.querySelector('.hint .plan-badge'); const a = b?.querySelector('a'); return !!b && b.textContent.includes('Using ChatGPT Plan') && !b.classList.contains('off') && a.textContent === 'Manage usage' && a.getAttribute('href') === 'https://chatgpt.com/settings/usage'; })()"));
 ok("the badge is under the box, so the send button stays on the row of the controls and nothing is left empty below it", await page.eval("(() => { const r = (e) => e.getBoundingClientRect(); const bar = document.querySelector('.composer-bar'); const chip = document.querySelector('.controls .chip'); const send = document.querySelector('.composer-bar .send'); const hint = document.querySelector('.hint'); const b = document.querySelector('.hint .plan-badge'); const mid = (e) => r(e).top + r(e).height / 2; return !document.querySelector('.controls .plan-badge') && Math.abs(mid(send) - mid(chip)) < 6 && r(bar).height < 40 && r(hint).height < 22 && r(b).right <= r(hint).right + 1 && r(b).left > r(hint).left + 100; })()"));
-ok("the badge ends in a grey ring after Manage usage, 14 px: the plan's figures are not given to this sign-in", await page.eval("(() => { const b = document.querySelector('.hint .plan-badge'); const ring = b.querySelector('.plan-ring .usage-ring'); const a = b.querySelector('a'); return !!ring && ring.getBoundingClientRect().width === 14 && ring.classList.contains('unknown') && !ring.querySelector('.ring-arc') && (a.compareDocumentPosition(ring) & Node.DOCUMENT_POSITION_FOLLOWING); })()"));
-await page.hover(".plan-ring");
-await page.waitFor("!!document.querySelector('.plan-ring .tip')", 2000);
-ok("hovering it says why there are no figures and where to look", await page.eval("(() => { const t = document.querySelector('.plan-ring .tip').textContent; return t.includes('现在读不到') && t.includes('Manage usage') && !/%/.test(t); })()"));
+ok("unavailable subscription figures have no empty ring or invented percentage", await page.eval("!document.querySelector('.plan-ring, .usage-ring') && !!document.querySelector('.plan-badge a')"));
 ok("the badge still fits the line under the box with the ring", await page.eval("(() => { const r = (e) => e.getBoundingClientRect(); const hint = document.querySelector('.hint'); const b = document.querySelector('.hint .plan-badge'); return r(hint).height < 22 && r(b).right <= r(hint).right + 1 && r(b).height < 22; })()"));
 ok("the reasoning levels are the model's own", (await menu(1)) === "Low,Medium,High,XHigh");
 ok("the permission scale is WittyCode's own three", (await menu(2)) === "询问,写代码,完全访问");
@@ -491,12 +488,9 @@ ok("the menu has its own CHATGPT PLAN group, with the models and the account", a
 })());
 await page.close();
 
-// the ring: OpenAI gives this sign-in no figures, so it is grey, and the tip says why
+// The sign-in exposes no subscription balance: keep the usage link, omit the empty ring in either theme.
 page = await openPage(`${index}?scene=chatgpt&theme=light&review=0`);
-ok("the ring is grey and empty", await page.eval("(() => { const ring = document.querySelector('.hint .plan-ring .usage-ring'); return !!ring && ring.classList.contains('unknown') && !ring.querySelector('.ring-arc') && ring.getAttribute('aria-label') === '套餐额度读不到'; })()"));
-await page.hover(".plan-ring");
-await page.waitFor("!!document.querySelector('.plan-ring .tip')", 2000);
-ok("and the tip says why and where to look, without inventing any figures", await page.eval("(() => { const t = document.querySelector('.plan-ring .tip').textContent; return t.includes('现在读不到：') && t.includes('没有给「用 ChatGPT 登录」的应用开放用量接口') && !/Codex|%/.test(t); })()"));
+ok("the light theme also omits the unavailable balance ring", await page.eval("!document.querySelector('.plan-ring, .usage-ring') && document.querySelector('.plan-badge a').textContent === 'Manage usage'"));
 await page.close();
 
 // messages waiting for their turn: one line each above the composer, the width of the box, four icons at the end
@@ -553,7 +547,7 @@ ok("an empty session moved to a ChatGPT Plan model takes that engine's levels: C
 await page.close();
 
 page = await openPage(`${index}?scene=done&settings=providers&chatgpt=signed-out&theme=dark&review=0`);
-ok("the page has three cards: ChatGPT Plan, Devin and API Provider", await page.eval("document.querySelectorAll('.providers .pcard').length === 3"));
+ok("the page has four cards including optional Factory CLI", await page.eval("document.querySelectorAll('.providers .pcard').length === 4"));
 ok("ChatGPT Plan starts signed out, with OpenAI's wording on a black button", await page.eval("document.querySelector('.pcard:nth-child(1)').textContent.includes('ChatGPT Plan') && document.querySelector('.pcard:nth-child(1) .pstate.off')?.textContent.includes('未登录') && document.querySelector('.pcard:nth-child(1) .btn.chatgpt-btn').textContent.trim() === 'Continue with ChatGPT' && getComputedStyle(document.querySelector('.pcard:nth-child(1) .btn.chatgpt-btn')).backgroundColor === 'rgb(0, 0, 0)'"));
 await page.click(".pcard:nth-child(1) .btn.chatgpt-btn");
 await page.waitFor("document.querySelector('.pcard:nth-child(1)').textContent.includes('正在等你在浏览器里完成登录')", 2000);
@@ -776,28 +770,28 @@ const noteTitles = () => page.eval("[...document.querySelectorAll('.mem-note .me
 const notice = () => page.eval("document.querySelector('.notice-text')?.textContent ?? ''");
 ok("the settings have a memory page, with the number of new notes on its tab", await page.eval("(() => { const n = [...document.querySelectorAll('.snav')].find(e => e.textContent.includes('共享记忆')); return !!n && n.classList.contains('on') && n.querySelector('.snav-badge')?.textContent === '5' && document.querySelector('.settings-body h2').textContent === '共享记忆'; })()"));
 ok("the sidebar's memory button carries the same number: two new notes and three notes for the weekly review", await page.eval("document.querySelector('.foot-btn .foot-badge')?.textContent === '5'"));
-ok("the switches: on, for ChatGPT Plan and Devin, and for the two ways notes get written by the application itself", await page.eval("(() => { const on = [...document.querySelectorAll('.settings-body .field .switch')].map((e) => e.getAttribute('aria-checked')); return on.length === 6 && on.every((v) => v === 'true') && [...document.querySelectorAll('.mem-engine')].map((e) => e.textContent.trim()).join() === 'ChatGPT Plan,Devin'; })()"));
+ok("the switches: on, for WittyHarness, Devin and Factory, and for the two ways notes get written by the application itself", await page.eval("(() => { const on = [...document.querySelectorAll('.settings-body .field .switch')].map((e) => e.getAttribute('aria-checked')); return on.length === 7 && on.every((v) => v === 'true') && [...document.querySelectorAll('.mem-engine')].map((e) => e.textContent.trim()).join() === 'WittyHarness,Devin,Factory'; })()"));
 await page.click(".mem-engine .switch", 1);
-ok("an engine can be left out", await page.eval("[...document.querySelectorAll('.mem-engine .switch')].map((e) => e.getAttribute('aria-checked')).join() === 'true,false'"));
+ok("an engine can be left out", await page.eval("[...document.querySelectorAll('.mem-engine .switch')].map((e) => e.getAttribute('aria-checked')).join() === 'true,false,true'"));
 await page.click(".mem-engine .switch", 1);
-await page.click(".settings-body .field .switch", 3);
-ok("the notes that bear on a message can be left out of the messages", await page.eval("document.querySelectorAll('.settings-body .field .switch')[3].getAttribute('aria-checked') === 'false'"));
-await page.click(".settings-body .field .switch", 3);
-await page.click(".settings-body .field .switch", 4);
-await page.click(".settings-body .field .switch", 5);
-ok("a message that says remember, and the notes the application writes by itself after a turn, can each be switched off", await page.eval("(() => { const s = [...document.querySelectorAll('.settings-body .field .switch')]; return s[4].getAttribute('aria-checked') === 'false' && s[5].getAttribute('aria-checked') === 'false' && /说了「记住」就直接记下/.test(document.querySelectorAll('.settings-body .field')[3].textContent) && /自动记笔记，每周回顾一次/.test(document.querySelectorAll('.settings-body .field')[4].textContent); })()"));
-await page.click(".settings-body .field .switch", 4);
-await page.click(".settings-body .field .switch", 5);
+await page.click('.switch[aria-label="新会话开头带上相关笔记"]');
+ok("the notes that bear on a message can be left out of the messages", await page.eval("document.querySelector('.switch[aria-label=\"新会话开头带上相关笔记\"]').getAttribute('aria-checked') === 'false'"));
+await page.click('.switch[aria-label="新会话开头带上相关笔记"]');
+await page.click('.switch[aria-label="说了记住就直接记下"]');
+await page.click('.switch[aria-label="自动记笔记，每周回顾一次"]');
+ok("a message that says remember, and the notes the application writes by itself after a turn, can each be switched off", await page.eval("(() => { const s = [...document.querySelectorAll('.settings-body .field .switch')]; return s[5].getAttribute('aria-checked') === 'false' && s[6].getAttribute('aria-checked') === 'false' && /说了「记住」就直接记下/.test(document.querySelectorAll('.settings-body .field')[3].textContent) && /自动记笔记，每周回顾一次/.test(document.querySelectorAll('.settings-body .field')[4].textContent); })()"));
+await page.click('.switch[aria-label="说了记住就直接记下"]');
+await page.click('.switch[aria-label="自动记笔记，每周回顾一次"]');
 await page.click(".settings-body .field .switch", 0);
 ok("with the master switch off the engines are gone, and the page says the notes stay", await page.eval("!document.querySelector('.mem-engine') && document.querySelectorAll('.settings-body .field .switch').length === 1 && document.querySelector('.page-note')?.textContent.includes('已关闭') && !!document.querySelector('.mem-note')"));
 await page.click(".settings-body .field .switch", 0);
 ok("the weekly review waits above what agents wrote: three notes, the least sure first, the sure ones ticked", await page.eval(`(() => { const sec = document.querySelector('.mem-sec[aria-label="每周回顾"]'); const rows = [...document.querySelectorAll('.mem-rev')]; return rows.map((r) => r.querySelector('.mem-title').textContent).join() === '这次先不动样式,e2e 要整文件连跑 20 次,提交信息用中文' && rows.map((r) => r.querySelector('.switch').getAttribute('aria-checked')).join() === 'false,true,true' && sec.textContent.includes('3 条') && (sec.compareDocumentPosition(document.querySelector('.mem-sec[aria-label="最近由代理写入"]')) & Node.DOCUMENT_POSITION_FOLLOWING); })()`));
-ok("a note says whose conversation it came from, why it is worth keeping, and how sure the application is", await page.eval("(() => { const m = document.querySelectorAll('.mem-rev')[2].querySelector('.mem-meta').textContent; return m.includes('ChatGPT Plan') && m.includes('测试一下换GPT Plan') && m.includes('用户明确说了') && m.includes('把握 91%'); })()"));
+ok("a note says whose conversation it came from, why it is worth keeping, and how sure the application is", await page.eval("(() => { const m = document.querySelectorAll('.mem-rev')[2].querySelector('.mem-meta').textContent; return m.includes('WittyHarness') && m.includes('测试一下换GPT Plan') && m.includes('用户明确说了') && m.includes('把握 91%'); })()"));
 ok("the button says how many stay and how many go", await page.eval("document.querySelector('.mem-rev-foot .btn.primary').textContent.replace(/\\s+/g, '') === '确认：留下2条，丢掉1条'"));
 await clickText(".mem-rev-foot .btn", "确认");
 await page.waitFor("!document.querySelector('.mem-rev')", 3000);
 ok("confirming says what was kept and dropped; only what agents wrote is counted by the tab again", await page.eval("document.querySelector('.mem-lead')?.textContent.includes('保留 2 条，丢弃 1 条') && [...document.querySelectorAll('.snav-badge')].map((e) => e.textContent).join() === '2'"));
-ok("what agents wrote lately: five changes, newest first", await page.eval("(() => { const r = [...document.querySelectorAll('.mem-change .mem-change-line')].map((e) => e.textContent.replace(/\\s+/g, ' ')); return r.length === 5 && r[0].startsWith('Devin 忘记了「旧结论') && r[1].startsWith('Devin 记住了「改了 frontend') && r[2].startsWith('Devin') && r[3].startsWith('ChatGPT Plan'); })()"));
+ok("what agents wrote lately: five changes, newest first", await page.eval("(() => { const r = [...document.querySelectorAll('.mem-change .mem-change-line')].map((e) => e.textContent.replace(/\\s+/g, ' ')); return r.length === 5 && r[0].startsWith('Devin 忘记了「旧结论') && r[1].startsWith('Devin 记住了「改了 frontend') && r[2].startsWith('Devin') && r[3].startsWith('WittyHarness'); })()"));
 ok("the two the user has not looked at are marked", await page.eval("document.querySelectorAll('.mem-change.new').length === 2 && document.querySelector('.mem-new')?.textContent.includes('2 条新的')"));
 ok("a change made in a conversation names it as a link", await page.eval("[...document.querySelectorAll('.mem-change .mem-link')].some((e) => e.textContent === '修复缓存')"));
 ok("the notes: four in use and one forgotten", (await page.eval("document.querySelector('.mem-count').textContent.replace(/\\s+/g, '')")) === "4·已忘记1" && (await noteTitles()).length === 4);
@@ -821,7 +815,7 @@ await page.click(".mem-tools .segc button", 0);
 await page.waitFor("document.querySelectorAll('.mem-note').length === 5", 3000);
 
 await clickText(".mem-note-head", "PowerShell");
-ok("a note opens to its text and says where it came from", await page.eval("(() => { const b = document.querySelector('.mem-note.open .mem-note-body'); return !!b && b.textContent.includes('用分号串联') && b.textContent.includes('ChatGPT Plan 写入') && b.textContent.includes('整理测试'); })()"));
+ok("a note opens to its text and says where it came from", await page.eval("(() => { const b = document.querySelector('.mem-note.open .mem-note-body'); return !!b && b.textContent.includes('用分号串联') && b.textContent.includes('WittyHarness 写入') && b.textContent.includes('整理测试'); })()"));
 ok("and offers 编辑 and 忘记", await page.eval("[...document.querySelectorAll('.mem-note.open .btn')].map((e) => e.textContent.trim()).join() === '编辑,忘记'"));
 await clickText(".mem-note.open .btn", "编辑");
 ok("the editor takes the focus (so Esc leaves it, not the settings)", await page.eval("document.activeElement?.getAttribute('aria-label') === '标题'"));
@@ -992,9 +986,11 @@ ok("nothing was blocked by the Content-Security-Policy (long answer, pictures, f
 const errors = page.consoleErrors();
 ok("no console errors", errors.length === 0);
 await page.close();
+await import("./check-frame-language.mjs");
 await import("./check-plan.mjs");
 await import("./check-usage-plan-updates.mjs");
 await import("./check-turn-navigation.mjs");
 await import("./check-step-limit.mjs");
+await import("./check-connections.mjs");
 console.log(failed ? `${failed} check(s) FAILED` : "all checks passed");
 process.exit(failed ? 1 : 0);

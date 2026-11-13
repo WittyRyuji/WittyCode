@@ -109,7 +109,7 @@ def test_a_message_gets_an_answer_and_the_conversation_is_saved(tmp_path):
             assert controller.usage_series() == {"self": controller.usage}
             assert controller.context.used == 240
             saved = engine.sessions.load(controller.session_id)
-            assert saved is not None and saved.title == "Say hello" and saved.messages == 1
+            assert saved is not None and not saved.title and saved.messages == 1, "the app summarizes titles separately; the controller must not copy the first sentence"
             assert saved.items[-1]["type"] == "message" and saved.items[-1]["role"] == "assistant"
             assert [row.id for row in await engine.list_sessions(tmp_path / "project")] == [controller.session_id]
             await engine.close_all()
@@ -222,8 +222,8 @@ def test_stopping_a_turn_that_is_streaming_drops_the_connection_and_the_conversa
             controller.send_prompt("second")
             await finish_turn(controller)
             assert texts(controller)[-1] == "second answer"
-            # the interrupted turn left a valid history: its user message is there, the answer is not
-            assert [i["role"] for i in fake.requests[1]["input"] if i["type"] == "message"] == ["user", "user"]
+            # The interrupted turn keeps what was already shown, so the next request can continue from it.
+            assert [i["role"] for i in fake.requests[1]["input"] if i["type"] == "message"] == ["user", "assistant", "user"]
             await engine.close_all()
 
     run(go())
@@ -301,10 +301,13 @@ def test_a_usage_limit_error_is_shown_in_words_and_leaves_no_trace_in_the_histor
     run(go())
 
 
-def test_a_bad_token_is_reported_as_a_refusal_not_a_crash(tmp_path):
+def test_a_bad_token_is_reported_as_a_refusal_not_a_crash(tmp_path, monkeypatch):
     async def go() -> None:
         with FakeResponses(token="some-other-token") as fake:
             engine, controller = await opened(tmp_path, fake)
+            async def refused_refresh(client_id, record):
+                raise AuthError("refresh refused", code="invalid_grant", terminal=True)
+            monkeypatch.setattr(engine.tokens, "_renew", refused_refresh)
             controller.send_prompt("hi")
             await finish_turn(controller)
             error = next(b for b in controller.transcript.turns[0].blocks if b.kind == "error")
@@ -601,7 +604,7 @@ def test_a_saved_conversation_comes_back_with_its_turns_tools_tokens_and_setting
 
             again = make_engine(tmp_path, fake)
             rows = await again.list_sessions(tmp_path / "project")
-            assert [(r.id, r.title, r.messages) for r in rows] == [(session_id, "change alpha to omega", 1)]
+            assert [(r.id, r.title, r.messages) for r in rows] == [(session_id, "", 1)]
             reopened = await again.open_saved(tmp_path / "project", session_id)
             assert reopened.state is SessionState.READY and reopened.model == "gpt-6.1-sol" and reopened.reasoning == "medium"
             (turn,) = reopened.transcript.turns

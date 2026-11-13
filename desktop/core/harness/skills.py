@@ -145,7 +145,7 @@ class Source:
     """The root of the plugin the folder belongs to (``${DROID_PLUGIN_ROOT}`` in its files)."""
 
 
-SKILL_FOLDERS = (".wittycode", ".agents", ".agent", ".claude", ".factory")
+SKILL_FOLDERS = (".wittycode", ".agents", ".agent", ".codex", ".claude", ".factory")
 """The folders a project or the user keeps skills in: WittyCode's own first, then the ones other agent applications use, so
 skills written for those work here too (they are only read)."""
 COMMAND_FOLDERS = (".wittycode", ".factory")
@@ -239,8 +239,16 @@ def skill_sources(project: Path, home: Path | None = None) -> list[Source]:
     out: list[Source] = []
     for folder in _repository_folders(project, home):
         out += [Source("project", folder / part / "skills") for part in SKILL_FOLDERS]
+    from desktop.core.connections import ConnectionError, ConnectionStore, _local, codex_home
     for part in SKILL_FOLDERS:
-        out.append(Source("personal", home / part / "skills"))
+        folder = home / part / "skills"
+        if part == ".codex":
+            try:
+                folder = _local(codex_home(home) / "skills")
+            except ConnectionError:
+                continue
+        out.append(Source("personal", folder))
+    out += ConnectionStore(home=home).skill_sources(project)
     out += [Source("plugin", root / "skills", root) for root in _plugins(home)]
     return out
 
@@ -339,18 +347,20 @@ def _skill_of(path: Path, source: Source) -> Skill | None:
     )
 
 
-def discover(project: Path | str, home: Path | None = None) -> list[Skill]:
-    """The skills the conversation in ``project`` can use, the winner of each name, in the order the sources are searched."""
+def discover(project: Path | str, home: Path | None = None, *, include_disabled: bool = False) -> list[Skill]:
+    """The winner of each name, in source order. Management can ignore WittyCode switches without changing runtime rules."""
     project = Path(project)
     home = _home(home)
     off = _disabled(project, home)
+    from desktop.core.connections import ConnectionStore
+    connections = ConnectionStore(home=home)
     found: dict[str, Skill] = {}
     for source in skill_sources(project, home):
         if not source.folder.is_dir():
             continue
         for folder in _walk_for(source.folder, SKILL_FILE):
             skill = _skill_of(folder / SKILL_FILE, source)
-            if skill is not None and skill.name not in found and skill.name not in off:
+            if skill is not None and skill.name not in found and skill.name not in off and (include_disabled or connections.skill_allowed(skill.path, project, name=skill.name, source=source.label)):
                 found[skill.name] = skill
     return list(found.values())
 

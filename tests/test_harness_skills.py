@@ -462,7 +462,9 @@ def test_a_skill_made_while_the_conversation_goes_on_is_listed_from_the_next_mes
             controller.send_prompt("second")
             await finish_turn(controller)
             assert "made-later" not in fake.requests[0]["instructions"]
-            assert "- made-later:" in fake.requests[1]["instructions"]
+            assert fake.requests[1]["instructions"] == fake.requests[0]["instructions"]
+            update = next(item for item in reversed(fake.requests[1]["input"]) if item.get("role") == "developer")
+            assert "- made-later:" in update["content"][0]["text"], "new skills are appended without rewriting the cached prefix"
             await engine.close_all()
 
     run(go())
