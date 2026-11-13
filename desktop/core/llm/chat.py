@@ -287,7 +287,7 @@ async def read_chat(lines: AsyncIterator[str], origin: str = "") -> AsyncIterato
         if choice.get("finish_reason"):
             reason = str(choice["finish_reason"])
     if not ended and not reason:
-        raise ChatGPTError("The stream ended before the response was complete.", code="stream")
+        raise ChatGPTError("The stream ended before the response was complete.", code="stream", transient=False)
     if not own_thoughts:
         for is_thought, piece in thinker.finish():
             for event in thought_events(piece) if is_thought else word_events(piece):
