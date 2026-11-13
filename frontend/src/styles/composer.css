@@ -1,8 +1,8 @@
 .composer-wrap { flex: none; padding: 8px calc(var(--conversation-gutter, 40px) + var(--conversation-scrollbar, 8px)) 12px; background: var(--bg); }
 .composer-wrap > * { max-width: var(--conversation-width, 796px); margin-left: auto; margin-right: auto; }
-/* A quiet, rounded input surface on the same reading grid as the messages above it. */
-.composer { container-type: inline-size; display: flex; flex-direction: column; gap: 6px; padding: 10px 12px 8px; border: 1px solid var(--line-strong); border-radius: 4px; background: var(--bg-raised); transition: border-color 0.1s, box-shadow 0.1s; }
-.composer:focus-within { border-color: var(--muted); box-shadow: 0 0 0 2px var(--hover); }
+/* Keep the logo's square frame and offset focus shadow on the shared reading grid. */
+.composer { container-type: inline-size; display: flex; flex-direction: column; gap: 6px; padding: 10px 12px 8px; border: var(--bw) solid var(--line-strong); background: var(--bg-raised); transition: border-color 0.1s, box-shadow 0.1s; }
+.composer:focus-within { border-color: var(--ink); box-shadow: 4px 4px 0 var(--shadow-hard); }
 .composer.off { background: var(--soft); }
 /* The messages waiting for their turn: one line each, the width of the box below them. At the end of the line: see all of it,
    change it, take it back, send it now. */
@@ -25,8 +25,6 @@
 /* One line, always: the chips give way (their values end in an ellipsis, the full text is the tooltip) before the send button is
    pushed onto a line of its own, which leaves a blank strip under the box. */
 .composer-bar { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; border-top: 1px solid var(--line); padding-top: 6px; }
-.composer-bar .chip { border-color: var(--line); border-radius: 3px; }
-.composer-bar .send { border-radius: 3px; }
 .composer-bar > :not(.controls) { flex: none; }
 .attach { cursor: pointer; }
 /* The group around the four chips takes no box of its own: the bar lays the chips out, so the permission and the mode stay on the
@@ -39,7 +37,7 @@
 .chip-model { order: 4; }
 .chip-reasoning { order: 5; }
 .bar-actions { order: 6; display: flex; align-items: center; gap: 8px; }
-.chip { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 6px 0 10px; border: 1px solid transparent; border-radius: 7px; background: transparent; font-size: 12.5px; flex: 0 1 auto; min-width: 0; white-space: nowrap; }
+.chip { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 6px 0 10px; border: 1px solid var(--line-strong); background: transparent; font-size: 12.5px; flex: 0 1 auto; min-width: 0; white-space: nowrap; }
 .chip-k, .chip-c, .src-tag { flex: none; }
 .chip:hover:not(:disabled) { background: var(--hover); border-color: var(--muted); }
 .chip.open { border-color: var(--ink); background: var(--hover); }
@@ -68,7 +66,7 @@
 .inline-link:hover { color: var(--ink); }
 .defaults-note { font-size: 11.5px; color: var(--muted); }
 .spacer { flex: 1; }
-.send { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px 0 16px; border: 1px solid var(--ink); border-radius: 8px; background: var(--ink); color: var(--paper); font-weight: 700; }
+.send { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px 0 16px; border: var(--bw) solid var(--ink); background: var(--ink); color: var(--paper); font-weight: 700; }
 .send:hover:not(:disabled) { background: var(--bg-raised); color: var(--ink); }
 .send:disabled { background: transparent; border-color: var(--line-strong); color: var(--faint); }
 .send.stop { background: transparent; color: var(--err); border-color: var(--err); padding: 0 14px; }

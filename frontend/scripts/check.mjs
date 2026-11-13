@@ -986,6 +986,7 @@ ok("nothing was blocked by the Content-Security-Policy (long answer, pictures, f
 const errors = page.consoleErrors();
 ok("no console errors", errors.length === 0);
 await page.close();
+await import("./check-frame-language.mjs");
 await import("./check-plan.mjs");
 await import("./check-usage-plan-updates.mjs");
 await import("./check-turn-navigation.mjs");

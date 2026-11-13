@@ -50,9 +50,11 @@ for (const [theme, width] of [["light", 1500], ["dark", 900]]) {
     await page.hover(".turn-marker", 0);
     await page.waitFor("!!document.querySelector('.turn-preview')");
     assert((await page.eval("document.querySelector('.turn-preview').textContent")).includes("检查第 1 项布局"));
+    assert(await page.eval("['.turn-marker', '.turn-marker > span', '.turn-preview'].every(s => parseFloat(getComputedStyle(document.querySelector(s)).borderRadius) === 0) && getComputedStyle(document.querySelector('.turn-preview')).boxShadow.includes('3px 3px 0px')"), "navigation uses square marks and the app's hard-shadow preview");
     await page.click(".turn-marker", 0);
     await page.waitFor("document.querySelector('.scroller').scrollTop < 2");
     assert(await page.eval("!!document.querySelector('.jump') && document.querySelector('.turn-marker').getAttribute('aria-current') === 'step'"));
+    assert(await page.eval("(() => { const s = getComputedStyle(document.querySelector('.jump')); return parseFloat(s.borderRadius) === 0 && s.borderTopWidth === '2px' && s.boxShadow.includes('3px 3px 0px'); })()"), "jump to latest keeps the original square action button");
     await page.key("ArrowDown");
     await page.waitFor("(() => { const s = document.querySelector('.scroller').getBoundingClientRect(), t = document.querySelectorAll('.transcript > .turn')[1].getBoundingClientRect(); return Math.abs(t.top - s.top - 28) < 2; })()");
     assert.equal(await page.eval("document.activeElement.dataset.turnId"), "turn-1");
@@ -79,7 +81,8 @@ for (const [theme, width] of [["light", 1500], ["dark", 900]]) {
     await page.click(".jump");
     await page.waitFor(atEnd);
     await page.waitFor("!document.querySelector('.jump')");
-    assert(await page.eval("document.querySelectorAll('.turn-marker')[5].getAttribute('aria-current') === 'step'"));
+    // The reading marker updates on the next animation frame, after the scroll position lands.
+    await page.waitFor("document.querySelectorAll('.turn-marker')[5].getAttribute('aria-current') === 'step'");
     turns[5].blocks[1].markdown = "最新一轮的简短回答。";
     await emit([turns[5]]);
     await page.waitFor(atEnd);
