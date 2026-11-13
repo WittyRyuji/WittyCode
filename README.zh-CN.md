@@ -4,18 +4,20 @@
 
 [![CI](https://github.com/WittyRyuji/WittyCode/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/WittyRyuji/WittyCode/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/WittyRyuji/WittyCode/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/WittyRyuji/WittyCode/actions/workflows/codeql.yml)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/WittyRyuji/WittyCode)
+[![Ask DeepWiki](docs/badges/deepwiki.svg)](https://deepwiki.com/WittyRyuji/WittyCode)
 
 Windows 上的编程代理桌面应用，自带代理循环：回答放在第一位，工具调用折叠成一行。
 
 ![一轮结束后：工具调用折叠成一行摘要，回答醒目](docs/screenshots/readme-conversation.png)
 
 - **自带代理循环**：WittyCode 自己调用模型——用你的 ChatGPT 套餐（Sign in with ChatGPT）或你自己的 API Provider——带文件、搜索、命令工具和三档权限；长对话自动压缩，请求失败自动重试。
-- **所有模型一个界面**：ChatGPT Plan、API Provider（OpenAI、Anthropic、DeepSeek / OpenRouter / Ollama 等兼容接口，以及 AWS Bedrock），可选 Devin。对话中途可以换模型，之前的文字会交接过去。
+- **所有模型一个界面**：ChatGPT Plan、API Provider（OpenAI、Anthropic、DeepSeek / OpenRouter / Ollama 等兼容接口，以及 AWS Bedrock），可选 Devin 和 Factory CLI。对话中途可以换模型，之前的文字会交接过去。
 - **运行中也能问答**：审批和提问显示成卡片，选项一行一个；运行中打的字可以排队，也可以立即引导本轮。
 - **斜杠命令和技能**：`/compact`、`/plan`、`/goal <目标>`；技能和自定义命令放在 `.wittycode/`（也读其他代理应用常用的目录）。
 - **共享记忆**：所有引擎读写同一份本地笔记，可以从别的应用导入笔记和会话。
 - **本地优先**：会话、记忆、缓存都在你的电脑上，没有遥测。
+
+设置 → **Connections** 管理本地 Codex 格式的 Skills、Plugins、command Hooks 和 stdio MCP，导入前预览并一次确认执行配置。支持范围和限制见[连接指南](docs/connections.md)。
 
 接下来要做什么见 [Roadmap](ROADMAP.zh-CN.md)。
 
@@ -26,6 +28,7 @@ Windows 上的编程代理桌面应用，自带代理循环：回答放在第一
 | ChatGPT Plan | 一个 ChatGPT 账号，不用装别的程序 |
 | API Provider | API Key，或 Bedrock 用的 AWS 凭据 |
 | Devin（可选） | Devin 命令行或 Devin 桌面版 |
+| Factory（可选） | 已单独登录的 Factory CLI，不需要 Factory SDK |
 
 WittyCode 本身不依赖任何别的代理程序。没设置的引擎不会报错，只是它的模型不出现在菜单里。
 
@@ -54,7 +57,7 @@ cd frontend; npm ci; npm run build:app; cd ..
 | 路径 | 内容 |
 | --- | --- |
 | `desktop/ui/` | 入口、无边框窗口和 QWebChannel 桥 |
-| `desktop/core/` | 后端，不依赖 Qt：`app_core.py`；自带循环在 `chatgpt/`、`harness/`、`llm/`；可选的 `devin/` 引擎 |
+| `desktop/core/` | 后端，不依赖 Qt：`app_core.py`；自带循环在 `chatgpt/`、`harness/`、`llm/`；可选的 `devin/`、`factory.py` 引擎；`connections.py` 管理本地扩展 |
 | `desktop/core/memory/`、`desktop/core/importers/` | 共享记忆；从别的应用导入 |
 | `frontend/` | 界面：React + TypeScript + Vite，构建成单文件 |
 | `tests/` | 自动测试（不调用模型） |
@@ -67,11 +70,12 @@ cd frontend; npm ci; npm run build:app; cd ..
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt -c constraints.txt
-.\.venv\Scripts\python.exe -m pytest tests -q -p no:cacheprovider
-cd frontend; npm run typecheck; npm run unit; node scripts/check.mjs; node scripts/check-live.mjs
+.\.venv\Scripts\python.exe scripts/check_ci.py --clean
+# 整机测试另在本地运行（先构建页面）：
+.\.venv\Scripts\python.exe scripts/check_ci.py --part windows
 ```
 
-`tests/test_app_e2e.py` 在真 Qt 窗口里跑真页面（改了 `frontend/` 先 `npm run build:app`），只在本地跑；其余都在 CI 里跑。提 PR 前请看 [CONTRIBUTING.md](CONTRIBUTING.md)，报告漏洞请看 [SECURITY.md](SECURITY.md)。
+验收使用 Python 3.11.9、Node 24.20.0，与 CI 一致。干净入口会在隔离副本安装锁定依赖，调用 CI 和发布共用的检查，包括 Qt 自己的 QWebChannel 客户端。整机测试运行真 Qt 窗口和 React 页，仍只在本地跑。提 PR 前请看 [CONTRIBUTING.md](CONTRIBUTING.md)，报告漏洞请看 [SECURITY.md](SECURITY.md)。
 
 做发布包：`cd frontend; npm run build:app; cd ..` 之后运行 `.\.venv\Scripts\python.exe scripts\build_release.py`，产物在 `dist\`。打 tag 时由 GitHub Actions 自动构建发布。
 

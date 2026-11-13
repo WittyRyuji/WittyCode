@@ -11,6 +11,8 @@ import { COMPACT_AT_MAX, COMPACT_AT_MIN } from "../liveReducer";
 import { Field, Select, Seg, Switch } from "./formkit";
 import { buildModelMenu } from "./modelMenu";
 import { MemoryPage } from "./MemoryPage";
+import { ConnectionsPage } from "./ConnectionsPage";
+import { FactorySettings } from "./FactorySettings";
 import { StepLimitSetting } from "./StepLimitSetting";
 import { ProviderEditor } from "./ProviderEditor";
 import { ProvidersPage } from "./ProvidersPage";
@@ -26,6 +28,7 @@ const PAGES = [
   { id: "projects", label: "项目", icon: <FolderOpen size={15} /> },
   { id: "shortcuts", label: "快捷键", icon: <Keyboard size={15} /> },
   { id: "about", label: "关于", icon: <Info size={15} /> },
+  { id: "connections", label: "Connections", icon: <Layers size={15} /> },
 ];
 
 function AppearancePage() {
@@ -232,7 +235,8 @@ function ProgramsPage() {
   const s = useStore();
   return (
     <>
-      <p className="page-note">WittyCode 自己的代理循环（ChatGPT Plan、API Provider）不需要任何别的程序。装了 Devin 的话，它的模型会出现在模型菜单里；这里可以指定它的位置。</p>
+      <p className="page-note">WittyCode 自己的代理循环（ChatGPT Plan、API Provider）不需要任何别的程序。Devin 和 Factory CLI 都是可选连接；在这里指定程序，再按需启用。</p>
+      <FactorySettings program />
       <ProgramPath label="Devin 命令行" autoHint="自动检测：在 PATH 和 Devin 桌面版的安装目录里找 devin。" found={s.devin.cliPath ?? ""} path={s.devinPath} onPath={s.setDevinPath} />
       <p className="page-note">改了路径后，已经打开的会话继续用旧进程；新开的会话才用新路径。</p>
     </>
@@ -379,6 +383,7 @@ export function SettingsHost() {
             {current.id === "projects" && <ProjectsPage />}
             {current.id === "shortcuts" && <ShortcutsPage />}
             {current.id === "about" && <AboutPage />}
+            {current.id === "connections" && <ConnectionsPage />}
           </div>
         </section>
       </div>

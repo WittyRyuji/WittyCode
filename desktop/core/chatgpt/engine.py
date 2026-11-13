@@ -321,10 +321,12 @@ class ChatGPTEngine:
         return [c for c in self.controllers if c.is_open]
 
     def memory_servers(self, controller: ChatGPTController) -> list[Any]:
-        if self.memory is None:
-            return []
-        command = self.memory.server_for("chatgpt", controller.project, controller.run)
-        return [command] if command is not None else []
+        command = self.memory.server_for("chatgpt", controller.project, controller.run) if self.memory is not None else None
+        commands = [command] if command is not None else []
+        connections = getattr(self, "connections", None)
+        if connections is not None:
+            commands += connections.mcp_commands(controller.project)
+        return commands
 
     async def open_new(
         self,

@@ -40,7 +40,7 @@ test("model colors do not collide, including the reported Sol and Terra pair and
   assert.equal(new Set(colors).size, ids.length + 1, "each model and the unknown balance need different actual colors");
 });
 
-test("usage colors are subdued rather than bright or highly saturated", () => {
+test("usage colors use bright soft pastels rather than muddy dark tones", () => {
   const rows = usageSlices(64, Object.fromEntries(Array.from({ length: 64 }, (_, i) => [`model-${i}`, 1])));
   for (const { color } of rows) {
     assert.match(color, /^#[a-f0-9]{6}$/i);
@@ -50,7 +50,8 @@ test("usage colors are subdued rather than bright or highly saturated", () => {
     const saturation = maximum === minimum ? 0 : (maximum - minimum) / (1 - Math.abs(2 * lightness - 1));
     const linear = rgb.map((value) => value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4);
     const luminance = linear[0] * 0.2126 + linear[1] * 0.7152 + linear[2] * 0.0722;
-    assert(lightness >= 0.34 && lightness <= 0.49 && saturation <= 0.4 && luminance < 0.24, color);
+    // The reference #ff9a9e has HSL saturation 1 but remains a soft pastel because every RGB channel is bright.
+    assert(lightness >= 0.67 && lightness <= 0.88 && saturation >= 0.25 && minimum >= 0.5 && maximum - minimum < 0.44 && luminance > 0.3, color);
   }
 });
 

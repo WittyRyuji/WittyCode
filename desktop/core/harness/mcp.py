@@ -61,7 +61,8 @@ class McpResult:
 
 
 class McpClient:
-    def __init__(self, name: str, command: str, args: Sequence[str] = (), env: Mapping[str, str] | None = None) -> None:
+    def __init__(self, name: str, command: str, args: Sequence[str] = (), env: Mapping[str, str] | None = None, *, cwd: str | None = None) -> None:
+        self.cwd = cwd
         self.name = name
         self.command = command
         self.args = tuple(args)
@@ -91,6 +92,7 @@ class McpClient:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
                 env={**os.environ, **self.env},
+                cwd=self.cwd,
                 limit=LINE_LIMIT,
                 **kwargs,
             )

@@ -1067,7 +1067,7 @@ def test_the_weekly_review_lists_what_the_application_wrote_and_one_confirmation
         await rig.wait_for(".mem-rev", 6)
         assert await rig.texts(".mem-rev .mem-title") == ["第 0 条笔记", "第 5 条笔记", "第 4 条笔记", "第 3 条笔记", "第 2 条笔记", "第 1 条笔记"], "the least sure first"
         assert len(launch.store.entries()) == 6, "the notes are in the memory already, in use"
-        assert "把握 20%" in await rig.text(".mem-rev .mem-meta", 0) and "ChatGPT Plan" in await rig.text(".mem-rev .mem-meta", 0)
+        assert "把握 20%" in await rig.text(".mem-rev .mem-meta", 0) and "WittyHarness" in await rig.text(".mem-rev .mem-meta", 0)
         assert await rig.js("[...document.querySelectorAll('.mem-rev .switch')].map(e => e.getAttribute('aria-checked')).join()") == "false,false,true,true,true,true"
 
         await rig.click_text(".mem-rev-foot .btn", "确认")
@@ -1154,9 +1154,9 @@ def test_a_note_is_written_and_the_memory_switched_off_from_the_settings(qapp, l
         await wait_for(lambda: rig.core.settings.memory_enabled is False, message="the master switch to reach the settings")
         await rig.wait_for(".mem-engine", 0)
         await rig.click(".settings-body .field .switch", 0)
-        await rig.wait_for(".mem-engine", 2)
+        await rig.wait_for(".mem-engine", 3)
         await rig.click(".mem-engine .switch", 1)
-        await wait_for(lambda: rig.core.settings.memory_engines == ["chatgpt"], message="the engine switch to reach the settings")
+        await wait_for(lambda: rig.core.settings.memory_engines == ["chatgpt", "factory"], message="the engine switch to reach the settings")
         await rig.finish()
 
     run(loop, scenario())
@@ -1567,7 +1567,7 @@ def test_a_chatgpt_plan_conversation_goes_from_the_model_menu_to_the_answer_and_
                 badge = await rig.text(".plan-badge")
                 assert "Using ChatGPT Plan" in badge and "Manage usage" in badge, "OpenAI's guideline: say the plan is in use and where to manage it"
                 assert "ChatGPT Plan" in await rig.text(".srow.open .ssub"), "the sidebar names the engine"
-                assert await rig.js("document.querySelector('.plan-badge .plan-ring .usage-ring')?.classList.contains('unknown')"), "the plan gives this sign-in no figures: the ring after Manage usage is grey"
+                assert await rig.js("!document.querySelector('.plan-badge .plan-ring, .plan-badge .usage-ring')"), "the sign-in exposes no balance, so no empty subscription ring is shown"
 
                 fake.script(say("Hello from the plan."))
                 await rig.send("hello plan")
@@ -1624,7 +1624,7 @@ def test_token_tooltip_shows_the_models_share_of_the_whole_conversation(qapp, lo
             await rig.wait_for(".usage-pie", 1)
             assert await rig.texts(".usage-percent") == ["66.7%", "33.3%"]
             assert await rig.texts(".usage-model-name") == ["GPT-6-Luna", "GPT-6.1-Sol"]
-            assert await rig.js("getComputedStyle(document.querySelector('.usage-pie')).backgroundImage.startsWith('conic-gradient')")
+            assert await rig.count(".usage-pie linearGradient") == 2 and await rig.count(".usage-pie path") == 2
             assert await rig.js("(() => { const r = document.querySelector('.usage .tip').getBoundingClientRect(); return r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight; })()")
         finally:
             await rig.finish()

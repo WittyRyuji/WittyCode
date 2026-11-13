@@ -10,8 +10,8 @@ export interface UsageSlice {
 
 const UNKNOWN_COLOR = "#72777b";
 
-/** Muted mid-dark colors remain legible on either tooltip background without neon/high-saturation wedges. */
-function mutedColor(hue: number, saturation = 28, lightness = 42): string {
+/** Soft pastel colors inspired by warm-flame, night-fade and winter-neva palettes. */
+function pastelColor(hue: number, saturation = 64, lightness = 77): string {
   const s = saturation / 100, l = lightness / 100;
   const a = s * Math.min(l, 1 - l);
   const channel = (n: number) => {
@@ -21,7 +21,12 @@ function mutedColor(hue: number, saturation = 28, lightness = 42): string {
   return `#${channel(0)}${channel(8)}${channel(4)}`;
 }
 
-const COLORS = [210, 155, 330, 30, 270, 70, 185, 0].map((hue) => mutedColor(hue));
+const COLORS = ["#ff9a9e", "#a18cd1", "#a1c4fd", "#84dcb7", "#ead58f", "#eab4de", "#91d5e3", "#b6d696"];
+
+export function usageGradient(color: string): [string, string] {
+  const lighten = (amount: number) => `#${color.slice(1).match(/../g)!.map((part) => Math.round(parseInt(part, 16) * (1 - amount) + 255 * amount).toString(16).padStart(2, "0")).join("")}`;
+  return [lighten(0.42), color];
+}
 function modelColors(ids: string[]): Map<string, string> {
   const colors = new Map<string, string>();
   const used = new Set([UNKNOWN_COLOR]);
@@ -36,7 +41,7 @@ function modelColors(ids: string[]): Map<string, string> {
       if (!used.has(candidate)) { color = candidate; break; }
     }
     while (!color) {
-      const candidate = mutedColor((++extra * 137.508) % 360, 24 + Math.floor(extra / 36) % 3 * 2, 40 + Math.floor(extra / 108) % 3 * 2);
+      const candidate = pastelColor((++extra * 137.508) % 360, 52 + Math.floor(extra / 36) % 3 * 6, 74 + Math.floor(extra / 108) % 3 * 3);
       if (!used.has(candidate)) color = candidate;
     }
     used.add(color);

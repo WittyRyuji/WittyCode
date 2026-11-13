@@ -1,7 +1,7 @@
 .composer-wrap { flex: none; padding: 8px calc(var(--conversation-gutter, 40px) + var(--conversation-scrollbar, 8px)) 12px; background: var(--bg); }
 .composer-wrap > * { max-width: var(--conversation-width, 796px); margin-left: auto; margin-right: auto; }
 /* A quiet, rounded input surface on the same reading grid as the messages above it. */
-.composer { container-type: inline-size; display: flex; flex-direction: column; gap: 8px; padding: 12px 14px 10px; border: 1px solid var(--line-strong); border-radius: 16px; background: var(--bg-raised); transition: border-color 0.1s, box-shadow 0.1s; }
+.composer { container-type: inline-size; display: flex; flex-direction: column; gap: 6px; padding: 10px 12px 8px; border: 1px solid var(--line-strong); border-radius: 4px; background: var(--bg-raised); transition: border-color 0.1s, box-shadow 0.1s; }
 .composer:focus-within { border-color: var(--muted); box-shadow: 0 0 0 2px var(--hover); }
 .composer.off { background: var(--soft); }
 /* The messages waiting for their turn: one line each, the width of the box below them. At the end of the line: see all of it,
@@ -24,7 +24,9 @@
 .input::placeholder { color: var(--faint); }
 /* One line, always: the chips give way (their values end in an ellipsis, the full text is the tooltip) before the send button is
    pushed onto a line of its own, which leaves a blank strip under the box. */
-.composer-bar { display: flex; align-items: center; gap: 8px; flex-wrap: nowrap; }
+.composer-bar { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; border-top: 1px solid var(--line); padding-top: 6px; }
+.composer-bar .chip { border-color: var(--line); border-radius: 3px; }
+.composer-bar .send { border-radius: 3px; }
 .composer-bar > :not(.controls) { flex: none; }
 .attach { cursor: pointer; }
 /* The group around the four chips takes no box of its own: the bar lays the chips out, so the permission and the mode stay on the

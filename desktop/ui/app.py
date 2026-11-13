@@ -113,6 +113,12 @@ def make_chatgpt(settings: AppSettings, open_url: Any, providers: Any = None) ->
     return ChatGPTEngine(settings, default_settings_path().parent / "chatgpt", open_browser=open_url, api=api)
 
 
+def make_factory(settings: AppSettings) -> Any:
+    from desktop.core.factory import FactoryEngine
+
+    return FactoryEngine(settings, default_settings_path().parent / "factory")
+
+
 def make_providers() -> Any:
     from desktop.core.providers import ProviderStore
 
@@ -147,6 +153,7 @@ def build_application(options: argparse.Namespace, qt_args: list[str] | None = N
     core = AppCore(
         settings,
         window.platform,
+        factory=make_factory(settings),
         devin=make_devin(settings),
         chatgpt=make_chatgpt(settings, window.platform.open_url, providers),
         providers=providers,

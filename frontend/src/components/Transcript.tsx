@@ -156,7 +156,11 @@ export function Transcript({ session }: { session: Session }) {
   const toEnd = (smooth = false) => {
     const el = scroller.current;
     jumpTarget.current = null;
-    if (el) el.scrollTo({ top: el.scrollHeight, behavior: behavior(smooth) });
+    if (el) {
+      const top = Math.max(0, el.scrollHeight - el.clientHeight);
+      jumpTarget.current = smooth && Math.abs(el.scrollTop - top) >= 2 ? top : null;
+      el.scrollTo({ top, behavior: behavior(smooth) });
+    }
   };
   const syncActive = useCallback(() => {
     const el = scroller.current;
@@ -164,7 +168,7 @@ export function Transcript({ session }: { session: Session }) {
     const turns = [...inner.current.querySelectorAll<HTMLElement>(":scope > .turn")];
     const origin = el.getBoundingClientRect().top - el.scrollTop;
     const tops = turns.map((turn) => turn.getBoundingClientRect().top - origin);
-    const index = activeTurnAt(tops, el.scrollTop + 40, el.scrollHeight - el.scrollTop - el.clientHeight < 4);
+    const index = activeTurnAt(tops, el.scrollTop + 40, stick.current || el.scrollHeight - el.scrollTop - el.clientHeight < 48);
     setActiveId(turns[index]?.dataset.turnId ?? null);
   }, []);
   const jumpTo = (id: string) => {
@@ -231,8 +235,11 @@ export function Transcript({ session }: { session: Session }) {
     const el = scroller.current!;
     const atEnd = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
     if (jumpTarget.current !== null && Math.abs(el.scrollTop - jumpTarget.current) < 2) jumpTarget.current = null;
-    stick.current = atEnd && jumpTarget.current === null;
-    setAway(!atEnd);
+    // Intermediate smooth-scroll events are not a new reading intent. Only settle when the target is reached.
+    if (jumpTarget.current === null) {
+      stick.current = atEnd;
+      setAway(!atEnd);
+    }
     if (jumpTarget.current === null) scheduleActive.current();
     setScrolling(true);
     window.clearTimeout(scrollTimer.current);

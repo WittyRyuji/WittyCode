@@ -39,7 +39,7 @@ for (const theme of ["light", "dark"]) {
     const colors = () => page.eval("Object.fromEntries([...document.querySelectorAll('.usage-legend li')].map(e => [e.dataset.model, getComputedStyle(e.querySelector('.usage-swatch')).backgroundColor]))");
     const before = await colors();
     assert.equal(new Set(Object.values(before)).size, 3, "the screenshot's three models have distinct actual RGB colors");
-    assert((await page.eval("document.querySelector('.usage-pie').style.background")).includes("conic-gradient"));
+    assert(await page.eval("document.querySelectorAll('.usage-pie linearGradient').length === 3 && [...document.querySelectorAll('.usage-pie linearGradient')].every(g => g.querySelectorAll('stop').length === 2)"), "each model has its own real SVG gradient, not a dim flat wedge");
     await page.shot(resolve(`shots/usage-plan-updates-${theme}.png`));
     await emit("session", { id, patch: { usageModels: { [ids[2]]: 2100, [ids[1]]: 2000, [ids[0]]: 1900 } } });
     await page.waitFor(`document.querySelector('.usage-legend li')?.dataset.model === '${ids[2]}'`);

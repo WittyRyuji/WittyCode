@@ -60,6 +60,7 @@ class HarnessTools:
         self.context = context
         self.level = level
         self.clients = list(clients)
+        self.connections = None
         self.asker = asker
         self.plan = False
         """Plan mode (set by the controller for the turn): only reading, searching and read-only commands run."""
@@ -118,6 +119,22 @@ class HarnessTools:
         self.remembered.add(remember_key(spec, call.args, self.context) if spec is not None else f"mcp:{call.name}")
 
     async def run(self, call: Call) -> Outcome:
+        if self.connections is not None:
+            from desktop.core.connections import ConnectionError
+            try:
+                await self.connections.hooks("PreToolUse", self.context.project, {"tool_name": call.name, "tool_input": call.args})
+            except ConnectionError as error:
+                return Outcome(str(error), True, cancelled=True)
+        outcome = await self._run(call)
+        if self.connections is not None:
+            from desktop.core.connections import ConnectionError
+            try:
+                await self.connections.hooks("PostToolUse", self.context.project, {"tool_name": call.name, "tool_input": call.args, "tool_response": outcome.output})
+            except ConnectionError as error:
+                outcome.output += "\n" + str(error)
+        return outcome
+
+    async def _run(self, call: Call) -> Outcome:
         if call.name == asking.NAME and self.asker is not None:
             views, problem = asking.parse(call.args)
             if problem:

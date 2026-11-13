@@ -8,9 +8,8 @@
 //      playing a short scripted conversation.
 // The check reads what the page asked for from `window.__fake.calls` and plays events with `window.__fake.emit(...)`.
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 
 const DUMP = [
   "import sys",
@@ -21,17 +20,20 @@ const DUMP = [
   "open(sys.argv[1], 'wb').write(bytes(f.readAll().data()))",
 ].join("\n");
 
-/** Qt's qwebchannel.js, cached in the temp folder; null without the project's Python (../.venv) and PySide6. */
+/** Always extract from the selected interpreter: an old global temp cache must not make local checks differ from CI. */
 export function qtWebChannelClient() {
-  const cache = join(tmpdir(), "wittycode-qwebchannel.js");
-  if (!existsSync(cache)) {
-    const python = resolve("../.venv/Scripts/python.exe");
-    if (!existsSync(python)) return null;
-    const r = spawnSync(python, ["-c", DUMP, cache], { encoding: "utf8", timeout: 60_000, windowsHide: true });
-    if (r.status !== 0 || !existsSync(cache)) return null;
-  }
+  const python = process.env.WITTYCODE_TEST_PYTHON || resolve("../.venv/Scripts/python.exe");
+  const unavailable = () => {
+    if (process.env.WITTYCODE_REQUIRE_QT === "1") throw new Error("CI parity requires the pinned Python and PySide6 for Qt's real QWebChannel client");
+    return null;
+  };
+  if (!existsSync(python)) return unavailable();
+  const cache = resolve("shots/qwebchannel.js");
+  mkdirSync(resolve("shots"), { recursive: true });
+  const r = spawnSync(python, ["-c", DUMP, cache], { encoding: "utf8", timeout: 60_000, windowsHide: true });
+  if (r.status !== 0 || !existsSync(cache)) return unavailable();
   const source = readFileSync(cache, "utf8");
-  return source.includes("var QWebChannel") ? source : null;
+  return source.includes("var QWebChannel") ? source : unavailable();
 }
 
 /** The scripts to inject, in order, and which QWebChannel client they use. */
@@ -214,7 +216,14 @@ function fakeBackend(config) {
     workingLabel: "",
   });
 
+  let releaseInit;
+  const initReady = new Promise((resolve) => { releaseInit = resolve; if (!config.initHold) resolve(); });
   const S = {
+    factory: { cli: "missing", cliPath: "", path: "", enabled: false },
+    connections: [
+      { id: "local-skill", kind: "skill", name: "summarize-diff", source: "C:\\Users\\me\\.agents\\skills\\summarize-diff\\SKILL.md", project: "", config: { path: "C:\\Users\\me\\.agents\\skills\\summarize-diff\\SKILL.md" }, enabled: true, imported: false },
+      { id: "local-mcp", kind: "mcp", name: "local-tools", source: "C:\\Users\\me\\.codex\\config.toml", project: "", config: { command: "python", args: ["-m", "demo_mcp"] }, enabled: false, imported: false },
+    ],
     calls: [],
     events: [],
     failNext: {},
@@ -234,7 +243,7 @@ function fakeBackend(config) {
     models: [...GW_MODELS],
     providers: [clone(GATEWAY)],
     defaults: { model: "", reasoning: "", autonomy: "code", mode: "auto" },
-    settings: { maxOpen: 4, maxSteps: 80, devinPath: "", hiddenModels: [], theme: "dark", fontScale: "md", sidebarWidth: 300, memoryEnabled: true, memoryRecall: true, memoryCapture: true, memoryCurate: true, memoryEngines: ["devin", "chatgpt"], compactAuto: true, compactAt: 85, lastProject: "" },
+    settings: { maxOpen: 4, maxSteps: 80, devinPath: "", hiddenModels: [], theme: "dark", fontScale: "md", sidebarWidth: 300, memoryEnabled: true, memoryRecall: true, memoryCapture: true, memoryCurate: true, memoryEngines: ["devin", "chatgpt", "factory"], compactAuto: true, compactAt: 85, lastProject: "" },
     devin: { cli: "found", auth: "checking", enabled: true },
     chatgpt: clone(CHATGPT_OUT),
   };
@@ -592,6 +601,7 @@ function fakeBackend(config) {
       return memoryState();
     },
     "app.init": async () => {
+      await initReady;
       if (config.initDelay) await sleep(config.initDelay);
       later(60, () => {
         S.defaults = { model: "api:gw:claude-haiku-5-5", reasoning: "low", autonomy: "code", mode: "auto" };
@@ -902,7 +912,7 @@ function fakeBackend(config) {
       else if (p.key === "memoryRecall" && typeof v === "boolean") s.memoryRecall = v;
       else if (p.key === "memoryCapture" && typeof v === "boolean") s.memoryCapture = v;
       else if (p.key === "memoryCurate" && typeof v === "boolean") s.memoryCurate = v;
-      else if (p.key === "memoryEngines" && Array.isArray(v) && v.every((e) => ["devin", "chatgpt"].includes(e))) s.memoryEngines = [...new Set(v)];
+      else if (p.key === "memoryEngines" && Array.isArray(v) && v.every((e) => ["devin", "chatgpt", "factory"].includes(e))) s.memoryEngines = [...new Set(v)];
       else if (p.key === "compactAuto" && typeof v === "boolean") s.compactAuto = v;
       else if (p.key === "compactAt" && Number.isInteger(v) && v >= 50 && v <= 95) s.compactAt = v;
       else throw new Error("这个设置的值不合法。");
@@ -917,6 +927,28 @@ function fakeBackend(config) {
       emit("settings", { settings: { ...s } });
       return { ...s };
     },
+    "connections.list": () => ({ items: clone(S.connections), errors: [], hookEvents: ["UserPromptSubmit", "PreToolUse", "PostToolUse"] }),
+    "connections.preview": (p) => {
+      const items = S.connections.filter((e) => e.source === p.path);
+      if (!items.length) throw new Error("没有找到可导入的本地配置。");
+      return { preview: "local-preview", items: clone(items), commands: items.filter((e) => e.kind === "mcp").map((e) => ({ name: e.name, kind: e.kind, command: e.config.command, args: e.config.args || [] })) };
+    },
+    "connections.import": (p) => {
+      if (p.preview !== "local-preview" || !p.confirmed) throw new Error("请确认导入。");
+      const item = S.connections.find((e) => e.id === "local-mcp");
+      item.enabled = item.imported = true;
+      return { ok: true, count: 1 };
+    },
+    "connections.update": (p) => {
+      const item = S.connections.find((e) => e.id === p.id);
+      if (!item) throw new Error("找不到这个连接。");
+      if (item.kind !== "skill" && (p.config || (p.enabled && !item.imported)) && !p.confirmed) throw new Error("请确认命令。");
+      Object.assign(item, { enabled: p.enabled, imported: true }, p.config ? { config: p.config } : {});
+      return { ok: true };
+    },
+    "connections.test": () => ({ ok: true, text: "连接成功 · 1 个工具", tools: ["echo"] }),
+    "factory.account": () => clone(S.factory),
+    "factory.configure": (p) => (S.factory = { ...S.factory, path: p.path, enabled: p.enabled }),
     "devin.account": () => S.devin,
     "devin.login": async () => {
       await sleep(200);
@@ -993,6 +1025,7 @@ function fakeBackend(config) {
   };
 
   window.__fake = {
+    releaseInit,
     calls: S.calls,
     events: S.events,
     wire,

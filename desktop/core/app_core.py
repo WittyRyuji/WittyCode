@@ -46,6 +46,7 @@ from desktop.core.attachments import (
     overage,
     too_many,
 )
+from desktop.core.connections import ConnectionError, ConnectionStore
 from desktop.core.cache import Cache
 from desktop.core.catalog import API_PREFIX, Catalog, Target, build_catalog, settings_for_model
 from desktop.core.chatgpt.errors import ChatGPTError
@@ -83,7 +84,7 @@ from desktop.core.settings import (
     save_settings,
 )
 from desktop.core.timefmt import format_relative
-from desktop.core.transcript import TurnStatus
+from desktop.core.transcript import Transcript, TurnStatus
 from desktop.core.speed import speed_of
 from desktop.core.usage import Tokens, UsageLedger
 from desktop.core.viewmodel import attachment_json, context_json, turn_json, usage_json
@@ -111,8 +112,8 @@ DEVIN_ROW_PREFIX = "dv:"
 """Row ids of saved Devin sessions in the sidebar."""
 CHATGPT_ROW_PREFIX = "cg:"
 """Row ids of saved conversations of WittyCode's own loop (ChatGPT Plan and the API providers) in the sidebar."""
-ROW_PREFIXES = {"devin": DEVIN_ROW_PREFIX, "chatgpt": CHATGPT_ROW_PREFIX}
-ENGINE_NAMES = {"devin": "Devin", "chatgpt": "ChatGPT Plan"}
+ROW_PREFIXES = {"devin": DEVIN_ROW_PREFIX, "chatgpt": CHATGPT_ROW_PREFIX, "factory": "fy:"}
+ENGINE_NAMES = {"devin": "Devin", "chatgpt": "ChatGPT Plan", "factory": "Factory"}
 OWN_ENGINE = "chatgpt"
 """WittyCode's own agent loop: ChatGPT Plan's models and the API providers' (``core/chatgpt``, ``core/harness``)."""
 
@@ -314,6 +315,7 @@ class AppCore:
         settings: AppSettings,
         platform: Platform,
         *,
+        factory: Any = None,
         devin: Any = None,
         chatgpt: Any = None,
         providers: Any = None,
@@ -325,8 +327,13 @@ class AppCore:
     ) -> None:
         self.settings: AppSettings = settings
         self.platform = platform
+        self.factory = factory
         self.devin = devin
         self.chatgpt = chatgpt
+        self.connections = ConnectionStore()
+        for engine in (factory, devin, chatgpt):
+            if engine is not None:
+                engine.connections = self.connections
         self.hooks = Hooks()
         """The application's own hooks (``core/hooks``), one set for every engine."""
         self.memory: MemoryBridge | None = None
@@ -335,14 +342,14 @@ class AppCore:
             self.memory = MemoryBridge(memory, row_id=row_id, review_mode=True)
             # the memory's hook is the first
             self.hooks.on_prompt(memory.prompt_hook)
-            for engine in (devin, chatgpt):
+            for engine in (factory, devin, chatgpt):
                 if engine is not None and hasattr(engine, "memory"):
                     engine.memory = memory
         # Skills and custom commands (harness/skills): the same hook for every engine, with or without the memory.
         self.hooks.on_prompt(skills.prompt_hook)
         # The language of the models' thinking (core/language): the own loop has it in its instructions.
         self.hooks.on_prompt(language.prompt_hook(lambda: self.settings.think_chinese))
-        for engine in (devin, chatgpt):
+        for engine in (factory, devin, chatgpt):
             if engine is not None and hasattr(engine, "hooks"):
                 engine.hooks = self.hooks
         self.curator: Curator | None = None
@@ -422,6 +429,8 @@ class AppCore:
         self._models_loaded = False
         self._shutting_down = False
 
+        if factory is not None:
+            factory.add_listener(self._on_event)
         if devin is not None:
             devin.add_listener(self._on_event)
             devin.add_account_listener(self._on_devin_account)
@@ -470,11 +479,15 @@ class AppCore:
 
     def _levels_of(self, engine: str) -> tuple[str, ...]:
         """The permission scale of an engine."""
+        if engine == "factory":
+            return ("off", "low", "medium", "high")
         return DEVIN_PERMISSIONS if engine == "devin" else CHATGPT_PERMISSIONS
 
     def _autonomy_of(self, engine: str) -> str:
         """The permission level new sessions of an engine start with."""
         s = self.settings
+        if engine == "factory":
+            return s.factory_autonomy
         return s.devin_autonomy if engine == "devin" else s.chatgpt_autonomy
 
     def _engine_defaults(self, page_model: str) -> dict[str, str]:
@@ -647,6 +660,10 @@ class AppCore:
 
     async def _reload_project(self, folder: str) -> None:
         rows: list[SavedRow] = []
+        if self.factory is not None and self.settings.factory_enabled:
+            with contextlib.suppress(Exception):
+                for item in await self.factory.list_sessions(folder, SESSION_LIST_LIMIT):
+                    rows.append(SavedRow("fy:" + item.id, item.id, "factory", item.title or "", item.modified_at, item.message_count or 0, self.catalog.page_id("factory", item.model), item.created_at))
         if self.devin is not None and self.settings.devin_enabled:
             with contextlib.suppress(Exception):
                 for item in await self.devin.list_sessions(folder, SESSION_LIST_LIMIT):
@@ -668,6 +685,13 @@ class AppCore:
 
     async def _load_models(self) -> None:
         folder = self.settings.projects[0] if self.settings.projects else str(Path.home())
+
+        async def from_factory() -> list[Any]:
+            if self.factory is None or not self.settings.factory_enabled:
+                return []
+            with contextlib.suppress(Exception):
+                return list(await self.factory.list_models())
+            return []
 
         async def from_devin() -> list[Any]:
             if self.devin is None or not self.settings.devin_enabled:
@@ -700,10 +724,11 @@ class AppCore:
                 return []
 
         # Some take seconds (the Devin account and its process): asked together, not one after the other.
-        devin_models, chatgpt_models, api_models = await asyncio.gather(from_devin(), from_chatgpt(), from_providers())
+        factory_models, devin_models, chatgpt_models, api_models = await asyncio.gather(from_factory(), from_devin(), from_chatgpt(), from_providers())
         provider_of = getattr(self.providers, "provider_of", None)
         window_of = getattr(self.providers, "window_of", None)
         self.catalog = build_catalog(
+            factory_models=factory_models,
             devin_models=devin_models,
             chatgpt_models=chatgpt_models,
             api_models=api_models,
@@ -1458,6 +1483,10 @@ class AppCore:
         target = self._target(page_model)
         if not target.model:
             raise AppError("还没有可用的模型：先在「设置 → 账号与模型」里登录 ChatGPT、添加一个 API Provider，或登录 Devin。")
+        if target.engine == "factory":
+            if self.factory is None:
+                raise AppError("这个版本未提供 Factory CLI 兼容。")
+            return await self.factory.open_new(folder, model=target.model, reasoning=settings.get("reasoning", ""), autonomy=settings.get("autonomy", self.settings.factory_autonomy), mode=settings.get("mode", "auto"), transcript=transcript or Transcript(), handoff=handoff)
         if target.engine == "devin":
             if self.devin is None:
                 raise AppError("没有找到 Devin 命令行：先在「设置 → 账号与模型」里安装并登录。")
@@ -1521,7 +1550,11 @@ class AppCore:
         self._preview = preview
         self._ledger_seed = seed
         try:
-            if row_id.startswith(DEVIN_ROW_PREFIX):
+            if row_id.startswith("fy:"):
+                if self.factory is None:
+                    raise AppError("没有找到 Factory CLI。")
+                controller = await self.factory.open_saved(folder, row_id[3:], title=params.get("title") or None, modified=modified)
+            elif row_id.startswith(DEVIN_ROW_PREFIX):
                 if self.devin is None:
                     raise AppError("没有找到 Devin 命令行。")
                 controller = await self.devin.open_saved(
@@ -2279,7 +2312,9 @@ class AppCore:
             settings.reasoning_effort = value
         elif field_name == "autonomy":
             current = engine or self.catalog.engine_of(settings.default_model)
-            if current == "devin" and value in DEVIN_PERMISSIONS:
+            if current == "factory" and value in ("off", "low", "medium", "high"):
+                settings.factory_autonomy = value
+            elif current == "devin" and value in DEVIN_PERMISSIONS:
                 settings.devin_autonomy = value
             elif current == "chatgpt" and value in CHATGPT_PERMISSIONS:
                 settings.chatgpt_autonomy = value
@@ -2805,6 +2840,65 @@ class AppCore:
     async def _m_devin_logout(self, params: dict[str, Any]) -> dict[str, Any]:
         return await self._devin_call("logout")
 
+    def _connection_project(self, params: dict[str, Any]) -> str:
+        project = params.get("projectId", "")
+        if not isinstance(project, str):
+            raise AppError("项目路径不合法。")
+        if not project:
+            return ""
+        folder = normalize_folder(project)
+        if not any(same_folder(folder, existing) for existing in self.settings.projects):
+            raise AppError("请先把这个文件夹添加为项目。")
+        return folder
+
+    async def _m_connections_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(self.connections.scan, self._connection_project(params))
+        except ConnectionError as error:
+            raise AppError(str(error)) from error
+
+    async def _m_connections_preview(self, params: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(self.connections.preview, params.get("path", ""), self._connection_project(params))
+        except ConnectionError as error:
+            raise AppError(str(error)) from error
+
+    async def _m_connections_import(self, params: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return self.connections.commit(params.get("preview"), params.get("confirmed"))
+        except ConnectionError as error:
+            raise AppError(str(error)) from error
+
+    async def _m_connections_update(self, params: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return self.connections.update(params.get("id"), enabled=params.get("enabled"), config=params.get("config"), confirmed=params.get("confirmed") is True, project=self._connection_project(params))
+        except ConnectionError as error:
+            raise AppError(str(error)) from error
+
+    async def _m_connections_test(self, params: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return await self.connections.test(params.get("id"), self._connection_project(params))
+        except ConnectionError as error:
+            raise AppError(str(error)) from error
+
+    async def _m_factory_account(self, params: dict[str, Any]) -> dict[str, Any]:
+        if self.factory is None:
+            return {"cli": "missing", "cliPath": "", "enabled": False, "path": self.settings.factory_path}
+        return {**await self.factory.account(), "path": self.settings.factory_path}
+
+    async def _m_factory_configure(self, params: dict[str, Any]) -> dict[str, Any]:
+        path, enabled = params.get("path"), params.get("enabled")
+        if not isinstance(path, str) or not isinstance(enabled, bool):
+            raise AppError("Factory 路径或启用状态不合法。")
+        self.settings.factory_path, self.settings.factory_enabled = path.strip(), enabled
+        self._save()
+        if self.factory is not None:
+            await self.factory.path_changed()
+        self._schedule_models()
+        for folder in self.settings.projects:
+            self._spawn(self._reload_project(folder), quiet=True)
+        return await self._m_factory_account({})
+
     async def _m_devin_setEnabled(self, params: dict[str, Any]) -> dict[str, Any]:
         self.settings.devin_enabled = bool(params["on"])
         self._save()
@@ -2935,6 +3029,8 @@ class AppCore:
             task.cancel()
         if self._tasks:
             await asyncio.gather(*list(self._tasks), return_exceptions=True)
+        if self.factory is not None:
+            await self.factory.close_all()
         if self.devin is not None:
             await self.devin.close_all()
         if self.chatgpt is not None:

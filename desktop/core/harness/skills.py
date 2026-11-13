@@ -145,7 +145,7 @@ class Source:
     """The root of the plugin the folder belongs to (``${DROID_PLUGIN_ROOT}`` in its files)."""
 
 
-SKILL_FOLDERS = (".wittycode", ".agents", ".agent", ".claude", ".factory")
+SKILL_FOLDERS = (".wittycode", ".agents", ".agent", ".codex", ".claude", ".factory")
 """The folders a project or the user keeps skills in: WittyCode's own first, then the ones other agent applications use, so
 skills written for those work here too (they are only read)."""
 COMMAND_FOLDERS = (".wittycode", ".factory")
@@ -241,6 +241,8 @@ def skill_sources(project: Path, home: Path | None = None) -> list[Source]:
         out += [Source("project", folder / part / "skills") for part in SKILL_FOLDERS]
     for part in SKILL_FOLDERS:
         out.append(Source("personal", home / part / "skills"))
+    from desktop.core.connections import ConnectionStore
+    out += ConnectionStore(home=home).skill_sources(project)
     out += [Source("plugin", root / "skills", root) for root in _plugins(home)]
     return out
 
@@ -344,13 +346,15 @@ def discover(project: Path | str, home: Path | None = None) -> list[Skill]:
     project = Path(project)
     home = _home(home)
     off = _disabled(project, home)
+    from desktop.core.connections import ConnectionStore
+    connections = ConnectionStore(home=home)
     found: dict[str, Skill] = {}
     for source in skill_sources(project, home):
         if not source.folder.is_dir():
             continue
         for folder in _walk_for(source.folder, SKILL_FILE):
             skill = _skill_of(folder / SKILL_FILE, source)
-            if skill is not None and skill.name not in found and skill.name not in off:
+            if skill is not None and skill.name not in found and skill.name not in off and connections.skill_allowed(skill.path, project):
                 found[skill.name] = skill
     return list(found.values())
 

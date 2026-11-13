@@ -41,6 +41,7 @@ from desktop.core.chatgpt import history as saved_history
 from desktop.core.chatgpt.errors import AuthError, ChatGPTError, friendly_failure
 from desktop.core.chatgpt.responses import Usage
 from desktop.core.engine_items import attachment_block
+from desktop.core.connections import ConnectionError as ExtensionError
 from desktop.core.context import ContextState, format_tokens
 from desktop.core.context_envelope import wrap as wrap_context
 from desktop.core.handoff import Handoff
@@ -137,6 +138,8 @@ class ChatGPTController:
     saved: SavedSession = field(init=False)
     _usage_total: Tokens | None = None
     _usage_models: dict[str, Tokens] = field(default_factory=dict)
+    _connection_started: bool = False
+    _connection_context: str = ""
     _turn: Turn | None = None
     _turn_task: asyncio.Task[Any] | None = None
     _turn_done: asyncio.Event | None = None
@@ -311,7 +314,7 @@ class ChatGPTController:
     async def _start_servers(self) -> None:
         """The shared memory's server. Without it the conversation works the same, without the memory."""
         for command in self.manager.memory_servers(self):
-            client = McpClient(command.name, command.command, command.args, command.env)
+            client = McpClient(command.name, command.command, command.args, command.env, cwd=str(self.project))
             try:
                 await client.start()
             except McpError as error:
@@ -364,6 +367,10 @@ class ChatGPTController:
             with contextlib.suppress(Exception):
                 await client.close()
         self._clients.clear()
+        connections = getattr(self.manager, "connections", None)
+        if connections is not None and self._connection_started:
+            with contextlib.suppress(Exception):
+                await connections.hooks("SessionEnd", self.project, {"session_id": self.session_id, "reason": "other"})
         self._save_now()
         self.state = SessionState.CLOSED
         self.manager._forget(self)
@@ -479,11 +486,18 @@ class ChatGPTController:
         try:
             tools = await self._ensure_tools()
             tools.plan = plan
+            tools.connections = getattr(self.manager, "connections", None)
             assert self._context is not None
             self._context.abort = threading.Event()
             # (read again every turn: a skill made during the conversation is there for the next message)
             found = await asyncio.to_thread(skills.discover, self.project)
             self._context.readable = skills.read_roots(found)
+            if tools.connections is not None:
+                if not self._connection_started:
+                    self._connection_context = await tools.connections.hooks("SessionStart", self.project, {"session_id": self.session_id, "source": "resume" if self.saved.items else "startup"})
+                    self._connection_started = True
+                extra = await tools.connections.hooks("UserPromptSubmit", self.project, {"session_id": self.session_id, "prompt": turn.user_block.text if turn.user_block else sent})
+                sent += wrap_context(self._connection_context, extra)
             item = user_item(sent, attachments)
             self._turn_start = len(self.saved.items)
             self.saved.items.append(item)
@@ -520,6 +534,8 @@ class ChatGPTController:
             # The loop works on the view (what the model reads: the summary of the early part, then the rest); what it adds
             # reaches the log (``saved.items``) through ``_Watch.history_grew``.
             end = await loop.run(compact.view_of(self.saved.items, self.saved.compaction))
+            if tools.connections is not None:
+                await tools.connections.hooks("Stop", self.project, {"session_id": self.session_id, "stop_hook_active": True})
         except asyncio.CancelledError:
             if self._turn is turn:
                 self._release_steers()
@@ -557,6 +573,8 @@ class ChatGPTController:
             log.warning("a ChatGPT turn failed: %s", error)
             if isinstance(error, AuthError) and error.terminal:
                 self.manager._emit_account()
+        elif isinstance(error, ExtensionError):
+            message = f"扩展连接未完成：{error}"
         elif isinstance(error, ValueError):
             message = f"附件无法发送：{error}。"
         else:
@@ -593,6 +611,8 @@ class ChatGPTController:
             if turn.status is TurnStatus.DONE:
                 self.recalled |= self._recall_ids
             self._recall_turn, self._recall_ids = None, frozenset()
+        if turn.status is TurnStatus.DONE:
+            self._connection_context = ""
         self._turn = None
         self._turn_model = self._turn_reasoning = self._turn_mode = ""
         if self._turn_done is not None:

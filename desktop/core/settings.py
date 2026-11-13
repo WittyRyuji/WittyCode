@@ -48,11 +48,14 @@ MAX_SESSION_TITLE = 120
 COMPACT_AT_RANGE = (50, 95)
 DEFAULT_COMPACT_AT = 85
 """Percent of a model's context window at which a ChatGPT Plan conversation is summarised (``harness/compact``)."""
-MEMORY_ENGINES = ("devin", "chatgpt")
+MEMORY_ENGINES = ("devin", "chatgpt", "factory")
 
 
 @dataclass
 class AppSettings:
+    factory_path: str = ""
+    factory_enabled: bool = False
+    factory_autonomy: str = "off"
     devin_path: str = ""
     """Explicit Devin CLI path; empty means auto-detect."""
     devin_enabled: bool = True
@@ -299,6 +302,9 @@ def settings_from_dict(raw: object) -> AppSettings:
                 created[key] = float(stamp)
 
     return AppSettings(
+        factory_path=text("factory_path"),
+        factory_enabled=raw.get("factory_enabled") if isinstance(raw.get("factory_enabled"), bool) else defaults.factory_enabled,
+        factory_autonomy=text("factory_autonomy", ("off", "low", "medium", "high")),
         devin_path=text("devin_path"),
         devin_enabled=devin_enabled,
         hidden_models=hidden,

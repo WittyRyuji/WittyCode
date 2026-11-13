@@ -232,7 +232,23 @@ export type QuestionAnswer = string | string[];
 
 type None = Record<string, never>;
 
+export interface ConnectionEntry {
+  id: string; kind: "skill" | "plugin" | "hook" | "mcp"; name: string; source: string; project: string;
+  config: Record<string, unknown>; enabled: boolean; imported: boolean; changed?: boolean; parent?: string;
+}
+export interface ConnectionScan { items: ConnectionEntry[]; errors: { source: string; text: string }[]; hookEvents: string[] }
+export interface ConnectionPreview { preview: string; items: ConnectionEntry[]; commands: { name: string; kind: string; command: string; args: string[] }[] }
+
+export interface FactoryState { cli: "found" | "missing"; cliPath: string; path: string; enabled: boolean }
+
 export interface Calls {
+  "connections.list": { params: { projectId?: string }; result: ConnectionScan };
+  "connections.preview": { params: { projectId?: string; path: string }; result: ConnectionPreview };
+  "connections.import": { params: { preview: string; confirmed: boolean }; result: { ok: boolean; count: number } };
+  "connections.update": { params: { projectId?: string; id: string; enabled?: boolean; config?: Record<string, unknown>; confirmed?: boolean }; result: { ok: boolean } };
+  "connections.test": { params: { projectId?: string; id: string }; result: { ok: boolean; text: string; tools: string[] } };
+  "factory.account": { params: None; result: FactoryState };
+  "factory.configure": { params: { path: string; enabled: boolean }; result: FactoryState };
   "app.init": { params: None; result: InitResult };
   /** no path: Python asks with the folder dialog; `added` false when the user cancelled */
   "project.add": { params: { path?: string }; result: { added: boolean; id?: string } };

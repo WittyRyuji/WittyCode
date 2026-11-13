@@ -164,6 +164,7 @@ def make_core(
     projects: bool = True,
     cache: Any = None,
     devin_engine: Any = None,
+    factory_engine: Any = None,
     chatgpt_engine: Any = None,
     plan: bool = True,
     signed_in: bool = True,
@@ -190,8 +191,11 @@ def make_core(
     service = Plan(fake, engine)
     platform = FakePlatform()
     events = Events()
+    if factory_engine is not None:
+        settings.factory_enabled = True
+        factory_engine.settings = settings
     core = AppCore(
-        settings, platform, devin=devin_engine, chatgpt=engine, providers=providers, persist=False, emit=events, cache=cache, memory=memory
+        settings, platform, factory=factory_engine, devin=devin_engine, chatgpt=engine, providers=providers, persist=False, emit=events, cache=cache, memory=memory
     )
     shutdown = core.shutdown
 

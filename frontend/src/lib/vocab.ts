@@ -33,6 +33,12 @@ export function reasoningChoices(model: ModelChoice | undefined): { value: strin
  *  loop's (Python's CHATGPT_PERMISSIONS), and for Devin its modes (DEVIN_PERMISSIONS). Least to most: the first entry is the engine's starting level, except where `START_LEVELS`
  *  says otherwise. */
 export const PERMISSIONS: Record<Engine, { value: string; label: string; hint: string }[]> = {
+  factory: [
+    { value: "off", label: "询问", hint: "Factory 每个操作前请求确认" },
+    { value: "low", label: "低自主", hint: "Factory 自动修改文件和执行只读命令" },
+    { value: "medium", label: "中自主", hint: "Factory 自动执行可撤销的命令" },
+    { value: "high", label: "高自主", hint: "Factory 自动执行命令，仅在可信项目中使用" },
+  ],
   devin: [
     { value: "ask", label: "问答", hint: "只回答问题，不改代码" },
     { value: "plan", label: "计划", hint: "先出方案，批准后再动手" },

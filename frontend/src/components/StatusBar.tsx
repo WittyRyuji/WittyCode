@@ -1,8 +1,9 @@
+import { useId } from "react";
 import { currentSession, useStore } from "../store";
 import type { ContextState, Speed, Usage } from "../types";
 import { cacheHitRate, formatCount, formatSpeed, formatTokens, usageTotal } from "../lib/format";
 import { StateDot, Tip } from "./ui";
-import { usagePercent, usageSlices } from "../lib/usage";
+import { usageGradient, usagePercent, usageSlices } from "../lib/usage";
 import type { ModelChoice } from "../types";
 
 const UNKNOWN = "—";
@@ -41,21 +42,30 @@ function ContextMeter({ c }: { c: ContextState }) {
 }
 
 function ModelUsageChart({ total, byModel, models }: { total: number; byModel?: Record<string, number>; models: ModelChoice[] }) {
+  const prefix = useId();
   const slices = usageSlices(total, byModel, models);
   if (!slices.length) return null;
-  let end = 0;
-  const stops = slices.map((s) => {
-    const start = end;
-    end += s.share;
-    return `${s.color} ${start}turn ${end}turn`;
+  let angle = -Math.PI / 2;
+  const wedges = slices.map((slice) => {
+    const start = angle;
+    angle += slice.share * Math.PI * 2;
+    return `M60,60 L${60 + 60 * Math.cos(start)},${60 + 60 * Math.sin(start)} A60,60 0 ${slice.share > 0.5 ? 1 : 0},1 ${60 + 60 * Math.cos(angle)},${60 + 60 * Math.sin(angle)} Z`;
   });
   return (
     <div className="usage-models">
-      <div className="usage-pie" role="img" aria-label={`模型 Token 占比：${slices.map((s) => `${s.label} ${usagePercent(s.share)}`).join("，")}`} style={{ background: `conic-gradient(${stops.join(",")})` }} />
+      <svg className="usage-pie" viewBox="0 0 120 120" role="img" aria-label={`模型 Token 占比：${slices.map((s) => `${s.label} ${usagePercent(s.share)}`).join("，")}`}>
+        <defs>{slices.map((s, i) => {
+          const [start, end] = usageGradient(s.color);
+          return <linearGradient key={s.id} id={`${prefix}-${i}`} x1="0" y1="0" x2="1" y2="1"><stop stopColor={start} /><stop offset="1" stopColor={end} /></linearGradient>;
+        })}</defs>
+        {slices.map((s, i) => slices.length === 1
+          ? <circle key={s.id} cx="60" cy="60" r="60" fill={`url(#${prefix}-${i})`} />
+          : <path key={s.id} d={wedges[i]} fill={`url(#${prefix}-${i})`} />)}
+      </svg>
       <ul className="usage-legend">
         {slices.map((s) => (
           <li key={s.id} data-model={s.id} title={`${s.label} · ${s.tokens.toLocaleString()} token`}>
-            <span className="usage-swatch" style={{ background: s.color }} aria-hidden />
+            <span className="usage-swatch" style={{ backgroundColor: s.color, backgroundImage: `linear-gradient(135deg, ${usageGradient(s.color).join(",")})` }} aria-hidden />
             <span className="usage-model-name">{s.label}</span>
             <span className="usage-percent">{usagePercent(s.share)}</span>
           </li>
@@ -79,6 +89,7 @@ function UsageTip({ u, byModel, models }: { u: Usage; byModel?: Record<string, n
   return (
     <div className="tip-lines usage-tip">
       <ModelUsageChart total={usageTotal(u)} byModel={byModel} models={models} />
+      {Object.values(byModel ?? {}).reduce((sum, n) => sum + n, 0) < usageTotal(u) && <div className="tip-note">旧记录未保存模型明细的部分显示为「未归属」，不会猜填。已知明细保存在本地，重启后保留。</div>}
       <b>Token 用量（整个对话累计）</b>
       <dl className="tip-table">
         {rows.map(([k, v]) => (

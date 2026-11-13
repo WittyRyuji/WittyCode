@@ -48,9 +48,9 @@ export function Select({ value, items, disabled, minWidth = 220 }: { value: stri
 }
 
 /** An on/off switch: a square with a block that moves, like the rest of the squared-off design. */
-export function Switch({ on, onChange, label }: { on: boolean; onChange: (v: boolean) => void; label: string }) {
+export function Switch({ on, onChange, label, disabled }: { on: boolean; onChange: (v: boolean) => void; label: string; disabled?: boolean }) {
   return (
-    <button type="button" role="switch" aria-checked={on} aria-label={label} className={`switch${on ? " on" : ""}`} onClick={() => onChange(!on)}>
+    <button type="button" role="switch" disabled={disabled} aria-checked={on} aria-label={label} className={`switch${on ? " on" : ""}`} onClick={() => onChange(!on)}>
       <span />
     </button>
   );

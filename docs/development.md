@@ -4,11 +4,12 @@
 
 ## 命令
 
-- 只用 Python 3.11.x：`.\.venv\Scripts\python.exe`（`_pyguard` 会拒绝其他版本）。
+- 本地与 CI 验收使用 Python 3.11.9、Node 24.20.0；Python 入口：`.\.venv\Scripts\python.exe`（`_pyguard` 会拒绝其他版本）。
+- **提交前与 CI 对齐**：`.\.venv\Scripts\python.exe scripts/check_ci.py --clean`。在 `sandbox/` 新建不带产物的副本、独立 Git 根与 venv，安装 `requirements-dev.txt -c constraints.txt` 和 `npm ci`，再调用 CI / release 共用的构建、单测、页面检查和 Python 测试。`--part frontend|python` 可只跑一个 CI 作业；`--part windows` 会重建页面并运行全部被 CI 排除的整机模块（按同一个 glob 自动选取，包含计划／导航／侧栏等独立回归），不要只跑主 e2e 文件；原有缓存、`node_modules`、页面产物和全局 Qt 临时缓存不会混进验收。
 - 测试（不调用模型）：`.\.venv\Scripts\python.exe -m pytest tests -q -p no:cacheprovider`。全量约 8 分钟，放到后台跑、输出重定向到文件。`tests/test_app_e2e.py` 是整机测试（真 Qt 窗口 + 真 React 页 + 自有循环接本机假 Responses 服务，需要第二个引擎时用假 Devin），页面没构建时自动跳过；CI 不跑它（`--ignore`），只在本地跑，变异测试也只在本地跑。CI 用 `constraints.txt` 固定依赖版本。
-- 构建页面（改 `frontend/` 后必须做，否则应用和 e2e 跑的是旧页面）：`cd frontend; npm run build:app`。界面检查：`node frontend/scripts/check.mjs`（模拟数据）、`node frontend/scripts/check-live.mjs`（接真后端，不调用模型）、`npm run unit`、`npm run typecheck`。
+- 构建页面（改 `frontend/` 后必须做，否则应用和 e2e 跑的是旧页面）：`cd frontend; npm run build:app`。界面检查在 `frontend/` 里运行：`node scripts/check-page-readiness.mjs`、`node scripts/check.mjs`（模拟数据与新连接页）、`node scripts/check-live.mjs`（真 QWebChannel 客户端接假后端，不调用模型）、`npm run unit`、`npm run typecheck`。统一入口会强制使用选定 Python 的真实 Qt 客户端，不静默换成 stand-in。
 - 启动：`.\.venv\Scripts\python.exe -m desktop`；无控制台：`.\.venv\Scripts\pythonw.exe WittyCode.pyw`。
-- 自己开窗口试用时把设置指到 `sandbox/`：`.\.venv\Scripts\python.exe -m desktop --settings sandbox	ry\settings.json --project .`（不动 `%APPDATA%\WittyCode\`）。
+- 自己开窗口试用时把设置指到 `sandbox/`：`.\.venv\Scripts\python.exe -m desktop --settings sandbox/try/settings.json --project .`（不动 `%APPDATA%\WittyCode\`）。
 - 发布包冒烟（离屏，不调用模型，设置在临时目录）：`$env:PYTHONPATH='.'; .\.venv\Scripts\python.exe scripts\smoke_release.py`。
 - 真实窗口冒烟（不调用模型，会在屏幕上开一个窗口再自己关掉）：`.\.venv\Scripts\python.exe sandbox\real_window_smoke.py`
 - README 截图重拍（演示数据，不含真实对话）：`cd frontend; npm run build; node scripts/readme-shots.mjs`

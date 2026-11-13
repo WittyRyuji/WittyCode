@@ -12,7 +12,7 @@
 /* Codex-like turn outline: short, quiet marks; message previews appear only on hover or keyboard focus. */
 .turn-nav { position: absolute; z-index: 4; left: 4px; top: 50%; transform: translateY(-50%); width: 28px; max-height: calc(100% - 56px); padding: 4px 0; overflow-y: auto; scrollbar-width: none; }
 .turn-nav::-webkit-scrollbar { display: none; }
-.turn-marker { display: flex; align-items: center; justify-content: center; width: 28px; height: 24px; border-radius: 6px; }
+.turn-marker { display: flex; align-items: center; justify-content: center; width: 28px; height: 16px; border-radius: 4px; }
 .turn-marker > span { width: 10px; height: 3px; border-radius: 3px; background: var(--line-strong); transition: width 0.15s, background-color 0.15s; }
 .turn-marker:hover, .turn-marker:focus-visible { background: var(--hover); }
 .turn-marker:hover > span, .turn-marker[aria-current="step"] > span { width: 18px; background: var(--fg); }

@@ -54,6 +54,14 @@ for (const [theme, width] of [["light", 1500], ["dark", 900]]) {
     await page.waitFor(atEnd);
     await page.waitFor("!document.querySelector('.jump')");
     assert(await page.eval("document.querySelectorAll('.turn-marker')[5].getAttribute('aria-current') === 'step'"));
+    turns[5].blocks[1].markdown = "最新一轮的简短回答。";
+    await emit([turns[5]]);
+    await page.waitFor(atEnd);
+    await page.eval("document.querySelector('.scroller').scrollTop -= 24");
+    await page.wait(150);
+    assert(await page.eval("!document.querySelector('.jump') && document.querySelectorAll('.turn-marker')[5].getAttribute('aria-current') === 'step'"), "near-bottom follow and the active marker use the same boundary, without jumping to an older turn");
+    await page.eval("window.dispatchEvent(new Event('wc:scroll-end'))");
+    await page.waitFor(atEnd);
     assert(await page.eval("(() => { const e = document.querySelector('.scroller'); return getComputedStyle(e).scrollbarWidth === 'auto' && getComputedStyle(e, '::-webkit-scrollbar').width === '8px' && getComputedStyle(e, '::-webkit-scrollbar-button').display === 'none' && parseFloat(getComputedStyle(e, '::-webkit-scrollbar-thumb').borderRadius) >= 8; })()"), "the native scrollbar is narrow, rounded and has no arrow buttons");
     const bar = await page.eval("(() => { const e = document.querySelector('.scroller'), r = e.getBoundingClientRect(); return {x: r.right - 4, top: r.top, bottom: r.bottom, thumb: Math.max(18, e.clientHeight * e.clientHeight / e.scrollHeight), maximum: e.scrollHeight - e.clientHeight}; })()");
     assert((await page.eval(`document.elementFromPoint(${bar.x}, ${bar.bottom - bar.thumb / 2})?.className`)).includes("scroller"), "the window resize handle must not intercept the scrollbar");

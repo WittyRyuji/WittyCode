@@ -22,6 +22,9 @@ import { quitWarning } from "../src/lib/quit.ts";
 import "./usage.test.mjs";
 import "./plan.test.mjs";
 import "./turn-navigation.test.mjs";
+import "./factory.test.mjs";
+import "./qwebchannel.test.mjs";
+import "./starmap.test.mjs";
 
 test("API windows use exact specifications, preserve overrides and require unknown limits", () => {
   const model = { id: "gpt-6.1-sol", displayName: "demo", images: true, reasoning: "max" };
@@ -719,12 +722,12 @@ test("ChatGPT Plan compaction: the switch and the percent come with the settings
 
 test("shared memory: switches come with the settings, the badge with app.init and the memory event", () => {
   const empty = emptyLiveData();
-  assert.deepEqual([empty.memoryEnabled, empty.memoryRecall, empty.memoryCapture, empty.memoryCurate, empty.memoryEngines, empty.memory], [true, true, true, true, ["devin", "chatgpt"], { latest: 0, unseen: 0, seen: 0, pending: 0 }]);
+  assert.deepEqual([empty.memoryEnabled, empty.memoryRecall, empty.memoryCapture, empty.memoryCurate, empty.memoryEngines, empty.memory], [true, true, true, true, ["devin", "chatgpt", "factory"], { latest: 0, unseen: 0, seen: 0, pending: 0 }]);
   const off = { ...SETTINGS, memoryEnabled: false, memoryRecall: false, memoryCapture: false, memoryCurate: false, memoryEngines: ["devin"] };
   const { state } = play(started(), ["settings", { settings: off }]);
   assert.deepEqual([state.memoryEnabled, state.memoryRecall, state.memoryCapture, state.memoryCurate, state.memoryEngines], [false, false, false, false, ["devin"]]);
   const defaults = play(state, ["settings", { settings: SETTINGS }]).state;
-  assert.deepEqual([defaults.memoryEnabled, defaults.memoryRecall, defaults.memoryCapture, defaults.memoryCurate, defaults.memoryEngines], [true, true, true, true, ["devin", "chatgpt"]], "a settings view without the keys is the default: on, for every engine");
+  assert.deepEqual([defaults.memoryEnabled, defaults.memoryRecall, defaults.memoryCapture, defaults.memoryCurate, defaults.memoryEngines], [true, true, true, true, ["devin", "chatgpt", "factory"]], "a settings view without the keys is the default: on, for every engine");
   const init = applyInit(emptyLiveData(), { ...INIT, memory: { latest: 7, unseen: 2, seen: 5, pending: 3 } });
   assert.deepEqual(init.memory, { latest: 7, unseen: 2, seen: 5, pending: 3 });
   assert.deepEqual(applyInit(emptyLiveData(), { ...INIT, memory: null }).memory, { latest: 0, unseen: 0, seen: 0, pending: 0 }, "an application without memory");
@@ -736,7 +739,7 @@ test("shared memory: switches come with the settings, the badge with app.init an
 
 test("shared memory: who wrote a note, and how a change and a source line read", () => {
   const devin = { kind: "agent", engine: "devin", conversation: { title: "修复缓存", rowId: "dv:1", projectId: "D:\\a" } };
-  assert.deepEqual([{ kind: "user" }, devin, { kind: "agent", engine: "chatgpt" }, { kind: "unknown" }].map(whoName), ["我", "Devin", "ChatGPT Plan", "未知"]);
+  assert.deepEqual([{ kind: "user" }, devin, { kind: "agent", engine: "chatgpt" }, { kind: "unknown" }].map(whoName), ["我", "Devin", "WittyHarness", "未知"]);
   assert.deepEqual(whoConversation(devin), { title: "修复缓存", rowId: "dv:1" });
   assert.equal(whoConversation({ kind: "agent", engine: "devin", conversation: { title: "x", rowId: "", projectId: "" } }), null, "a conversation that cannot be opened is not a link");
   assert.equal(whoConversation({ kind: "user" }), null);
@@ -747,7 +750,7 @@ test("shared memory: who wrote a note, and how a change and a source line read",
   assert.equal(sourceLine(note), "Devin 写入");
   assert.equal(sourceLine({ ...note, rev: 3 }), "Devin 写入", "changed again by the same engine");
   assert.equal(sourceLine({ ...note, editor: { kind: "user" }, rev: 2 }), "Devin 写入，我改过");
-  assert.equal(sourceLine({ ...note, editor: { kind: "agent", engine: "chatgpt" }, rev: 2 }), "Devin 写入，ChatGPT Plan 改过");
+  assert.equal(sourceLine({ ...note, editor: { kind: "agent", engine: "chatgpt" }, rev: 2 }), "Devin 写入，WittyHarness 改过");
   assert.deepEqual([{ scope: "global", projectName: "" }, { scope: "project", projectName: "wittycode" }].map(scopeLabel), ["全局", "wittycode"]);
 });
 
