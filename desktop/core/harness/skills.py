@@ -239,9 +239,15 @@ def skill_sources(project: Path, home: Path | None = None) -> list[Source]:
     out: list[Source] = []
     for folder in _repository_folders(project, home):
         out += [Source("project", folder / part / "skills") for part in SKILL_FOLDERS]
+    from desktop.core.connections import ConnectionError, ConnectionStore, _local, codex_home
     for part in SKILL_FOLDERS:
-        out.append(Source("personal", home / part / "skills"))
-    from desktop.core.connections import ConnectionStore
+        folder = home / part / "skills"
+        if part == ".codex":
+            try:
+                folder = _local(codex_home(home) / "skills")
+            except ConnectionError:
+                continue
+        out.append(Source("personal", folder))
     out += ConnectionStore(home=home).skill_sources(project)
     out += [Source("plugin", root / "skills", root) for root in _plugins(home)]
     return out

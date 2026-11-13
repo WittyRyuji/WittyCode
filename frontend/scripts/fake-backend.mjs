@@ -927,7 +927,7 @@ function fakeBackend(config) {
       emit("settings", { settings: { ...s } });
       return { ...s };
     },
-    "connections.list": () => ({ items: clone(S.connections), errors: [], hookEvents: ["UserPromptSubmit", "PreToolUse", "PostToolUse"] }),
+    "connections.list": () => ({ items: clone(S.connections), errors: clone(config.connectionErrors || []), hookEvents: ["UserPromptSubmit", "PreToolUse", "PostToolUse"] }),
     "connections.preview": (p) => {
       const items = S.connections.filter((e) => e.source === p.path);
       if (!items.length) throw new Error("没有找到可导入的本地配置。");

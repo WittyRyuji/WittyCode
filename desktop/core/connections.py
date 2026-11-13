@@ -100,9 +100,16 @@ def _source_hash(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _entry(kind, name, source, config, project="", parent=""):
+def codex_home(home: Path) -> Path:
+    """CODEX_HOME replaces the default; an explicitly isolated test home never reads the real profile."""
+    if home == Path.home() and os.environ.get("CODEX_HOME"):
+        return Path(os.path.abspath(os.path.expanduser(os.environ["CODEX_HOME"])))
+    return home / ".codex"
+
+
+def _entry(kind, name, source, config, project="", parent="", *, fingerprint=True):
     source = _local(source)
-    return {"id": _digest([kind, str(source), name, project])[:24], "kind": kind, "name": str(name), "source": str(source), "project": str(project), "config": config, "parent": parent, "enabled": False, "imported": False, "fingerprint": _source_hash(source)}
+    return {"id": _digest([kind, str(source), name, project])[:24], "kind": kind, "name": str(name), "source": str(source), "project": str(project), "config": config, "parent": parent, "enabled": False, "imported": False, "fingerprint": _source_hash(source) if fingerprint else ""}
 
 
 def _safe_member(root: Path, relative: str) -> Path:
@@ -190,7 +197,7 @@ class ConnectionStore:
             except re.error as error:
                 raise ConnectionError("Hook matcher 不是有效正则。") from error
 
-    def _config_entries(self, path, project="", parent="", root=None):
+    def _config_entries(self, path, project="", parent="", root=None, *, fingerprint=True):
         path = _local(path)
         raw = _read(path)
         entries = []
@@ -203,7 +210,7 @@ class ConnectionStore:
             config = dict(config)
             if root is not None:
                 config = self._expand(config, root)
-            entries.append(_entry("mcp", name, path, config, project, parent))
+            entries.append(_entry("mcp", name, path, config, project, parent, fingerprint=fingerprint))
         hooks = raw.get("hooks", {})
         if isinstance(hooks, Mapping):
             for event, groups in hooks.items():
@@ -212,7 +219,10 @@ class ConnectionStore:
                 for group_index, group in enumerate(groups):
                     if not isinstance(group, Mapping):
                         continue
-                    for index, handler in enumerate(group.get("hooks", [])):
+                    handlers = group.get("hooks", [])
+                    if not isinstance(handlers, list):
+                        raise ConnectionError("Hook 分组必须包含 hooks 数组。")
+                    for index, handler in enumerate(handlers):
                         if not isinstance(handler, Mapping):
                             continue
                         config = {**handler, "event": event, "matcher": group.get("matcher", "")}
@@ -221,7 +231,7 @@ class ConnectionStore:
                         if root is not None:
                             config = self._expand(config, root)
                             config["pluginRoot"] = str(root)
-                        entries.append(_entry("hook", f"{event} {group_index + 1}.{index + 1}", path, config, project, parent))
+                        entries.append(_entry("hook", f"{event} {group_index + 1}.{index + 1}", path, config, project, parent, fingerprint=fingerprint))
         return entries
 
     @staticmethod
@@ -232,23 +242,23 @@ class ConnectionStore:
             text = text.replace("${" + name + "}", json.dumps(str(root))[1:-1])
         return json.loads(text)
 
-    def _from_path(self, path, project=""):
+    def _from_path(self, path, project="", *, fingerprint=True):
         path = _local(path)
         if not path.exists():
             raise ConnectionError("找不到这个本地配置文件或插件目录。")
         if path.is_file() and path.name == "plugin.json" and path.parent.name in (".codex-plugin", ".claude-plugin", ".factory-plugin"):
-            return self._from_path(path.parent.parent, project)
+            return self._from_path(path.parent.parent, project, fingerprint=fingerprint)
         if path.is_file() and path.name == "SKILL.md":
-            return [_entry("skill", path.parent.name, path, {"path": str(path)}, project)]
+            return [_entry("skill", path.parent.name, path, {"path": str(path)}, project, fingerprint=fingerprint)]
         if path.is_file():
-            return self._config_entries(path, project)
+            return self._config_entries(path, project, fingerprint=fingerprint)
         manifest = next((path / folder / "plugin.json" for folder in (".codex-plugin", ".claude-plugin", ".factory-plugin") if (path / folder / "plugin.json").is_file()), None)
         if manifest is None:
             if (path / "SKILL.md").is_file():
-                return self._from_path(path / "SKILL.md", project)
+                return self._from_path(path / "SKILL.md", project, fingerprint=fingerprint)
             raise ConnectionError("插件目录需要 .codex-plugin/plugin.json；技能目录需要 SKILL.md。")
-        raw = _read(manifest)
-        plugin = _entry("plugin", raw.get("name") or path.name, path, {"root": str(path), "manifest": str(manifest)}, project)
+        raw = _read(_local(manifest))
+        plugin = _entry("plugin", raw.get("name") or path.name, path, {"root": str(path), "manifest": str(manifest)}, project, fingerprint=fingerprint)
         entries = [plugin]
         roots = raw.get("skills", "./skills")
         roots = [roots] if isinstance(roots, str) else roots
@@ -262,7 +272,7 @@ class ConnectionStore:
                     continue
                 file = _local(child / "SKILL.md")
                 if file.is_file():
-                    entries.append(_entry("skill", file.parent.name, file, {"path": str(file), "pluginRoot": str(path)}, project, plugin["id"]))
+                    entries.append(_entry("skill", file.parent.name, file, {"path": str(file), "pluginRoot": str(path)}, project, plugin["id"], fingerprint=fingerprint))
         for key, default in (("hooks", "./hooks/hooks.json"), ("mcpServers", "./.mcp.json")):
             specs = raw.get(key, default)
             specs = specs if isinstance(specs, list) else [specs]
@@ -270,20 +280,23 @@ class ConnectionStore:
                 if isinstance(spec, str):
                     file = _safe_member(path, spec)
                     if file.is_file():
-                        entries += self._config_entries(file, project, plugin["id"], path)
+                        entries += self._config_entries(file, project, plugin["id"], path, fingerprint=fingerprint)
                 elif isinstance(spec, Mapping):
                     # Inline lifecycle/MCP objects are parsed by the same path-independent parser.
-                    entries += self._inline_entries(manifest, key, spec, project, plugin["id"], path)
+                    entries += self._inline_entries(manifest, key, spec, project, plugin["id"], path, fingerprint=fingerprint)
         return list({e["id"]: e for e in entries}.values())
 
-    def _inline_entries(self, source, key, data, project, parent, root):
+    def _inline_entries(self, source, key, data, project, parent, root, *, fingerprint=True):
         entries = []
         if key == "mcpServers":
             for name, config in data.items():
                 if isinstance(config, Mapping):
-                    entries.append(_entry("mcp", name, source, self._expand(config, root), project, parent))
+                    entries.append(_entry("mcp", name, source, self._expand(config, root), project, parent, fingerprint=fingerprint))
         else:
-            for event, groups in (data.get("hooks", data)).items():
+            hooks = data.get("hooks", data)
+            if not isinstance(hooks, Mapping):
+                raise ConnectionError("插件 hooks 必须是事件配置对象。")
+            for event, groups in hooks.items():
                 if not isinstance(groups, list):
                     continue
                 for i, group in enumerate(groups):
@@ -293,7 +306,7 @@ class ConnectionStore:
                         if not isinstance(handler, Mapping):
                             raise ConnectionError("插件 Hook 处理器必须是对象。")
                         config = self._expand({**handler, "event": event, "matcher": group.get("matcher", ""), "pluginRoot": str(root)}, root)
-                        entries.append(_entry("hook", f"{event} {i + 1}.{j + 1}", source, config, project, parent))
+                        entries.append(_entry("hook", f"{event} {i + 1}.{j + 1}", source, config, project, parent, fingerprint=fingerprint))
         return entries
 
     def preview(self, path, project=""):
@@ -327,56 +340,61 @@ class ConnectionStore:
         from desktop.core.harness import skills
 
         stored = {e["id"]: e for e in self._load() if not e.get("project") or e["project"] == str(project)}
-        detected = []
+        detected, errors = [], []
         for skill in skills.discover(project or self.home, self.home):
-            entry = _entry("skill", skill.name, skill.path, {"path": str(skill.path)}, project if skill.source == "project" else "")
-            entry["enabled"] = True
-            detected.append(entry)
-        roots = [self.home / ".codex"]
-        if self.home == Path.home() and os.environ.get("CODEX_HOME"):
-            roots.insert(0, _local(os.environ["CODEX_HOME"]))
+            try:
+                entry = _entry("skill", skill.name, skill.path, {"path": str(skill.path)}, project if skill.source == "project" else "", fingerprint=False)
+                entry["enabled"] = True
+                detected.append(entry)
+            except (OSError, ConnectionError):
+                errors.append({"source": str(skill.path), "text": "无法读取这个技能来源，请检查本地路径、目录链接和权限。"})
+        roots = [(codex_home(self.home), "")]
         if project:
-            roots += [Path(project) / ".codex", Path(project) / ".wittycode"]
-        errors = []
-        for root in roots:
+            roots += [(Path(project) / ".codex", str(project)), (Path(project) / ".wittycode", str(project))]
+        seen_roots = set()
+        for root, scope in roots:
             try:
                 root = _local(root)
             except ConnectionError as error:
                 errors.append({"source": str(root), "text": str(error)})
                 continue
+            key = os.path.normcase(str(root))
+            if key in seen_roots:
+                continue
+            seen_roots.add(key)
             for name in ("config.toml", "hooks.json", ".mcp.json"):
                 file = root / name
                 try:
                     file = _local(file)
                     if file.is_file():
-                        detected += self._config_entries(file, str(project) if project and root.is_relative_to(Path(project)) else "")
+                        detected += self._config_entries(file, scope, fingerprint=False)
                 except ConnectionError as error:
                     errors.append({"source": str(file), "text": str(error)})
+                except OSError:
+                    errors.append({"source": str(file), "text": "连接配置不可访问，请检查文件权限。"})
             plugins = root / "plugins"
             try:
                 plugins = _local(plugins)
-            except ConnectionError as error:
-                errors.append({"source": str(plugins), "text": str(error)})
-                continue
-            if plugins.is_dir():
-                count = 0
-                for current, folders, _files in os.walk(plugins, followlinks=False):
-                    folders[:] = sorted(name for name in folders if name not in {"node_modules", ".git"} and not _linked(Path(current) / name))
-                    if ".codex-plugin" not in folders:
-                        continue
-                    manifest = Path(current) / ".codex-plugin" / "plugin.json"
-                    if not manifest.is_file():
-                        continue
-                    count += 1
-                    if count > 100:
-                        break
+                children = sorted(plugins.iterdir()) if plugins.is_dir() else []
+                for child in children:
+                    manifest = child / ".codex-plugin/plugin.json"
                     try:
-                        detected += self._from_path(manifest.parent.parent)
+                        # Cache versions, marketplace checkouts and temporary downloads are not an installation list.
+                        if child.name.startswith(".") or child.name in {"cache", "marketplaces", "node_modules", "__pycache__"} or _linked(child):
+                            continue
+                        if child.is_dir() and manifest.is_file():
+                            detected += self._from_path(child, scope, fingerprint=False)
                     except ConnectionError as error:
                         errors.append({"source": str(manifest), "text": str(error)})
-        managed_skills = {entry["source"] for entry in stored.values() if entry["kind"] == "skill"}
+                    except OSError:
+                        errors.append({"source": str(manifest), "text": "插件配置不可访问，请检查文件权限。"})
+            except ConnectionError as error:
+                errors.append({"source": str(plugins), "text": str(error)})
+            except OSError:
+                errors.append({"source": str(plugins), "text": "插件目录不可访问，请检查文件权限。"})
+        managed_skills = {os.path.normcase(entry["source"]) for entry in stored.values() if entry["kind"] == "skill"}
         for entry in detected:
-            if entry["kind"] == "skill" and entry["source"] in managed_skills:
+            if entry["kind"] == "skill" and os.path.normcase(entry["source"]) in managed_skills:
                 continue
             try:
                 self._validate(entry)
@@ -385,14 +403,20 @@ class ConnectionStore:
                 continue
             stored.setdefault(entry["id"], entry)
         items = []
+        seen_items = set()
         for entry in stored.values():
+            identity = (entry["kind"], os.path.normcase(entry["source"]), "" if entry["kind"] == "skill" else entry["name"], os.path.normcase(entry["project"]))
+            if identity in seen_items:
+                continue
+            seen_items.add(identity)
             entry = dict(entry)
             try:
                 entry["changed"] = entry.get("imported", False) and _source_hash(Path(entry["source"])) != entry["fingerprint"]
             except (OSError, ConnectionError):
                 entry["changed"] = True
             items.append(entry)
-        return {"items": items, "errors": errors, "hookEvents": sorted(HOOK_EVENTS)}
+        unique_errors = {(os.path.normcase(error["source"]), error["text"]): error for error in errors}
+        return {"items": items, "errors": list(unique_errors.values()), "hookEvents": sorted(HOOK_EVENTS)}
 
     def update(self, entry_id, *, enabled=None, config=None, confirmed=False, project=""):
         stored = {e["id"]: e for e in self._load()}
@@ -495,8 +519,23 @@ class ConnectionStore:
         try:
             await client.start(timeout=15)
             return {"ok": True, "text": f"连接成功 · {len(client.tools)} 个工具", "tools": [t.name for t in client.tools]}
-        except Exception:
-            return {"ok": False, "text": "MCP 连接失败，请检查命令、依赖和环境变量。", "tools": []}
+        except Exception as error:
+            causes = []
+            while error is not None and error not in causes:
+                causes.append(error)
+                error = error.__cause__
+            if any(isinstance(cause, FileNotFoundError) for cause in causes):
+                text = "MCP 连接失败：找不到启动程序，请先安装依赖或填写可执行文件的完整路径。"
+            elif any(isinstance(cause, PermissionError) for cause in causes):
+                text = "MCP 连接失败：没有启动程序或访问工作目录的权限。"
+            elif any(isinstance(cause, TimeoutError) for cause in causes):
+                text = "MCP 连接失败：服务器握手或工具列表读取超时，请检查本地依赖与运行环境。"
+            elif any("the server exited" in str(cause) for cause in causes):
+                text = "MCP 连接失败：服务器在握手或读取工具列表时提前退出，请检查程序依赖与运行环境。"
+            else:
+                text = "MCP 连接失败：未能完成握手或读取工具列表，请检查命令、依赖和环境变量。"
+            # Server output and raw exception text can contain credentials; never send them to the page.
+            return {"ok": False, "text": text, "tools": []}
         finally:
             await client.close()
 

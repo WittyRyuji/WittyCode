@@ -15,6 +15,14 @@ WittyHarness 是 WittyCode 自己的循环，运行 ChatGPT Plan 与 API Provide
 - **Hooks**：读取 `hooks.json` 的 `hooks → 事件 → 分组 → hooks`，支持 `type: command`、`command`、Windows 的 `command_windows`、`matcher`、`timeout`（最多 120 秒）。支持 `SessionStart`、`UserPromptSubmit`、`PreToolUse`、`PostToolUse`、`Stop`、`SessionEnd`。当前只在 WittyHarness 执行；启动事件在会话首次发消息时运行。常见 OpenAI 工具别名可用于匹配；启动／发消息事件可附加上下文，发送前与工具执行前可拒绝操作，但不会越过应用自己的权限判定。执行后的 Hook 失败只附加提示，不撤销已发生的操作；结束事件不实现自动续跑。
 - **MCP**：读取 Codex `config.toml` 的 `[mcp_servers.NAME]` 和 JSON 的 `mcpServers`。本批支持 stdio 的 `command`、`args`、`env` 和 `env_vars`；环境值用 `${变量名}`，不导入明文密钥。会话里的进程以项目目录启动；全局行未选项目时，连接测试以来源文件夹启动。独立 `cwd`、工具白／黑名单和自定义 MCP 超时选项暂不实现，发现这些配置会明确拒绝，不把忽略后的结果当成兼容。
 
+### 发现范围与计数
+
+- 设置了 `CODEX_HOME` 时，它替代默认的 `~/.codex`，不同时合并两个 Codex 用户目录；技能列表和连接列表使用同一个来源规则。
+- 自动发现个人／项目技能、`plugins/插件名/.codex-plugin/plugin.json` 形式的直接本地插件，以及 WittyCode 已导入的项目。同一作用范围内，同一个技能文件不重复计数。
+- Codex `plugins/cache` 的历史版本、`plugins/marketplaces` 的市场源码与临时下载不是可靠的安装清单，不自动遍历、统计或执行。不会凭缓存目录猜测当前安装了哪一个版本；需要使用缓存中的某个具体插件时，可粘贴该插件目录预览导入。此前明确导入过的来源仍保留，不删除记录或外部文件。
+- 只读发现只读取定义，不递归计算未受信任插件的资源指纹。实际预览／导入仍检查整个来源、目录链接及上限（1000 个文件／12 MB），没有为了让列表正常打开而绕过信任检查。
+- 不支持或不可读的来源按「来源＋原因」去重，在可展开的「发现提示」中列明，不覆盖连接列表；其余可用项仍可操作。不支持的格式不会因此被启用。
+
 ### 导入与确认
 
 1. 粘贴配置文件、`SKILL.md` 或本地插件目录，点「预览导入」。这一步不会启动命令。
@@ -23,6 +31,14 @@ WittyHarness 是 WittyCode 自己的循环，运行 ChatGPT Plan 与 API Provide
 4. MCP 在新开／重新连接的会话中加载；「测试连接」会立即启动所选服务器、握手并读取工具列表，随后关闭。Hooks 在下一次对应事件生效。
 
 导入是允许执行外部程序，不是沙箱。仅导入信任的来源；本地指纹检查不保证系统里安装的命令或其依赖永远不变。插件商店、远程 MCP / OAuth 和非 command Hook 不在本批范围。
+
+### MCP 测试与失败提示
+
+Windows 上会按服务器的 `PATH`／`PATHEXT` 查找 `npx.cmd` 等入口，不隐式从工作目录寻找同名程序；显式的相对程序路径按服务器工作目录解释，也使用 `PATHEXT`；不接受依赖其他盘当前目录的 `C:server` 或省略盘符的根路径。测试真的启动选中服务器、完成握手并读取工具列表，不以配置能解析代替连接成功。结束或超时会关闭本次启动的进程；需要强制停止时只处理它自己的进程树。
+
+失败会清除上次的成功结果，显示缺少启动程序、权限不足、握手超时或服务器提前退出等原因。服务器 stderr 与原始异常可能含凭据，不原样展示或写入连接配置；需检查环境变量、安装依赖或修正路径后再试。一个测试成功不代表其他插件、其他服务器或远程 OAuth 已受支持。
+
+Codex 激活配置与 Hooks 来源规则参见 [官方配置参考](https://developers.openai.com/codex/config-file/config-reference) 与 [官方 Hooks 文档](https://developers.openai.com/codex/hooks)。本地适配器只采用上面明确列出的子集，不把缓存文件当作官方安装状态。
 
 ## Factory CLI
 

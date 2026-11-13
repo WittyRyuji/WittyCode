@@ -34,13 +34,15 @@ serve(handle)
 
 def test_timeout_sends_cancel_notification_and_stderr_is_drained_without_logging_it(tmp_path):
     body = PRELUDE + '''
+import os
 def handle(m):
     if m["method"] == "initialize": INIT(m)
     elif m["method"] == "tools/list": send({"jsonrpc": "2.0", "id": m["id"], "result": {"tools": []}})
     elif m["method"] == "tools/call":
         sys.stderr.write("demo diagnostic\\n" * 10000); sys.stderr.flush()
     elif m["method"] == "notifications/cancelled":
-        with open(sys.argv[0] + ".cancel", "w") as output: json.dump(m["params"], output)
+        with open(sys.argv[0] + ".cancel.tmp", "w") as output: json.dump(m["params"], output)
+        os.replace(sys.argv[0] + ".cancel.tmp", sys.argv[0] + ".cancel")
 for line in sys.stdin:
     handle(json.loads(line))
 '''

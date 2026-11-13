@@ -21,6 +21,9 @@
 .connection-consent input { flex: none; margin-top: 3px; accent-color: var(--ink); }
 .connection-error { color: var(--err); font-size: 12px; overflow-wrap: anywhere; }
 .connection-result { color: var(--fg-2); font-size: 12px; overflow-wrap: anywhere; }
+.connection-issues { margin: 12px 0; padding: 8px 12px; border: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+.connection-issues > summary { cursor: pointer; color: var(--fg-2); }
+.connection-issue { display: flex; flex-direction: column; gap: 3px; border-top: 1px solid var(--line); padding-top: 8px; overflow-wrap: anywhere; }
 .factory-program { margin: 18px 0; padding: 16px 0; border-block: 1px solid var(--line); }
 .factory-card .row-btns, .factory-program .row-btns { display: flex; gap: 8px; }
 .switch:disabled { opacity: 0.45; cursor: default; }
