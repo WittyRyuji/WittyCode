@@ -71,6 +71,9 @@ class McpClient:
         self.instructions = ""
         self._process: asyncio.subprocess.Process | None = None
         self._reader: asyncio.Task[None] | None = None
+        self._stderr_reader: asyncio.Task[None] | None = None
+        self.stderr_tail = ""
+        """Bounded diagnostics in memory only; server stderr is untrusted and may contain private data."""
         self._pending: dict[int, asyncio.Future[Any]] = {}
         self._next = 0
         self._dead = ""
@@ -81,6 +84,9 @@ class McpClient:
 
     async def start(self, timeout: float = START_SECONDS) -> None:
         """Start the server, shake hands and read its tools. Raises ``McpError`` (the process is stopped again)."""
+        if self._process is not None:
+            await self.close()
+        self._dead = ""
         kwargs: dict[str, Any] = {}
         if sys.platform == "win32":
             kwargs["creationflags"] = CREATE_NO_WINDOW
@@ -90,7 +96,7 @@ class McpClient:
                 *self.args,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
                 env={**os.environ, **self.env},
                 cwd=self.cwd,
                 limit=LINE_LIMIT,
@@ -98,7 +104,10 @@ class McpClient:
             )
         except OSError as error:
             raise McpError(f"{self.name}: cannot start {self.command}: {error}") from error
+        self.stderr_tail = ""
         self._reader = asyncio.ensure_future(self._read())
+        self._stderr_reader = asyncio.create_task(self._read_stderr())
+        listed_tools: list[Any] = []
         try:
             async with asyncio.timeout(timeout):
                 answer = await self._request(
@@ -107,13 +116,27 @@ class McpClient:
                 )
                 self.instructions = str(answer.get("instructions") or "") if isinstance(answer, Mapping) else ""
                 await self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
-                listed = await self._request("tools/list", {})
-        except (TimeoutError, McpError) as error:
+                cursor: str | None = None
+                seen: set[str] = set()
+                while True:
+                    listed = await self._request("tools/list", {"cursor": cursor} if cursor else {})
+                    if not isinstance(listed, Mapping) or not isinstance(listed.get("tools"), list):
+                        raise McpError("tools/list did not return a tool list")
+                    listed_tools.extend(listed["tools"])
+                    cursor = listed.get("nextCursor")
+                    if not cursor:
+                        break
+                    if not isinstance(cursor, str) or cursor in seen or len(seen) >= 100 or len(listed_tools) > 10000:
+                        raise McpError("tools/list pagination did not terminate within the limit")
+                    seen.add(cursor)
+        except BaseException as error:
             await self.close()
+            if isinstance(error, asyncio.CancelledError):
+                raise
             raise McpError(f"{self.name}: {error or 'timed out starting'}") from error
         self.tools = [
             McpTool(self.name, str(tool["name"]), str(tool.get("description") or ""), dict(tool.get("inputSchema") or {"type": "object", "properties": {}}), dict(tool.get("annotations") or {}))
-            for tool in (listed.get("tools") if isinstance(listed, Mapping) else None) or ()
+            for tool in listed_tools
             if isinstance(tool, Mapping) and tool.get("name")
         ]
 
@@ -126,7 +149,18 @@ class McpClient:
         except McpError as error:
             return McpResult(f"The tool {tool} failed: {error}", True)
         content = answer.get("content") if isinstance(answer, Mapping) else None
-        parts = [str(part.get("text") or "") for part in content or () if isinstance(part, Mapping) and part.get("type") == "text"]
+        parts: list[str] = []
+        for part in content or ():
+            if not isinstance(part, Mapping):
+                continue
+            if part.get("type") == "text":
+                parts.append(str(part.get("text") or ""))
+            elif part.get("type") == "resource" and isinstance(part.get("resource"), Mapping) and isinstance(part["resource"].get("text"), str):
+                parts.append(part["resource"]["text"])
+            else:
+                parts.append(f"[MCP returned non-text content ({str(part.get('type') or 'unknown')[:40]}); this harness cannot display it to the model.]")
+        if isinstance(answer, Mapping) and isinstance(answer.get("structuredContent"), Mapping):
+            parts.append(json.dumps(answer["structuredContent"], ensure_ascii=False))
         return McpResult("\n".join(parts), bool(isinstance(answer, Mapping) and answer.get("isError")))
 
     async def close(self) -> None:
@@ -147,7 +181,18 @@ class McpClient:
             reader.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await reader
+        stderr_reader, self._stderr_reader = self._stderr_reader, None
+        if stderr_reader is not None:
+            stderr_reader.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await stderr_reader
         self._fail_pending("closed")
+
+    async def _read_stderr(self) -> None:
+        process = self._process
+        assert process is not None and process.stderr is not None
+        while data := await process.stderr.read(4096):
+            self.stderr_tail = (self.stderr_tail + data.decode("utf-8", "replace"))[-4096:]
 
     # ------------------------------------------------------------------ wire
 
@@ -169,6 +214,10 @@ class McpClient:
         try:
             await self._send({"jsonrpc": "2.0", "id": identifier, "method": method, "params": dict(params)})
             return await future
+        except asyncio.CancelledError:
+            with contextlib.suppress(McpError):
+                await self._send({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": identifier, "reason": "Client stopped waiting"}})
+            raise
         finally:
             self._pending.pop(identifier, None)
 

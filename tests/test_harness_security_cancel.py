@@ -92,14 +92,15 @@ def test_an_edit_stopped_while_it_is_planned_writes_nothing(project, ctx, regist
 def test_a_create_stopped_after_it_read_the_old_content_does_not_overwrite(project, ctx, registry, monkeypatch):
     target = project / "f.txt"
     target.write_bytes(b"before\n")
-    real = fs_tools._existing_text
+    fs_tools.read_file({"file_path": "f.txt"}, ctx)
+    real = fs_tools._decode
 
-    def gated(path: Path) -> str:
-        text = real(path)
+    def gated(data: bytes):
+        decoded = real(data)
         ctx.abort.set()
-        return text
+        return decoded
 
-    monkeypatch.setattr(fs_tools, "_existing_text", gated)
+    monkeypatch.setattr(fs_tools, "_decode", gated)
     result = asyncio.run(registry.run("create_file", {"file_path": "f.txt", "content": "after\n"}, ctx))
     assert result.is_error and "Stopped by the user" in result.output
     assert target.read_bytes() == b"before\n"

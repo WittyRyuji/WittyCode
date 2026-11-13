@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 import threading
 import time
 from collections.abc import Awaitable, Callable, Iterator, Mapping
@@ -113,6 +114,8 @@ class ToolContext:
     """Folders outside the project that reads may enter without asking (the folders of the user's skills, ``harness.skills``).
     Only reads: nothing here may be written, and ``protected`` still wins."""
     writes: CommitGuard = field(default_factory=CommitGuard)
+    read_files: dict[str, str] = field(default_factory=dict)
+    """Content fingerprints read or written by this conversation; shared by per-call context copies."""
 
 
 @dataclass
@@ -141,6 +144,8 @@ def _coerce(value: Any, schema: Mapping[str, Any]) -> tuple[Any, str | None]:
         if not isinstance(value, str):
             return value, "must be a string"
     elif kind == "integer":
+        if isinstance(value, str) and re.fullmatch(r"[+-]?[0-9]{1,18}", value.strip()):
+            value = int(value)
         if isinstance(value, float) and value.is_integer():
             value = int(value)
         if isinstance(value, bool) or not isinstance(value, int):
@@ -181,6 +186,7 @@ def validate_arguments(schema: Mapping[str, Any], args: Any) -> dict[str, Any]:
     for key, value in given.items():
         prop = properties.get(key)
         if prop is None:
+            problems.append(f"unknown parameter '{key}'; use the declared parameter names")
             continue
         value, problem = _coerce(value, prop)
         if problem:

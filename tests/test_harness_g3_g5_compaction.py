@@ -62,7 +62,7 @@ def request_size(request: dict[str, Any]) -> int:
 
 
 def is_summary_request(request: dict[str, Any]) -> bool:
-    return request["instructions"] == compact.INSTRUCTIONS
+    return request["instructions"] == compact.INSTRUCTIONS or (request.get("tool_choice") == "none" and request["input"][-1]["content"][0]["text"].startswith(compact.SUMMARY_TASK))
 
 
 def body_of(request: dict[str, Any]) -> str:
@@ -502,7 +502,11 @@ def test_a_summary_the_user_pasted_is_theirs_and_the_place_where_the_summary_sto
         await finish_turn(controller)
         items, record = controller.saved.items, controller.saved.compaction
         assert record["upto"] == 3 and items[3]["type"] == "message" and "continue" in text_of(items[3]), "the summary stops at a message, not at a tool result"
-        assert "USER: " + compact.SUMMARY_PREFIX in body_of(service.summaries[0]), "the pasted text was given as the user's words"
+        summary_request = service.summaries[0]
+        if summary_request.get("tool_choice") == "none":
+            assert summary_request["input"][0]["role"] == "user" and text_of(summary_request["input"][0]).startswith(compact.SUMMARY_PREFIX)
+        else:
+            assert "USER: " + compact.SUMMARY_PREFIX in body_of(summary_request), "the pasted text was given as the user's words"
         assert engine.sessions.load(controller.session_id).compaction["upto"] == 3, "so it is on disk"
         controller.send_prompt("next")
         await finish_turn(controller)
@@ -517,8 +521,12 @@ def test_a_summary_the_user_pasted_is_theirs_and_the_place_where_the_summary_sto
         items, record = controller.saved.items, controller.saved.compaction
         assert controller.transcript.turns[-1].status is TurnStatus.DONE and service.refused == []
         assert record["upto"] == len(items) - 2 == 9 and "once more" in text_of(items[9])
-        second = body_of(service.summaries[1])
-        assert "<previous_summary>\nSUMMARY of what was done." in second and "USER: " + compact.SUMMARY_PREFIX not in second
+        second_request = service.summaries[1]
+        second = body_of(second_request)
+        if second_request.get("tool_choice") == "none":
+            assert compact.is_summary(second_request["input"][0]) and "SUMMARY of what was done." in second
+        else:
+            assert "<previous_summary>\nSUMMARY of what was done." in second and "USER: " + compact.SUMMARY_PREFIX not in second
         session_id = controller.session_id
         await engine.close_all()
 

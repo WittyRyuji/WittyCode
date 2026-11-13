@@ -54,19 +54,19 @@ def test_the_declarations_are_the_built_in_tools_and_every_running_servers_tools
     tools = make(tmp_path, clients=[memory, stopped])
     names = [d["name"] for d in tools.declarations()]
     assert names[: len(ToolRegistry.default().specs())] == [spec.name for spec in ToolRegistry.default().specs()]
-    assert names[-1] == "mcp__wittycode-memory__memory_search" and "mcp__old__ghost" not in names
-    declared = tools.declarations()[-1]
+    assert names[-2:] == ["mcp__wittycode-memory__memory_search", "mcp__old__ghost"], "known schemas remain even while a server is offline"
+    declared = tools.declarations()[-2]
     assert declared["description"] == "memory_search of wittycode-memory" and declared["parameters"]["properties"] == {"q": {"type": "string"}}
 
 
-def test_a_server_that_comes_up_later_is_offered_after_a_refresh(tmp_path):
+def test_a_server_that_comes_up_later_keeps_the_same_known_schema(tmp_path):
     late = StubClient("late", [tool("late", "ping")], running=False)
     tools = make(tmp_path, clients=[late])
-    assert not tools.known("mcp__late__ping")
-    late.running = True
-    assert not tools.known("mcp__late__ping"), "the list is read when asked for, not on every look"
-    tools.refresh()
+    before = tools.declarations()
     assert tools.known("mcp__late__ping")
+    late.running = True
+    tools.refresh()
+    assert tools.known("mcp__late__ping") and tools.declarations() == before
 
 
 def test_known_names_are_the_built_in_and_the_mcp_ones_only(tmp_path):
@@ -159,4 +159,4 @@ def test_an_mcp_action_is_described_for_the_approval_card(tmp_path):
 
 def test_the_running_servers_are_listed_with_their_instructions_for_the_system_prompt(tmp_path):
     tools = make(tmp_path, clients=[StubClient("a", [], instructions="use me"), StubClient("b", [], running=False, instructions="gone")])
-    assert tools.servers() == [("a", "use me")]
+    assert tools.servers() == [("a", "use me"), ("b", "gone")], "connection state must not rewrite instruction history"

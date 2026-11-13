@@ -385,11 +385,22 @@ def _fixed_part(value: str) -> str | None:
     return value
 
 
+_FILESYSTEM_PROVIDER = re.compile(r"^(?:Microsoft\.PowerShell\.Core[\\/])?FileSystem::", re.IGNORECASE)
+
+
+def _filesystem_argument(value: str) -> str | None:
+    """Recognise only ordinary paths or PowerShell's known filesystem provider, never an arbitrary PSDrive."""
+    expanded = _DEVICE_PREFIX.sub("", _FILESYSTEM_PROVIDER.sub("", _expand_environment(value)))
+    if ":" in expanded and not re.match(r"^[A-Za-z]:[\\/]", expanded):
+        return None
+    return expanded
+
+
 def resolved_argument(value: str, cwd: Path) -> Path | None:
     """Where an argument leads, with links followed (``Path.resolve`` uses ``os.path.realpath``, which follows a Windows
     junction as well as a symlink), or None when that cannot be known."""
-    expanded = _DEVICE_PREFIX.sub("", _expand_environment(value))
-    if re.match(r"[\\/]{2}", expanded):
+    expanded = _filesystem_argument(value)
+    if expanded is None or re.match(r"[\\/]{2}", expanded):
         return None  # resolving \\host\share would connect to that host before anyone approved the command
     fixed = _fixed_part(expanded)
     if fixed is None:
@@ -425,7 +436,10 @@ def _wildcard_targets(value: str, cwd: Path) -> list[Path | None]:
     ``_LISTING_LIMIT``, and anything past ``_EXPANSION_LISTINGS`` listings or ``_EXPANSION_TARGETS`` targets, adds
     None ("not knowable"), which every caller reads as outside the project.
     """
-    segments = re.split(r"[\\/]", _DEVICE_PREFIX.sub("", _expand_environment(value)))
+    expanded = _filesystem_argument(value)
+    if expanded is None or re.match(r"[\\/]{2}", expanded):
+        return []
+    segments = re.split(r"[\\/]", expanded)
     index = _next_wildcard(segments, 0)
     if index is None:
         return []

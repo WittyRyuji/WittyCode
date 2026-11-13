@@ -2,9 +2,9 @@
 
 The plan route (``POST https://api.openai.com/v1/responses`` with the OAuth access token) is stateless: ``store`` is false,
 ``stream`` is true, the whole history goes in ``input`` every time, and a list of request fields is refused outright
-(``docs/chatgpt-plan-harness.md`` section 2). Items we keep for the next request are sent back without their ids: nothing
-is stored on the server, so an id would point at nothing. A ``reasoning`` item can only be sent back with its
-``encrypted_content`` (``include`` asks for it); one without is dropped from the history.
+(``docs/chatgpt-plan-harness.md`` section 2). Output items are replayed intact, including their ids, status and assistant
+phase; an output id is not an item reference when the complete item is supplied. A Responses ``reasoning`` item needs
+its ``encrypted_content`` (``include`` asks for it); another provider's signed thoughts are kept for that adapter.
 
 ``Shape`` holds the choices that depend on what the service accepts and that have not been verified on a real account yet
 (flat or namespaced tools, ``include``, the reasoning summary): they are the first thing to change if a request is refused.
@@ -15,6 +15,7 @@ The stream is read into neutral events (``TextDelta`` …) so the loop does not 
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 from collections.abc import AsyncIterator, Mapping, Sequence
@@ -42,7 +43,7 @@ class Shape:
     """``reasoning.summary``: the readable summary shown while the model thinks (``None``: do not ask)."""
     parallel_tool_calls: bool = True
     cache_key: bool = False
-    """Send ``prompt_cache_key`` (the conversation id): same prefix, cheaper request. Not verified on this route."""
+    """Optional cache-accounting isolation. GPT-5.6+ routes automatically; a changing key can prevent reuse."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,7 +54,7 @@ class Usage:
     output_tokens: int = 0
     reasoning_tokens: int = 0
     cache_write_tokens: int | None = None
-    """Input tokens the request wrote into the cache, cached ones not included, for the APIs that report it (Anthropic); also part of ``input_tokens``."""
+    """Input tokens written into the cache, when reported; included in ``input_tokens``."""
 
     @classmethod
     def of(cls, raw: Any) -> Usage | None:
@@ -66,10 +67,11 @@ class Usage:
             _count(details_in.get("cached_tokens")) if isinstance(details_in, Mapping) else 0,
             _count(raw.get("output_tokens")),
             _count(details_out.get("reasoning_tokens")) if isinstance(details_out, Mapping) else 0,
+            _count(details_in["cache_write_tokens"]) if isinstance(details_in, Mapping) and "cache_write_tokens" in details_in else None,
         )
 
     def tokens(self) -> Tokens:
-        """The page's four counters: ``input`` is what the cache did not serve; OpenAI has no cache-write figure."""
+        """The page's disjoint counters: ordinary input, output, cache write and cache read."""
         written = self.cache_write_tokens or 0
         return Tokens(max(self.input_tokens - self.cached_tokens - written, 0), self.output_tokens, self.cache_write_tokens, self.cached_tokens)
 
@@ -139,9 +141,16 @@ class Finished:
     response_id: str = ""
     incomplete: str = ""
     """Why the answer stopped short (``max_output_tokens``, ``content_filter``); empty: it completed."""
+    diagnostics: dict[str, Any] = field(default_factory=dict)
+    """Response-level diagnostics, kept separate from replayable output items."""
 
 
-Event = TextDelta | TextDone | ReasoningDelta | ReasoningDone | CallBegun | CallDone | ItemDone | Finished
+@dataclass(frozen=True, slots=True)
+class Started:
+    """The server acknowledged this request: a later stream failure must not resend it blindly."""
+
+
+Event = Started | TextDelta | TextDone | ReasoningDelta | ReasoningDone | CallBegun | CallDone | ItemDone | Finished
 
 
 # ---------------------------------------------------------------------- the request
@@ -187,6 +196,8 @@ def build_request(
         options["summary"] = shape.reasoning_summary
     if options:
         request["reasoning"] = options
+    if reasoning == "off" and model.startswith("api:"):
+        request["wc_reasoning_effort"] = "off"  # internal only; API adapters must not lose an explicit disable
     if shape.encrypted_reasoning:
         request["include"] = ["reasoning.encrypted_content"]
     if shape.cache_key and conversation:
@@ -195,22 +206,14 @@ def build_request(
 
 
 def history_item(item: Mapping[str, Any]) -> dict[str, Any] | None:
-    """An output item as it is kept and sent back: no ids (nothing is stored server-side), no status; a reasoning item
-    without its encrypted content cannot be sent back, so it is not kept (``None``)."""
-    kind = item.get("type")
-    if kind == "reasoning":
-        # (the ``wc_*`` keys are what another API's adapter keeps of the model's thoughts: see ``core/llm``)
-        if not item.get("encrypted_content") and not item.get("wc_reasoning") and not item.get("wc_data"):
-            return None
-        kept = {key: item[key] for key in ("type", "summary", "encrypted_content", "wc_reasoning", "wc_signature", "wc_data", "wc_origin") if key in item}
-        kept.setdefault("summary", [])
-        return kept
-    if kind == "message":
-        return {"type": "message", "role": item.get("role", "assistant"), "content": list(item.get("content") or ())}
-    if kind == "function_call":
-        kept = {key: item[key] for key in ("type", "call_id", "name", "arguments", "namespace") if key in item}
-        return kept
-    return None
+    """Replay complete output items, not id references. Do not rebuild them from a field whitelist.
+
+    Unencrypted Responses reasoning cannot be replayed; adapter-local thoughts (including a signature with no visible
+    text) remain available to their original provider. Transport cleanup belongs to ``for_responses``.
+    """
+    if item.get("type") == "reasoning" and not any(item.get(key) for key in ("encrypted_content", "wc_reasoning", "wc_signature", "wc_data")):
+        return None
+    return copy.deepcopy(dict(item)) if item.get("type") else None
 
 
 def for_responses(items: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -295,13 +298,15 @@ async def read_events(lines: AsyncIterator[str]) -> AsyncIterator[Event]:
     for item in await flush():
         yield item
     if not finished:
-        raise ChatGPTError("The stream ended before the response was complete.", code="stream")
+        raise ChatGPTError("The stream ended before the response was complete.", code="stream", transient=False)
 
 
 def _translate(event: Mapping[str, Any], reasoning_parts: dict[str, dict[int, str]]) -> list[Event]:
     kind = event.get("type")
     item = event.get("item") if isinstance(event.get("item"), Mapping) else {}
     item_id = str(event.get("item_id") or item.get("id") or "")
+    if kind in ("response.created", "response.in_progress"):
+        return [Started()]
     if kind == "response.output_text.delta":
         return [TextDelta(item_id, str(event.get("delta") or ""))]
     if kind in ("response.reasoning_summary_text.delta", "response.reasoning_text.delta"):
@@ -327,7 +332,8 @@ def _translate(event: Mapping[str, Any], reasoning_parts: dict[str, dict[int, st
         response = event.get("response") if isinstance(event.get("response"), Mapping) else {}
         details = response.get("incomplete_details")
         reason = str(details.get("reason") or "incomplete") if isinstance(details, Mapping) else ("incomplete" if kind == "response.incomplete" else "")
-        return [Finished(Usage.of(response.get("usage")), str(response.get("id") or ""), reason)]
+        diagnostics = {key: copy.deepcopy(response[key]) for key in ("reasoning", "input_transformations", "prompt_cache_diagnostics") if key in response}
+        return [Finished(Usage.of(response.get("usage")), str(response.get("id") or ""), reason, diagnostics)]
     if kind == "response.failed":
         response = event.get("response") if isinstance(event.get("response"), Mapping) else None
         raise _failure(response, event)

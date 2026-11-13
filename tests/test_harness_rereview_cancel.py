@@ -98,6 +98,7 @@ def test_a_cancel_while_the_temporary_file_waits_leaves_the_target_alone(project
     caplog.set_level(logging.WARNING, logger="desktop.harness.tools")
     target = project / "f.txt"
     target.write_bytes(b"before\n")
+    fs_tools.read_file({"file_path": "f.txt"}, ctx)  # replacing an existing file requires a current read
     parked, release, finished = threading.Event(), threading.Event(), threading.Event()
     park_before_the_replace(monkeypatch, parked, release)
     outcome: list[object] = []
@@ -125,6 +126,7 @@ def test_a_cancel_while_the_temporary_file_waits_leaves_the_target_alone(project
 def test_a_stop_between_two_replace_attempts_leaves_the_target_alone(project, ctx, registry, monkeypatch):
     target = project / "f.txt"
     target.write_bytes(b"before\n")
+    fs_tools.read_file({"file_path": "f.txt"}, ctx)  # replacing an existing file requires a current read
     attempts: list[int] = []
     real = os.replace
 
@@ -148,6 +150,7 @@ def test_a_stop_is_refused_before_the_in_place_fallback(project, ctx, registry, 
     """The fallback for a file that cannot be replaced must be guarded like the replace itself."""
     target = project / "f.txt"
     target.write_bytes(b"before\n")
+    fs_tools.read_file({"file_path": "f.txt"}, ctx)  # replacing an existing file requires a current read
 
     def no_temporary_file_and_stopped(path: Path, data: bytes):
         ctx.abort.set()
@@ -162,6 +165,7 @@ def test_a_stop_is_refused_before_the_in_place_fallback(project, ctx, registry, 
 def test_a_stop_during_the_last_replace_attempt_is_refused_before_the_in_place_fallback(project, ctx, registry, monkeypatch):
     target = project / "f.txt"
     target.write_bytes(b"before\n")
+    fs_tools.read_file({"file_path": "f.txt"}, ctx)  # replacing an existing file requires a current read
     attempts: list[int] = []
 
     def locked(source, destination):
@@ -199,6 +203,7 @@ def test_a_call_stopped_after_planning_writes_no_temporary_file(project, ctx, re
     """``create_file`` checks before it makes folders; an edit reaches the write with only the check at its top."""
     target = project / "f.txt"
     target.write_bytes(b"before\n")
+    fs_tools.read_file({"file_path": "f.txt"}, ctx)  # replacing an existing file requires a current read
     seen: list[str] = []
     real_temporary, real_plan = fs_tools._temporary_beside, fs_tools._plan_edit
 
@@ -227,6 +232,7 @@ def test_a_cancel_that_arrives_during_the_commit_does_not_claim_that_nothing_was
     caplog.set_level(logging.WARNING, logger="desktop.harness.tools")
     target = project / "f.txt"
     target.write_bytes(b"before\n")
+    fs_tools.read_file({"file_path": "f.txt"}, ctx)  # replacing an existing file requires a current read
     inside, release, finished = threading.Event(), threading.Event(), threading.Event()
     real = os.replace
 
@@ -293,6 +299,7 @@ def test_a_stopped_call_does_not_stop_the_writes_of_a_later_turn(project, ctx, r
     monkeypatch.setattr("desktop.core.harness.tools.THREAD_WAIT_SECONDS", 0.3)
     target = project / "f.txt"
     target.write_bytes(b"before\n")
+    fs_tools.read_file({"file_path": "f.txt"}, ctx)  # replacing an existing file requires a current read
     parked, release, finished = threading.Event(), threading.Event(), threading.Event()
     real = fs_tools._temporary_beside
 
@@ -347,6 +354,7 @@ def test_every_call_gets_its_own_guard(project, registry, monkeypatch):
 def test_an_ordinary_write_still_goes_through_a_temporary_file_and_a_replace(project, ctx, registry, monkeypatch):
     target = project / "f.txt"
     target.write_bytes(b"before\n")
+    fs_tools.read_file({"file_path": "f.txt"}, ctx)  # replacing an existing file requires a current read
     seen: list[bytes] = []
     real = os.replace
 

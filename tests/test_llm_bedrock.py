@@ -356,7 +356,7 @@ def test_invoke_chunks_are_anthropics_events_in_base64_and_read_as_such():
         chunk({"type": "message_stop"}),
     ]
     events = collect(read_anthropic(bedrock.invoke_lines(pieces([b"".join(frames)])), ORIGIN))
-    assert kinds(events) == ["TextDelta", "TextDone", "ItemDone", "Finished"]
+    assert kinds(events) == ["Started", "TextDelta", "TextDone", "ItemDone", "Finished"]
     assert events[1].text == "Hi"
 
 

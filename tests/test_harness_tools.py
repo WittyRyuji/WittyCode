@@ -150,7 +150,7 @@ def test_unknown_tool_is_an_error_result(registry: ToolRegistry, ctx: ToolContex
     [
         ("read_file", {}, "'file_path' is required"),
         ("read_file", {"file_path": 5}, "'file_path' must be a string"),
-        ("read_file", {"file_path": "a", "offset": "3"}, "'offset' must be an integer"),
+        ("read_file", {"file_path": "a", "offset": "three"}, "'offset' must be an integer"),
         ("read_file", {"file_path": "a", "offset": True}, "'offset' must be an integer"),
         ("read_file", {"file_path": "a", "offset": 0}, "at least 1"),
         ("glob", {"patterns": "*.py"}, "'patterns' must be an array"),
@@ -176,9 +176,12 @@ def test_arguments_must_be_an_object(registry: ToolRegistry, ctx: ToolContext):
         assert result.is_error and "JSON object" in result.output
 
 
-def test_null_counts_as_absent_unknown_keys_dropped_integral_float_accepted():
+def test_null_counts_as_absent_unknown_keys_are_errors_and_integral_values_are_accepted():
     schema = fs_tools.READ_FILE.parameters
-    assert validate_arguments(schema, {"file_path": "a", "offset": None, "bogus": 1}) == {"file_path": "a"}
+    assert validate_arguments(schema, {"file_path": "a", "offset": None}) == {"file_path": "a"}
+    with pytest.raises(ToolError, match="unknown parameter 'bogus'"):
+        validate_arguments(schema, {"file_path": "a", "offset": None, "bogus": 1})
+    assert validate_arguments(schema, {"file_path": "a", "limit": "5"}) == {"file_path": "a", "limit": 5}
     assert validate_arguments(schema, {"file_path": "a", "limit": 5.0}) == {"file_path": "a", "limit": 5}
     with pytest.raises(ToolError):
         validate_arguments(schema, {"file_path": "a", "limit": 5.5})
@@ -651,6 +654,7 @@ def test_create_file_writes_utf8_without_bom_and_makes_parents(registry, ctx, pr
 
 def test_create_file_overwrites_and_diffs(registry, ctx, project):
     (project / "a.txt").write_text("one\ntwo\nthree\n", encoding="utf-8")
+    assert not call(registry, ctx, "read_file", file_path="a.txt").is_error
     result = call(registry, ctx, "create_file", file_path="a.txt", content="one\nTWO\nthree\nfour\n")
     assert "Overwrote" in result.output
     (diff,) = result.diffs

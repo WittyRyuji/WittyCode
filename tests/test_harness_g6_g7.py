@@ -32,7 +32,7 @@ def run(coroutine: Any) -> Any:
 
 
 def is_summary(request: dict[str, Any]) -> bool:
-    return request["instructions"] == compact.INSTRUCTIONS
+    return request["instructions"] == compact.INSTRUCTIONS or (request.get("tool_choice") == "none" and request["input"][-1]["content"][0]["text"].startswith(compact.SUMMARY_TASK))
 
 
 def size(request: dict[str, Any]) -> int:

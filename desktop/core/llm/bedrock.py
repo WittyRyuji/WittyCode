@@ -45,7 +45,7 @@ from desktop.core.chatgpt.responses import (
     TextDelta,
     TextDone,
 )
-from desktop.core.llm.anthropic import anthropic_body, thinking_for
+from desktop.core.llm.anthropic import anthropic_body, thinking_effort, thinking_fields
 from desktop.core.llm.wire import DEFAULT_MAX_OUTPUT, Route, count, declared_functions, images_of, load_json, split_data_url, text_of, usage_of
 
 log = logging.getLogger("desktop.llm")
@@ -126,8 +126,8 @@ def converse_messages(items: Sequence[Mapping[str, Any]], origin: str) -> list[d
                 continue
             if item.get("wc_data"):
                 push("assistant", [{"reasoningContent": {"redactedContent": item["wc_data"]}}])
-            elif item.get("wc_reasoning") and item.get("wc_signature"):
-                push("assistant", [{"reasoningContent": {"reasoningText": {"text": item["wc_reasoning"], "signature": item["wc_signature"]}}}])
+            elif item.get("wc_signature"):
+                push("assistant", [{"reasoningContent": {"reasoningText": {"text": item.get("wc_reasoning", ""), "signature": item["wc_signature"]}}}])
         elif kind == "message" and item.get("role") == "assistant":
             text = text_of(item)
             push("assistant", [{"text": text}] if text.strip() else [])
@@ -176,12 +176,10 @@ def converse_body(request: Mapping[str, Any], route: Route, metadata: Mapping[st
             "toolChoice": {"auto": {}},
         }
     max_tokens = route.max_output
-    reasoning = request.get("reasoning")
-    effort = reasoning.get("effort") if isinstance(reasoning, Mapping) else None
-    thinking = thinking_for(effort, max_tokens or DEFAULT_MAX_OUTPUT, route.thinking) if is_claude(model) else None
-    if thinking is not None:
+    thinking = thinking_fields(model, thinking_effort(request), max_tokens or DEFAULT_MAX_OUTPUT, route.thinking) if is_claude(model) else {}
+    if thinking:
         max_tokens = max_tokens or DEFAULT_MAX_OUTPUT
-        body["additionalModelRequestFields"] = {"thinking": thinking}
+        body["additionalModelRequestFields"] = thinking
     if max_tokens:
         body["inferenceConfig"] = {"maxTokens": max_tokens}
     if metadata:

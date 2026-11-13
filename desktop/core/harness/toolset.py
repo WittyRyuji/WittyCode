@@ -70,7 +70,8 @@ class HarnessTools:
 
     def refresh(self) -> None:
         """Read the connected servers' tools again (a server may have come up since)."""
-        self._mcp = {mcp_name(tool.server, tool.name): (client, tool) for client in self.clients if client.running for tool in client.tools}
+        # A disconnected server is an unavailable tool, not a different prompt. Keep known schemas and their order.
+        self._mcp = {mcp_name(tool.server, tool.name): (client, tool) for client in self.clients for tool in client.tools}
 
     # ------------------------------------------------------------------ loop.Tools
 
@@ -113,6 +114,17 @@ class HarnessTools:
             if verdict.verdict != ASK:
                 return verdict
         return Verdict(DENY, PLAN_REFUSAL)
+
+    def parallel_safe(self, call: Call) -> bool:
+        """Only approved, independent filesystem reads; hooks, commands and memory writes retain serial ordering."""
+        if self.connections is not None:
+            active = getattr(self.connections, "active", None)
+            if active is None or any(entry.get("config", {}).get("event") in ("PreToolUse", "PostToolUse") for entry in active("hook", self.context.project)):
+                return False
+        return (
+            not call.problem and call.name in ("read_file", "list_dir", "glob", "grep")
+            and self.known(call.name) and self.check(call).verdict == ALLOW
+        )
 
     def remember(self, call: Call) -> None:
         spec = self.registry.get(call.name)
@@ -167,4 +179,4 @@ class HarnessTools:
 
     def servers(self) -> list[tuple[str, str]]:
         """``(name, instructions)`` of the connected servers, for the system prompt."""
-        return [(client.name, client.instructions) for client in self.clients if client.running]
+        return [(client.name, client.instructions) for client in self.clients]

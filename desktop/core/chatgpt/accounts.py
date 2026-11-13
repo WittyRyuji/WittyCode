@@ -448,7 +448,7 @@ class TokenProvider:
         self._renewals: dict[str, asyncio.Future[str]] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
 
-    async def access_token(self, client_id: str | None = None) -> str:
+    async def access_token(self, client_id: str | None = None, *, rejected: str | None = None) -> str:
         """The access token of ``client_id`` (None: the active account). Raises ``PlanNotEnabled`` when the sign-in
         does not allow plan usage, ``AuthError(terminal=True)`` when the account is signed out or its refresh token is
         dead (the tokens are cleared then), and the error of a renewal that failed otherwise (the tokens are kept)."""
@@ -456,12 +456,12 @@ class TokenProvider:
         if not key:
             raise AuthError("no ChatGPT account is signed in", terminal=True, code="signed_out")
         record = self._usable(key, self.store.get(key))
-        if self._fresh(record):
+        if self._fresh(record) and record.access_token != rejected:
             return record.access_token
         self._bind_loop()
         renewal = self._renewals.get(key)
         if renewal is None or renewal.done():
-            renewal = asyncio.ensure_future(self._renewal(key))
+            renewal = asyncio.ensure_future(self._renewal(key, rejected))
             renewal.add_done_callback(_retrieved)
             self._renewals[key] = renewal
         # Shielded: a caller that gives up (the user stops a turn) must not cut a renewal short, or the refresh token
@@ -476,11 +476,11 @@ class TokenProvider:
         async with self._serialized(key):
             return await sign_out(self.http, self.endpoints, self.store, key, sleep=self._sleep)
 
-    async def _renewal(self, client_id: str) -> str:
+    async def _renewal(self, client_id: str, rejected: str | None = None) -> str:
         async with self._serialized(client_id):
             # (another task or process may have renewed it while this one waited)
             record = self._usable(client_id, self.store.get(client_id))
-            if self._fresh(record):
+            if self._fresh(record) and record.access_token != rejected:
                 return record.access_token
             return await self._renew(client_id, record)
 

@@ -254,6 +254,7 @@ def test_nothing_is_added_when_nothing_bears_on_the_message_or_the_recall_is_off
         for recall_on, text in ((True, "good morning"), (False, ASK)):
             memory = own_launch(tmp_path / f"r{recall_on}", recall=lambda on=recall_on: on)
             proj = (tmp_path / "proj").resolve()
+            proj.mkdir(exist_ok=True)
             deploy_note(memory, proj)
             core, plan, events, _, _ = await ready_core(tmp_path / f"r{recall_on}", memory=memory)
             plan.script(say("ok"))

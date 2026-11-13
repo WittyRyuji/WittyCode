@@ -175,7 +175,8 @@ serve2()
         client = stub(tmp_path, body)
         await client.start()
         try:
-            assert (await client.call("t", {})).text == "ok\n!"
+            result = (await client.call("t", {})).text
+            assert result.startswith("ok\n[MCP returned non-text content (image)") and result.endswith("\n!"), "non-text content is reported, not silently lost"
         finally:
             await client.close()
 

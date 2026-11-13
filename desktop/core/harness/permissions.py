@@ -239,6 +239,9 @@ def _points_outside(token: str, cwd: Path, project: Path) -> bool:
     An argument whose target cannot be known counts as outside, so the command is asked about rather than allowed.
     """
     for value in argument_pieces(token):
+        # Python treats PowerShell providers/PSDrives as relative names. They must never enter the read-only allowlist.
+        if "::" in value or (":" in value and not re.match(r"^[A-Za-z]:[\\/]", value)):
+            return True
         for target in argument_targets(value, cwd):
             if target is None or not fs_tools.is_within(target, project):
                 return True
@@ -303,6 +306,9 @@ def _segment_is_readonly(tokens: list[str], cwd: Path, project: Path) -> bool:
             return False  # ``findstr /s`` reads every file of the tree, whatever links lie in it
     else:
         return False
+    if name == "git" and rest[0].lower() in ("show", "log", "diff", "blame"):
+        # Git's object:path syntax is not a PowerShell provider. Check its tree path, not an invented local PSDrive.
+        rest = [token.split(":", 1)[1] if re.match(r"^(?:HEAD(?:~\d+|\^\d*)*|[0-9a-fA-F]{4,40}):[^:]", token) else token for token in rest]
     return not any(_points_outside(token, cwd, project) for token in rest)
 
 
