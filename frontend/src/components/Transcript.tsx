@@ -139,28 +139,38 @@ export function TurnView({ turn, session }: { turn: Turn; session: Session }) {
 }
 
 
-export function Transcript({ session }: { session: Session }) {
+export interface ReadingPosition {
+  follow: boolean;
+  top: number;
+  anchor?: { id: string; offset: number };
+}
+
+export function Transcript({ session, positions }: { session: Session; positions: Map<string, ReadingPosition> }) {
   const scroller = useRef<HTMLDivElement>(null);
   const inner = useRef<HTMLDivElement>(null);
-  const stick = useRef(true);
+  const position = useRef<ReadingPosition>(positions.get(session.id) ?? { follow: true, top: 0 });
+  const restoring = useRef(positions.has(session.id));
+  const stick = useRef(position.current.follow);
   const jumpTarget = useRef<number | null>(null);
   const scheduleActive = useRef(() => {});
+  const measured = useRef({ content: 0, viewport: 0 });
   const scrollTimer = useRef<number | undefined>(undefined);
-  const [away, setAway] = useState(false);
+  const [away, setAway] = useState(!stick.current);
   const [scrolling, setScrolling] = useState(false);
   const [activeId, setActiveId] = useState<string | null>(null);
   const links = useMemo(() => turnLinks(session.turns), [session.turns]);
   const setDraft = useStore((s) => s.setDraft);
 
   const behavior = (smooth: boolean): ScrollBehavior => smooth && !window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "smooth" : "auto";
-  const toEnd = (smooth = false) => {
+  const remember = () => {
     const el = scroller.current;
-    jumpTarget.current = null;
-    if (el) {
-      const top = Math.max(0, el.scrollHeight - el.clientHeight);
-      jumpTarget.current = smooth && Math.abs(el.scrollTop - top) >= 2 ? top : null;
-      el.scrollTo({ top, behavior: behavior(smooth) });
-    }
+    if (!el || restoring.current) return;
+    const top = jumpTarget.current ?? el.scrollTop;
+    const origin = el.getBoundingClientRect().top;
+    const turns = [...(inner.current?.querySelectorAll<HTMLElement>(":scope > .turn") ?? [])];
+    const anchor = [...turns].reverse().find((turn) => turn.getBoundingClientRect().top <= origin + 40) ?? turns[0];
+    position.current = { follow: stick.current, top, ...(anchor ? { anchor: { id: anchor.dataset.turnId!, offset: anchor.getBoundingClientRect().top - origin - (top - el.scrollTop) } } : {}) };
+    positions.set(session.id, position.current);
   };
   const syncActive = useCallback(() => {
     const el = scroller.current;
@@ -171,26 +181,59 @@ export function Transcript({ session }: { session: Session }) {
     const index = activeTurnAt(tops, el.scrollTop + 40, stick.current || el.scrollHeight - el.scrollTop - el.clientHeight < 48);
     setActiveId(turns[index]?.dataset.turnId ?? null);
   }, []);
+  const applyLayout = () => {
+    const el = scroller.current;
+    if (!el || !inner.current) return;
+    if (restoring.current && !inner.current.querySelector(":scope > .turn")) return;
+    const sizeChanged = measured.current.content !== el.scrollHeight || measured.current.viewport !== el.clientHeight;
+    if (stick.current) {
+      if (sizeChanged || restoring.current) {
+        jumpTarget.current = null;
+        el.scrollTo({ top: el.scrollHeight, behavior: "instant" });
+      }
+    } else if (restoring.current || (sizeChanged && jumpTarget.current === null)) {
+      const saved = position.current;
+      const anchor = [...inner.current.querySelectorAll<HTMLElement>(":scope > .turn")].find((turn) => turn.dataset.turnId === saved.anchor?.id);
+      const top = anchor && saved.anchor ? el.scrollTop + anchor.getBoundingClientRect().top - el.getBoundingClientRect().top - saved.anchor.offset : saved.top;
+      el.scrollTo({ top, behavior: "instant" });
+    }
+    restoring.current = false;
+    measured.current = { content: el.scrollHeight, viewport: el.clientHeight };
+    remember();
+    syncActive();
+  };
+  const toEnd = (smooth = false) => {
+    const el = scroller.current;
+    if (!el) return;
+    restoring.current = false;
+    stick.current = true;
+    setAway(false);
+    const top = Math.max(0, el.scrollHeight - el.clientHeight);
+    jumpTarget.current = smooth && Math.abs(el.scrollTop - top) >= 2 ? top : null;
+    el.scrollTo({ top, behavior: behavior(smooth) });
+    remember();
+    scheduleActive.current();
+  };
   const jumpTo = (id: string) => {
     const el = scroller.current;
     const turn = [...(inner.current?.querySelectorAll<HTMLElement>(":scope > .turn") ?? [])].find((item) => item.dataset.turnId === id);
     if (!el || !turn) return;
+    restoring.current = false;
     const top = Math.max(0, Math.min(el.scrollHeight - el.clientHeight, el.scrollTop + turn.getBoundingClientRect().top - el.getBoundingClientRect().top - 28));
     jumpTarget.current = Math.abs(el.scrollTop - top) < 2 ? null : top;
-    stick.current = jumpTarget.current === null && el.scrollHeight - top - el.clientHeight < 48;
+    stick.current = el.scrollHeight - top - el.clientHeight < 48;
     setActiveId(id);
-    setAway(el.scrollHeight - top - el.clientHeight >= 48);
+    setAway(!stick.current);
     el.scrollTo({ top, behavior: behavior(true) });
+    remember();
   };
 
-  // A different session starts at its end.
+  // The parent owns positions across keyed transcript mounts; restore before the first paint, not after a flash at the end.
   useLayoutEffect(() => {
-    stick.current = true;
-    setAway(false);
-    toEnd();
+    applyLayout();
+    return () => remember();
   }, [session.id]);
 
-  // Follow streaming only at the bottom. Re-measure the outline after scrolling, wrapping or resizing the pane.
   useEffect(() => {
     const el = inner.current;
     const viewport = scroller.current;
@@ -203,10 +246,7 @@ export function Transcript({ session }: { session: Session }) {
         syncActive();
       });
     };
-    const ro = new ResizeObserver(() => {
-      if (stick.current) toEnd();
-      scheduleActive.current();
-    });
+    const ro = new ResizeObserver(applyLayout);
     ro.observe(el);
     ro.observe(viewport);
     scheduleActive.current();
@@ -217,30 +257,29 @@ export function Transcript({ session }: { session: Session }) {
     };
   }, [session.id, syncActive]);
 
-  // Restored snapshots can replace turn IDs without changing any measured height.
-  useLayoutEffect(() => scheduleActive.current(), [session.turns]);
+  // A cached/live replacement may change IDs without changing any measured height.
+  useLayoutEffect(() => applyLayout(), [session.turns]);
 
-  // 跳到最新消息 (the app menu, Ctrl+End)
   useEffect(() => {
-    const end = () => {
-      stick.current = true;
-      setAway(false);
-      toEnd(true);
-    };
+    const end = () => toEnd(true);
     window.addEventListener("wc:scroll-end", end);
     return () => window.removeEventListener("wc:scroll-end", end);
   }, []);
 
   const onScroll = () => {
     const el = scroller.current!;
-    const atEnd = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
-    if (jumpTarget.current !== null && Math.abs(el.scrollTop - jumpTarget.current) < 2) jumpTarget.current = null;
-    // Intermediate smooth-scroll events are not a new reading intent. Only settle when the target is reached.
-    if (jumpTarget.current === null) {
-      stick.current = atEnd;
-      setAway(!atEnd);
+    // Browser clamping during a resize is layout, not a request to leave the latest messages.
+    if (measured.current.content !== el.scrollHeight || measured.current.viewport !== el.clientHeight) {
+      applyLayout();
+      return;
     }
-    if (jumpTarget.current === null) scheduleActive.current();
+    if (jumpTarget.current !== null && Math.abs(el.scrollTop - jumpTarget.current) < 2) jumpTarget.current = null;
+    if (jumpTarget.current === null && !restoring.current) {
+      stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+      setAway(!stick.current);
+      remember();
+      scheduleActive.current();
+    }
     setScrolling(true);
     window.clearTimeout(scrollTimer.current);
     scrollTimer.current = window.setTimeout(() => setScrolling(false), 800);

@@ -22,6 +22,7 @@ from desktop.core.context import ContextState
 from desktop.core.context_envelope import strip, wrap
 from desktop.core.devin.rpc import AcpClient
 from desktop.core.engine_errors import EngineRpcError
+from desktop.core.engine_items import split_handoff
 from desktop.core.hooks import Hooks, PromptEvent
 from desktop.core.prompts import ActionView, OptionView, QuestionView, OPTION_LABELS, UNSUPPORTED_OPTIONS
 from desktop.core.session_state import LiveSettings, SessionState, SESSION_STATE_LABELS, SteerOutcome
@@ -291,7 +292,10 @@ class FactoryController:
             if message.get("role") == "user":
                 text = "\n".join(_text(block.get("text")) for block in content if isinstance(block, Mapping) and block.get("type") == "text")
                 if text:
-                    turn = self.transcript.new_history_turn(strip(text))
+                    typed, handoff = split_handoff(strip(text))
+                    turn = self.transcript.new_history_turn(typed.lstrip("\r\n") if handoff is not None else typed)
+                    if turn.user_block is not None:
+                        turn.user_block.handoff = handoff
                     self.transcript.turns.append(turn)
             if turn is not None:
                 if message.get("role") == "user":
@@ -408,8 +412,6 @@ class FactoryController:
     def send_prompt(self, text, attachments=()):
         if self.state is not SessionState.READY:
             return False
-        if not self.transcript.title and not self.saved_title:
-            self.transcript.title = " ".join(text.split())[:80]
         self.state = SessionState.RUNNING
         self.used_at = self.active_at = time.time()
         self._turn_model, self._turn_usage = self.model, self._usage

@@ -1593,7 +1593,7 @@ def test_a_chatgpt_plan_conversation_goes_from_the_model_menu_to_the_answer_and_
                 # closed, it is a saved session in the list, named as the plan's
                 await rig.click(".tab-x")
                 await rig.wait_for(".tab", 0)
-                await rig.wait_text(".srow", "hello plan", timeout=15)
+                await rig.wait_text(".srow", fake.title_answer, timeout=15)
                 assert "· ChatGPT Plan" in await rig.text(".srow .ssub")
             finally:
                 await rig.finish()

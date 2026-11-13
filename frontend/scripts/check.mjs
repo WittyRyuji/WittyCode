@@ -202,7 +202,7 @@ ok("the TPS tooltip says in its first line that the figure is an estimate", awai
 // settings: the button, the pages, and a change that takes effect at once
 await page.click(".foot-btn", 1);
 ok("the settings button opens the settings", await page.eval("!!document.querySelector('.settings')"));
-ok("the settings pages also include Connections", await page.eval("[...document.querySelectorAll('.snav')].map(e => e.textContent.trim()).join(',') === '外观,账号与模型,新会话默认值,会话,共享记忆5,外部程序,项目,快捷键,关于,Connections'"));
+ok("the settings pages also include Connections", await page.eval("[...document.querySelectorAll('.snav')].map(e => e.textContent.trim()).join(',') === '外观,账号与模型,新会话默认值,会话,共享记忆5,外部程序,项目,快捷键,Connections,关于'"));
 await page.click(".snav", 2);
 ok("defaults page lists model / reasoning / permission / mode", await page.eval("document.querySelectorAll('.settings-scroll .field').length === 4"));
 await page.click(".snav", 0);

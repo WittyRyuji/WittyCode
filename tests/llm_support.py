@@ -55,6 +55,8 @@ class FakeApi:
 
     def __init__(self) -> None:
         self.posts: list[tuple[str, dict[str, str], dict[str, Any]]] = []
+        self.title_posts: list[tuple[str, dict[str, str], dict[str, Any]]] = []
+        self.title_turn: list[Any] = []
         self._turns: list[Any] = []
         self._lock = threading.Lock()
         self._server: ThreadingHTTPServer | None = None
@@ -80,9 +82,19 @@ class FakeApi:
             def do_POST(self) -> None:
                 length = int(self.headers.get("Content-Length") or 0)
                 body = json.loads(self.rfile.read(length) or b"{}")
+                from desktop.core.session_title import SYSTEM as TITLE_SYSTEM
+
+                system = body.get("instructions") or body.get("system") or next((m.get("content") for m in body.get("messages", []) if m.get("role") == "system"), "")
+                if isinstance(system, list):
+                    system = "\n".join(part.get("text", "") for part in system)
                 with fake._lock:
-                    fake.posts.append((self.path, {key.lower(): value for key, value in self.headers.items()}, body))
-                    turn = fake._turns.pop(0) if fake._turns else []
+                    post = (self.path, {key.lower(): value for key, value in self.headers.items()}, body)
+                    if system == TITLE_SYSTEM:
+                        fake.title_posts.append(post)
+                        turn = fake.title_turn
+                    else:
+                        fake.posts.append(post)
+                        turn = fake._turns.pop(0) if fake._turns else []
                 if isinstance(turn, http_error):
                     payload = json.dumps(turn.body).encode()
                     self.send_response(turn.status)

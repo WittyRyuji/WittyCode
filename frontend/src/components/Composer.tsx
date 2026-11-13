@@ -196,8 +196,13 @@ export function Composer() {
   useEffect(() => {
     const el = area.current;
     if (!el) return;
+    // Measuring at auto height must not briefly enlarge the transcript and clamp away its scroll position.
+    const box = el.parentElement!;
+    const minimum = box.style.minHeight;
+    box.style.minHeight = `${box.getBoundingClientRect().height}px`;
     el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, 220)}px`;
+    box.style.minHeight = minimum;
   }, [draft, session?.id]);
 
   useEffect(() => {

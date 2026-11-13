@@ -221,12 +221,6 @@ class ChatGPTController:
             # (a saved conversation keeps the name it was saved under: its first message is not its title, and an
             # imported one is named after the conversation it came from)
             return stored
-        first = next((t for t in self.transcript.turns if t.user_block), None)
-        if first is not None and first.user_block is not None:
-            lines = first.user_block.text.strip().splitlines()
-            text = lines[0] if lines else ""
-            if text:
-                return text[:60]
         return self.saved_title or "新会话"
 
     @property

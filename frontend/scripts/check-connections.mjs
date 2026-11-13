@@ -22,6 +22,7 @@ for (const live of [false, true]) for (const theme of ["light", "dark"]) {
     }
     await page.waitFor("document.querySelectorAll('.connection-tabs [role=tab]').length === 4 && !!document.querySelector('.connection-row')", 6000);
     assert.deepEqual(await page.eval("[...document.querySelectorAll('.connection-tabs button')].map(e => e.textContent.replace(/[0-9]/g, '').trim())"), ["Skills", "Plugins", "Hooks", "MCP"]);
+    assert.equal(await page.eval("[...document.querySelectorAll('.snav')].at(-1).textContent.trim()"), "关于", "About must remain the final settings page");
     await page.click(".connection-row .switch");
     await page.waitFor("document.querySelector('.connection-row .switch').getAttribute('aria-checked') === 'false'", 3000);
     await page.click(".connection-row .switch");

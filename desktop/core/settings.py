@@ -113,6 +113,10 @@ class AppSettings:
     own files is touched, and the conversation can be brought back."""
     session_titles: dict[str, str] = field(default_factory=dict)
     """The names the user gave conversations here (row id -> name). The engines keep their own titles."""
+    session_auto_titles: dict[str, str] = field(default_factory=dict)
+    """LLM summaries of the first question; manual session_titles always take precedence."""
+    session_links: dict[str, str] = field(default_factory=dict)
+    """Earlier native row ids -> the current native segment of the same WittyCode conversation."""
     session_order: list[str] = field(default_factory=list)
     """Sidebar row ids in the order the user dragged them; newly discovered sessions precede these."""
     session_created: dict[str, float] = field(default_factory=dict)
@@ -290,6 +294,25 @@ def settings_from_dict(raw: object) -> AppSettings:
             if isinstance(key, str) and key and isinstance(name, str) and name.strip() and len(titles) < MAX_REMEMBERED_SESSIONS:
                 titles[key] = " ".join(name.split())[:MAX_SESSION_TITLE]
 
+    auto_titles: dict[str, str] = {}
+    if isinstance(raw.get("session_auto_titles"), dict):
+        auto_titles = {k: " ".join(v.split())[:MAX_SESSION_TITLE] for k, v in raw["session_auto_titles"].items() if isinstance(k, str) and k and isinstance(v, str) and v.strip()}
+        auto_titles = dict(list(auto_titles.items())[:MAX_REMEMBERED_SESSIONS])
+    links: dict[str, str] = {}
+    if isinstance(raw.get("session_links"), dict):
+        links = {k: v for k, v in raw["session_links"].items() if isinstance(k, str) and isinstance(v, str) and k != v and k.startswith(("cg:", "dv:", "fy:")) and v.startswith(("cg:", "dv:", "fy:"))}
+        links = dict(list(links.items())[:MAX_REMEMBERED_SESSIONS])
+        for key in list(links):
+            if key not in links:
+                continue
+            seen, current = {key}, links[key]
+            while current in links and current not in seen:
+                seen.add(current)
+                current = links[current]
+            if current in seen:
+                for item in seen:
+                    links.pop(item, None)
+
     order: list[str] = []
     raw_order = raw.get("session_order")
     if isinstance(raw_order, list):
@@ -335,6 +358,8 @@ def settings_from_dict(raw: object) -> AppSettings:
         last_project=text("last_project"),
         archived_sessions=archived,
         session_titles=titles,
+        session_auto_titles=auto_titles,
+        session_links=links,
         session_order=order,
         session_created=created,
     )

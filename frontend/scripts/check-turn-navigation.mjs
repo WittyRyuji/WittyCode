@@ -33,6 +33,20 @@ for (const [theme, width] of [["light", 1500], ["dark", 900]]) {
     assert(await page.eval(aligned));
     await page.waitFor("document.querySelectorAll('.turn-marker[aria-current=step]').length === 1 && document.querySelectorAll('.turn-marker')[5].getAttribute('aria-current') === 'step'");
     assert(await page.eval("document.querySelector('.turn-nav').getBoundingClientRect().right < document.querySelector('.transcript').getBoundingClientRect().left"), "the outline belongs in the left gutter, not on top of the messages");
+    assert(await page.eval("(() => { const a = [...document.querySelectorAll('.turn-marker')].map(e => e.getBoundingClientRect()); return a.every((r, i) => r.height <= 12 && (!i || r.top - a[i - 1].top <= 12)); })()"), "markers use a compact 12px pitch");
+    const navTop = await page.eval("document.querySelector('.turn-nav').getBoundingClientRect().top");
+    const fillDraft = (text) => page.eval(`(() => { const e = document.querySelector('.input'); Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(e, ${JSON.stringify(text)}); e.dispatchEvent(new Event('input', {bubbles: true})); })()`);
+    await fillDraft("输入多行草稿，导航保持固定。\n".repeat(12));
+    await page.wait(180);
+    assert(Math.abs(await page.eval("document.querySelector('.turn-nav').getBoundingClientRect().top") - navTop) < 1, "growing the input does not move the outline");
+    assert(await page.eval(atEnd), "growing the input preserves following latest");
+    await fillDraft("");
+    await page.wait(150);
+    await page.click('.srow', 1);
+    await page.waitFor("document.querySelectorAll('.tab').length === 2 && !!document.querySelector('.tab.current .dot-ready')");
+    await page.click('.tab', 0);
+    await page.waitFor("document.querySelectorAll('.turn-marker').length === 6");
+    assert(await page.eval(atEnd), "returning to a session keeps latest-follow mode");
     await page.hover(".turn-marker", 0);
     await page.waitFor("!!document.querySelector('.turn-preview')");
     assert((await page.eval("document.querySelector('.turn-preview').textContent")).includes("检查第 1 项布局"));
@@ -42,6 +56,18 @@ for (const [theme, width] of [["light", 1500], ["dark", 900]]) {
     await page.key("ArrowDown");
     await page.waitFor("(() => { const s = document.querySelector('.scroller').getBoundingClientRect(), t = document.querySelectorAll('.transcript > .turn')[1].getBoundingClientRect(); return Math.abs(t.top - s.top - 28) < 2; })()");
     assert.equal(await page.eval("document.activeElement.dataset.turnId"), "turn-1");
+    const historicalTop = await page.eval("document.querySelector('.scroller').scrollTop");
+    await page.click('.tab', 1);
+    await page.click('.tab', 0);
+    await page.waitFor("document.querySelectorAll('.turn-marker').length === 6");
+    assert(Math.abs(await page.eval("document.querySelector('.scroller').scrollTop") - historicalTop) < 2, "each session restores its historical reading position");
+    assert.equal(await page.eval("document.querySelector('.turn-marker[aria-current=step]')?.dataset.turnId"), "turn-1");
+    await fillDraft("继续输入多行，不抢历史位置。\n".repeat(10));
+    await page.wait(150);
+    assert(Math.abs(await page.eval("document.querySelector('.scroller').scrollTop") - historicalTop) < 2);
+    assert(Math.abs(await page.eval("document.querySelector('.turn-nav').getBoundingClientRect().top") - navTop) < 1);
+    await fillDraft("");
+    await page.eval("document.querySelector('.turn-marker[aria-current=step]').focus({preventScroll: true})");
     await page.key("Home", { vk: 36 });
     await page.waitFor("document.querySelector('.scroller').scrollTop < 2");
     turns[5].blocks[1].markdown += "\n\n" + "后台仍在持续输出，但历史阅读位置不应跳走。\n\n".repeat(50);
@@ -97,6 +123,8 @@ for (const [theme, width] of [["light", 1500], ["dark", 900]]) {
     await emit([turns[5]]);
     await page.waitFor("!document.querySelector('.plan-toggle')");
 
+    await page.eval("window.dispatchEvent(new Event('wc:scroll-end'))");
+    await page.waitFor(atEnd);
     await emit(Array.from({ length: 80 }, (_, i) => turn(i, 1)), true);
     await page.waitFor("document.querySelectorAll('.turn-marker').length === 80");
     await page.waitFor(atEnd);

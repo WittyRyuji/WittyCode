@@ -48,6 +48,7 @@ from desktop.core.attachments import (
 )
 from desktop.core.connections import ConnectionError, ConnectionStore
 from desktop.core.cache import Cache
+from desktop.core.conversation_history import ConversationHistory, prepend as prepend_history
 from desktop.core.catalog import API_PREFIX, Catalog, Target, build_catalog, settings_for_model
 from desktop.core.chatgpt.errors import ChatGPTError
 from desktop.core.hooks import Hooks
@@ -55,7 +56,7 @@ from desktop.core.llm.backend import is_api_model
 from desktop.core import files as filetools
 from desktop.core.handoff import AS_TEXT, CarryOption, attachment_text, build_handoff, carry_options, carry_overage, conversation_messages
 from desktop.core.harness import goal as goals
-from desktop.core import language
+from desktop.core import language, session_title
 from desktop.core.harness import skills
 from desktop.core.import_bridge import ImportBridge
 from desktop.core.chatgpt import side as chatgpt_side
@@ -79,6 +80,7 @@ from desktop.core.settings import (
     SIDEBAR_WIDTH_RANGE,
     THEMES,
     AppSettings,
+    default_settings_path,
     normalize_folder,
     same_folder,
     save_settings,
@@ -207,6 +209,9 @@ class Conversation:
     """The settings asked for when the session was opened (what the page shows until the engine reports its own)."""
     hidden: set[str] = field(default_factory=set)
     """Native ids of earlier engines' sessions of this conversation: not listed again in the sidebar."""
+    history: dict[str, Any] | None = None
+    title_started: bool = False
+    title_task: asyncio.Future[Any] | None = None
     sent_ids: list[str] = field(default_factory=list)
     sent_versions: dict[str, int] = field(default_factory=dict)
     meta: dict[str, Any] = field(default_factory=dict)
@@ -331,6 +336,8 @@ class AppCore:
         self.devin = devin
         self.chatgpt = chatgpt
         self.connections = ConnectionStore()
+        self.history = ConversationHistory(default_settings_path().parent / "conversations")
+        self._opening_history: dict[str, Any] | None = None
         for engine in (factory, devin, chatgpt):
             if engine is not None:
                 engine.connections = self.connections
@@ -548,6 +555,16 @@ class AppCore:
 
     # ------------------------------------------------------------------ sidebar
 
+    def _resolve_row(self, row: str) -> str:
+        seen = set()
+        while row in self.settings.session_links and row not in seen:
+            seen.add(row)
+            row = self.settings.session_links[row]
+        return row
+
+    def _visible_saved(self, folder: str) -> list[SavedRow]:
+        return [row for row in self._saved.get(normalize_folder(folder), []) if self._resolve_row(row.id) == row.id]
+
     def _rows_for(self, folder: str) -> list[dict[str, Any]]:
         open_here = [c for c in self.order if same_folder(c.project, folder)]
         taken: set[str] = set()
@@ -558,7 +575,7 @@ class AppCore:
                 taken.add(native)
                 taken.update(prefix + native for prefix in ROW_PREFIXES.values())
         rows: list[tuple[str, float, dict[str, Any]]] = []
-        for saved in self._saved.get(normalize_folder(folder), []):
+        for saved in self._visible_saved(folder):
             if saved.native in taken or saved.id in taken or saved.id in self.settings.archived_sessions:
                 continue
             created = self.settings.session_created.get(saved.id, _aware(saved.created).timestamp())
@@ -570,6 +587,8 @@ class AppCore:
         return [row for _, _, row in rows]
 
     def _sync_sidebar_key(self, conv: Conversation) -> None:
+        if conv.switching:
+            return  # a failed engine open must not migrate any persistent identity or title
         key = self._row_of(conv) or conv.cid
         if key == conv.sidebar_key:
             return
@@ -607,7 +626,7 @@ class AppCore:
         return {
             "id": saved.id,
             "projectId": folder,
-            "title": self.settings.session_titles.get(saved.id) or saved.title or "（无标题）",
+            "title": self.settings.session_titles.get(saved.id) or self.settings.session_auto_titles.get(saved.id) or saved.title or "（无标题）",
             "modified": format_relative(saved.modified),
             "modifiedAt": int(saved.modified.timestamp() * 1000),
             "engine": saved.engine,
@@ -620,7 +639,7 @@ class AppCore:
     def _saved_sessions_json(self) -> dict[str, Any]:
         sessions = {}
         for folder in self.settings.projects:
-            for saved in self._saved.get(normalize_folder(folder), []):
+            for saved in self._visible_saved(folder):
                 if saved.id not in self.settings.archived_sessions:
                     sessions[saved.id] = self._saved_json(saved, folder)
         return sessions
@@ -629,7 +648,7 @@ class AppCore:
         """The archived conversations the engines still list, the one archived last first."""
         found: list[tuple[int, dict[str, Any]]] = []
         for folder in self.settings.projects:
-            for saved in self._saved.get(normalize_folder(folder), []):
+            for saved in self._visible_saved(folder):
                 stamp = self.settings.archived_sessions.get(saved.id)
                 if stamp is not None:
                     found.append((stamp, self._saved_json(saved, folder)))
@@ -677,6 +696,22 @@ class AppCore:
                     page_model = self.catalog.page_id("chatgpt", item.model) if item.model and self.catalog is not None else ""
                     created = datetime.fromtimestamp(item.created_at, timezone.utc)
                     rows.append(SavedRow(chatgpt_row, item.id, "chatgpt", item.title or "", self._latest(chatgpt_row, stamp), item.messages, page_model, created))
+        # A just-switched segment may have no native messages yet, or its CLI may currently be unavailable.
+        for head in set(self.settings.session_links.values()):
+            if self._resolve_row(head) != head or any(row.id == head for row in rows):
+                continue
+            try:
+                saved = await asyncio.to_thread(self.history.load, head)
+                if saved and same_folder(saved["project"], folder):
+                    engine, native = head.split(":", 1)
+                    rows.append(SavedRow(head, native, {"cg": "chatgpt", "dv": "devin", "fy": "factory"}[engine], saved["title"], datetime.fromtimestamp(saved["activeAt"], timezone.utc), created=datetime.fromtimestamp(saved["created"], timezone.utc)))
+            except (OSError, ValueError, KeyError, TypeError):
+                log.warning("a conversation segment could not be listed")
+            if not any(row.id == head for row in rows):
+                earlier = next((row for row in rows if self._resolve_row(row.id) == head), None)
+                if earlier is not None:
+                    prefix, native = head.split(":", 1)
+                    rows.append(dataclasses.replace(earlier, id=head, native=native, engine={"cg": "chatgpt", "dv": "devin", "fy": "factory"}[prefix], model=""))
         self._saved[normalize_folder(folder)] = rows
         self._remember_rows(folder, rows)
         self._schedule_sidebar(folder)
@@ -916,7 +951,7 @@ class AppCore:
             conv.engine,
             native,
             conv.project,
-            controller.title,
+            self._title_of(conv),
             controller.active_at,
             listed,
             {name: meta[name] for name in ("settings", "usage", "usageModels", "speed", "context")},
@@ -1062,6 +1097,12 @@ class AppCore:
             self._drop(conv, controller)
             return
         self._sync_sidebar_key(conv)
+        if conv.history and not conv.switching and controller.state in (SessionState.READY, SessionState.RUNNING) and getattr(controller, "_history_loaded", True):
+            prefix = conv.history["turns"]
+            if prefix and prefix[0] not in controller.transcript.turns:
+                if not controller.transcript.turns:
+                    controller.handoff = conv.history.get("handoff")
+                prepend_history(controller.transcript, prefix, self._row_of(conv))
         conv.dirty = True
         if kind == "state":
             self._schedule_sidebar(conv.project, reload=controller.state is SessionState.READY)
@@ -1096,7 +1137,10 @@ class AppCore:
             controller=controller,
             project=normalize_folder(controller.project),
             requested=dict(self._opening_meta or {}),
+            history=self._opening_history,
         )
+        if conv.history and self._ledger_seed is None:
+            conv.ledger = UsageLedger.from_json(conv.history["ledger"])
         key = self._row_of(conv)
         saved = next((row for row in self._saved.get(conv.project, []) if row.id == key), None)
         conv.created_at = self.settings.session_created.get(key) or (
@@ -1241,7 +1285,8 @@ class AppCore:
 
     def _title_of(self, conv: Conversation) -> str:
         """The name the user gave the conversation here, else the engine's title."""
-        return self.settings.session_titles.get(self._row_of(conv)) or conv.controller.title
+        row = self._resolve_row(self._row_of(conv))
+        return self.settings.session_titles.get(row) or self.settings.session_auto_titles.get(row) or conv.controller.title
 
     @staticmethod
     def _cache_fits(live: Mapping[str, Any], cached: Mapping[str, Any]) -> bool:
@@ -1534,7 +1579,7 @@ class AppCore:
         return {"id": conv.cid if conv else None}
 
     async def _m_session_openSaved(self, params: dict[str, Any]) -> dict[str, Any]:
-        row_id: str = params["id"]
+        row_id: str = self._resolve_row(params["id"])
         folder = normalize_folder(params["projectId"])
         for conv in self.order:
             native = getattr(conv.controller, "session_id", None)
@@ -1544,11 +1589,20 @@ class AppCore:
         saved = next((item for item in self._saved.get(folder, []) if item.id == row_id), None)
         modified = saved.modified.timestamp() if saved is not None else None
         seed, preview = await self._cached_conversation(row_id, modified)
+        history = None
+        if row_id in self.settings.session_links.values():
+            try:
+                history = await asyncio.to_thread(self.history.load, row_id)
+                if not history or not same_folder(history["project"], folder):
+                    raise ValueError("missing history")
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                raise AppError("这个会话的跨引擎交接记录无法读取，暂不打开，避免丢失之前的对话。") from error
         await self._make_room()
         self._select_next = True
         self._opening_meta = {}
         self._preview = preview
         self._ledger_seed = seed
+        self._opening_history = history
         try:
             if row_id.startswith("fy:"):
                 if self.factory is None:
@@ -1576,6 +1630,7 @@ class AppCore:
             self._select_next = False
             self._preview = None
             self._ledger_seed = None
+            self._opening_history = None
         conv = self._conv_of(controller)
         return {"id": conv.cid if conv else None}
 
@@ -1631,6 +1686,10 @@ class AppCore:
         conv = self._by_cid.get(ident)
         if conv is not None:
             return self._row_of(conv), conv
+        ident = self._resolve_row(ident)
+        conv = next((c for c in self.order if self._row_of(c) == ident), None)
+        if conv is not None:
+            return ident, conv
         known = any(item.id == ident for rows in self._saved.values() for item in rows)
         if not known and ident not in self.settings.archived_sessions:
             raise AppError("找不到这个会话。")
@@ -1738,6 +1797,7 @@ class AppCore:
         if not controller.send_prompt(goals.opening(text)):
             conv.goal = None
             return {"ok": False, "text": "现在不能发送：会话没有就绪。"}
+        self._start_title(conv, text)
         controller.transcript.add_notice(
             f"目标已设定：{text}\n模型会一轮轮做下去，每轮都把目标交给它对照结果判断，最多 {goals.ROUNDS} 轮；完成或需要你时会停下，点「停止」随时结束。"
         )
@@ -1789,8 +1849,42 @@ class AppCore:
 
     # ------------------------------------------------------------------ messages
 
+    def _start_title(self, conv: Conversation, question: str) -> None:
+        if conv.title_started or sum(t.user_block is not None for t in conv.controller.transcript.turns) != 1:
+            return
+        conv.title_started = True
+        row = self._row_of(conv)
+        if row in self.settings.session_auto_titles or row in self.settings.session_titles:
+            return
+        # Factory generates a title natively (session_title_updated); never send its question to another account.
+        if conv.engine == "factory":
+            return
+        conv.title_task = self._spawn(self._generate_title(conv, row, question, conv.engine, conv.controller.model), quiet=True)
+
+    async def _generate_title(self, conv: Conversation, row: str, question: str, engine: str, model: str) -> None:
+        prompt = session_title.prompt(question)
+        if engine == "chatgpt" and self.chatgpt is not None:
+            answer = await chatgpt_side.ask(self.chatgpt, prompt, model_id=model, instructions=session_title.SYSTEM, timeout=30)
+        elif engine == "devin" and self.devin is not None:
+            answer = await devin_side.ask(self.devin, conv.project, session_title.SYSTEM + "\n\n" + prompt, timeout=30)
+        else:
+            return
+        title = session_title.clean(answer)
+        if title is None or self._shutting_down:
+            return  # Keep a neutral title on failure; never pretend the first sentence was an LLM summary.
+        row = self._resolve_row(row)
+        self.settings.session_auto_titles[row] = title
+        self._save()
+        if conv.cid in self._by_cid:
+            conv.dirty = True
+            self._mark_cache_dirty(conv)
+            self._schedule_flush()
+        self._schedule_sidebar(conv.project, reload=True)
+
     async def _m_session_send(self, params: dict[str, Any]) -> dict[str, Any]:
         conv = self._conversation(params["id"])
+        if conv.switching:
+            raise AppError("模型正在切换，稍后再发送。")
         ids = params.get("attachmentIds")
         if ids is not None and not (isinstance(ids, list) and all(isinstance(i, str) for i in ids)):
             raise AppError("附件列表不合法。")
@@ -1855,6 +1949,7 @@ class AppCore:
             return {"ok": True, "queued": True}
         if not controller.send_prompt(text, attachments):
             raise AppError("现在不能发送：会话没有就绪。")
+        self._start_title(conv, text)
         taken()
         if attachments:
             conv.inflight = (controller.transcript.turns[-1], text, tuple(attachments))
@@ -1967,6 +2062,7 @@ class AppCore:
         head = conv.queue[0]
         if not controller.send_prompt(head.text, head.attachments):
             return
+        self._start_title(conv, head.text)
         conv.queue.pop(0)
         if head.attachments:
             conv.inflight = (controller.transcript.turns[-1], head.text, head.attachments)
@@ -2373,7 +2469,10 @@ class AppCore:
         target = self.catalog.target(page_model)
         lookup = getattr(getattr(self, target.engine, None), "model_info", None)
         info = lookup(target.model) if lookup is not None else None
-        if info is not None and not info.supports_images:
+        if isinstance(info, Mapping):
+            if info.get("noImageSupport"):
+                return f"「{info.get('displayName') or info.get('id') or target.model}」不支持图片输入。"
+        elif info is not None and not info.supports_images:
             return f"「{info.display_name}」不支持图片输入。"
         return ""
 
@@ -2420,6 +2519,10 @@ class AppCore:
         call: the page shows by how much and says so (``over_ok``); only without that is it an error.
         """
         old = conv.controller
+        old_row = self._row_of(conv)
+        previous_title = self._title_of(conv)
+        if conv.switching:
+            raise AppError("模型正在切换，稍后再试。")
         if old.busy:
             raise AppError("本轮还在运行：结束后才能换引擎。")
         if old.state is not SessionState.READY:
@@ -2478,8 +2581,25 @@ class AppCore:
             controller = await self._open_controller(
                 conv.project, page_model, settings, transcript=transcript, handoff=handoff, replacing=True
             )
-            if controller.state is SessionState.CLOSED:
+            if controller.state is not SessionState.READY:
                 raise AppError(controller.last_error or "没有切换成功：新的会话没有启动。")
+            if handoff is not None and not window:
+                window = await self._window_of(controller, page_model)
+                if window and getattr(controller, "handoff", None) is handoff and controller.state is SessionState.READY:
+                    handoff = controller.handoff = build_handoff(transcript.turns, window_tokens=window, carry=chosen)
+            if handoff is not None and handoff.carried:
+                transcript.add_switch(
+                    from_model=was.get("label", ""), from_engine=engine_label(old.engine, was),
+                    to_model=model["label"], to_engine=engine_label(target.engine, model),
+                    carried=handoff.carried, total=handoff.total, size=handoff.size, truncated=handoff.truncated,
+                )
+            new_row = self._row_of(conv)
+            history = {"project": conv.project, "title": previous_title, "activeAt": old.active_at, "created": conv.created_at,
+                       "turns": list(transcript.turns), "ledger": conv.ledger.to_json(), "handoff": handoff}
+            await asyncio.to_thread(self.history.save, new_row, history)
+            if target.engine == "chatgpt":
+                # Preserve even an empty native segment: its previous turns are in the engine-neutral archive.
+                await asyncio.to_thread(self.chatgpt.sessions.save, controller._snapshot())
         except BaseException as error:
             self._rollback_switch(conv, old, controller)
             transcript.restore(before)  # a failed open writes its error into the shared transcript
@@ -2492,24 +2612,19 @@ class AppCore:
         finally:
             conv.switching = False
             self._adopt = None
-        if handoff is not None and not window:
-            window = await self._window_of(controller, page_model)
-            if window and getattr(controller, "handoff", None) is handoff and controller.state is SessionState.READY:
-                handoff = controller.handoff = build_handoff(transcript.turns, window_tokens=window, carry=chosen)
         if old.session_id:
             conv.hidden.add(old.session_id)
+        aliases = [key for key in self.settings.session_links if self._resolve_row(key) == old_row]
+        for key in [*aliases, old_row]:
+            if key and key != new_row:
+                self.settings.session_links[key] = new_row
+        for names in (self.settings.session_titles, self.settings.session_auto_titles):
+            if old_row in names:
+                names[new_row] = names.pop(old_row)
+        conv.history = history
+        self._sync_sidebar_key(conv)
+        self._save()
         transcript.model = target.model
-        if handoff is not None and handoff.carried:
-            transcript.add_switch(
-                from_model=was.get("label", ""),
-                from_engine=engine_label(old.engine, was),
-                to_model=model["label"],
-                to_engine=engine_label(target.engine, model),
-                carried=handoff.carried,
-                total=handoff.total,
-                size=handoff.size,
-                truncated=handoff.truncated,
-            )
         self._spawn(old.close(), quiet=True)
         self._set_default("model", page_model)
         self._emit_sidebar()

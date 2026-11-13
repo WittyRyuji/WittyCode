@@ -27,8 +27,8 @@ const PAGES = [
   { id: "programs", label: "外部程序", icon: <Cpu size={15} /> },
   { id: "projects", label: "项目", icon: <FolderOpen size={15} /> },
   { id: "shortcuts", label: "快捷键", icon: <Keyboard size={15} /> },
-  { id: "about", label: "关于", icon: <Info size={15} /> },
   { id: "connections", label: "Connections", icon: <Layers size={15} /> },
+  { id: "about", label: "关于", icon: <Info size={15} /> },
 ];
 
 function AppearancePage() {

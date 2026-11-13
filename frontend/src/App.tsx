@@ -4,7 +4,7 @@ import { currentSession, useStore } from "./store";
 import { latestPlan } from "./lib/plan";
 import { Sidebar } from "./components/Sidebar";
 import { Tabs } from "./components/Tabs";
-import { Transcript } from "./components/Transcript";
+import { Transcript, type ReadingPosition } from "./components/Transcript";
 import { AgentBar, AgentPanel } from "./components/Agents";
 import { FilePanel, PathMenuHost } from "./components/FilePanel";
 import { Composer } from "./components/Composer";
@@ -38,6 +38,11 @@ function useTheme() {
 
 function Main() {
   const session = useStore(currentSession);
+  const tabs = useStore((s) => s.tabs);
+  const readingPositions = useRef(new Map<string, ReadingPosition>());
+  useEffect(() => {
+    for (const id of readingPositions.current.keys()) if (!tabs.includes(id)) readingPositions.current.delete(id);
+  }, [tabs]);
   const inspectorOpen = useStore((s) => (s.agentPanel !== null && s.agentPanel.sessionId === s.currentId) || (s.filePanel !== null && s.filePanel.sessionId === s.currentId));
   const setDragging = useStore((s) => s.setDragging);
   const say = useStore((s) => s.say);
@@ -99,7 +104,7 @@ function Main() {
       <div className="conversation-body">
         <div className="conversation-column">
           {/* keyed: Python numbers turns and blocks per conversation, so two conversations share ids */}
-          {session ? <Transcript key={session.id} session={session} /> : <EmptyPage />}
+          {session ? <Transcript key={session.id} session={session} positions={readingPositions.current} /> : <EmptyPage />}
           {session && <AgentBar session={session} />}
           <Composer />
         </div>

@@ -109,7 +109,7 @@ def test_a_message_gets_an_answer_and_the_conversation_is_saved(tmp_path):
             assert controller.usage_series() == {"self": controller.usage}
             assert controller.context.used == 240
             saved = engine.sessions.load(controller.session_id)
-            assert saved is not None and saved.title == "Say hello" and saved.messages == 1
+            assert saved is not None and not saved.title and saved.messages == 1, "the app summarizes titles separately; the controller must not copy the first sentence"
             assert saved.items[-1]["type"] == "message" and saved.items[-1]["role"] == "assistant"
             assert [row.id for row in await engine.list_sessions(tmp_path / "project")] == [controller.session_id]
             await engine.close_all()
@@ -601,7 +601,7 @@ def test_a_saved_conversation_comes_back_with_its_turns_tools_tokens_and_setting
 
             again = make_engine(tmp_path, fake)
             rows = await again.list_sessions(tmp_path / "project")
-            assert [(r.id, r.title, r.messages) for r in rows] == [(session_id, "change alpha to omega", 1)]
+            assert [(r.id, r.title, r.messages) for r in rows] == [(session_id, "", 1)]
             reopened = await again.open_saved(tmp_path / "project", session_id)
             assert reopened.state is SessionState.READY and reopened.model == "gpt-6.1-sol" and reopened.reasoning == "medium"
             (turn,) = reopened.transcript.turns
