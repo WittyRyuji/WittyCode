@@ -71,11 +71,18 @@ export interface SettingsView {
   compactAt: number;
   /** every model is asked to write its thinking in Chinese */
   thinkChinese?: boolean;
+  soundEnabled?: boolean;
+  /** Resolved paths, including bundled defaults (never an ambiguous empty selection). */
+  soundQuestion?: string;
+  soundComplete?: string;
+  soundError?: string;
   /** the folder of the conversation started last ("" before the first): the first message box starts there */
   lastProject?: string;
 }
 export type FollowUp = "queue" | "steer";
-export type SettingKey = "theme" | "fontScale" | "followUp" | "maxOpen" | "maxSteps" | "sidebarWidth" | "devinPath" | "memoryEnabled" | "memoryRecall" | "memoryCapture" | "memoryCurate" | "memoryEngines" | "compactAuto" | "compactAt" | "thinkChinese";
+export type SettingKey = "theme" | "fontScale" | "followUp" | "maxOpen" | "maxSteps" | "sidebarWidth" | "devinPath" | "memoryEnabled" | "memoryRecall" | "memoryCapture" | "memoryCurate" | "memoryEngines" | "compactAuto" | "compactAt" | "thinkChinese" | "soundEnabled" | SoundKey;
+export type SoundKind = "question" | "complete" | "error";
+export type SoundKey = "soundQuestion" | "soundComplete" | "soundError";
 export type SettingValue = string | number | boolean | string[];
 
 /** What `memory.list` can be narrowed by (all optional). `query`: words to look for; `status` "all" lists forgotten notes too. */
@@ -315,6 +322,8 @@ export interface Calls {
   /** the whole picture as a data: URI, for the big view; null when Python no longer has it */
   "attachments.full": { params: { id?: string; attachmentId: string }; result: { url: string | null } };
   "settings.set": { params: { key: SettingKey; value: SettingValue }; result: SettingsView };
+  "sounds.pick": { params: { kind: SoundKind }; result: SettingsView };
+  "sounds.preview": { params: { kind: SoundKind }; result: { ok: boolean } };
   /** the shared memory (desktop/core/memory): notes that the own loop and Devin read and write, and the user too.
    *  Nothing is ever deleted: forgetting marks a note, every change is in a journal and `memory.undo` takes one back. */
   "memory.list": { params: MemoryFilter; result: { entries: MemoryEntry[]; counts: Record<string, number> } & MemoryState };

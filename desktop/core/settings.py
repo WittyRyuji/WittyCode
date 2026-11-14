@@ -100,6 +100,11 @@ class AppSettings:
     """Model decision steps allowed in one turn of the own loop; read again between steps."""
     think_chinese: bool = True
     """Ask every model to write its thinking in Chinese (``core/language``)."""
+    sound_enabled: bool = True
+    sound_question: str = ""
+    sound_complete: str = ""
+    sound_error: str = ""
+    """Local WAV paths; empty means the corresponding bundled sound (resolved for display by ``core/sounds``)."""
     mode: str = "auto"
     projects: list[str] = field(default_factory=list)
     max_open_sessions: int = DEFAULT_MAX_OPEN_SESSIONS
@@ -118,7 +123,7 @@ class AppSettings:
     session_links: dict[str, str] = field(default_factory=dict)
     """Earlier native row ids -> the current native segment of the same WittyCode conversation."""
     session_order: list[str] = field(default_factory=list)
-    """Sidebar row ids in the order the user dragged them; newly discovered sessions precede these."""
+    """Sidebar row ids after dragging or promoting a sent/finished conversation; newly discovered sessions precede these."""
     session_created: dict[str, float] = field(default_factory=dict)
     """Stable creation times, including old rows without one and conversations that changed engine."""
 
@@ -350,6 +355,10 @@ def settings_from_dict(raw: object) -> AppSettings:
         chatgpt_compact_at=compact_at,
         max_steps=max_steps,
         think_chinese=think_chinese,
+        sound_enabled=raw.get("sound_enabled") if isinstance(raw.get("sound_enabled"), bool) else defaults.sound_enabled,
+        sound_question=text("sound_question").strip(),
+        sound_complete=text("sound_complete").strip(),
+        sound_error=text("sound_error").strip(),
         mode=text("mode", MODES),
         projects=projects,
         max_open_sessions=max_open,

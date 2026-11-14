@@ -46,6 +46,43 @@ def test_dragging_the_real_sidebar_saves_order_and_survives_a_page_reload(qapp, 
     run(loop, scenario())
 
 
+def test_concurrent_thinking_does_not_move_real_rows_but_each_final_answer_does(qapp, loop, tmp_path):
+    from tests.fake_responses import say
+
+    async def scenario():
+        rig = await open_rig(tmp_path, saved=[("new", "Newest", 5), ("mid", "Middle", 30), ("old", "Oldest", 60)])
+        try:
+            rig.core.settings.sound_enabled = False
+            await rig.wait_for(".srow", 3)
+            conversations = []
+            for native, title in (("old", "Oldest"), ("mid", "Middle"), ("new", "Newest")):
+                cid = (await rig.core.call("session.openSaved", {"id": "cg:" + native, "projectId": str(rig.project)}))["id"]
+                controller = rig.core._by_cid[cid].controller
+                await wait_for(lambda: controller.state is SessionState.READY)
+                rig.plan.script([("hold", native), *say("Final " + title)])
+                requests = len(rig.plan.requests)
+                await rig.core.call("session.send", {"id": cid, "text": "Continue"})
+                await wait_for(lambda: len(rig.plan.requests) > requests)
+                await rig.wait_text(".srow:first-child .stitle", title)
+                conversations.append((native, title, controller))
+            for _, _, controller in conversations:
+                turn = controller.transcript.turns[-1]
+                controller.active_at = 1
+                controller.transcript.append_thinking(turn, "thought", 0, "Thinking")
+                controller._changed()
+                rig.core._emit_sidebar()
+                await rig.wait_text(".srow:first-child .stitle", "Newest")
+                assert await rig.texts(".srow .stitle") == ["Newest", "Middle", "Oldest"]
+            for native, title, controller in conversations:
+                rig.plan.release(native)
+                await wait_for(lambda: controller.state is SessionState.READY)
+                await rig.wait_text(".srow:first-child .stitle", title)
+        finally:
+            await rig.finish()
+
+    run(loop, scenario())
+
+
 def test_local_messages_settings_and_usage_are_visible_before_devin_connects_and_after_failure(qapp, loop, tmp_path):
     async def scenario():
         harness = make_devin(tmp_path, FAKE_DEVIN_OPEN_DELAY="2", FAKE_DEVIN_OPEN_FAIL="1")

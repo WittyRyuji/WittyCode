@@ -417,6 +417,13 @@ function liveActions(): Partial<Store> {
     setMemoryEngines: (engines) => void setting("memoryEngines", engines),
     setCompactAuto: (on) => void setting("compactAuto", on),
     setThinkChinese: (on) => void setting("thinkChinese", on),
+    setSoundEnabled: (on) => void setting("soundEnabled", on),
+    setSoundPath: (key, path) => void setting(key, path),
+    pickSound: async (kind) => {
+      const view = await attempt(liveCall("sounds.pick", { kind }));
+      if (view !== FAILED) set(settingsFields(view));
+    },
+    previewSound: (kind) => void attempt(liveCall("sounds.preview", { kind })),
     setCompactAt: (percent) => void setting("compactAt", clampCompactAt(percent)),
     setDevinPath: (path) => void setting("devinPath", path),
     setSidebarWidth: (px, commit = false) => {

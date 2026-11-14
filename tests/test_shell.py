@@ -15,6 +15,7 @@ import pytest
 from PySide6.QtCore import Qt
 
 from desktop.core.app_core import AppCore
+from desktop.core import sounds
 from desktop.core.settings import AppSettings
 from desktop.ui import shell
 from desktop.ui.shell import MainWindow
@@ -249,6 +250,38 @@ def test_the_geometry_is_saved_with_the_settings_and_handed_back_on_the_next_sta
         assert [base64.b64encode(item).decode("ascii") for item in handed] == [saved]
         again.deleteLater()
         await asyncio.sleep(0.05)
+
+    run(loop, scenario())
+
+
+def test_notification_player_loads_all_bundled_wavs_and_picker_only_accepts_one_wav(qapp, loop, tmp_path):
+    from PySide6.QtMultimedia import QSoundEffect
+    from PySide6.QtWidgets import QFileDialog
+
+    async def scenario():
+        rig = await open_rig(tmp_path)
+        try:
+            platform = rig.window.platform
+            for kind in sounds.KINDS:
+                path = sounds.sound_path(kind)
+                platform.play_sound(path)
+                await wait_for(lambda: platform._sound.status() in (QSoundEffect.Status.Ready, QSoundEffect.Status.Error))
+                assert platform._sound.status() is QSoundEffect.Status.Ready
+                assert platform._sound.source().toLocalFile() == path.replace("\\", "/")
+                platform.stop_sound()
+                assert not platform._sound.isPlaying()
+            seen = []
+
+            async def pick(dialog):
+                seen.append((dialog.fileMode(), dialog.nameFilters()))
+                dialog.deleteLater()
+                return [sounds.sound_path("question")]
+
+            platform._ask = pick
+            assert await platform.pick_sound(sounds.sound_path("question")) == sounds.sound_path("question")
+            assert seen == [(QFileDialog.FileMode.ExistingFile, ["PCM WAV 声音 (*.wav)"])]
+        finally:
+            await rig.finish()
 
     run(loop, scenario())
 

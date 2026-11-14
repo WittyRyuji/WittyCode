@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import type { ApiProvider, AttachmentView, Engine, FileView, MemoryState, ModelChoice, ProviderDraft, Session, SessionSettings, SkillItem, SwitchBlock, Turn } from "./types";
-import type { FollowUp, HandoffChoice, QuestionAnswer, SavedRow } from "./protocol";
+import type { FollowUp, HandoffChoice, QuestionAnswer, SavedRow, SoundKey, SoundKind } from "./protocol";
 import {
   API_PROVIDERS,
   CHATGPT_ACCOUNT,
@@ -221,6 +221,10 @@ export interface Store extends LiveData {
   setCompactAt: (percent: number) => void;
   /** ask every model to write its thinking in Chinese */
   setThinkChinese: (on: boolean) => void;
+  setSoundEnabled: (on: boolean) => void;
+  setSoundPath: (key: SoundKey, path: string) => void;
+  pickSound: (kind: SoundKind) => void;
+  previewSound: (kind: SoundKind) => void;
   setMemoryState: (state: MemoryState) => void;
   setDevinPath: (p: string) => void;
   /** while the splitter is dragged; `commit` once it is let go (the live app then saves it) */
@@ -289,6 +293,10 @@ function mockData(): LiveData {
     compactAuto: true,
     compactAt: COMPACT_AT_DEFAULT,
     thinkChinese: true,
+    soundEnabled: true,
+    soundQuestion: "C:\\Apps\\WittyCode\\app\\desktop\\assets\\sounds\\question.wav",
+    soundComplete: "C:\\Apps\\WittyCode\\app\\desktop\\assets\\sounds\\complete.wav",
+    soundError: "C:\\Apps\\WittyCode\\app\\desktop\\assets\\sounds\\error.wav",
     lastProject: "",
     memory: { latest: MOCK_MEMORY_LATEST, unseen: 2, seen: MOCK_MEMORY_LATEST - 2, pending: MOCK_PENDING },
     maximized: false,
@@ -727,6 +735,10 @@ export const useStore = create<Store>((set, get) => ({
   setMemoryEngines: (memoryEngines) => set({ memoryEngines }),
   setCompactAuto: (compactAuto) => set({ compactAuto }),
   setThinkChinese: (thinkChinese) => set({ thinkChinese }),
+  setSoundEnabled: (soundEnabled) => set({ soundEnabled }),
+  setSoundPath: (key, path) => set({ [key]: path || mockData()[key] }),
+  pickSound: () => get().say("演示界面不选择本机声音文件。"),
+  previewSound: () => get().say("演示界面不播放声音。"),
   setCompactAt: (percent) => set({ compactAt: clampCompactAt(percent) }),
   setMemoryState: (memory) => set({ memory: { latest: memory.latest, unseen: memory.unseen, seen: memory.seen, pending: memory.pending ?? 0 } }),
   setDevinPath: (devinPath) => set({ devinPath }),

@@ -59,6 +59,10 @@ export interface LiveData {
   compactAt: number;
   /** every model is asked to write its thinking in Chinese */
   thinkChinese: boolean;
+  soundEnabled: boolean;
+  soundQuestion: string;
+  soundComplete: string;
+  soundError: string;
   /** the folder of the conversation started last: where the first message box starts when nothing else was chosen */
   lastProject: string;
   /** the newest change of the shared memory, and how many by agents the user has not looked at (the badge) */
@@ -130,6 +134,10 @@ export function emptyLiveData(theme: ThemeChoice = "system", fontScale: FontScal
     compactAuto: true,
     compactAt: COMPACT_AT_DEFAULT,
     thinkChinese: true,
+    soundEnabled: true,
+    soundQuestion: "",
+    soundComplete: "",
+    soundError: "",
     lastProject: "",
     memory: { ...NO_MEMORY },
     maximized: false,
@@ -211,6 +219,10 @@ export function settingsFields(v: SettingsView): Partial<LiveData> {
     compactAuto: v.compactAuto ?? true,
     compactAt: v.compactAt ?? COMPACT_AT_DEFAULT,
     thinkChinese: v.thinkChinese ?? true,
+    soundEnabled: v.soundEnabled ?? true,
+    soundQuestion: v.soundQuestion ?? "",
+    soundComplete: v.soundComplete ?? "",
+    soundError: v.soundError ?? "",
     lastProject: v.lastProject ?? "",
   };
 }

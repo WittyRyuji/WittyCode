@@ -391,6 +391,7 @@ await page.close();
 // accounts and models: WittyCode's own engine, Devin and the API providers, no other program's
 page = await openPage(`${index}?scene=done&settings=providers&theme=dark&review=0`);
 ok("the page has the own-loop providers, Devin and an optional Factory CLI card", await page.eval("document.querySelectorAll('.providers .pcard').length === 4 && document.querySelector('.factory-card').textContent.includes('Factory CLI（可选）')"));
+ok("API Provider is the last account/model card", await page.eval("document.querySelector('.providers > .pcard:last-child h4')?.textContent === 'API Provider'"));
 ok("no console errors (accounts page)", page.consoleErrors().length === 0);
 await page.close();
 
@@ -591,6 +592,7 @@ await page.close();
 
 page = await openPage(`${index}?scene=done&settings=programs&theme=light&review=0`);
 ok("the 外部程序 page holds the Devin program path", await page.eval("document.querySelector('.settings-body').textContent.includes('Devin 命令行')"));
+ok("external program cards and their title/input edges align without inherited page-header padding", await page.eval("(() => { const f = document.querySelector('.factory-program'), d = document.querySelector('.program-path'); const fr = f.getBoundingClientRect(), dr = d.getBoundingClientRect(); const title = f.querySelector('h4').getBoundingClientRect(), input = f.querySelector('input').getBoundingClientRect(), label = d.querySelector('.field-label').getBoundingClientRect(), path = d.querySelector('.pathbox').getBoundingClientRect(); return Math.abs(fr.left-dr.left)<1 && Math.abs(fr.width-dr.width)<1 && Math.abs(title.left-input.left)<1 && Math.abs(title.left-label.left)<1 && Math.abs(label.left-path.left)<1 && Math.abs(dr.top-fr.bottom-14)<1 && getComputedStyle(f.querySelector('header')).paddingLeft==='0px'; })()"));
 await page.close();
 
 // accounts and models: which models the conversation's model menu offers

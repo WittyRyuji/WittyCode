@@ -15,6 +15,7 @@ import { MemoryPage } from "./MemoryPage";
 import { ConnectionsPage } from "./ConnectionsPage";
 import { FactorySettings } from "./FactorySettings";
 import { StepLimitSetting } from "./StepLimitSetting";
+import { SoundSettings } from "./SoundSettings";
 import { ProviderEditor } from "./ProviderEditor";
 import { ProvidersPage } from "./ProvidersPage";
 import type { MenuItem } from "./ui";
@@ -179,6 +180,7 @@ function SessionsPage() {
       <p className="page-note">
         超过上限时，会自动关闭最久没用、而且没在运行的会话，并在状态栏提示。会话内容已保存，可以在侧边栏重新打开。上限范围 1–16。
       </p>
+      <SoundSettings />
     </>
   );
 }
@@ -231,12 +233,14 @@ function ProgramPath({ label, autoHint, found, path, onPath, browse }: { label: 
 function ProgramsPage() {
   const s = useStore();
   return (
-    <>
+    <div className="programs">
       <p className="page-note">WittyCode 自己的代理循环（ChatGPT Plan、API Provider）不需要任何别的程序。Devin 和 Factory CLI 都是可选连接；在这里指定程序，再按需启用。</p>
       <FactorySettings program />
-      <ProgramPath label="Devin 命令行" autoHint="自动检测：在 PATH 和 Devin 桌面版的安装目录里找 devin。" found={s.devin.cliPath ?? ""} path={s.devinPath} onPath={s.setDevinPath} />
+      <section className="pcard program-path">
+        <ProgramPath label="Devin 命令行" autoHint="自动检测：在 PATH 和 Devin 桌面版的安装目录里找 devin。" found={s.devin.cliPath ?? ""} path={s.devinPath} onPath={s.setDevinPath} />
+      </section>
       <p className="page-note">改了路径后，已经打开的会话继续用旧进程；新开的会话才用新路径。</p>
-    </>
+    </div>
   );
 }
 

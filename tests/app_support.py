@@ -35,6 +35,18 @@ class FakePlatform:
         self.calls: list[str] = []
         self.pdf_requests: list[tuple[str, int, int]] = []
         self.maximized = False
+        self.sound: str | None = None
+        self.played_sounds: list[str] = []
+        self.sound_stops = 0
+
+    async def pick_sound(self, start: str) -> str | None:
+        return self.sound
+
+    def play_sound(self, path: str) -> None:
+        self.played_sounds.append(path)
+
+    def stop_sound(self) -> None:
+        self.sound_stops += 1
 
     async def pick_folder(self, start: str) -> str | None:
         return self.folder

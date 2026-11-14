@@ -56,7 +56,7 @@ from desktop.core.llm.backend import is_api_model
 from desktop.core import files as filetools
 from desktop.core.handoff import AS_TEXT, CarryOption, attachment_text, build_handoff, carry_options, carry_overage, conversation_messages
 from desktop.core.harness import goal as goals
-from desktop.core import language, session_title
+from desktop.core import language, session_title, sounds
 from desktop.core.harness import skills
 from desktop.core.import_bridge import ImportBridge
 from desktop.core.chatgpt import side as chatgpt_side
@@ -146,6 +146,12 @@ class Platform(Protocol):
 
     async def pick_files(self, start: str) -> list[str]: ...
 
+    async def pick_sound(self, start: str) -> str | None: ...
+
+    def play_sound(self, path: str) -> None: ...
+
+    def stop_sound(self) -> None: ...
+
     def open_url(self, url: str) -> None: ...
 
     def reveal(self, path: str) -> None: ...
@@ -223,6 +229,11 @@ class Conversation:
     created_at: float = field(default_factory=time.time)
     sidebar_key: str = ""
     """Stable sidebar identity, migrated to the native row id once it is known (also across engine changes)."""
+    sidebar_active_at: float = 0.0
+    """Ordering activity, unlike the displayed age, never advances on streaming updates."""
+    activity_running: bool = False
+    activity_state: SessionState | None = None
+    sound_prompts: set[str] = field(default_factory=set)
     preview: bool = False
     """The page shows the cached conversation while the real history is still being loaded."""
     cached_turns: list[dict[str, Any]] = field(default_factory=list)
@@ -539,6 +550,10 @@ class AppCore:
             "compactAt": self.settings.chatgpt_compact_at,
             "maxSteps": self.settings.max_steps,
             "thinkChinese": self.settings.think_chinese,
+            "soundEnabled": self.settings.sound_enabled,
+            "soundQuestion": sounds.sound_path("question", self.settings.sound_question),
+            "soundComplete": sounds.sound_path("complete", self.settings.sound_complete),
+            "soundError": sounds.sound_path("error", self.settings.sound_error),
         }
 
     def project_rows(self) -> list[dict[str, Any]]:
@@ -578,10 +593,9 @@ class AppCore:
         for saved in self._visible_saved(folder):
             if saved.native in taken or saved.id in taken or saved.id in self.settings.archived_sessions:
                 continue
-            created = self.settings.session_created.get(saved.id, _aware(saved.created).timestamp())
-            rows.append((saved.id, created, self._saved_json(saved, folder)))
+            rows.append((saved.id, saved.modified.timestamp(), self._saved_json(saved, folder)))
         for conv in open_here:
-            rows.append((conv.sidebar_key, conv.created_at, {"id": conv.cid}))
+            rows.append((conv.sidebar_key, conv.sidebar_active_at, {"id": conv.cid}))
         ranks = {key: i for i, key in enumerate(self.settings.session_order)}
         rows.sort(key=lambda row: (1, ranks[row[0]], row[0]) if row[0] in ranks else (0, -row[1], row[0]))
         return [row for _, _, row in rows]
@@ -600,6 +614,19 @@ class AppCore:
             self.settings.session_created.pop(previous, None)
         self.settings.session_created[key] = conv.created_at
         self._save()
+
+    def _promote_session(self, conv: Conversation) -> None:
+        """Move only this project's conversation to the top, not on incremental engine output."""
+        conv.sidebar_active_at = conv.controller.active_at
+        ids = [row["id"] for row in self._rows_for(conv.project)]
+        if conv.cid not in ids:
+            return
+        ids.remove(conv.cid)
+        ids.insert(0, conv.cid)
+        keys = [self._by_cid[item].sidebar_key if item in self._by_cid else item for item in ids]
+        self.settings.session_order = keys + [item for item in self.settings.session_order if item not in keys]
+        self._save()
+        self._schedule_sidebar(conv.project)
 
     async def _m_session_reorder(self, params: dict[str, Any]) -> dict[str, Any]:
         folder = params.get("projectId")
@@ -1104,6 +1131,7 @@ class AppCore:
                     controller.handoff = conv.history.get("handoff")
                 prepend_history(controller.transcript, prefix, self._row_of(conv))
         conv.dirty = True
+        self._session_activity(conv)
         if kind == "state":
             self._schedule_sidebar(conv.project, reload=controller.state is SessionState.READY)
             if conv.preview and controller.state is SessionState.DEAD:
@@ -1119,6 +1147,40 @@ class AppCore:
         elif conv.queue or conv.ran:
             asyncio.get_running_loop().call_soon(self._follow_queue, conv)
         self._schedule_flush()
+
+    def _play_notification(self, kind: str) -> None:
+        if self.offline or not self.settings.sound_enabled:
+            return
+        try:
+            path = sounds.validate_path(sounds.sound_path(kind, getattr(self.settings, "sound_" + kind)))
+            self.platform.play_sound(path)
+        except (sounds.SoundProblem, OSError):
+            self.say("提示音无法播放，请在设置 → 会话中检查声音路径。")
+
+    def _session_activity(self, conv: Conversation) -> None:
+        controller = conv.controller
+        state = controller.state
+        running = state is SessionState.RUNNING
+        if running and not conv.activity_running:
+            conv.sound_prompts.clear()
+            self._promote_session(conv)
+        elif conv.activity_running and state in (SessionState.READY, SessionState.DEAD):
+            turns = controller.transcript.turns
+            status = turns[-1].status if turns else None
+            if status in (TurnStatus.DONE, TurnStatus.FAILED):
+                self._promote_session(conv)
+                self._play_notification("complete" if status is TurnStatus.DONE else "error")
+            elif state is SessionState.DEAD:
+                self._play_notification("error")
+        elif state is SessionState.DEAD and conv.activity_state is not state:
+            self._play_notification("error")
+        conv.activity_running, conv.activity_state = running, state
+        if running:
+            pending = controller.transcript.pending_prompts()
+            ids = {p.id for p in pending}
+            if ids - conv.sound_prompts:
+                conv.sound_prompts.update(ids)
+                self._play_notification("question")
 
     def _adopt_or_create(self, controller: Any) -> Conversation:
         if self._adopt is not None:
@@ -1138,6 +1200,7 @@ class AppCore:
             project=normalize_folder(controller.project),
             requested=dict(self._opening_meta or {}),
             history=self._opening_history,
+            sidebar_active_at=controller.active_at,
         )
         if conv.history and self._ledger_seed is None:
             conv.ledger = UsageLedger.from_json(conv.history["ledger"])
@@ -2886,6 +2949,17 @@ class AppCore:
             s.max_steps = value
         elif key == "thinkChinese" and isinstance(value, bool):
             s.think_chinese = value
+        elif key == "soundEnabled" and isinstance(value, bool):
+            s.sound_enabled = value
+            if not value:
+                self.platform.stop_sound()
+        elif key in ("soundQuestion", "soundComplete", "soundError") and isinstance(value, str):
+            kind = key[5:].lower()
+            try:
+                path = await asyncio.to_thread(sounds.validate_path, value) if value.strip() else ""
+            except sounds.SoundProblem as error:
+                raise AppError(str(error)) from error
+            setattr(s, "sound_" + kind, path)
         elif key == "maxOpen" and _is_int(value) and MAX_OPEN_SESSIONS_RANGE[0] <= value <= MAX_OPEN_SESSIONS_RANGE[1]:
             s.max_open_sessions = value
         elif key == "sidebarWidth" and _is_int(value) and SIDEBAR_WIDTH_RANGE[0] <= value <= SIDEBAR_WIDTH_RANGE[1]:
@@ -2901,6 +2975,31 @@ class AppCore:
         view = self.settings_view()
         self.emit("settings", {"settings": view})
         return view
+
+    async def _m_sounds_pick(self, params: dict[str, Any]) -> dict[str, Any]:
+        kind = params.get("kind")
+        if not isinstance(kind, str) or kind not in sounds.KINDS:
+            raise AppError("没有这种提示音。")
+        start = sounds.sound_path(kind, getattr(self.settings, "sound_" + kind))
+        path = await self.platform.pick_sound(start)
+        if path is None:
+            return self.settings_view()
+        return await self._m_settings_set({"key": "sound" + kind.title(), "value": path})
+
+    async def _m_sounds_preview(self, params: dict[str, Any]) -> dict[str, Any]:
+        kind = params.get("kind")
+        if not isinstance(kind, str) or kind not in sounds.KINDS:
+            raise AppError("没有这种提示音。")
+        if not self.settings.sound_enabled:
+            return {"ok": False}
+        try:
+            path = await asyncio.to_thread(sounds.validate_path, sounds.sound_path(kind, getattr(self.settings, "sound_" + kind)))
+            if not self.settings.sound_enabled or self._shutting_down:
+                return {"ok": False}
+            self.platform.play_sound(path)
+        except (sounds.SoundProblem, OSError) as error:
+            raise AppError("提示音无法播放，请检查声音路径。") from error
+        return {"ok": True}
 
     async def _devin_path_changed(self) -> None:
         """A new Devin program: read its account and models again, and drop the old process unless sessions use it."""

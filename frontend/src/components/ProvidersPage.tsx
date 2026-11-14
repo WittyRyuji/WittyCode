@@ -261,6 +261,7 @@ export function ProvidersPage() {
     <div className="providers">
       <ChatGPTCard />
       <DevinCard />
+      <FactorySettings />
       <section className="pcard">
         <header className="pcard-head">
           <div>
@@ -296,7 +297,6 @@ export function ProvidersPage() {
           <ExternalLink size={12} /> 支持 Anthropic、OpenAI、OpenRouter、Fireworks、Groq、Gemini 兼容接口、Ollama、LM Studio、AWS Bedrock，以及任何 OpenAI 兼容的服务。
         </div>
       </section>
-      <FactorySettings />
     </div>
   );
 }

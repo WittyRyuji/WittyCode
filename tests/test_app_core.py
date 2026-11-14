@@ -401,7 +401,7 @@ def test_a_session_whose_row_is_not_in_the_list_still_opens_and_counts_from_now(
     run(scenario())
 
 
-def test_messages_and_answers_update_the_time_without_moving_the_session(tmp_path):
+def test_messages_and_answers_promote_the_session_and_update_its_time(tmp_path):
     async def scenario():
         core, plan, events, _, _ = await ready_core(tmp_path, projects=False)
         proj, before = await three_saved(core, events, tmp_path)
@@ -412,7 +412,7 @@ def test_messages_and_answers_update_the_time_without_moving_the_session(tmp_pat
         await core.call("session.send", {"id": cid, "text": "hello"})
         await until(lambda: plan.requests)
         core._emit_sidebar()
-        assert listed(events) == ["cg:new", "cg:mid", cid], "activity does not change creation order"
+        assert listed(events) == [cid, "cg:new", "cg:mid"], "sending a message promotes its conversation"
         await until(lambda: sessions_of(events)[cid]["modifiedAt"] > old_ms)
 
         controller = core._by_cid[cid].controller
@@ -421,7 +421,7 @@ def test_messages_and_answers_update_the_time_without_moving_the_session(tmp_pat
         await idle(core, cid)
         assert controller.active_at > 1.0
         core._emit_sidebar()
-        assert listed(events) == ["cg:new", "cg:mid", cid]
+        assert listed(events) == [cid, "cg:new", "cg:mid"]
         await core.shutdown()
 
     run(scenario())
@@ -437,7 +437,7 @@ def test_a_closed_session_keeps_the_time_of_its_last_message(tmp_path):
         await talk(core, plan, cid, "hello", "Hi")
         await core.call("session.close", {"id": cid})
         await until(lambda: events.last("sidebar")["sessions"].get("cg:old", {}).get("modifiedAt", 0) > old_ms)
-        assert listed(events) == ["cg:new", "cg:mid", "cg:old"], "closing keeps creation order despite newer activity"
+        assert listed(events) == ["cg:old", "cg:new", "cg:mid"], "closing keeps the latest completed activity on top"
         row = events.last("sidebar")["sessions"]["cg:old"]
         assert row["modifiedAt"] > int((time.time() - 60) * 1000) and row["modified"] == "刚刚"
         await core.shutdown()

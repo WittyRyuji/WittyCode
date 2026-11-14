@@ -1,4 +1,4 @@
-"""Creation order is independent of activity; a dragged order survives native/open row changes and restarts."""
+"""Significant activity promotes a conversation; streams stay put and dragged order persists until the next activity."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from tests.fakes import until
 from tests.test_app_core import idle, listed, talk, three_saved
 
 
-def test_creation_not_modification_decides_the_default_order_and_old_indices_are_migrated(tmp_path):
+def test_last_activity_decides_default_order_and_old_indices_keep_creation_metadata(tmp_path):
     async def scenario():
         core, _, events, _, engine = await ready_core(tmp_path, projects=False)
         proj, _ = await three_saved(core, events, tmp_path)
@@ -29,7 +29,7 @@ def test_creation_not_modification_decides_the_default_order_and_old_indices_are
         index_path.write_text(json.dumps(index), encoding="utf-8")
         await core.call("project.refresh")
         core._emit_sidebar()
-        assert listed(events) == ["cg:new", "cg:mid", "cg:old"]
+        assert listed(events) == ["cg:old", "cg:new", "cg:mid"]
         assert engine.sessions.rows(str(proj))[0].created_at == old.created_at, "creation time comes from the archive, not activity"
         await core.shutdown()
 
@@ -103,7 +103,7 @@ def test_rows_do_not_vanish_at_an_activity_based_cutoff(tmp_path):
         old.modified_at = time.time()
         engine.sessions.save(old)
         await core.call("project.refresh")
-        assert core.project_rows()[0]["sessionIds"] == ids
+        assert core.project_rows()[0]["sessionIds"] == ["cg:row-51", *ids[:-1]], "all rows remain, ordered by activity"
         await core.shutdown()
 
     asyncio.run(scenario())

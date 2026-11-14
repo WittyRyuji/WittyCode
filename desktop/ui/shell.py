@@ -227,6 +227,22 @@ class QtPlatform:
         self.window = window
         self.close_requested: Callable[[], None] = lambda: None
         self._pdf: Any = None
+        self._sound: Any = None
+
+    def play_sound(self, path: str) -> None:
+        from PySide6.QtMultimedia import QSoundEffect
+
+        if self._sound is None:
+            self._sound = QSoundEffect(self.window)
+            self._sound.setLoopCount(1)
+            self._sound.setVolume(0.7)
+        self._sound.stop()
+        self._sound.setSource(QUrl.fromLocalFile(path))
+        self._sound.play()
+
+    def stop_sound(self) -> None:
+        if self._sound is not None:
+            self._sound.stop()
 
     # ---- dialogs
     def _ask(self, dialog: QFileDialog) -> asyncio.Future[list[str]]:
@@ -247,6 +263,12 @@ class QtPlatform:
         dialog = QFileDialog(self.window, "选择要附加的文件", start)
         dialog.setFileMode(QFileDialog.FileMode.ExistingFiles)
         return await self._ask(dialog)
+
+    async def pick_sound(self, start: str) -> str | None:
+        dialog = QFileDialog(self.window, "选择提示音", start, "PCM WAV 声音 (*.wav)")
+        dialog.setFileMode(QFileDialog.FileMode.ExistingFile)
+        paths = await self._ask(dialog)
+        return paths[0] if paths else None
 
     # ---- the system
     def open_url(self, url: str) -> None:
