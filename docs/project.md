@@ -46,6 +46,8 @@ WittyCode：Windows 上的编程代理桌面应用，Python 3.11 + PySide6 + Qt 
 
 ## 发布包
 
+- 图标（2026-11-14）：入口 EXE 和包内 GUI 宿主 `python/pythonw.exe` 都使用 `desktop/assets/icon.ico`；根目录另附 `WittyCode.ico`，可供快捷方式使用。构建仅修改 GUI 宿主的图标资源，不修改系统 Python，修改说明随 `THIRD_PARTY_NOTICES.txt` 一起发布。
+
 - 发布包（Windows，2026-11-11）：先 `cd frontend; npm run build:app`，再 `.\.venv\Scripts\python.exe scripts\build_release.py`（`--no-smoke` / `--no-zip` / `--keep-work`）。产物在 `dist/`（已忽略）：`WittyCode-<版本>-win-x64\` 和同名 `.zip` + `.sha256`（约 730 MB / 压缩后 265 MB）。**结构**：`python\`（python.org 的 3.11.9 内嵌版，下载后核对 python.org 公布的 MD5；3.11.9 是 3.11 最后一个有 Windows 二进制的版本）、`site-packages\`（从 `.venv` 按 `RECORD` 复制 `requirements.txt` 的包和它们的依赖，共 13 个，去掉 PySide6 的 `examples/include/glue/scripts/typesystems` 和 `.pyi`）、`app\`（`desktop` + `WittyCode.pyw`）、`WittyCode.exe` + `launcher\`（`scripts/launcher.py` 用 `.venv-build` 里的 PyInstaller onedir 冻结，只负责找到 `python\pythonw.exe` 和 `app\WittyCode.pyw` 并带着参数启动）、`LICENSE` / `NOTICE` / `THIRD_PARTY_NOTICES.txt` / `licenses\` / `README.txt`。**为什么不把整个应用冻结成一个 exe**：应用会用 `sys.executable` 起子进程（记忆 MCP 服务器 `python -m desktop.core.memory`、搜索工作进程 `python -c …`），冻结后 `sys.executable` 是应用自己，会再开一个窗口；内嵌 Python 保持了和测试时完全一样的运行方式。`python311._pth` 写死 `..\site-packages` 和 `..\app`（内嵌版会忽略 PYTHONPATH 和注册表）。字节码用 `compileall --invalidation-mode unchecked-hash` 预编译（zip 会丢文件时间，按时间戳校验的 .pyc 会全部作废）。**验证**：构建脚本最后用发布包自己的 `python.exe` 跑 `scripts/smoke_release.py`（离屏、回放一段录像：页面加载、通道连上、标题栏画出、回放的对话画出来，不调用模型、不写 `%APPDATA%`）；手工解压 zip 后双击 `WittyCode.exe` 的情形用同样参数 `--replay … --settings <临时>` 查过：启动器退出，`pythonw.exe` 和 `QtWebEngineProcess.exe` 在解压目录里跑，日志空。**没做**：代码签名（SmartScreen 会提示未知发布者）；自动更新；32 位 / ARM64。
 
 ## 仓库与许可证

@@ -5,6 +5,7 @@ r"""Builds the Windows release: a folder (and a zip of it) that runs WittyCode w
 What goes into ``dist\WittyCode-<version>-win-x64\``:
 
     WittyCode.exe, launcher\   the launcher (scripts/launcher.py, frozen with PyInstaller)
+    WittyCode.ico              the app icon, also embedded in the launcher's GUI interpreter
     python\                    the embeddable Python from python.org (checked against the MD5 python.org publishes)
     site-packages\             the packages ``requirements.txt`` names and what they depend on, copied from this .venv
     app\                       the desktop package (with the built page) and WittyCode.pyw
@@ -149,6 +150,17 @@ def build_launcher(target: Path, work: Path) -> None:
             shutil.copy2(item, target / item.name)
 
 
+def brand_gui_runtime(target: Path) -> None:
+    """Windows also sees the real GUI interpreter, not just the short-lived launcher."""
+    icon = target / "WittyCode.ico"
+    shutil.copy2(ROOT / "desktop" / "assets" / "icon.ico", icon)
+    build_python = ROOT / ".venv-build" / "Scripts" / "python.exe"
+    subprocess.run(
+        [str(build_python), str(ROOT / "scripts" / "set_exe_icon.py"), str(target / "python" / "pythonw.exe"), str(icon)],
+        check=True,
+    )
+
+
 def write_notices(dists: list[metadata.Distribution], target: Path, python_folder: Path) -> None:
     licenses = target / "licenses"
     licenses.mkdir(parents=True, exist_ok=True)
@@ -163,6 +175,7 @@ def write_notices(dists: list[metadata.Distribution], target: Path, python_folde
         "each under its own license; the license texts are in the folder licenses\\.",
         "",
         "Python " + PYTHON_VERSION + " (python\\) — PSF License (licenses\\python\\LICENSE.txt). https://www.python.org/",
+        "Modification: pythonw.exe uses WittyCode's icon resources; its executable code and other resources are unchanged.",
     ]
     packaged = licenses / "python"
     packaged.mkdir(exist_ok=True)
@@ -262,6 +275,7 @@ def main() -> int:
         copy_app(out / "app")
         precompile(out / "python" / "python.exe", [out / "site-packages", out / "app"])
         build_launcher(out, work)
+        brand_gui_runtime(out)
         write_notices(dists, out, out / "python")
         (out / "README.txt").write_text(README.format(version=version), encoding="utf-8")
         size = sum(path.stat().st_size for path in out.rglob("*") if path.is_file())

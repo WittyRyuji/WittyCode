@@ -97,8 +97,11 @@
 89. Connections 不把缓存当安装清单，Windows MCP 需解析真实入口
 90. Connections 按名称固定排序，同名 Skill 不因开关而出现备用项
 91. 长期 dev 在 squash 发布后要同步 main 的祖先关系
+92. Windows 发布图标要覆盖实际 GUI 宿主，按 HICON 尺寸验证
 
 ## 条目
+
+- Windows 发布图标要覆盖实际 GUI 宿主，按 HICON 尺寸验证（2026-11-14，用户：「App exe 把 ico 加上」）：入口 `WittyCode.exe` 的 PyInstaller `--icon` 不会改变内嵌 Python 的图标；主窗口虽已设置 `QIcon`，真正承载窗口的 `pythonw.exe` 仍可能在 Shell／进程／回退路径显示默认 Python 图标。发布构建在启动器之后，用已固定的构建环境把包内 `python/pythonw.exe` 的现有图标组及语言版本都替换成应用 ICO，同时附上根目录 `WittyCode.ico`；不改用户安装的 Python，也不清用户图标缓存。`scripts/set_exe_icon.py` 只更新 RT_ICON／RT_GROUP_ICON，保留清单、版本及可执行代码，失败丢弃资源事务；第三方说明应披露这项图标修改。验证要分别读取入口／宿主的 PE 资源和 Shell 图标，再检查真实窗口的大小 HICON；Qt 高 DPI 的 HICON 尺寸可能不同于 Shell 的 32px，必须先 `GetIconInfo` 取真实尺寸，不能统一缩放到 32px 后误报。私人包只从已核验的旧 ZIP 延续数据快照，换入口 EXE 时带上同次构建的 `launcher/` 支持文件，并逐文件核对 `data/` 哈希不变，不为改图标重新收集用户凭据或历史。
 
 - 长期 dev 在 squash 发布后要同步 main 的祖先关系（2026-11-13，用户：「保证现在的修改不丢失。把 git 搞好」）：Squash 只把文件结果压成 main 上的新提交，不保留 dev 原提交的祖先关系。长期 dev 若不合回这个 main 提交，下一轮 PR 可能从更早的共同祖先重复合并已发布内容，出现大量 add/add 和内容冲突；提交列表仍可能包含旧提交，不能仅凭数量认定代码重复或丢失。修复前先核对干净工作树、远端与 PR 两端，建立本地恢复分支，记录原提交、完整 tree 与受控文件原始哈希。只有 main 的完整 tree 确实等于 dev 的某个祖先快照、没有独有内容时，才可按明确授权用保留 dev 文件树的双亲合并补齐历史；提交前后必须核对 tree、逐文件哈希、双亲、原提交可达性与 main 祖先关系。不能把这种特殊情况当成以后都用 ours 覆盖 main 的规则；main 有独有更新时必须正常整合并验证。推送应为普通快进，不重写历史，不自动合并 PR；后续每轮 squash 发布后及时同步 main，不能拿 dev 头的 CI 成功冒充合并结果已验证。
 
