@@ -51,6 +51,7 @@ from desktop.core.chatgpt.responses import (
 )
 
 from desktop.core.harness.compact import estimate_item, estimate_items, estimate_text, fixed_tokens, is_overflow
+from desktop.core.harness.history import replayable
 
 log = logging.getLogger("desktop.harness")
 
@@ -297,6 +298,7 @@ class AgentLoop:
         retry_delays: Sequence[float] | None = None,
         pause: Callable[[float], Awaitable[object]] | None = None,
         jitter: Callable[[], float] | None = None,
+        max_continuations: int = 0,
     ) -> None:
         self.stream = stream
         self._retry_delays = tuple(RETRY_DELAYS if retry_delays is None else retry_delays)
@@ -322,6 +324,8 @@ class AgentLoop:
         """Tokens of the items the last response added to the history."""
         self._last_call = ""
         self._repeats = 0
+        self._continuations = 0
+        self._max_continuations = max_continuations
         """How many calls in a row were exactly the one before (``reminder``)."""
 
     @property
@@ -339,6 +343,7 @@ class AgentLoop:
     async def _prepare(self, history: list[dict[str, Any]], overflow: bool = False) -> bool:
         replaced = await self.observer.prepare(history, self.estimate(history), overflow)
         if replaced:
+            self.instructions = getattr(self.observer, "instructions", self.instructions)
             self._measured = None
             self._floor = 0
         return replaced
@@ -404,8 +409,21 @@ class AgentLoop:
             try:
                 return await self._read(history, self._request(history))
             except Exception as error:  # (a stop is a CancelledError and passes)
+                network = getattr(error, "code", None) in ("network", "stream", "stream_idle", "timeout")
+                if network and (self._events or self._acknowledged or getattr(error, "code", None) in ("stream", "stream_idle")) and self._continuations < self._max_continuations:
+                    self._continuations += 1
+                    self.observer.notice(f"连接中断，已保留收到的内容；用新请求接着做（第 {self._continuations}/{self._max_continuations} 次），不是重发上一请求。")
+                    update = {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": (
+                        "WittyCode transport recovery: the previous response was interrupted. Continue from the preserved "
+                        "history and current state. Do not repeat completed actions. Check state before repeating any tool "
+                        "whose result is unknown; do not assume a partial answer completed the task."
+                    )}]}
+                    history.append(update)
+                    self.observer.history_grew([update])
+                    await self._prepare(history)
+                    continue
                 if self._events:
-                    raise  # (part of the answer was shown and acted on: asking again would not be the same request)
+                    raise  # output was preserved; never blindly resend the original request
                 if is_overflow(error):
                     # Refused as too big before the answer began: the observer may be able to shorten the history; once, then it is the error.
                     log.warning("the request was refused as too big (%s); compacting and asking again", error)
@@ -489,6 +507,8 @@ class AgentLoop:
             failed = False
         finally:
             if failed:
+                # A locally reconstructed partial message is not the protocol item a reasoning id was attached to.
+                kept = replayable(kept)
                 # Completed output is useful even if the response never finished. Preserve visible partial text, but
                 # never execute an incomplete call. Completed calls receive an explicit unknown/interrupted result.
                 for item_id, text in texts.items():
@@ -497,6 +517,7 @@ class AgentLoop:
                     ) for item in kept):
                         kept.append({"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": text}]})
                 kept.extend(call_output(str(item.get("call_id") or ""), INTERRUPTED) for item in list(kept) if item.get("type") == "function_call")
+            kept = replayable(kept)
             history.extend(kept)
             self._answer = estimate_items(kept)
             if context and not failed:

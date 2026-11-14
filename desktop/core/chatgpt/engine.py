@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Any
 
 from desktop.core.chatgpt.accounts import AccountStore, TokenProvider
 from desktop.core.chatgpt.errors import AuthError, ChatGPTError, PlanNotEnabled
-from desktop.core.chatgpt.http import HttpClient
+from desktop.core.chatgpt.http import HttpClient, stream_idle_timeout
 from desktop.core.chatgpt.models import FALLBACK_MODELS, ChatGPTModel, models_from_result
 from desktop.core.chatgpt.oauth import Endpoints, SignIn
 from desktop.core.chatgpt.responses import BASE_URL, Event, Shape, for_responses, read_events
@@ -260,7 +260,7 @@ class ChatGPTEngine:
         body = {**request, "input": for_responses(request.get("input") or ())}
         for attempt in range(2):
             headers = {"Authorization": f"Bearer {token}", "Accept": "text/event-stream", "originator": APP_NAME.lower()}
-            lines = self.http.stream_lines("POST", f"{self.base_url}/responses", headers=headers, json_body=body)
+            lines = self.http.stream_lines("POST", f"{self.base_url}/responses", headers=headers, json_body=body, timeout=stream_idle_timeout(request))
             begun = False
             retry = False
             try:

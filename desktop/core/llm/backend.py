@@ -16,7 +16,7 @@ from typing import Any, Protocol
 from urllib.parse import urlsplit
 
 from desktop.core.chatgpt.errors import ChatGPTError
-from desktop.core.chatgpt.http import HttpClient
+from desktop.core.chatgpt.http import HttpClient, stream_idle_timeout
 from desktop.core.chatgpt.models import ChatGPTModel
 from desktop.core.chatgpt.responses import Event, read_events
 from desktop.core.llm import aws, bedrock
@@ -172,7 +172,7 @@ class ApiBackend:
             body, read = anthropic_body(request, route), lambda lines: read_anthropic(lines, route.origin)
         else:
             body, read = responses_body(request, route), read_events
-        lines = self.http.stream_lines("POST", route.url, headers=route.headers, json_body=body)
+        lines = self.http.stream_lines("POST", route.url, headers=route.headers, json_body=body, timeout=stream_idle_timeout(request))
         try:
             async for event in read(lines):
                 yield event
@@ -214,11 +214,11 @@ class ApiBackend:
             raise ChatGPTError("没有可用的 AWS 凭据。", code="api")
         origin = urlsplit(base).netloc.lower()
         if kind == "openai":
-            lines = self.http.stream_lines("POST", url, headers=sent, body=data)
+            lines = self.http.stream_lines("POST", url, headers=sent, body=data, timeout=stream_idle_timeout(request))
             events = read_events(lines)
             closer = lines
         else:
-            chunks = self.http.stream_chunks("POST", url, headers=sent, body=data)
+            chunks = self.http.stream_chunks("POST", url, headers=sent, body=data, timeout=stream_idle_timeout(request))
             events = bedrock.read_converse(chunks, origin) if kind == BEDROCK else read_anthropic(bedrock.invoke_lines(chunks), origin)
             closer = chunks
         try:

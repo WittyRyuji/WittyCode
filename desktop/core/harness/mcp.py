@@ -78,6 +78,25 @@ class McpTool:
         return self.read_only or (self.annotations.get("destructiveHint") is False and self.annotations.get("openWorldHint") is False)
 
 
+def parse_tools(server: str, raw: Any, *, schema_key: str = "inputSchema") -> list[McpTool]:
+    """Validate the untrusted handshake/cache as a unit; never leave a half-updated tool contract."""
+    if not isinstance(raw, list):
+        raise McpError("tools/list did not return a tool list")
+    tools: list[McpTool] = []
+    seen: set[str] = set()
+    for tool in raw:
+        if not isinstance(tool, Mapping) or not isinstance(tool.get("name"), str) or not tool["name"] or tool["name"] in seen:
+            raise McpError("tools/list contains an invalid or duplicate tool name")
+        schema = tool.get(schema_key, {"type": "object", "properties": {}})
+        annotations = tool.get("annotations") or {}
+        description = tool.get("description") or ""
+        if not isinstance(schema, Mapping) or not isinstance(annotations, Mapping) or not isinstance(description, str):
+            raise McpError("tools/list contains an invalid tool contract")
+        seen.add(tool["name"])
+        tools.append(McpTool(server, tool["name"], description, dict(schema), dict(annotations)))
+    return tools
+
+
 @dataclass(frozen=True, slots=True)
 class McpResult:
     text: str
@@ -93,6 +112,7 @@ class McpClient:
         self.env = dict(env or {})
         self.tools: list[McpTool] = []
         self.instructions = ""
+        self.trusted_annotations = False
         self._process: asyncio.subprocess.Process | None = None
         self._reader: asyncio.Task[None] | None = None
         self._stderr_reader: asyncio.Task[None] | None = None
@@ -115,7 +135,8 @@ class McpClient:
         if sys.platform == "win32":
             kwargs["creationflags"] = CREATE_NO_WINDOW
         try:
-            env = {**os.environ, **self.env}
+            from desktop.core.child_env import environment
+            env = environment(minimal=True, explicit=self.env)
             command = _windows_command(self.command, env, self.cwd) if sys.platform == "win32" else self.command
             self._process = await asyncio.create_subprocess_exec(
                 command,
@@ -140,7 +161,7 @@ class McpClient:
                     "initialize",
                     {"protocolVersion": PROTOCOL_VERSION, "capabilities": {}, "clientInfo": {"name": "WittyCode", "version": "1"}},
                 )
-                self.instructions = str(answer.get("instructions") or "") if isinstance(answer, Mapping) else ""
+                instructions = str(answer.get("instructions") or "") if isinstance(answer, Mapping) else ""
                 await self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
                 cursor: str | None = None
                 seen: set[str] = set()
@@ -155,16 +176,14 @@ class McpClient:
                     if not isinstance(cursor, str) or cursor in seen or len(seen) >= 100 or len(listed_tools) > 10000:
                         raise McpError("tools/list pagination did not terminate within the limit")
                     seen.add(cursor)
+                parsed = parse_tools(self.name, listed_tools)
         except BaseException as error:
             await self.close()
             if isinstance(error, asyncio.CancelledError):
                 raise
             raise McpError(f"{self.name}: {error or 'timed out starting'}") from error
-        self.tools = [
-            McpTool(self.name, str(tool["name"]), str(tool.get("description") or ""), dict(tool.get("inputSchema") or {"type": "object", "properties": {}}), dict(tool.get("annotations") or {}))
-            for tool in listed_tools
-            if isinstance(tool, Mapping) and tool.get("name")
-        ]
+        self.tools = parsed
+        self.instructions = instructions
 
     async def call(self, tool: str, arguments: Mapping[str, Any], timeout: float = CALL_SECONDS) -> McpResult:
         try:

@@ -1383,6 +1383,10 @@ class ProviderStore:
         records = self._read_sidecar()
         return _State(doc, entries, records, _build_groups(entries, records))
 
+    def secret_environment_names(self) -> tuple[str, ...]:
+        """Configured variable references must not leak into commands, even when their names look ordinary."""
+        return tuple(sorted(set(_ENV_ANY.findall(json.dumps(self._read_settings(), ensure_ascii=False)))))
+
     def _read_settings(self) -> dict:
         try:
             data = self.models_file.read_bytes()

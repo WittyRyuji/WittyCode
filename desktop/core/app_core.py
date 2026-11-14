@@ -248,7 +248,7 @@ class Conversation:
     ran: bool = False
     """A turn was running since the queue was last looked at: when it ends, the queue is looked at again."""
     goal: goals.Goal | None = None
-    """What the conversation works toward turn after turn (``/goal``, any engine); not kept in a file, a restart ends it."""
+    """What the conversation works toward turn after turn. The own harness checkpoints it; reopening requires /goal resume."""
     curated: set[str] = field(default_factory=set)
     """Ids of the turns the memory curator was already shown (a turn is looked at once)."""
     ledger: UsageLedger = field(default_factory=UsageLedger)
@@ -1841,9 +1841,11 @@ class AppCore:
         conv = self._conversation(params["id"])
         text = str(params.get("text", "")).strip()
         if text.lower() in goals.STOP_WORDS:
-            if conv.goal is None:
+            checkpoint = getattr(getattr(conv.controller, "saved", None), "goal", {})
+            if conv.goal is None and not checkpoint:
                 return {"ok": True, "text": "现在没有进行中的目标。"}
             conv.goal = None
+            self._checkpoint_goal(conv, None)
             conv.dirty = True  # (the page shows no goal any more: closing the window need not warn about it)
             self._schedule_flush()
             return {"ok": True, "text": "目标已取消。"}
@@ -1856,19 +1858,33 @@ class AppCore:
             return {"ok": False, "text": "还有排队的消息没有发出：它们发完后再设目标。"}
         if self._page_settings(conv).get("mode") == "spec":
             return {"ok": False, "text": "Plan 模式只出方案、不动手，做不了目标：先用 /plan 回到 Auto。"}
-        conv.goal = goals.Goal(text)
-        if not controller.send_prompt(goals.opening(text)):
+        resuming = text.lower() == "resume"
+        goal = goals.Goal.from_json(getattr(getattr(controller, "saved", None), "goal", {})) if resuming else goals.Goal(text)
+        if goal is None:
+            return {"ok": False, "text": "没有已保存的目标可以恢复：用 /goal 目标 设置一个新目标。"}
+        if resuming and goal.rounds >= goals.ROUNDS:
+            return {"ok": False, "text": "已保存目标已用完轮数：检查结果后，用 /goal 目标 明确开始新一批。"}
+        conv.goal = goal
+        if not controller.send_prompt(goal.next_message() if resuming else goals.opening(text)):
             conv.goal = None
             return {"ok": False, "text": "现在不能发送：会话没有就绪。"}
-        self._start_title(conv, text)
+        self._checkpoint_goal(conv, goal)
+        self._start_title(conv, goal.text)
         controller.transcript.add_notice(
-            f"目标已设定：{text}\n模型会一轮轮做下去，每轮都把目标交给它对照结果判断，最多 {goals.ROUNDS} 轮；完成或需要你时会停下，点「停止」随时结束。"
+            f"目标已{'恢复' if resuming else '设定'}：{goal.text}\n模型会一轮轮做下去，每轮都把目标交给它对照结果判断，最多 {goals.ROUNDS} 轮；完成或需要你时会停下，点「停止」随时结束。"
         )
         conv.dirty = True
         self._schedule_flush()
         return {"ok": True, "text": ""}
 
-    def _stop_goal(self, conv: Conversation, notice: str) -> None:
+    def _checkpoint_goal(self, conv: Conversation, goal: goals.Goal | None) -> None:
+        saved = getattr(conv.controller, "saved", None)
+        if conv.engine == OWN_ENGINE and saved is not None:
+            saved.goal = goal.to_json() if goal is not None else {}
+            conv.controller._save_now()
+
+    def _stop_goal(self, conv: Conversation, notice: str, *, finished: bool = False) -> None:
+        self._checkpoint_goal(conv, None if finished else conv.goal)
         conv.goal = None
         conv.controller.transcript.add_notice(notice)
         conv.dirty = True
@@ -1883,6 +1899,9 @@ class AppCore:
         controller = conv.controller
         turns = controller.transcript.turns
         turn = turns[-1] if turns else None
+        if getattr(controller, "stop_hook_blocked", False):
+            self._stop_goal(conv, "目标先停下了：Stop Hook 未通过；模型回合已保留，但目标未标记完成。")
+            return
         if turn is None or turn.status is not TurnStatus.DONE:
             why = "这一轮出错了。" if turn is not None and turn.status is TurnStatus.FAILED else "这一轮被停止了。"
             self._stop_goal(conv, "目标先停下了：" + why)
@@ -1890,8 +1909,9 @@ class AppCore:
         texts = [block.text for block in turn.blocks if block.kind == "text" and block.text]
         outcome = goals.step(goal, texts[-1] if texts else "", bool(turn.tools))
         if not outcome.prompt:
-            self._stop_goal(conv, outcome.notice)
+            self._stop_goal(conv, outcome.notice, finished=goals.mark_of(texts[-1] if texts else "")[0] == "done")
         elif controller.send_prompt(outcome.prompt):
+            self._checkpoint_goal(conv, goal)
             conv.dirty = True
             self._schedule_flush()
         else:

@@ -256,15 +256,12 @@ def test_protected_check_ignores_case_on_windows(guarded):
 
 def test_remember_key_for_shell(ctx):
     key = lambda command: remember_key(SHELL, {"command": command}, ctx)  # noqa: E731
-    assert key("git status") == "exec:git"
-    assert key("GIT.EXE push origin") == "exec:git"
-    assert key("  Remove-Item -Recurse x") == "exec:remove-item"
-    assert key("C:\\Program Files\\Git\\bin\\git.exe status".replace("C:\\Program Files\\Git\\bin\\", "")) == "exec:git"
-    assert key("& 'C:\\Program Files\\Git\\bin\\git.exe' status") == "exec:git"
-    assert key('"C:\\tools\\Build.CMD" all') == "exec:build"
-    assert key("./scripts/run.ps1 -x") == "exec:run"
-    assert key("python -m pytest") == "exec:python"
-    assert key("") == "exec:"
+    commands = ["git status", "GIT.EXE push origin", "Remove-Item -Recurse x", "git.exe status",
+                "& 'C:\\Program Files\\Git\\bin\\git.exe' status", '"C:\\tools\\Build.CMD" all',
+                "./scripts/run.ps1 -x", "python -m pytest", ""]
+    assert all(key(command).startswith("exec:") for command in commands)
+    assert len({key(command) for command in commands}) == len(commands)
+    assert key("  git status  ") == key("git status")
 
 
 def test_remember_key_for_writes(ctx, project, outside):
@@ -289,8 +286,9 @@ def test_remember_key_for_reads(ctx, project, outside):
 def test_remembered_keys_turn_an_ask_into_an_allow(ctx, outside):
     command = {"command": "dotnet build"}
     assert verdict("code", SHELL, command, ctx) == "ask"
-    assert verdict("code", SHELL, command, ctx, {"exec:dotnet"}) == "allow"
-    assert verdict("code", SHELL, {"command": "dotnet test"}, ctx, {"exec:dotnet"}) == "allow"
+    approved = {remember_key(SHELL, command, ctx)}
+    assert verdict("code", SHELL, command, ctx, approved) == "allow"
+    assert verdict("code", SHELL, {"command": "dotnet test"}, ctx, approved) == "ask"
     assert verdict("code", SHELL, {"command": "npm test"}, ctx, {"exec:dotnet"}) == "ask"
     create = {"file_path": "n.txt", "content": "x"}
     assert verdict("ask", CREATE_FILE, create, ctx) == "ask"
@@ -305,7 +303,7 @@ def test_remembered_keys_turn_an_ask_into_an_allow(ctx, outside):
 
 
 def test_a_remembered_program_does_not_cover_chained_commands(ctx):
-    remembered = {"exec:dotnet"}
+    remembered = {remember_key(SHELL, {"command": "dotnet build"}, ctx)}
     for command in (
         "dotnet build; Remove-Item -Recurse .",
         "dotnet build && del x",
@@ -318,7 +316,9 @@ def test_a_remembered_program_does_not_cover_chained_commands(ctx):
         "dotnet 'unterminated",
     ):
         assert verdict("code", SHELL, {"command": command}, ctx, remembered) == "ask", command
-    assert verdict("code", SHELL, {"command": 'dotnet build -p:Note="a;b"'}, ctx, remembered) == "allow"
+    quoted = {"command": 'dotnet build -p:Note="a;b"'}
+    assert verdict("code", SHELL, quoted, ctx, remembered) == "ask"
+    assert verdict("code", SHELL, quoted, ctx, {remember_key(SHELL, quoted, ctx)}) == "allow"
 
 
 def test_a_remembered_key_does_not_widen_full_or_read_only_levels(ctx):

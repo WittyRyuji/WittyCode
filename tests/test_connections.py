@@ -216,6 +216,9 @@ def test_real_own_loop_uses_imported_mcp_and_prompt_lifecycle_hooks(tmp_path, ri
             controller = core._by_cid[cid].controller
             plan.script(call("mcp__demo__echo", {}, call_id="local-call"), say("done", used=usage(100, 10)))
             await core.call("session.send", {"id": cid, "text": "use the local tool"})
+            await until(lambda: controller.transcript.pending_prompts(), timeout=15)
+            permission = controller.transcript.pending_prompts()[0]
+            assert controller.answer_permission(permission.id, "proceed_once")
             await until(lambda: controller.state is SessionState.READY, timeout=15)
             assert len(plan.requests) == 2
             assert "local hook context" in json.dumps(plan.requests[0]["input"])

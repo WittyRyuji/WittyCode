@@ -85,8 +85,10 @@ class SavedSession:
     """Per ``call_id``: ``{"status": "done" | "error" | "cancelled", "diffs": [...]}``."""
     usage: dict[str, Any] = field(default_factory=dict)
     """Tokens of the whole conversation: ``input``, ``output``, optional ``cacheWrite``, ``cacheRead``."""
-    prompt: dict[str, str] = field(default_factory=dict)
+    prompt: dict[str, Any] = field(default_factory=dict)
     """The original instructions and their latest rendered state; updates are appended to ``items``."""
+    goal: dict[str, Any] = field(default_factory=dict)
+    """An unfinished goal checkpoint; reopening never auto-executes it (explicit /goal resume)."""
     requests: list[dict[str, Any]] = field(default_factory=list)
     """The most recent content-free request diagnostics (``harness.diagnostics``)."""
     context_used: int = 0
@@ -158,6 +160,8 @@ def _session_json(session: SavedSession) -> dict[str, Any]:
         "recalled": session.recalled,
         "items": session.items,
     }
+    if session.goal:
+        data["goal"] = session.goal
     if session.prompt:
         data["prompt"] = session.prompt
     if session.requests:
@@ -205,9 +209,14 @@ def _session_from(raw: Any) -> SavedSession | None:
             turns=turns,
             tools={str(k): dict(v) for k, v in (raw.get("tools") or {}).items() if isinstance(v, Mapping)},
             usage={str(k): int(v) for k, v in (raw.get("usage") or {}).items() if isinstance(v, (int, float))},
-            prompt={key: value for key, value in raw.get("prompt", {}).items() if key in ("instructions", "current") and isinstance(value, str)} if isinstance(raw.get("prompt"), Mapping) else {},
+            prompt={key: value for key, value in raw.get("prompt", {}).items() if (
+                key in ("instructions", "current") and isinstance(value, str)
+                or key == "sections" and isinstance(value, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in value.items())
+                or key == "mcp" and isinstance(value, dict)
+            )} if isinstance(raw.get("prompt"), Mapping) else {},
             requests=[dict(entry) for entry in raw.get("requests", [])[-128:] if isinstance(entry, Mapping)] if isinstance(raw.get("requests"), list) else [],
             usage_models={str(k): dict(v) for k, v in raw.get("usage_models", {}).items() if isinstance(v, Mapping)} if isinstance(raw.get("usage_models"), Mapping) else {},
+            goal=dict(raw["goal"]) if isinstance(raw.get("goal"), Mapping) else {},
             context_used=int(raw.get("context_used") or 0),
             recalled=[str(x) for x in raw.get("recalled") or ()],
             origin=dict(raw["origin"]) if isinstance(raw.get("origin"), Mapping) else {},
@@ -342,7 +351,20 @@ def recover(session: SavedSession) -> bool:
     summary stops inside a step (an earlier version put it one place too early when the conversation began with a
     message that looked like a summary) is moved to the end of that step, so that no tool result is sent without its
     call. Whether anything changed (the caller saves it then, once: a recovered conversation has nothing left to recover)."""
+    from desktop.core.harness.history import orphan_reasoning
+
     changed = pair_in_place(session)
+    dropped = orphan_reasoning(session.items)
+    if dropped:
+        items, position = [], []
+        for index, item in enumerate(session.items):
+            position.append(len(items))
+            if index not in dropped:
+                items.append(item)
+        session.turns, session.compaction = _remapped(session, items, position, copy=False)
+        session.items = items
+        session.context_used = 0
+        changed = True
     if session.compaction:
         upto = int(session.compaction.get("upto") or 0)
         mended = mend_boundary(session.items, upto)
@@ -386,6 +408,30 @@ class SessionStore:
         if not _ID.match(session_id):
             raise ValueError(f"not a session id: {session_id!r}")
         return self.root / SESSIONS / f"{session_id}.json"
+
+    def claim(self, session_id: str) -> Any:
+        """One writer for an open conversation, across processes. The OS releases the lock after a crash."""
+        from desktop.core.chatgpt.accounts import _try_lock
+
+        self._path(session_id)  # validate before making any path
+        folder = self.root / "locks"
+        folder.mkdir(parents=True, exist_ok=True)
+        handle = (folder / f"{session_id}.lock").open("a+b")
+        try:
+            _try_lock(handle)
+        except OSError:
+            handle.close()
+            raise OSError("这个会话正在另一个窗口中打开；请先关闭那个窗口里的会话，再重试。") from None
+        return handle
+
+    @staticmethod
+    def release(handle: Any) -> None:
+        from desktop.core.chatgpt.accounts import _unlock
+
+        try:
+            _unlock(handle)
+        finally:
+            handle.close()
 
     def save(self, session: SavedSession) -> None:
         _write(self._path(session.id), _session_json(session))

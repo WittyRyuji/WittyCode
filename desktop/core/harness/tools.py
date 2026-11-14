@@ -110,11 +110,13 @@ class ToolContext:
     abort: threading.Event = field(default_factory=threading.Event)
     shell: str = "powershell"
     protected: tuple[Path, ...] = ()
+    secret_env: tuple[str, ...] = ()
     readable: tuple[Path, ...] = ()
     """Folders outside the project that reads may enter without asking (the folders of the user's skills, ``harness.skills``).
     Only reads: nothing here may be written, and ``protected`` still wins."""
     writes: CommitGuard = field(default_factory=CommitGuard)
     read_files: dict[str, str] = field(default_factory=dict)
+    read_encodings: dict[str, str] = field(default_factory=dict)
     """Content fingerprints read or written by this conversation; shared by per-call context copies."""
 
 

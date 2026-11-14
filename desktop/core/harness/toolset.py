@@ -5,11 +5,11 @@
 model as ``mcp__<server>__<tool>`` (a function name may hold letters, digits, ``_`` and ``-``, 64 at most); that is also the
 form the page already recognises for the shared memory's tools (``toolinfo.memory_tool``).
 
-A tool declared harmless by its server (read-only, or neither destructive nor open-world: the memory's) runs without a
-question at every level. Any other MCP tool asks, except at the ``full`` level.
+Only the bundled server's locally trusted annotations may grant automatic permission. Third-party MCP annotations
+are untrusted: their tools ask unless the user explicitly approved that tool or selected ``full``.
 
 In Plan mode (``plan``) the permission level is set aside: reads and read-only commands run, anything that could change
-something is refused (not asked: the answer would be no), and so is an MCP tool its server did not declare harmless.
+something is refused. Only locally trusted, read-only MCP tools run; memory writes do not bypass Plan mode.
 
 ``ask_user`` (``asking``) is the model's way to put a question to the user. It is offered when the conversation can show
 the question (``asker``), asks no permission itself, and is shown on the page as the AskUser row the other engines have.
@@ -17,6 +17,7 @@ the question (``asker``), asks no permission itself, and is shown on the page as
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any
@@ -24,7 +25,7 @@ from typing import Any
 from desktop.core.harness import asking
 from desktop.core.harness.loop import ALLOW, ASK, DENY, Call, Outcome, Verdict
 from desktop.core.harness.mcp import McpClient, McpTool
-from desktop.core.harness.permissions import action_view, decide, remember_key
+from desktop.core.harness.permissions import _rememberable_command, action_view, decide, remember_key
 from desktop.core.harness.tools import ToolContext, ToolRegistry, ToolSpec
 from desktop.core.prompts import ActionView, QuestionView
 
@@ -41,7 +42,12 @@ Asker = Callable[[Call, tuple[QuestionView, ...]], Awaitable["list[str | list[st
 
 
 def mcp_name(server: str, tool: str) -> str:
-    return (MCP_PREFIX + _UNSAFE.sub("_", server) + "__" + _UNSAFE.sub("_", tool))[:NAME_LIMIT]
+    raw = MCP_PREFIX + server + "__" + tool
+    name = _UNSAFE.sub("_", raw)
+    if name != raw or len(name) > NAME_LIMIT or "__" in server or "__" in tool:
+        suffix = "__" + hashlib.sha256((server + "\0" + tool).encode("utf-8")).hexdigest()[:12]
+        name = name[:NAME_LIMIT - len(suffix)] + suffix
+    return name
 
 
 def ui_call(registry: ToolRegistry, name: str, args: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -71,7 +77,15 @@ class HarnessTools:
     def refresh(self) -> None:
         """Read the connected servers' tools again (a server may have come up since)."""
         # A disconnected server is an unavailable tool, not a different prompt. Keep known schemas and their order.
-        self._mcp = {mcp_name(tool.server, tool.name): (client, tool) for client in self.clients for tool in client.tools}
+        found = {}
+        for client in self.clients:
+            for tool in client.tools:
+                name = mcp_name(tool.server, tool.name)
+                if name in found:
+                    raise ValueError("MCP tool names must be unique; check duplicate server/tool definitions.")
+                found[name] = (client, tool)
+        self._mcp = dict(sorted(found.items()))
+        self._server_notes = sorted((client.name, client.instructions) for client in self.clients)
 
     # ------------------------------------------------------------------ loop.Tools
 
@@ -92,10 +106,11 @@ class HarnessTools:
         spec = self.registry.get(call.name)
         if spec is not None:
             return self._planned(spec, call) if self.plan else self._decided(spec, call)
-        _, tool = self._mcp[call.name]
+        client, tool = self._mcp[call.name]
+        trusted = getattr(client, "trusted_annotations", False)
         if self.plan:
-            return Verdict(ALLOW) if tool.harmless else Verdict(DENY, PLAN_REFUSAL)
-        if self.level == "full" or tool.harmless or f"mcp:{call.name}" in self.remembered:
+            return Verdict(ALLOW) if trusted and tool.read_only else Verdict(DENY, PLAN_REFUSAL)
+        if self.level == "full" or trusted and tool.harmless or f"mcp:{call.name}" in self.remembered:
             return Verdict(ALLOW)
         return Verdict(ASK, f"tool of the server {tool.server}")
 
@@ -118,8 +133,8 @@ class HarnessTools:
     def parallel_safe(self, call: Call) -> bool:
         """Only approved, independent filesystem reads; hooks, commands and memory writes retain serial ordering."""
         if self.connections is not None:
-            active = getattr(self.connections, "active", None)
-            if active is None or any(entry.get("config", {}).get("event") in ("PreToolUse", "PostToolUse") for entry in active("hook", self.context.project)):
+            hint = getattr(self.connections, "has_tool_hooks", None)
+            if hint is None or hint(self.context.project):
                 return False
         return (
             not call.problem and call.name in ("read_file", "list_dir", "glob", "grep")
@@ -128,6 +143,8 @@ class HarnessTools:
 
     def remember(self, call: Call) -> None:
         spec = self.registry.get(call.name)
+        if spec is not None and spec.kind == "exec" and not _rememberable_command(str(call.args.get("command") or "")):
+            return
         self.remembered.add(remember_key(spec, call.args, self.context) if spec is not None else f"mcp:{call.name}")
 
     async def run(self, call: Call) -> Outcome:
@@ -179,4 +196,4 @@ class HarnessTools:
 
     def servers(self) -> list[tuple[str, str]]:
         """``(name, instructions)`` of the connected servers, for the system prompt."""
-        return [(client.name, client.instructions) for client in self.clients]
+        return list(self._server_notes)

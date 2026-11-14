@@ -77,11 +77,8 @@ def count(value: Any) -> int:
 
 def text_of(item: Mapping[str, Any]) -> str:
     """The words of a message item (user or assistant)."""
-    return "".join(
-        part.get("text", "")
-        for part in item.get("content") or ()
-        if isinstance(part, Mapping) and part.get("type") in ("input_text", "output_text", "text") and isinstance(part.get("text"), str)
-    )
+    from desktop.core.harness.history import message_text
+    return message_text(item)
 
 
 def images_of(item: Mapping[str, Any]) -> list[str]:

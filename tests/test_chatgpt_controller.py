@@ -182,7 +182,7 @@ def test_a_refused_command_is_not_run_and_the_model_is_told(tmp_path):
     run(go())
 
 
-def test_allowing_once_for_the_session_is_remembered_in_the_conversation(tmp_path):
+def test_inline_interpreter_approval_is_not_reused_for_other_code(tmp_path):
     async def go() -> None:
         with FakeResponses(token=ACCESS_TOKEN) as fake:
             fake.script(
@@ -193,8 +193,11 @@ def test_allowing_once_for_the_session_is_remembered_in_the_conversation(tmp_pat
             engine, controller = await opened(tmp_path, fake, autonomy="code")
             controller.send_prompt("twice")
             await until(lambda: controller.transcript.pending_prompts(), message="the first question")
-            controller.answer_permission(controller.transcript.pending_prompts()[0].id, "proceed_always")
-            await finish_turn(controller)  # (the second command did not ask again, or this would time out)
+            first = controller.transcript.pending_prompts()[0]
+            controller.answer_permission(first.id, "proceed_always")
+            await until(lambda: any(p.id != first.id for p in controller.transcript.pending_prompts()), message="the second code still needs approval")
+            controller.answer_permission(controller.transcript.pending_prompts()[0].id, "proceed_once")
+            await finish_turn(controller)
             outputs = [item["output"] for request in sent(fake) for item in request if item["type"] == "function_call_output"]
             assert any("two" in output for output in outputs)
             await engine.close_all()

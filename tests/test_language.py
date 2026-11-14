@@ -22,12 +22,13 @@ def test_the_other_engines_are_asked_after_each_message_and_the_own_loop_is_not(
 
 
 def test_the_own_loop_s_instructions_ask_for_chinese_thinking_only_when_the_setting_is_on(tmp_path: Path):
-    asked = build_instructions(tmp_path, model="m", level="ask", think_chinese=True)
+    sections = {}
+    asked = build_instructions(tmp_path, model="m", level="ask", think_chinese=True, sections=sections)
     plain = build_instructions(tmp_path, model="m", level="ask", think_chinese=False)
     assert language.THINK_CHINESE in asked and language.THINK_CHINESE not in plain
     answer_rule = next(line for line in BASE.splitlines() if line.startswith("- Answer in the language"))
-    assert f"{answer_rule}\n- {language.THINK_CHINESE}" in asked, "next to the rule about the language of the answer"
-    assert plain.startswith(BASE)
+    assert answer_rule in asked and sections["language"] == language.THINK_CHINESE
+    assert sections["workflow"] == BASE and asked.startswith(BASE) and plain.startswith(BASE), "language changes must not copy the workflow section"
 
 
 def test_the_rule_covers_later_steps_and_forbids_an_english_version_then_translation():

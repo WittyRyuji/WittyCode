@@ -154,9 +154,8 @@ def keep_tokens(window: int) -> int:
 
 
 def _text_of(item: Mapping[str, Any]) -> str:
-    return "".join(
-        str(part.get("text") or "") for part in item.get("content") or () if isinstance(part, Mapping) and part.get("type") in ("input_text", "output_text")
-    )
+    from desktop.core.harness.history import message_text
+    return message_text(item)
 
 
 def _images_of(item: Mapping[str, Any]) -> int:
@@ -565,6 +564,7 @@ async def compact(
     whole: bool = False,
     fallback: bool = True,
     rules: str = "",
+    rebase: bool = False,
     prefix_request: Mapping[str, Any] | None = None,
     on_request: OnRequest | None = None,
 ) -> Compacted | None:
@@ -587,6 +587,11 @@ async def compact(
         cut = choose_cut(view, keep_tokens(window), room - min(SUMMARY_ROOM, window // 20), synthetic=synthetic)
     if cut is None:
         return None
+    if rebase:
+        # Rebuilding the prefix is already a cache boundary. Fold all obsolete context updates into the covered part,
+        # keeping log/view indices linear (do not filter arbitrary items out of the unsummarised tail).
+        latest = max((i + 1 for i, item in enumerate(view) if item.get("wc_context_update")), default=0)
+        cut = mend_boundary(view, max(cut, latest))
     if previous is None:
         previous = summary_text(view[0]) if synthetic else ""
     if turn is None:

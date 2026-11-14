@@ -26,6 +26,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
 from desktop.core.chatgpt.errors import ChatGPTError, error_from_body
@@ -118,6 +119,70 @@ def _abort(response: Any) -> None:
         response.close()
 
 
+class _StreamConnection:
+    """Keep urllib's proxy/TLS behaviour, but switch deadlines immediately after connect, before getresponse()."""
+
+    def __init__(self, *args: Any, call: Any, **kwargs: Any) -> None:
+        self.call = call
+        super().__init__(*args, **kwargs)
+        call._connection = self
+
+    def connect(self) -> None:
+        super().connect()
+        if self.call.cancelled.is_set():
+            self.close()
+            raise OSError("stream cancelled")
+        self.sock.settimeout(self.call._timeout)
+
+    def send(self, data: Any) -> None:
+        if self.sock is None:
+            self.connect()
+        if self.call.cancelled.is_set():
+            self.close()
+            raise OSError("stream cancelled")
+        # Even a partially sent request may have been accepted: do not blindly replay it.
+        self.call._sent = True
+        super().send(data)
+
+
+class _StreamHTTPConnection(_StreamConnection, http.client.HTTPConnection):
+    pass
+
+
+class _StreamHTTPSConnection(_StreamConnection, http.client.HTTPSConnection):
+    pass
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    handler_order = 400
+
+    def http_error_302(self, request: Any, response: Any, code: int, message: str, headers: Any) -> Any:
+        # A model/OAuth body and arbitrary credential headers must not be forwarded or converted to a GET.
+        raise urllib.error.HTTPError(request.full_url, code, message, headers, response)
+
+    http_error_301 = http_error_303 = http_error_307 = http_error_308 = http_error_302
+
+
+class _StreamHTTPHandler(urllib.request.HTTPHandler):
+    handler_order = 400
+
+    def http_open(self, request: Any) -> Any:
+        call = getattr(request, "_stream_call", None)
+        if call is not None:
+            return self.do_open(partial(_StreamHTTPConnection, call=call), request)
+        return None
+
+
+class _StreamHTTPSHandler(urllib.request.HTTPSHandler):
+    handler_order = 400
+
+    def https_open(self, request: Any) -> Any:
+        call = getattr(request, "_stream_call", None)
+        if call is not None:
+            return self.do_open(partial(_StreamHTTPSConnection, call=call), request, context=self._context, check_hostname=self._check_hostname)
+        return None
+
+
 class _StreamCall:
     """One streamed request: a worker thread reads the response, the async generator that owns the call consumes the lines.
 
@@ -148,6 +213,9 @@ class _StreamCall:
         self._lines: queue.Queue[tuple[str, Any]] = queue.Queue(STREAM_QUEUE_LINES)
         self._lock = threading.Lock()
         self._response: Any = None
+        self._connection: Any = None
+        self._sent = False
+        self._request._stream_call = self
         self.cancelled = threading.Event()
 
     def start(self) -> threading.Thread:
@@ -167,6 +235,12 @@ class _StreamCall:
             self.cancelled.set()
             response = self._response
         _drop_connection(response)
+        sock = getattr(self._connection, "sock", None)
+        if sock is not None:
+            with contextlib.suppress(OSError):
+                sock.shutdown(socket.SHUT_RDWR)
+            with contextlib.suppress(OSError):
+                socket.socket._real_close(sock)
         # (a worker waiting for room gets it at once, sees the flag and goes)
         with contextlib.suppress(queue.Empty):
             while True:
@@ -203,8 +277,8 @@ class _StreamCall:
                 if self._adopt(error):
                     self._put("error", error_from_body(error.code, error.read(), _headers_of(error.headers)))
         except (urllib.error.URLError, OSError, TimeoutError, ValueError, http.client.HTTPException) as error:
-            if held is not None and 200 <= getattr(held, "status", 0) < 300:
-                timed_out = isinstance(error, TimeoutError)
+            if self._sent or held is not None and 200 <= getattr(held, "status", 0) < 300:
+                timed_out = isinstance(getattr(error, "reason", error), TimeoutError)
                 message = "模型长时间没有输出，已停止等待；请求可能已在处理，未自动重发。" if timed_out else "响应流中断；请求已被服务端接受，未自动重发。"
                 self._put("error", ChatGPTError(message, code="stream_idle" if timed_out else "stream", transient=False))
             else:
@@ -242,11 +316,23 @@ class _StreamCall:
         return False
 
 
+def stream_idle_timeout(request: Mapping[str, Any]) -> float:
+    """A bounded patience policy, not a claim about measured service latency. Keep-alives still reset each read."""
+    reasoning = request.get("reasoning")
+    effort = request.get("wc_reasoning_effort") or (reasoning.get("effort") if isinstance(reasoning, Mapping) else None)
+    return max(STREAM_IDLE_SECONDS, 600.0 if effort in ("high", "xhigh", "max") else 300.0 if effort == "medium" else STREAM_IDLE_SECONDS)
+
+
 class HttpClient:
     """Requests with a fixed opener (the default one honours the proxy settings)."""
 
     def __init__(self, opener: urllib.request.OpenerDirector | None = None) -> None:
         self._opener = opener or urllib.request.build_opener()
+        if isinstance(self._opener, urllib.request.OpenerDirector):
+            tls = next((h for h in self._opener.handlers if isinstance(h, urllib.request.HTTPSHandler)), None)
+            self._opener.add_handler(_StreamHTTPHandler())
+            self._opener.add_handler(_StreamHTTPSHandler(context=getattr(tls, "_context", None), check_hostname=getattr(tls, "_check_hostname", None)))
+            self._opener.add_handler(_NoRedirect())
 
     async def request(
         self,

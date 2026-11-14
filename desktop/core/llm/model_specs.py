@@ -18,3 +18,8 @@ def _models() -> dict[str, dict]:
 
 def known_window(model_id: str) -> int | None:
     return _models().get(model_id.strip(), {}).get("contextWindow")
+
+
+def long_context_threshold(model_id: str) -> int | None:
+    """Documented API pricing boundary for exact ids only; subscription usage is not subject to it."""
+    return _models().get(model_id.strip(), {}).get("longContextThreshold")

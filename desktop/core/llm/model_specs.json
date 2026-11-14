@@ -1,10 +1,10 @@
 {
   "checked": "2026-11-12",
   "models": {
-    "gpt-6.1-sol": { "contextWindow": 1050000, "source": "https://developers.openai.com/api/docs/models/gpt-6.1-sol" },
-    "gpt-6.1-terra": { "contextWindow": 1050000, "source": "https://developers.openai.com/api/docs/models/gpt-6.1-terra" },
-    "gpt-6-astra": { "contextWindow": 1050000, "source": "https://developers.openai.com/api/docs/models/gpt-6-astra" },
-    "gpt-5.4": { "contextWindow": 1050000, "source": "https://developers.openai.com/api/docs/models/gpt-5.4" },
+    "gpt-6.1-sol": { "contextWindow": 1050000, "longContextThreshold": 272000, "source": "https://developers.openai.com/api/docs/models/gpt-6.1-sol" },
+    "gpt-6.1-terra": { "contextWindow": 1050000, "longContextThreshold": 272000, "source": "https://developers.openai.com/api/docs/models/gpt-6.1-terra" },
+    "gpt-6-astra": { "contextWindow": 1050000, "longContextThreshold": 272000, "source": "https://developers.openai.com/api/docs/models/gpt-6-astra" },
+    "gpt-5.4": { "contextWindow": 1050000, "longContextThreshold": 272000, "source": "https://developers.openai.com/api/docs/models/gpt-5.4" },
     "gpt-5.2": { "contextWindow": 400000, "source": "https://developers.openai.com/api/docs/models/gpt-5.2" },
     "gpt-5.1": { "contextWindow": 400000, "source": "https://developers.openai.com/api/docs/models/gpt-5.1" },
     "gpt-5": { "contextWindow": 400000, "source": "https://developers.openai.com/api/docs/models/gpt-5" },

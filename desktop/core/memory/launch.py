@@ -42,6 +42,8 @@ class McpCommand:
     command: str
     args: tuple[str, ...]
     env: dict[str, str]
+    trusted_annotations: bool = False
+    """Only the bundled server has a locally known permission contract; a name is not proof of trust."""
 
 
 def console_python() -> str:
@@ -106,6 +108,7 @@ class MemoryLaunch:
             self.python,
             ("-m", "desktop.core.memory", "--store", str(self.root), "--engine", engine, "--project", project_path(project), "--run", run),
             env,
+            trusted_annotations=True,
         )
 
     def brief_for(self, engine: str, project: str | os.PathLike[str]) -> str:

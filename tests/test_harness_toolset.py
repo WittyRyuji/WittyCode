@@ -43,7 +43,8 @@ def call(name: str, **args: Any) -> Call:
 
 def test_a_server_and_tool_name_become_one_valid_function_name():
     assert mcp_name("wittycode-memory", "memory_write") == "mcp__wittycode-memory__memory_write"
-    assert mcp_name("my server", "do.it!") == "mcp__my_server__do_it_"
+    assert mcp_name("my server", "do.it!").startswith("mcp__my_server__do_it_")
+    assert mcp_name("my server", "do.it!") != mcp_name("my_server", "do_it_")
     long = mcp_name("s" * 40, "t" * 40)
     assert len(long) == NAME_LIMIT and long.startswith("mcp__" + "s" * 40 + "__")
 
@@ -54,8 +55,8 @@ def test_the_declarations_are_the_built_in_tools_and_every_running_servers_tools
     tools = make(tmp_path, clients=[memory, stopped])
     names = [d["name"] for d in tools.declarations()]
     assert names[: len(ToolRegistry.default().specs())] == [spec.name for spec in ToolRegistry.default().specs()]
-    assert names[-2:] == ["mcp__wittycode-memory__memory_search", "mcp__old__ghost"], "known schemas remain even while a server is offline"
-    declared = tools.declarations()[-2]
+    assert names[-2:] == ["mcp__old__ghost", "mcp__wittycode-memory__memory_search"], "known schemas stay sorted even while a server is offline"
+    declared = tools.declarations()[-1]
     assert declared["description"] == "memory_search of wittycode-memory" and declared["parameters"]["properties"] == {"q": {"type": "string"}}
 
 
@@ -77,7 +78,9 @@ def test_known_names_are_the_built_in_and_the_mcp_ones_only(tmp_path):
 
 def test_a_tool_declared_harmless_runs_without_a_question_at_every_level(tmp_path):
     for level in ("ask", "code", "full"):
-        tools = make(tmp_path, level, [StubClient("s", [tool("s", "quiet", **HARMLESS), tool("s", "look", readOnlyHint=True)])])
+        client = StubClient("s", [tool("s", "quiet", **HARMLESS), tool("s", "look", readOnlyHint=True)])
+        client.trusted_annotations = True
+        tools = make(tmp_path, level, [client])
         assert tools.check(call("mcp__s__quiet")).verdict == ALLOW, level
         assert tools.check(call("mcp__s__look")).verdict == ALLOW, level
 

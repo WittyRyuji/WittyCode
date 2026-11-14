@@ -237,7 +237,7 @@ def read_agents(project: Path) -> tuple[Path, str] | None:
 def context_update(instructions: str) -> dict[str, object]:
     """A normal developer message, supported without experimental configuration-update fields."""
     return {
-        "type": "message", "role": "developer",
+        "type": "message", "role": "developer", "wc_context_update": True,
         "content": [{"type": "input_text", "text": (
             "WittyCode context update: the following is the complete current instruction context. "
             "These instructions replace the earlier environment, mode, permissions, skills, server notes and project rules "
@@ -257,30 +257,27 @@ def build_instructions(
     plan: bool = False,
     skills: Sequence[Skill] = (),
     think_chinese: bool = True,
+    sections: dict[str, str] | None = None,
 ) -> str:
     """``servers``: ``(name, instructions)`` of the MCP servers connected to the conversation. ``notes``, when given, gets
     the sentences (Chinese, for the user) about instruction files that did not fit whole. ``plan``: the Plan mode (nothing
     may be changed). ``skills``: the skills the model may load itself (``harness.skills``). ``think_chinese``: the user's
     setting (``core/language``)."""
-    parts = [BASE.replace(_ANSWER_RULE, f"{_ANSWER_RULE}\n- {THINK_CHINESE}", 1) if think_chinese else BASE]
     day = today or datetime.date.today()
     runs = "Only reading and searching run (Plan mode)." if plan else LEVEL_RULES.get(level, LEVEL_RULES["ask"])
-    parts.append(
-        "Environment:\n"
-        f"- Working folder: {project}\n"
-        f"- Operating system: Windows ({os.environ.get('OS', 'Windows_NT')})\n"
-        f"- Date: {day.isoformat()}\n"
-        f"- Model: {model}\n"
-        f"- What runs without asking: {runs}\n"
-        "- When the user declines an action, do not try it again; say what you could not do."
-    )
-    if plan:
-        parts.append(PLAN_RULES)
-    if skills:
-        parts.append(skills_prompt(skills))
-    for name, text in servers:
+    fields = {
+        "workflow": BASE,
+        "language": THINK_CHINESE if think_chinese else "The Chinese thinking-language preference is off. Answer in the user's language.",
+        "environment": f"Environment:\n- Working folder: {project}\n- Operating system: Windows ({os.environ.get('OS', 'Windows_NT')})",
+        "date": f"- Date: {day.isoformat()}",
+        "model": f"- Model: {model}",
+        "permissions": f"- What runs without asking: {runs}",
+        "mode": PLAN_RULES if plan else "Auto mode is on. Plan mode is off; work may proceed under the current permissions.",
+        "skills": skills_prompt(skills) if skills else "No skills are available.",
+    }
+    for name, text in sorted(servers):
         if text.strip():
-            parts.append(f"Notes from the connected tool server `{name}`:\n{text.strip()}")
+            fields[f"server:{name}"] = f"Notes from the connected tool server `{name}`:\n{text.strip()}"
     agents = load_agents(project)
     for index, item in enumerate(agents.files):
         nearest = index == len(agents.files) - 1
@@ -291,10 +288,27 @@ def build_instructions(
             if item.cuts
             else ""
         )
-        parts.append(f"Instructions from {where} {AGENTS_FILE} ({item.path}). Follow them.{more}{short}\n{item.text}")
+        fields[f"project:{item.path}"] = f"Instructions from {where} {AGENTS_FILE} ({item.path}). Follow them.{more}{short}\n{item.text}"
     skipped = agents.left_out
     if skipped:
-        parts.append("Instruction files not loaded for lack of room: " + ", ".join(str(path) for path in skipped) + ". Read them with read_file when they matter.")
+        fields["omitted_files"] = "Instruction files not loaded for lack of room: " + ", ".join(str(path) for path in skipped) + ". Read them with read_file when they matter."
     if notes is not None:
         notes.extend(agents.notes())
-    return "\n\n".join(parts)
+    if sections is not None:
+        sections.update(fields)
+    return "\n\n".join(fields.values())
+
+
+def changed_context(previous: dict[str, str], current: dict[str, str]) -> dict[str, object] | None:
+    """Append only replaced sections. Explicit removal prevents an old skill/server/rule staying effective forever."""
+    changes = [f"[{key}]\n{value}" for key, value in current.items() if previous.get(key) != value]
+    changes += [f"[{key}]\nThis section is removed; its earlier instructions no longer apply." for key in previous if key not in current]
+    if not changes:
+        return None
+    return {
+        "type": "message", "role": "developer", "wc_context_update": True,
+        "content": [{"type": "input_text", "text": (
+            "WittyCode context update: replace only the named sections below. All other current sections stay in force. "
+            "Apply these current rules rather than an older snapshot.\n\n" + "\n\n".join(changes)
+        )}],
+    }

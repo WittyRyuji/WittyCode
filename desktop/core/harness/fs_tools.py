@@ -218,6 +218,7 @@ class _Decoded:
     codec: str
     bom: bytes
     lossy: bool
+    ambiguous: bool = False
 
 
 def _is_binary(data: bytes) -> bool:
@@ -228,19 +229,24 @@ def _is_binary(data: bytes) -> bool:
     return b"\0" in data
 
 
-def _decode(data: bytes) -> _Decoded:
+def _decode(data: bytes, encoding: str | None = None) -> _Decoded:
     bom, codec = b"", "utf-8"
     for candidate, name in ((codecs.BOM_UTF8, "utf-8"), (codecs.BOM_UTF16_LE, "utf-16-le"), (codecs.BOM_UTF16_BE, "utf-16-be")):
         if data.startswith(candidate):
             bom, codec = candidate, name
             data = data[len(candidate) :]
             break
+    if encoding and not bom:
+        try:
+            return _Decoded(data.decode(encoding), encoding, b"", False)
+        except (UnicodeDecodeError, LookupError) as error:
+            raise ToolError(f"The file is not valid {encoding}; choose the correct read_file encoding before editing.") from error
     try:
         return _Decoded(data.decode(codec), codec, bom, False)
     except UnicodeDecodeError:
         if not bom:
             try:
-                return _Decoded(data.decode("gb18030"), "gb18030", b"", False)
+                return _Decoded(data.decode("gb18030"), "gb18030", b"", False, True)
             except UnicodeDecodeError:
                 pass
         return _Decoded(data.decode(codec, "replace"), codec, bom, True)
@@ -272,7 +278,7 @@ def _format_numbered(lines: list[str], first: int) -> tuple[list[str], int]:
     return out, first + len(out) - 1
 
 
-def _read_window(path: Path, offset: int, limit: int, ctx: ToolContext) -> tuple[list[str], int | None, bool]:
+def _read_window(path: Path, offset: int, limit: int, ctx: ToolContext, encoding: str = "utf-8") -> tuple[list[str], int | None, bool]:
     """Lines ``offset``..``offset+limit-1`` of a file too big to load; the total is unknown."""
     lines: list[str] = []
     more = False
@@ -288,7 +294,7 @@ def _read_window(path: Path, offset: int, limit: int, ctx: ToolContext) -> tuple
             if len(lines) >= limit:
                 more = True
                 break
-            text = raw.decode("utf-8", "replace").rstrip("\r\n")
+            text = raw.decode(encoding, "replace").rstrip("\r\n")
             lines.append(text.removeprefix("\ufeff") if number == 1 else text)
     return lines, None, more
 
@@ -314,17 +320,20 @@ def read_file(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
             "Pass offset and limit to read a part of it, or use grep to find what you need."
         )
     note = ""
+    encoding = args.get("encoding") or ctx.read_encodings.get(_fold(str(path)))
     try:
         if info.st_size > MAX_READ_BYTES:
-            lines, total, more = _read_window(path, offset, limit, ctx)
+            lines, total, more = _read_window(path, offset, limit, ctx, encoding or "utf-8")
             window = lines
         else:
             data = path.read_bytes()
             if _is_binary(data):
                 raise ToolError(f"{path} looks like a binary file (it contains NUL bytes); it cannot be read as text.")
-            decoded = _decode(data)
+            decoded = _decode(data, encoding)
             if decoded.lossy:
                 note = "[Note: the file is not valid UTF-8; undecodable bytes are shown as U+FFFD.]\n"
+            elif decoded.ambiguous:
+                note = "[Note: GB18030 is only a guess; other legacy encodings can decode to different text. Re-read with the correct encoding (gb18030, big5, shift_jis or cp1252) before editing.]\n"
             all_lines = _split_lines(decoded.text)
             total = len(all_lines)
             window = all_lines[offset - 1 : offset - 1 + limit]
@@ -333,6 +342,8 @@ def read_file(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         raise _io_error("read", path, error) from None
     if info.st_size <= MAX_READ_BYTES and (total == 0 or window):
         ctx.read_files[_fold(str(path))] = hashlib.sha256(data).hexdigest()
+        if encoding:
+            ctx.read_encodings[_fold(str(path))] = encoding
     if total == 0:
         return ToolResult(f"{note}(The file is empty.)")
     if not window:
@@ -1184,9 +1195,9 @@ def create_file(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
                 original = path.read_bytes()
                 if ctx.read_files.get(_fold(str(path))) != hashlib.sha256(original).hexdigest():
                     raise ToolError("The existing file has not been read in this conversation or has changed since it was read. Use read_file first, then retry with the current content.")
-                decoded = _decode(original)
-                if _is_binary(original) or decoded.lossy:
-                    raise ToolError("The existing file cannot be decoded safely; it was not overwritten.")
+                decoded = _decode(original, ctx.read_encodings.get(_fold(str(path))))
+                if _is_binary(original) or decoded.lossy or decoded.ambiguous:
+                    raise ToolError("The existing file cannot be decoded safely; re-read with an explicit encoding before replacing it.")
                 before = decoded.text
                 normal = content.replace("\r\n", "\n")
                 crlf = before.count("\r\n") > before.count("\n") - before.count("\r\n")
@@ -1288,9 +1299,11 @@ def _plan_edit(ctx: ToolContext, args: dict[str, Any]) -> _EditPlan:
         raise _io_error("read", path, error) from None
     if _is_binary(data):
         raise ToolError(f"{path} looks like a binary file (it contains NUL bytes) and cannot be edited as text.")
-    decoded = _decode(data)
+    decoded = _decode(data, ctx.read_encodings.get(_fold(str(path))))
     if decoded.lossy:
-        raise ToolError(f"{path} is not valid UTF-8. Editing it would destroy the bytes that cannot be decoded; edit it with a shell command instead.")
+        raise ToolError(f"{path} is not valid UTF-8. Re-read it with the correct explicit encoding before editing; nothing was written.")
+    if decoded.ambiguous:
+        raise ToolError(f"{path} has an ambiguous text encoding. Re-read it with the correct explicit encoding before editing; nothing was written.")
     crlf_count = decoded.text.count("\r\n")
     lf_count = decoded.text.count("\n") - crlf_count
     text = decoded.text.replace("\r\n", "\n")
@@ -1360,7 +1373,8 @@ READ_FILE = ToolSpec(
         "Read a text file and return its lines numbered like `{line number}<TAB>{text}`. "
         f"{_PATH_NOTE} Returns up to 2000 lines from the start unless offset/limit are given; use them to page through "
         "a long file (the result says how to continue). Lines longer than 2000 characters are cut. UTF-8, GB18030 and UTF-16 "
-        "(with BOM) are read. Binary files are refused, and so are files over 5 MB unless offset and limit narrow the read. "
+        "(with BOM) are read. Guessed legacy encodings require an explicit encoding read before editing. "
+        "Binary files are refused, and so are files over 5 MB unless offset and limit narrow the read. "
         "To look at a folder use list_dir."
     ),
     parameters={
@@ -1369,6 +1383,7 @@ READ_FILE = ToolSpec(
             "file_path": {"type": "string", "description": f"File to read. {_PATH_NOTE}"},
             "offset": {"type": "integer", "minimum": 1, "description": "1-based line number to start at (default 1)."},
             "limit": {"type": "integer", "minimum": 1, "description": "Maximum number of lines to return (default 2000)."},
+            "encoding": {"type": "string", "enum": ["utf-8", "gb18030", "big5", "shift_jis", "cp1252"], "description": "Explicit legacy encoding when automatic detection is ambiguous; required before editing a guessed encoding."},
         },
         "required": ["file_path"],
     },

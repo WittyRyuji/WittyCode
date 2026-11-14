@@ -521,6 +521,12 @@ class ConnectionStore:
                     continue
         return kept
 
+    def has_tool_hooks(self, project):
+        """Conservative scheduling hint only; execution still validates source hashes in a worker thread."""
+        return any(e.get("kind") == "hook" and e.get("enabled") and e.get("imported")
+                   and (not e.get("project") or e["project"] == str(project))
+                   and e.get("config", {}).get("event") in ("PreToolUse", "PostToolUse") for e in self._load())
+
     def skill_allowed(self, path, project, *, name="", source=""):
         from desktop.core.harness.skills import slug
         key = os.path.normcase(str(path))
@@ -596,7 +602,7 @@ class ConnectionStore:
             payload["wittycode_tool_name"] = native_tool
             payload["tool_name"] = aliases[0]
         contexts = []
-        for entry in self.active("hook", project):
+        for entry in await asyncio.to_thread(self.active, "hook", project):
             config = entry["config"]
             if config.get("event") != event:
                 continue
@@ -604,7 +610,8 @@ class ConnectionStore:
             names = [str(native_tool or payload.get("source") or ""), *aliases]
             if matcher not in ("", "*") and not any(re.search(matcher, name) for name in names):
                 continue
-            env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
+            from desktop.core.child_env import environment
+            env = environment(minimal=True, explicit={"PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"})
             if config.get("pluginRoot"):
                 env.update(PLUGIN_ROOT=config["pluginRoot"], CLAUDE_PLUGIN_ROOT=config["pluginRoot"])
             process = await asyncio.create_subprocess_exec(str(SYSTEM32 / "WindowsPowerShell/v1.0/powershell.exe"), "-NoProfile", "-NonInteractive", "-Command", config["command"], cwd=project, env=env, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, creationflags=CREATE_NO_WINDOW)

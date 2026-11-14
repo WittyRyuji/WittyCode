@@ -220,8 +220,10 @@ def for_responses(items: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """The history as the Responses API takes it: a ``reasoning`` item that another API's adapter wrote (``wc_*``, no encrypted
     content) means nothing to it and is left out. The request the loop builds keeps those items (the adapters of the other APIs
     read them from it); whoever sends it to a Responses endpoint passes it through here."""
+    from desktop.core.harness.history import replayable
+
     sent: list[dict[str, Any]] = []
-    for item in items:
+    for item in replayable(items):
         if item.get("type") == "reasoning" and not item.get("encrypted_content"):
             continue
         sent.append({key: value for key, value in item.items() if not key.startswith("wc_")})
@@ -243,7 +245,8 @@ def call_output(call_id: str, output: str) -> dict[str, Any]:
 
 
 def _message_text(item: Mapping[str, Any]) -> str:
-    return "".join(part.get("text", "") for part in item.get("content") or () if isinstance(part, Mapping) and part.get("type") == "output_text")
+    from desktop.core.harness.history import message_text
+    return message_text(item)
 
 
 def _summary_text(item: Mapping[str, Any]) -> str:
@@ -307,7 +310,7 @@ def _translate(event: Mapping[str, Any], reasoning_parts: dict[str, dict[int, st
     item_id = str(event.get("item_id") or item.get("id") or "")
     if kind in ("response.created", "response.in_progress"):
         return [Started()]
-    if kind == "response.output_text.delta":
+    if kind in ("response.output_text.delta", "response.refusal.delta"):
         return [TextDelta(item_id, str(event.get("delta") or ""))]
     if kind in ("response.reasoning_summary_text.delta", "response.reasoning_text.delta"):
         index = event.get("summary_index") if isinstance(event.get("summary_index"), int) else 0

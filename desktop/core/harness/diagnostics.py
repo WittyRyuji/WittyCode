@@ -38,14 +38,32 @@ def _reasons(value: Any) -> list[str]:
     return sorted(found)
 
 
+def _frozen(value: Any) -> Any:
+    """Snapshot JSON structure without copying/encoding strings. Scalar values are immutable; nested edits change the key."""
+    if isinstance(value, Mapping):
+        return (dict, tuple(sorted((key, _frozen(part)) for key, part in value.items())))
+    if isinstance(value, (list, tuple)):
+        return (list, tuple(_frozen(part) for part in value))
+    return (type(value), value)
+
+
 class RequestTrace:
     def __init__(self) -> None:
         self._fixed: str = ""
         self._items: list[str] = []
+        self._cache: dict[Any, str] = {}
 
     def record(self, request: Mapping[str, Any], finished: Finished | None, seconds: float, failed: bool = False) -> dict[str, Any]:
-        fixed = fingerprint([request.get(key) for key in ("model", "instructions", "tools", "reasoning", "wc_reasoning_effort")])
-        items = [fingerprint(item) for item in request.get("input") or ()]
+        cache: dict[Any, str] = {}
+        def digest(value: Any) -> str:
+            key = _frozen(value)
+            result = cache.get(key) or self._cache.get(key)
+            if result is None:
+                result = fingerprint(value)
+            cache[key] = result
+            return result
+        fixed = digest([request.get(key) for key in ("model", "instructions", "tools", "reasoning", "wc_reasoning_effort")])
+        items = [digest(item) for item in request.get("input") or ()]
         shared = 0
         if self._fixed == fixed:
             for before, after in zip(self._items, items):
@@ -55,10 +73,11 @@ class RequestTrace:
         self._fixed, self._items = fixed, items
         record: dict[str, Any] = {
             "at": round(time.time(), 3), "seconds": round(max(seconds, 0), 3), "failed": failed,
-            "model_hash": fingerprint(request.get("model")), "instructions_hash": fingerprint(request.get("instructions")),
-            "tools_hash": fingerprint(request.get("tools")), "reasoning_hash": fingerprint([request.get("reasoning"), request.get("wc_reasoning_effort")]),
-            "input_hash": fingerprint(items), "input_items": len(items), "shared_prefix_items": shared,
+            "model_hash": digest(request.get("model")), "instructions_hash": digest(request.get("instructions")),
+            "tools_hash": digest(request.get("tools")), "reasoning_hash": digest([request.get("reasoning"), request.get("wc_reasoning_effort")]),
+            "input_hash": digest(items), "input_items": len(items), "shared_prefix_items": shared,
         }
+        self._cache = cache  # bound to this request: compaction/other contexts release obsolete text references
         if finished is not None:
             if finished.usage is not None:
                 record.update(finished.usage.tokens().to_json())

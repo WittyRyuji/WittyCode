@@ -197,10 +197,10 @@ def test_the_thoughts_another_api_wrote_are_not_sent_to_a_responses_endpoint_but
         with FakeApi() as api:
             api.script(list(say("ok")))
             store = store_for(settings_with(tmp_path, api.base_url, provider="openai"))
-            request = build_request(model=model_id_of(store), instructions="", items=[user_message("go"), foreign, own], tools=[], reasoning=None)
+            request = build_request(model=model_id_of(store), instructions="", items=[user_message("go"), foreign, own, {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "hi"}]}], tools=[], reasoning=None)
             assert foreign in request["input"], "the request the loop builds keeps them: the adapters of the other APIs read them from it"
             await ask(ApiBackend(store), request)
-            assert api.posts[0][2]["input"] == [user_message("go"), own]
+            assert api.posts[0][2]["input"] == [user_message("go"), own, {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "hi"}]}]
 
     asyncio.run(go())
 
@@ -235,9 +235,9 @@ def test_what_another_api_wrote_does_not_reach_openai_through_the_plan(tmp_path)
         with FakeResponses(token=ACCESS_TOKEN) as fake:
             fake.script(say("ok"))
             engine = make_engine(tmp_path, fake)
-            request = build_request(model="gpt-6.1-sol", instructions="", items=[user_message("go"), foreign, own], tools=[], reasoning=None)
+            request = build_request(model="gpt-6.1-sol", instructions="", items=[user_message("go"), foreign, own, {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "hi"}]}], tools=[], reasoning=None)
             await ask(engine, request)
-            assert fake.requests[0]["input"] == [user_message("go"), own]
+            assert fake.requests[0]["input"] == [user_message("go"), own, {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "hi"}]}]
             await engine.close_all()
 
     asyncio.run(go())

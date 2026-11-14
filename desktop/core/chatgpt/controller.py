@@ -47,10 +47,10 @@ from desktop.core.context_envelope import wrap as wrap_context
 from desktop.core.handoff import Handoff
 from desktop.core.harness import asking, compact, skills
 from desktop.core.harness.loop import INTERRUPTED, AgentLoop, Call, Observer, Outcome, Steer, Verdict
-from desktop.core.harness.mcp import McpClient, McpError, McpTool
+from desktop.core.harness.mcp import McpClient, McpError, McpTool, parse_tools
 from desktop.core.harness.permissions import LEVELS
 from desktop.core.harness.diagnostics import MAX_RECORDS, RequestTrace
-from desktop.core.harness.prompt import build_instructions, context_update
+from desktop.core.harness.prompt import build_instructions, changed_context, context_update
 from desktop.core.harness.store import SavedSession, SavedTurn, diff_to_json, pair_in_place, paired, recover
 from desktop.core.harness.tools import ToolContext
 from desktop.core.harness.toolset import HarnessTools
@@ -174,6 +174,8 @@ class ChatGPTController:
     _save_handle: asyncio.TimerHandle | None = None
     _close_requested: bool = False
     _close_task: asyncio.Task[None] | None = None
+    _session_lock: Any = None
+    stop_hook_blocked: bool = False
 
     def __post_init__(self) -> None:
         self.saved = SavedSession(id=self.session_id, project=str(self.project))
@@ -270,11 +272,13 @@ class ChatGPTController:
     # ------------------------------------------------------------------ opening
 
     async def open_new(self) -> None:
+        self._claim_session()
         memory = self.manager.memory
         self.preface = memory.brief_for("chatgpt", self.project) if memory is not None else ""
         self._ready()
 
     async def open_saved(self) -> None:
+        self._claim_session()
         self._notify("state")  # announce the opening tab so its cached history can be shown before reading the archive
         saved = await asyncio.to_thread(self.manager.sessions.load, self.session_id)
         if saved is None:
@@ -309,6 +313,8 @@ class ChatGPTController:
                 self.manager.sessions.save(saved)
             except OSError:
                 log.warning("could not save the repaired conversation", exc_info=True)
+        if saved.goal:
+            self.transcript.add_notice("未完成目标已保留；重新打开后不会自动执行。用 /goal resume 明确继续，或 /goal off 清除。")
         self._ready()
 
     def _ready(self) -> None:
@@ -319,25 +325,54 @@ class ChatGPTController:
         self._changed()
 
     async def _start_servers(self) -> None:
-        """The shared memory's server. Without it the conversation works the same, without the memory."""
+        """Start independent servers concurrently; cached contracts are available before handshakes finish."""
         from desktop.core.memory.server import INSTRUCTIONS, SERVER_NAME, TOOLS
+        from desktop.core.harness.diagnostics import fingerprint
 
-        for command in self.manager.memory_servers(self):
+        try:
+            commands = await asyncio.to_thread(self.manager.memory_servers, self)
+        except ExtensionError:
+            # One broken Connections definition must not make the model conversation unusable.
+            memory = self.manager.memory
+            built_in = memory.server_for("chatgpt", self.project, self.run) if memory is not None else None
+            commands = [built_in] if built_in is not None else []
+            self.transcript.add_notice("第三方 MCP 配置未就绪，已暂时跳过；模型会话仍可继续。请检查 Connections 的定义和环境变量。")
+        if self._close_requested:
+            return
+        contracts = self.saved.prompt.setdefault("mcp", {})
+        launches = []
+        for command in commands:
             client = McpClient(command.name, command.command, command.args, command.env, cwd=str(self.project))
-            if command.name == SERVER_NAME:
-                # The built-in contract is available even before initialize completes or if startup fails.
+            client.trusted_annotations = getattr(command, "trusted_annotations", False)
+            key = fingerprint([command.name, command.command, command.args, command.env])
+            cached = contracts.get(key, {})
+            if client.trusted_annotations and command.name == SERVER_NAME:
                 client.instructions = INSTRUCTIONS
                 client.tools = [McpTool(SERVER_NAME, tool["name"], tool["description"], tool["inputSchema"], tool["annotations"]) for tool in TOOLS]
+            elif cached:
+                try:
+                    if not isinstance(cached, dict) or not isinstance(cached.get("instructions", ""), str):
+                        raise McpError("invalid cached contract")
+                    client.tools = parse_tools(client.name, cached.get("tools", []), schema_key="schema")
+                    client.instructions = cached.get("instructions", "")
+                except McpError:
+                    self.transcript.add_notice("已忽略损坏的 MCP 声明缓存，正在重新读取；会话仍可继续。")
             self._clients.append(client)
+            launches.append((client, key))
+
+        async def start(client: McpClient, key: str) -> None:
             try:
                 await client.start()
+                contracts[key] = {"instructions": client.instructions, "tools": [
+                    {"name": t.name, "description": t.description, "schema": t.input_schema, "annotations": t.annotations} for t in client.tools
+                ]}
             except McpError:
                 log.warning("a tool server could not be started for a conversation")
-                self.transcript.add_notice("工具服务器未能启动，相关调用会返回不可用；不会静默移除工具。")
+                self.transcript.add_notice("工具服务器未能启动，相关调用会返回不可用；不会静默移除已知工具。")
                 self._changed()
             if self._close_requested:
                 await client.close()
-                return
+        await asyncio.gather(*(start(client, key) for client, key in launches))
 
     async def _ensure_tools(self) -> HarnessTools:
         if self._mcp_task is not None and not self._mcp_task.done():
@@ -353,16 +388,51 @@ class ChatGPTController:
                     except McpError:
                         self.transcript.add_notice("共享记忆重启失败，本会话的记忆工具暂不可用。")
                     self._changed()
-        self._context = self._context or ToolContext(self.project, threading.Event(), protected=(self.manager.root,))
+        from desktop.core.settings import default_settings_path
+        providers = getattr(getattr(self.manager, "api", None), "providers", None)
+        protected = [self.manager.root, default_settings_path().parent]
+        protected += [self.manager.root.parent / name for name in ("models.json", "providers.json", "connections.json", "settings.json", "memory", "conversations", "cache")]
+        for name in ("models_file", "sidecar"):
+            path = getattr(providers, name, None)
+            if isinstance(path, Path):
+                protected.append(path)
+        for owner, name in ((getattr(self.manager, "connections", None), "file"), (self.manager.memory, "root")):
+            path = getattr(owner, name, None)
+            if isinstance(path, Path):
+                protected.append(path)
+        self._context = self._context or ToolContext(self.project, threading.Event(), protected=tuple(protected))
+        names = getattr(providers, "secret_environment_names", None)
+        if names is not None:
+            from desktop.core.providers import ProviderError
+            try:
+                self._context.secret_env = await asyncio.to_thread(names)
+            except (ProviderError, OSError):
+                from desktop.core.child_env import environment
+                # Broken unrelated provider metadata must not poison Plan sessions or leak an unknown variable name.
+                self._context.secret_env = tuple(set(environment()) - set(environment(minimal=True)))
+                self.transcript.add_notice("模型配置无法读取；本轮命令仅继承基础环境。会话仍可继续，请检查 API Provider 配置。")
         if self._tools is None:
+            if self._mcp_task is not None and not self._mcp_task.done() and (not self._clients or any(not c.tools for c in self._clients)):
+                self.transcript.add_notice("部分 MCP 工具仍在启动；本次工具清单已固定。待服务器就绪后，重新打开会话可使用新工具。")
             self._tools = HarnessTools(self.manager.registry, self._context, self.autonomy, self._clients, asker=self._ask_questions)
-        else:
-            self._tools.clients = list(self._clients)
-            self._tools.refresh()
+        # The offered manifest is fixed for this open session. A first-time server that misses startup can be used
+        # after reopening (its contract is cached), rather than invalidating every previous request's cache prefix.
         self._tools.level = self.autonomy
         return self._tools
 
+    def _claim_session(self) -> None:
+        try:
+            self._session_lock = self.manager.sessions.claim(self.session_id)
+        except OSError as error:
+            raise ChatGPTError(str(error), code="session_in_use") from error
+
+    def _release_session(self) -> None:
+        if self._session_lock is not None:
+            self.manager.sessions.release(self._session_lock)
+            self._session_lock = None
+
     def _abandon(self, error: BaseException) -> None:
+        self._release_session()
         self.state = SessionState.CLOSED
         self.last_error = friendly_failure(error) if isinstance(error, ChatGPTError) else f"{type(error).__name__}: {error}"
         self.manager._forget(self)
@@ -396,6 +466,7 @@ class ChatGPTController:
             with contextlib.suppress(Exception):
                 await connections.hooks("SessionEnd", self.project, {"session_id": self.session_id, "reason": "other"})
         self._save_now()
+        self._release_session()
         self.state = SessionState.CLOSED
         self.manager._forget(self)
         self._notify("state")
@@ -477,6 +548,7 @@ class ChatGPTController:
             return False
         self.used_at = self.active_at = time.time()
         self.state = SessionState.RUNNING
+        self.stop_hook_blocked = False
         self._turn_model, self._turn_reasoning, self._turn_mode = self.model, self.reasoning, self.mode
         self._turn_start = len(self.saved.items)  # even setup failures belong to a new boundary, never the previous turn
         context = self.manager.hooks.prompt(PromptEvent(self.engine, self.project, text, frozenset(self.recalled), first=bool(self.preface)))
@@ -525,6 +597,7 @@ class ChatGPTController:
                 sent += wrap_context(self._connection_context, extra)
             item = user_item(sent, attachments)
             notes: list[str] = []
+            sections: dict[str, str] = {}
             instructions = build_instructions(
                 self.project,
                 model=model,
@@ -534,13 +607,18 @@ class ChatGPTController:
                 plan=plan,
                 skills=found,
                 think_chinese=self.manager.settings.think_chinese,
+                sections=sections,
             )
             snapshot = self.saved.prompt
             if not snapshot.get("instructions"):
-                self.saved.prompt = snapshot = {"instructions": instructions, "current": instructions}
-            elif snapshot.get("current") != instructions:
-                self.saved.items.append(context_update(instructions))
-                snapshot["current"] = instructions
+                snapshot.update(instructions=instructions, current=instructions, sections=sections)
+            else:
+                update = changed_context(snapshot["sections"], sections) if isinstance(snapshot.get("sections"), dict) else (
+                    context_update(instructions) if snapshot.get("current") != instructions else None
+                )
+                if update is not None:
+                    self.saved.items.append(update)
+                snapshot.update(current=instructions, sections=sections)
             instructions = snapshot["instructions"]
             self._turn_start = len(self.saved.items)
             self.saved.items.append(item)
@@ -561,13 +639,19 @@ class ChatGPTController:
                 shape=self.manager.shape,
                 conversation=self.session_id,
                 max_steps=lambda: self.manager.settings.max_steps,
+                max_continuations=2,
                 **self._carried_measure(model),
             )
             # The loop works on the view (what the model reads: the summary of the early part, then the rest); what it adds
             # reaches the log (``saved.items``) through ``_Watch.history_grew``.
             end = await loop.run(compact.view_of(self.saved.items, self.saved.compaction))
             if tools.connections is not None:
-                await tools.connections.hooks("Stop", self.project, {"session_id": self.session_id, "stop_hook_active": True})
+                try:
+                    await tools.connections.hooks("Stop", self.project, {"session_id": self.session_id, "stop_hook_active": True})
+                except ExtensionError:
+                    # This hook runs after the answer; a veto must not reclassify completed actions as failed.
+                    self.stop_hook_blocked = True
+                    self.transcript.add_notice("Stop Hook 未通过；模型回合已完成，未自动重做。请检查 Hook 或继续给出要求。")
         except asyncio.CancelledError:
             if self._turn is turn:
                 self._release_steers()
@@ -735,6 +819,7 @@ class ChatGPTController:
             return "还没有对话可以压缩。"
         self.used_at = time.time()
         self.state = SessionState.RUNNING
+        self.stop_hook_blocked = False
         self._turn_model, self._turn_reasoning, self._turn_mode = self.model, self.reasoning, self.mode
         self._turn_start = len(self.saved.items)  # even setup failures belong to a new boundary, never the previous turn
         self.transcript.output_probe = self._output_so_far
@@ -828,6 +913,18 @@ class ChatGPTController:
 
     # ------------------------------------------------------------------ keeping inside the window
 
+    def _economic_window(self, window: int | None) -> int | None:
+        """Only documented, direct API billing: do not impose an API surcharge policy on subscriptions/gateways."""
+        from urllib.parse import urlsplit
+        from desktop.core.llm.model_specs import long_context_threshold
+
+        api = getattr(self.manager, "api", None)
+        spec = api.spec(self.running_model) if api is not None and hasattr(api, "spec") else None
+        if spec is None or urlsplit(spec.base_url).hostname != "api.openai.com":
+            return window
+        threshold = long_context_threshold(spec.native)
+        return min(window, threshold) if window and threshold else window
+
     def _summary_effort(self) -> str | None:
         """The lowest reasoning level of the model: a summary needs no deep thought, and the user's own level may be Max."""
         info = self.manager.model_info(self.running_model)
@@ -850,10 +947,13 @@ class ChatGPTController:
         that cannot be written raises instead of being replaced by the digest."""
         model = self.running_model
         window = self.manager.model_window(model)
+        if self._tools is not None and self.saved.prompt.get("current"):
+            fixed = compact.fixed_tokens(self.saved.prompt["current"], self._tools.declarations(), self.manager.shape)
         # (refused although the estimate said it fits: aim well below what was refused; no window known: below the estimate)
         target = min(window, int(estimate * 0.7)) if window and overflow else (window or int(estimate * 0.7))
         if manual:
             target = window or MANUAL_WINDOW
+        target = self._economic_window(target) or target
         record = self.saved.compaction
         # (the loop's view is view_of(log, record): it begins with a summary because there is a record, never because of what
         # a message says, which may be a summary the user pasted)
@@ -891,7 +991,7 @@ class ChatGPTController:
                 on_usage=used,
                 whole=manual,
                 fallback=not manual,
-                rules=self.saved.prompt.get("current", "") if self.saved.prompt.get("current") != self.saved.prompt.get("instructions") else "",
+                rebase=True,
                 prefix_request=prefix,
                 on_request=requested,
             )
@@ -908,8 +1008,6 @@ class ChatGPTController:
                 "upto": upto, "summary": result.summary, "kept": result.kept, "at": time.time(), "before": result.before,
                 "after": result.after, "model": model, "mechanical": result.mechanical,
             }
-            if self.saved.prompt.get("current") != self.saved.prompt.get("instructions"):
-                entry["rules"] = self.saved.prompt.get("current", "")
             if not compact.boundary_ok(self.saved.items, upto) or compact.view_of(self.saved.items, entry) != result.view:
                 # (the view and the log disagree: kept, this summary would give the next turn a different conversation,
                 # or one with a tool result whose call is gone)
@@ -920,6 +1018,8 @@ class ChatGPTController:
                 raise self._too_big(model, window, result, estimate, fixed, overflow)
             return False
         self.saved.compaction = entry
+        if self.saved.prompt.get("current"):
+            self.saved.prompt["instructions"] = self.saved.prompt["current"]
         history[:] = result.view
         self.saved.context_used = 0
         self._publish_context(replace(self.context, used=None, compacted=True))
@@ -937,6 +1037,8 @@ class ChatGPTController:
             return f"已按你的要求压缩：对话约 {before}，现在约 {after}。整段对话变成了一段摘要，下一条消息从摘要接着聊；上面的完整记录还在。"
         if overflow:
             text = f"服务器说对话太长，「{name}」读不下（约 {before}）。已压缩到约 {after}"
+        elif window and self._economic_window(window) != window:
+            text = f"对话约 {before}，按「{name}」的长上下文价格分界提前压缩到约 {after}，减少后续请求的 Token 开销"
         elif window:
             text = f"对话约 {before}，快超出「{name}」的窗口（{format_tokens(window)}）。已压缩到约 {after}"
         else:
@@ -1213,7 +1315,7 @@ class _Watch(Observer):
     def _compact_at(self, window: int) -> int:
         """Where the user wants the conversation compacted: their percent of the window (read at every request)."""
         settings = self.ctl.manager.settings
-        return int(window * settings.chatgpt_compact_at / 100)
+        return int((self.ctl._economic_window(window) or window) * settings.chatgpt_compact_at / 100)
 
     def tool_room(self, estimate: int, step: int) -> int | None:
         if not self.current:
@@ -1226,7 +1328,7 @@ class _Watch(Observer):
             return max(0, compact.budget(window) - estimate)
         # (below the point where the conversation is compacted, so that the model reads them before any summary; when that
         # point is near or past, what a compaction keeps word for word, with the answer that asked for them)
-        return max(0, self._compact_at(window) - 1 - estimate, compact.keep_tokens(window) - step)
+        return max(0, self._compact_at(window) - 1 - estimate, compact.keep_tokens(self.ctl._economic_window(window) or window) - step)
 
     async def prepare(self, history: list[dict[str, Any]], estimate: int, overflow: bool) -> bool:
         if not self.current:
@@ -1246,6 +1348,9 @@ class _Watch(Observer):
                 return False
         fixed = self.fixed()
         done = await self.ctl._compact(self.owner, history, estimate, overflow, fixed, must_fit=overflow or over)
+        if done:
+            self.instructions = self.ctl.saved.prompt.get("instructions", self.instructions)
+            fixed = self.fixed()
         # (after one that could not help too: it is not tried again before the conversation has grown)
         self._compacted_to = compact.estimate_items(history) + fixed if done else estimate
         return done

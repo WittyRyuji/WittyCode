@@ -95,7 +95,7 @@ def test_the_words_that_cancel_a_goal():
 
 def test_the_plan_is_in_the_instructions_only_when_it_is_on(tmp_path):
     plain = build_instructions(tmp_path, model="m", level="code")
-    assert "Plan mode" not in plain and "Goal mode" not in plain
+    assert PLAN_RULES not in plain and "Plan mode is off" in plain and "Goal mode" not in plain
     assert "Reading, searching, creating and editing files inside the project run directly" in plain
     planned = build_instructions(tmp_path, model="m", level="full", plan=True)
     assert PLAN_RULES in planned
@@ -173,12 +173,16 @@ def test_plan_mode_still_asks_before_reading_outside_the_project_and_still_denie
     assert tools.check(use("shell", command="git status", cwd=str(outside))).verdict == DENY, "a command outside the project would ask: refused"
 
 
-def test_in_plan_mode_an_mcp_tool_runs_only_when_its_server_calls_it_harmless(tmp_path):
+def test_in_plan_mode_only_locally_trusted_readonly_mcp_tools_run(tmp_path):
     for level in ("ask", "full"):
-        tools = planned(tmp_path, level, [Stub([tool("s", "quiet", **HARMLESS), tool("s", "risky", destructiveHint=True)])])
-        assert tools.check(use("mcp__s__quiet")).verdict == ALLOW, level
-        verdict = tools.check(use("mcp__s__risky"))
-        assert verdict.verdict == DENY and verdict.reason == PLAN_REFUSAL, level
+        client = Stub([tool("s", "quiet", **HARMLESS), tool("s", "look", readOnlyHint=True), tool("s", "risky", destructiveHint=True)])
+        tools = planned(tmp_path, level, [client])
+        assert tools.check(use("mcp__s__look")).verdict == DENY
+        client.trusted_annotations = True
+        assert tools.check(use("mcp__s__look")).verdict == ALLOW, level
+        for name in ("quiet", "risky"):
+            verdict = tools.check(use(f"mcp__s__{name}"))
+            assert verdict.verdict == DENY and verdict.reason == PLAN_REFUSAL, level
 
 
 def test_asking_the_user_is_allowed_in_plan_mode(tmp_path):
@@ -423,7 +427,7 @@ def test_a_mode_chosen_while_a_turn_runs_is_the_next_turns_and_the_page_is_told(
             assert any("模式改为「Plan」" in text and "这一轮仍是「Auto」" in text for text in notices(controller))
             fake.release("answer")
             await finish_turn(controller)
-            assert "Plan mode" not in fake.requests[0]["instructions"]
+            assert PLAN_RULES not in fake.requests[0]["instructions"]
             controller.send_prompt("second")
             await finish_turn(controller)
             assert fake.requests[1]["instructions"] == fake.requests[0]["instructions"]

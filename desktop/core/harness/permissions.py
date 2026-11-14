@@ -10,10 +10,10 @@ case are dealt with), and a shell command is judged by its text and by where its
 resolves into it, a command whose text names it, and a command one of whose arguments resolves into it (a directory
 junction or symlink inside the project is therefore no way in). A deny cannot be overridden by ``remembered``.
 
-"Don't ask again this session" is a key (``remember_key``): ``exec:<program>`` for commands, ``edit`` for writes
-inside the project, ``edit:<folder>`` for writes elsewhere, ``read:<folder>`` for reads elsewhere. One deliberate
-narrowing: a remembered ``exec:`` key does not cover a command that chains or redirects (``git status; Remove-Item ...``),
-because approving ``git`` must not approve whatever follows the semicolon.
+"Don't ask again this session" is a key (``remember_key``): commands bind to an exact command/cwd digest, ``edit``
+means writes inside the project, ``edit:<folder>`` writes elsewhere, ``read:<folder>`` reads elsewhere. Compound commands
+and inline interpreter code cannot gain a remembered grant. Approving a harmless command never grants all its program's
+other operations or destructive flags.
 
 The read-only shell allowlist is a recogniser, not a parser: anything it cannot be sure about asks. A command passes only
 if it is one allowlisted command, or two joined by a single ``|``, and its text outside quotes has none of
@@ -27,6 +27,7 @@ resolved for certain (a wildcard standing for a folder, a drive-relative name) c
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import stat
@@ -346,6 +347,15 @@ def _is_compound(command: str) -> bool:
         return True
     flat, expands = masked
     return expands or bool(_CHAINING.search(flat))
+
+
+def _rememberable_command(command: str) -> bool:
+    if _is_compound(command):
+        return False
+    name = _program_key(command)
+    tokens = {token.lower() for token in command_tokens(command)}
+    interpreter = re.fullmatch(r"python(?:[0-9.]+)?|py|node(?:js)?|powershell|pwsh|cmd|bash|sh|ruby|perl|php|wscript|cscript", name)
+    return not (interpreter and tokens.intersection({"-c", "-command", "-encodedcommand", "-enc", "/c", "-e", "--eval"}))
 
 
 def _program_key(command: str) -> str:
@@ -860,7 +870,11 @@ def _git_internals(spec: ToolSpec, args: Mapping[str, Any], ctx: ToolContext) ->
 def remember_key(spec: ToolSpec, args: Any, ctx: ToolContext) -> str:
     args = _args(args)
     if spec.kind == "exec":
-        return "exec:" + _program_key(_command(args))
+        # Program-wide or even subcommand-wide grants include destructive flags (reset --hard, clean -fdx).
+        # Bind approval to the exact command and cwd, not to a parser's guess at an operation category.
+        resolved, _ = _locate(ctx, _text(args, "cwd"))
+        cwd = os.path.normcase(str(resolved)) if resolved is not None else "unresolved:" + str(_text(args, "cwd"))
+        return "exec:" + hashlib.sha256((cwd + "\0" + _command(args).strip()).encode("utf-8")).hexdigest()
     touched = _touched(spec, args, ctx)
     outside = next(((path, inside) for path, inside in touched if not inside), None)
     if spec.kind == "edit":
@@ -940,7 +954,7 @@ def decide(level: str, spec: ToolSpec, args: Any, ctx: ToolContext, *, remembere
         )
     verdict = _base(level if level in LEVELS else "ask", spec, args, ctx)
     if verdict.verdict == "ask" and remembered and remember_key(spec, args, ctx) in remembered:
-        if spec.kind != "exec" or not _is_compound(_command(args)):
+        if spec.kind != "exec" or _rememberable_command(_command(args)):
             return Decision("allow", "本会话内已允许同类操作")
     return verdict
 

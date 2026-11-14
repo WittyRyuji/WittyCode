@@ -119,8 +119,9 @@ def _git_env(env: dict[str, str]) -> None:
     env["GIT_CONFIG_COUNT"] = str(start + len(_GIT_NEUTRAL))
 
 
-def _launch(command: str) -> tuple[list[str], dict[str, str]]:
-    env = dict(os.environ)
+def _launch(command: str, blocked: tuple[str, ...] = ()) -> tuple[list[str], dict[str, str]]:
+    from desktop.core.child_env import environment
+    env = environment(blocked=blocked)
     env.update(GIT_PAGER="cat", PAGER="cat", TERM="dumb", NO_COLOR="1", PYTHONIOENCODING="utf-8")
     _git_env(env)
     if IS_WINDOWS:
@@ -239,11 +240,12 @@ async def run_shell(
     cwd: Path,
     timeout: float,
     abort_event: threading.Event | None = None,
+    blocked: tuple[str, ...] = (),
 ) -> tuple[str, int, bool, bool]:
     """Run ``command``; returns ``(output, exit_code, timed_out, aborted)``. ``exit_code`` is -1 when there is none."""
     if abort_event is not None and abort_event.is_set():
         return "", -1, False, True
-    argv, env = _launch(command)
+    argv, env = _launch(command, blocked)
     extra: dict[str, Any] = {"creationflags": CREATE_NO_WINDOW} if IS_WINDOWS else {"start_new_session": True}
     process = await asyncio.create_subprocess_exec(
         *argv,
@@ -553,7 +555,7 @@ async def shell(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         )
     timeout = args.get("timeout", DEFAULT_TIMEOUT)
     try:
-        output, code, timed_out, aborted = await run_shell(command, cwd, timeout, ctx.abort)
+        output, code, timed_out, aborted = await run_shell(command, cwd, timeout, ctx.abort, ctx.secret_env)
     except OSError as error:
         raise ToolError(f"Could not start the shell: {error}") from None
     lines = [output or "(no output)"]

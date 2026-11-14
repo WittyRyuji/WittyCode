@@ -249,7 +249,7 @@ def test_an_error_body_that_is_cut_short_ends_the_stream_with_an_error(server, c
 
     with pytest.raises(ChatGPTError) as caught:
         asyncio.run(asyncio.wait_for(read(), 10))
-    assert caught.value.code == "network", "a cut body is a network problem for the user, not an internal error"
+    assert caught.value.code == "stream" and not caught.value.transient, "a sent request with a truncated error body must not be blindly replayed"
 
 
 # ------------------------------------------------------------------------------------------------ after the end
