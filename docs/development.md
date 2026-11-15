@@ -36,6 +36,16 @@
 - `docs/knowledge.md` 和 `docs/handoff.md` 里有几千字的长行：搜索时只列文件名或限制输出长度。
 - 有的代理的 shell 里设置了环境变量 `GIT_SSH_COMMAND`，它会盖过仓库的 `core.sshCommand`：推送前在同一条命令里先重设它（见 `docs/knowledge.md`「斜杠菜单去掉 `/new`…」一条的 (d)）。
 
+## 规则的细节
+
+`AGENTS.md` 的规则在本项目里具体指什么。改代码、开窗口、调用真实模型或提交之前看一遍。
+
+- **语言**：任何用途都不许引入 C#、C++、Rust 等其他语言，小工具、启动器、安装器也不行；需要的东西用 Python 或前端工具链做。
+- **不许改的文件**：`spikes/ctx_long_session.py`、`fixtures/long_session/` 和 `LICENSE`。
+- **用户的数据和设置**在 `%APPDATA%\WittyCode\` 和旧位置 `%APPDATA%\droid-desk\`。自己开的窗口用 `--settings` 指到 `sandbox/` 里，并尽快关掉；真实模型调用的工作目录放在 `sandbox/` 下。
+- **公开仓库**：下面这些不许进库，截图、录像、测试数据、代码注释、提交说明和文档里都不行——真实路径和用户名、机器信息、令牌和密钥、SSH 密钥文件名、邮箱、账号和会话 id、套餐等级、用户的其他项目和个人内容。演示和测试用中性名字（`demo@example.com`、`C:\Users\me\…`、项目 `wittycode` / `inventory-api`）。测试里的假密钥拆开写（`"sk-" + "…"`），不要绕过密钥扫描。进库前用 `git grep` 自查；更细的清单在 `docs/project.md`「仓库与许可证」。
+- **提交格式**：见下面「Git」一节。
+
 ## Git
 
 - 远端 `origin` 是公开仓库。提交标题用英文一行祈使句（如 `Add file links in the conversation`），正文写做了什么和为什么，结尾带上做这次改动的代理的 `Co-authored-by` 行。提交前看一遍 `git status` 和暂存的差异，不要把无关文件带进去。
