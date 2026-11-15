@@ -1,0 +1,24 @@
+{
+  "id": "ex-bowling",
+  "title": "Exercism (Python): bowling",
+  "prompt": [
+    "Solve the programming exercise in this folder.",
+    "",
+    "- INSTRUCTIONS.md describes it.",
+    "- Write the solution in bowling.py. Keep the names the tests import.",
+    "- The tests are in bowling_test.py. Do not change them.",
+    "- Run them with: python -m unittest -q bowling_test.py",
+    "",
+    "You are done when every test passes."
+  ],
+  "check": [
+    "python",
+    "-m",
+    "unittest",
+    "-q",
+    "bowling_test.py"
+  ],
+  "protect": [
+    "bowling_test.py"
+  ]
+}

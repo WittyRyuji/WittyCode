@@ -1,0 +1,14 @@
+{
+  "id": "probe-gbk-csv",
+  "title": "Edit a GBK file with CRLF line ends and keep both",
+  "prompt": [
+    "Update the stock file data/stock.csv:",
+    "",
+    "1. Set the stock of 螺丝刀 to 35.",
+    "2. Add a new last record: 扳手,18,把",
+    "",
+    "The file is exchanged with a legacy system (see README.md): it must stay GBK-encoded with CRLF line ends. Do not change test_stock.py.",
+    "Check with: python -m unittest -q"
+  ],
+  "protect": ["test_stock.py"]
+}

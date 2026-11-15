@@ -43,6 +43,7 @@ WittyCode：Windows 上的编程代理桌面应用，Python 3.11 + PySide6 + Qt 
 | `desktop/devtools/` | `samples.py`（样例文件） |
 | `desktop/ui_dist/` | 构建产物（`index.html` 单文件），不进 git |
 | `tests/`、`fixtures/` | 按模块分的单元 / 集成测试 + `test_app_e2e.py` 整机测试（`e2e_support.py` 的 `Rig` 像用户一样用真 Qt 事件驱动真页面）；`app_support.make_core` 是真的自有循环接本机假 Responses 服务（`fake_responses.py`），`fake_devin.py` 是假的 `devin acp`；`conftest.py` 让每个测试的设置目录指向临时目录 |
+| `evals/` | Harness 评测集（不进发布包）：`taskset.py`（任务的定义、任务文件夹、判定、不用模型的 `verify`）、`runner.py`（把任务交给真的 `ChatGPTEngine`、控制器和循环；`Pilot` 代替用户批准、拒绝越界读写、按 Token 和时间叫停；整轮预算）、`metrics.py`（从会话的请求诊断和回合里读出请求数、四类 token、折算成本、分项用时、前缀打断）、`report.py`（结果表和两次运行的对比）、`__main__.py`（`python -m evals list / verify / run / compare`）、`tasks/`（`exercism/` 8 道公开题，MIT，来源和哈希在 `SOURCE.json`；`probes/` 5 道针对 Harness 行为的自编题；`suites.json`）；见「Harness 评测集」一条 |
 
 ## 发布包
 

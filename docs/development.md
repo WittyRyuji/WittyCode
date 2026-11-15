@@ -15,6 +15,12 @@
 - README 截图重拍（演示数据，不含真实对话）：`cd frontend; npm run build; node scripts/readme-shots.mjs`
 - 发布包：先 `cd frontend; npm run build:app`，再 `.\.venv\Scripts\python.exe scripts\build_release.py`（`--no-smoke` / `--no-zip` / `--keep-work`），产物在 `dist/`。包的结构和验证见 `docs/project.md`「发布包」。
 - 实机探针用便宜的模型，轮数按任务给的上限。
+- **评测集**（`evals/`：衡量自有循环的任务通过率、Token 和用时；设计和读法见 `docs/knowledge.md`「Harness 评测集」）：
+  - 不调用模型：`.\.venv\Scripts\python.exe -m evals list`（任务和套件）、`-m evals verify`（每个任务原样必须不通过、套上参考解必须通过）、`-m evals compare <运行 A> <运行 B>`（两次运行逐任务对比）。
+  - **调用真实模型**：`.\.venv\Scripts\python.exe -m evals run --model <模型> [--reasoning low] [--suite smoke|core|full]`。默认套件 `core`（10 个任务）；默认预算 100 万 token（`--budget 1m`，最多 `5m`，再大直接拒绝），单任务默认 20 万（`--task-budget`）、30 步、900 秒。结果在 `sandbox/eval/runs/<时间>-<模型>/`：`result.json`、`summary.md`、`transcripts/`（每个任务的对话）、`work/`（任务文件夹）。第一次先用 `--suite smoke`（3 个任务）。
+  - 套餐模型需要一份登录。默认用评测自己的资料夹：先运行 `.\.venv\Scripts\python.exe -m desktop --settings sandbox/eval/profile/settings.json`，在窗口里登录一次再关掉；也可以用 `--account <含登录的 chatgpt 文件夹>` 指到别处。API 模型用 `--model api:<provider>:<id> --models <models.json>`，密钥按该文件里的 `${变量名}` 从环境读。
+  - 评测没有沙箱：批准的命令以当前用户在本机运行，所以只放不需要外部东西的小任务；任务文件夹之外的读写请求一律拒绝。
+  - 改了 `evals/` 之后跑变异检查：`.\.venv\Scripts\python.exe sandbox\mutate_evals.py`（在临时副本里跑，约 25 分钟；`--check` 只查模式串）。
 
 ## 测试的坑
 

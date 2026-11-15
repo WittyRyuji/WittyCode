@@ -1,0 +1,24 @@
+{
+  "id": "ex-react",
+  "title": "Exercism (Python): react",
+  "prompt": [
+    "Solve the programming exercise in this folder.",
+    "",
+    "- INSTRUCTIONS.md describes it.",
+    "- Write the solution in react.py. Keep the names the tests import.",
+    "- The tests are in react_test.py. Do not change them.",
+    "- Run them with: python -m unittest -q react_test.py",
+    "",
+    "You are done when every test passes."
+  ],
+  "check": [
+    "python",
+    "-m",
+    "unittest",
+    "-q",
+    "react_test.py"
+  ],
+  "protect": [
+    "react_test.py"
+  ]
+}
