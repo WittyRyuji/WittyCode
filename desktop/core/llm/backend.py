@@ -204,7 +204,7 @@ class ApiBackend:
         else:
             url, body = base + "/responses", responses_body(request, route)
             headers["Accept"] = "text/event-stream"
-        data = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        data = await asyncio.to_thread(lambda: json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
         if plan.access.bearer:
             sent = {**headers, "Authorization": f"Bearer {plan.access.bearer}"}
         elif plan.access.credentials is not None:

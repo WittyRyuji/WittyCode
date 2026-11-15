@@ -19,6 +19,7 @@ import type {
   SessionSettings,
   ThemeChoice,
   Turn,
+  TurnUpdate,
 } from "./types";
 import type { Events, FollowUp, InitResult, SavedRow, SettingsView } from "./protocol";
 
@@ -239,12 +240,18 @@ export function selectWhenKnown(s: Pick<LiveData, "sessions">, id: string): Part
 }
 
 /** Changed turns replace the ones with the same id; new ones are appended in the order given. */
-export function upsertTurns(turns: Turn[], incoming: Turn[]): Turn[] {
+export function upsertTurns(turns: Turn[], incoming: TurnUpdate[]): Turn[] {
   if (incoming.length === 0) return turns;
   const at = new Map(turns.map((t, i) => [t.id, i]));
   const out = [...turns];
-  for (const turn of incoming) {
-    const i = at.get(turn.id);
+  for (const update of incoming) {
+    const i = at.get(update.id);
+    const previous = new Map((i === undefined ? [] : out[i]!.blocks).map((block) => [block.id, block]));
+    const turn: Turn = !update.blocks.some((block) => block.kind === "unchanged") ? update as Turn : { ...update, blocks: update.blocks.flatMap((block) => {
+      if (block.kind !== "unchanged") return [block];
+      const kept = previous.get(block.id);
+      return kept ? [kept] : [];
+    }) };
     if (i === undefined) {
       at.set(turn.id, out.length);
       out.push(turn);
@@ -319,7 +326,7 @@ function onAgentTurns(s: LiveData, e: Events["agentTurns"]): Partial<LiveData> {
 function onTurns(s: LiveData, e: Events["turns"]): Partial<LiveData> {
   if (!s.tabs.includes(e.id)) return {};
   const before = s.sessions[e.id] ?? newConversation(e.id);
-  const turns = e.all ? [...e.turns] : upsertTurns(before.turns, e.turns);
+  const turns = upsertTurns(e.all ? [] : before.turns, e.turns);
   return { sessions: { ...s.sessions, [e.id]: { ...before, turns } } };
 }
 

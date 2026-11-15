@@ -22,6 +22,7 @@ Invariants worth knowing:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import random
@@ -104,6 +105,8 @@ class Outcome:
     diffs: tuple[Any, ...] = ()
     cancelled: bool = False
     """The user said no (or the turn was stopped): shown as cancelled rather than failed."""
+    reference: str = ""
+    """Immutable full output, retained separately from the model preview."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,6 +161,9 @@ class Observer:
     def call_running(self, call: Call) -> None: ...
 
     def call_done(self, call: Call, outcome: Outcome) -> None: ...
+
+    async def retain_output(self, call: Call, outcome: Outcome) -> None:
+        """Persist complete evidence before a preview is appended to model history."""
 
     def usage(self, usage: Usage) -> None: ...
 
@@ -471,8 +477,9 @@ class AgentLoop:
         texts: dict[str, str] = {}
         self._visible_text = False
         failed = True
+        stream = self.stream(request)
         try:
-            async for event in self.stream(request):
+            async for event in stream:
                 if isinstance(event, Started):
                     self._acknowledged = True
                 elif not isinstance(event, Finished):
@@ -503,6 +510,7 @@ class AgentLoop:
                     if event.usage is not None:
                         context = event.usage.context
                         self.observer.usage(event.usage)
+                    break
             self._visible_text = any(text.strip() for text in texts.values())
             failed = False
         finally:
@@ -525,6 +533,10 @@ class AgentLoop:
             if kept:
                 self.observer.history_grew(kept)
             self.observer.request_done(request, finished, time.monotonic() - started, failed)
+            close = getattr(stream, "aclose", None)
+            if close is not None:
+                with contextlib.suppress(Exception):
+                    await close()
         return calls, incomplete
 
     # ------------------------------------------------------------------ tools
@@ -538,14 +550,19 @@ class AgentLoop:
         tasks: list[asyncio.Task[Any]] = []
         safe = getattr(self.tools, "parallel_safe", lambda call: False)
 
-        def commit(index: int, call: Call, outcome: Outcome) -> None:
+        async def commit(index: int, call: Call, outcome: Outcome) -> None:
             nonlocal room
+            await self.observer.retain_output(call, outcome)
             self.observer.call_done(call, outcome)
+            from desktop.core.harness.outputs import hint
+            reference_note = "\n" + hint(outcome.reference) if outcome.reference else ""
             output = clip_output(outcome.output) + self.reminder(call, outcome)
             if room is not None:
                 clip = clip_read_output if call.name == "read_file" and not outcome.is_error else clip_tokens
-                output = clip(output, max(OUTPUT_FLOOR, room // (len(calls) - index)) - _OUTPUT_ITEM)
-            item = call_output(call.call_id, output)
+                output = clip(output, max(OUTPUT_FLOOR, room // (len(calls) - index)) - _OUTPUT_ITEM - estimate_text(reference_note))
+            item = call_output(call.call_id, output + reference_note)
+            if outcome.reference:
+                item["wc_output_ref"] = outcome.reference
             if room is not None:
                 room = max(0, room - estimate_item(item))
             history.append(item)
@@ -565,7 +582,8 @@ class AgentLoop:
                 tasks = [asyncio.create_task(execute(position)) for position in range(index, end)]
                 await asyncio.gather(*tasks)
                 for position in range(index, end):
-                    commit(position, calls[position], outcomes.pop(position))
+                    await commit(position, calls[position], outcomes[position])
+                    outcomes.pop(position)
                 tasks = []
                 index = end
         except BaseException:
@@ -579,7 +597,7 @@ class AgentLoop:
                     continue
                 outcome = outcomes.get(index)
                 if outcome is not None:
-                    commit(index, call, outcome)
+                    await commit(index, call, outcome)
                 else:
                     item = call_output(call.call_id, INTERRUPTED)
                     history.append(item)

@@ -184,6 +184,9 @@ export interface QuestionPrompt {
 
 export type Prompt = PermissionPrompt | QuestionPrompt;
 
+/** Only live deltas may reference an unchanged block; cached/full history always contains actual blocks. */
+export type TurnUpdate = Omit<Turn, "blocks"> & { blocks: (Block | { id: string; kind: "unchanged" })[] };
+
 export interface Turn {
   id: string;
   blocks: Block[];

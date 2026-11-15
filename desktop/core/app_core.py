@@ -94,6 +94,7 @@ from desktop.core.transcript import Transcript, TurnStatus
 from desktop.core.speed import speed_of
 from desktop.core.usage import Tokens, UsageLedger
 from desktop.core.viewmodel import attachment_json, context_json, turn_json, usage_json
+from desktop.core.turn_delta import changed_blocks
 
 log = logging.getLogger("desktop.app")
 
@@ -1484,9 +1485,12 @@ class AppCore:
         if (changed or replace) and not hold:
             built = []
             for turn in changed:
+                previous = conv.json_cache.get(turn.id) if not replace else None
+                if previous is not None and previous[0] != conv.sent_versions.get(turn.id):
+                    previous = None  # A cache write may have rebuilt this turn before the page received it.
                 entry = (turn.version, turn_json(turn, self._thumb))
                 conv.json_cache[turn.id] = entry
-                built.append(entry[1])
+                built.append(changed_blocks(entry[1], previous[1] if previous is not None else None))
             payload = {"id": conv.cid, "turns": built, "all": replace}
             conv.sent_ids = ids
             for turn in changed:
@@ -1910,11 +1914,15 @@ class AppCore:
             return {"ok": False, "text": "没有已保存的目标可以恢复：用 /goal 目标 设置一个新目标。"}
         if resuming and goal.rounds >= goals.ROUNDS:
             return {"ok": False, "text": "已保存目标已用完轮数：检查结果后，用 /goal 目标 明确开始新一批。"}
+        previous = dict(getattr(getattr(controller, "saved", None), "goal", {}))
+        if not self._checkpoint_goal(conv, goal):
+            controller.saved.goal = previous
+            return {"ok": False, "text": "目标未启动：会话保存失败，请先检查存储空间和权限。"}
         conv.goal = goal
         if not controller.send_prompt(goal.next_message() if resuming else goals.opening(text)):
             conv.goal = None
+            self._checkpoint_goal(conv, goals.Goal.from_json(previous))
             return {"ok": False, "text": "现在不能发送：会话没有就绪。"}
-        self._checkpoint_goal(conv, goal)
         self._start_title(conv, goal.text)
         controller.transcript.add_notice(
             f"目标已{'恢复' if resuming else '设定'}：{goal.text}\n模型会一轮轮做下去，每轮都把目标交给它对照结果判断，最多 {goals.ROUNDS} 轮；完成或需要你时会停下，点「停止」随时结束。"
@@ -1923,11 +1931,12 @@ class AppCore:
         self._schedule_flush()
         return {"ok": True, "text": ""}
 
-    def _checkpoint_goal(self, conv: Conversation, goal: goals.Goal | None) -> None:
+    def _checkpoint_goal(self, conv: Conversation, goal: goals.Goal | None) -> bool:
         saved = getattr(conv.controller, "saved", None)
         if conv.engine == OWN_ENGINE and saved is not None:
             saved.goal = goal.to_json() if goal is not None else {}
-            conv.controller._save_now()
+            return conv.controller._save_now()
+        return True
 
     def _stop_goal(self, conv: Conversation, notice: str, *, finished: bool = False) -> None:
         self._checkpoint_goal(conv, None if finished else conv.goal)
@@ -1951,6 +1960,11 @@ class AppCore:
         if turn is None or turn.status is not TurnStatus.DONE:
             why = "这一轮出错了。" if turn is not None and turn.status is TurnStatus.FAILED else "这一轮被停止了。"
             self._stop_goal(conv, "目标先停下了：" + why)
+            return
+        end = getattr(controller, "last_turn_end", None)
+        if conv.engine == OWN_ENGINE and (end is None or end.reason != "done" or getattr(controller, "_save_failed", False)):
+            goal.rounds += 1
+            self._stop_goal(conv, "目标先停下了：这一轮未正常完成或未成功保存，未接受完成标记，也不会自动续跑。检查结果后可用 /goal resume 继续。")
             return
         texts = [block.text for block in turn.blocks if block.kind == "text" and block.text]
         outcome = goals.step(goal, texts[-1] if texts else "", bool(turn.tools))
@@ -1993,7 +2007,15 @@ class AppCore:
     async def _generate_title(self, conv: Conversation, row: str, question: str, engine: str, model: str) -> None:
         prompt = session_title.prompt(question)
         if engine == "chatgpt" and self.chatgpt is not None:
-            answer = await chatgpt_side.ask(self.chatgpt, prompt, model_id=model, instructions=session_title.SYSTEM, timeout=30)
+            owner = conv.controller
+            def spent(usage: Any, used_model: str) -> None:
+                if owner.state is SessionState.CLOSED or not hasattr(owner, "_add_usage"):
+                    self.chatgpt.record_side_usage(usage, used_model)
+                    return
+                owner._add_usage(usage, measures_context=False, model=used_model)
+                owner.saved.requests.append({"kind": "title", "model": used_model, "usage": usage.tokens().to_json()})
+                owner._save_now()
+            answer = await chatgpt_side.ask(self.chatgpt, prompt, model_id=model, instructions=session_title.SYSTEM, timeout=30, on_usage=spent)
         elif engine == "devin" and self.devin is not None:
             answer = await devin_side.ask(self.devin, conv.project, session_title.SYSTEM + "\n\n" + prompt, timeout=30)
         else:

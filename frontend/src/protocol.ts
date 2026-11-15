@@ -39,6 +39,7 @@ import type {
   Speed,
   ThemeChoice,
   Turn,
+  TurnUpdate,
   Usage,
 } from "./types";
 import type { TestResult } from "./bridge";
@@ -429,7 +430,7 @@ export interface Events {
   /** the run of the sub-agent that is open in the side panel: all of it (`all`), or the turns that changed */
   agentTurns: { id: string; agentId: string; turns: Turn[]; all: boolean };
   /** `all`: these are all of its turns; otherwise the ones that changed (new ones come last) */
-  turns: { id: string; turns: Turn[]; all: boolean };
+  turns: { id: string; turns: TurnUpdate[]; all: boolean };
   /** a message with attachments whose turn failed goes back into the composer */
   restore: { id: string; text: string; attachments: AttachmentView[] };
   settings: { settings: SettingsView };

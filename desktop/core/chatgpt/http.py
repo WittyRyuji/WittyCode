@@ -344,7 +344,7 @@ class HttpClient:
         json_body: Any = None,
         timeout: float = DEFAULT_TIMEOUT,
     ) -> HttpResponse:
-        request = _prepare(method, url, headers, form, json_body)
+        request = await asyncio.to_thread(_prepare, method, url, headers, form, json_body)
         return await asyncio.to_thread(self._send, request, timeout)
 
     def _send(self, request: urllib.request.Request, timeout: float) -> HttpResponse:
@@ -368,8 +368,9 @@ class HttpClient:
         timeout: float = STREAM_IDLE_SECONDS,
     ) -> AsyncIterator[str]:
         """The lines of the response body, without their line ends. ``timeout`` is how long a read may wait."""
-        async for line in self._stream(method, url, headers, json_body, body, timeout, 0):
-            yield line
+        async with contextlib.aclosing(self._stream(method, url, headers, json_body, body, timeout, 0)) as stream:
+            async for line in stream:
+                yield line
 
     async def stream_chunks(
         self,
@@ -381,11 +382,12 @@ class HttpClient:
         timeout: float = STREAM_IDLE_SECONDS,
     ) -> AsyncIterator[bytes]:
         """The response body as the pieces of bytes that arrive (at most 64 KiB each)."""
-        async for piece in self._stream(method, url, headers, None, body, timeout, 65536):
-            yield piece
+        async with contextlib.aclosing(self._stream(method, url, headers, None, body, timeout, 65536)) as stream:
+            async for piece in stream:
+                yield piece
 
     async def _stream(self, method: str, url: str, headers: Mapping[str, str] | None, json_body: Any, body: bytes | None, timeout: float, chunk: int) -> AsyncIterator[Any]:
-        request = _prepare(method, url, headers, None, json_body, body)
+        request = await asyncio.to_thread(_prepare, method, url, headers, None, json_body, body)
         wake = asyncio.Event()
         call = _StreamCall(self._opener, request, timeout, asyncio.get_running_loop(), wake, chunk)
         call.start()

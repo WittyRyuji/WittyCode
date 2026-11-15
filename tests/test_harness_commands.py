@@ -242,8 +242,8 @@ def test_a_summary_that_cannot_be_written_raises_when_the_user_asked_for_it():
         run_coroutine(compact.compact(big_view(), stream=Script(say("   ")), model="m", reasoning=None, window=4000, whole=True, fallback=False))
     with pytest.raises(ChatGPTError):
         run_coroutine(compact.compact(big_view(), stream=_failing, model="m", reasoning=None, window=4000, whole=True, fallback=False))
-    kept = run_coroutine(compact.compact(big_view(), stream=Script(say("   ")), model="m", reasoning=None, window=4000, whole=True))
-    assert kept is not None and kept.mechanical, "without the flag the digest still stands in"
+    with pytest.raises(compact.CompactionFailed):
+        run_coroutine(compact.compact(big_view(), stream=Script(say("   ")), model="m", reasoning=None, window=4000, whole=True))
 
 
 async def _failing(request: dict[str, Any]):

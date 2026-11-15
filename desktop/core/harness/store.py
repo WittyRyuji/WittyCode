@@ -142,6 +142,14 @@ def diff_from_json(raw: Any) -> FileDiff | None:
 
 
 def _session_json(session: SavedSession) -> dict[str, Any]:
+    from desktop.core.harness.outputs import RETAIN_CHARS, hint
+    from desktop.core.harness.loop import clip_output
+    # Full results are immutable sidecars written once, not re-encoded at every checkpoint.
+    items = [
+        {**item, "output": clip_output(str(item["output"]), RETAIN_CHARS) + "\n" + hint(item["wc_output_ref"])}
+        if item.get("type") == "function_call_output" and item.get("wc_output_ref") and len(str(item.get("output") or "")) > RETAIN_CHARS
+        else item for item in session.items
+    ]
     data: dict[str, Any] = {
         "version": VERSION,
         "id": session.id,
@@ -158,7 +166,7 @@ def _session_json(session: SavedSession) -> dict[str, Any]:
         "usage": session.usage,
         "context_used": session.context_used,
         "recalled": session.recalled,
-        "items": session.items,
+        "items": items,
     }
     if session.goal:
         data["goal"] = session.goal
@@ -391,6 +399,8 @@ def _write(path: Path, data: Any) -> None:
     try:
         with os.fdopen(handle, "w", encoding="utf-8") as stream:
             json.dump(data, stream, ensure_ascii=False, separators=(",", ":"))
+            stream.flush()
+            os.fsync(stream.fileno())
         os.replace(temp, path)
     except BaseException:
         try:
@@ -408,6 +418,11 @@ class SessionStore:
         if not _ID.match(session_id):
             raise ValueError(f"not a session id: {session_id!r}")
         return self.root / SESSIONS / f"{session_id}.json"
+
+    def outputs(self, session_id: str):
+        from desktop.core.harness.outputs import OutputStore
+        self._path(session_id)
+        return OutputStore(self.root / "outputs" / session_id)
 
     def claim(self, session_id: str) -> Any:
         """One writer for an open conversation, across processes. The OS releases the lock after a crash."""
@@ -452,6 +467,12 @@ class SessionStore:
             self._path(session_id).unlink()
         except OSError:
             pass
+        if not self._path(session_id).exists():
+            from desktop.core.harness.tools import ToolError
+            try:
+                self.outputs(session_id).delete()
+            except (OSError, ToolError):
+                log.warning("could not delete retained outputs", exc_info=True)
         index = self._index()
         if index.pop(session_id, None) is not None:
             self._write_index(index)

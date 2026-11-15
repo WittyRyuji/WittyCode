@@ -265,7 +265,8 @@ def test_a_call_that_may_change_something_is_on_disk_before_it_runs_but_a_read_c
             seen["session"] = controller.session_id
             controller.send_prompt("read it, then remove it")
             await until(lambda: "shell" in seen, message="the command to start")
-            assert seen["read_file"] is None, "no save before a read"
+            assert seen["read_file"] is not None, "the initial user input is checkpointed before requesting a response"
+            assert not any(item.get("type") == "function_call" for item in seen["read_file"]["items"]), "a read adds no execution checkpoint"
             data = seen["shell"]
             assert data is not None, "saved before the command ran"
             assert unpaired(data["items"]) == [] and "alpha" in outputs(data["items"])["c0"] and outputs(data["items"])["c1"] == LOST

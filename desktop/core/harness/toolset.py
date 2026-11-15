@@ -103,6 +103,8 @@ class HarnessTools:
     def check(self, call: Call) -> Verdict:
         if call.name == asking.NAME:
             return Verdict(ALLOW)  # (asking is not an action: the question is the user's say)
+        if call.name == "read_output":
+            return Verdict(ALLOW)  # Validated opaque references only, confined to this conversation.
         spec = self.registry.get(call.name)
         if spec is not None:
             return self._planned(spec, call) if self.plan else self._decided(spec, call)

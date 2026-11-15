@@ -295,6 +295,8 @@ async def read_events(lines: AsyncIterator[str]) -> AsyncIterator[Event]:
         if line == "":
             for item in await flush():
                 yield item
+            if finished:
+                return  # The protocol ended; a late EOF/reset is not a failed model response.
         elif line.startswith("data:"):
             data.append(line[5:].lstrip(" "))
         # (``event:``, ``id:``, ``retry:`` and comments carry nothing the payload does not say itself)

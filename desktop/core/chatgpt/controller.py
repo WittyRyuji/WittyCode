@@ -46,13 +46,13 @@ from desktop.core.context import ContextState, format_tokens
 from desktop.core.context_envelope import wrap as wrap_context
 from desktop.core.handoff import Handoff
 from desktop.core.harness import asking, compact, skills
-from desktop.core.harness.loop import INTERRUPTED, AgentLoop, Call, Observer, Outcome, Steer, Verdict
+from desktop.core.harness.loop import INTERRUPTED, AgentLoop, Call, Observer, Outcome, Steer, TurnEnd, Verdict
 from desktop.core.harness.mcp import McpClient, McpError, McpTool, parse_tools
 from desktop.core.harness.permissions import LEVELS
 from desktop.core.harness.diagnostics import MAX_RECORDS, RequestTrace
 from desktop.core.harness.prompt import build_instructions, changed_context, context_update
 from desktop.core.harness.store import SavedSession, SavedTurn, diff_to_json, pair_in_place, paired, recover
-from desktop.core.harness.tools import ToolContext
+from desktop.core.harness.tools import ToolContext, ToolError
 from desktop.core.harness.toolset import HarnessTools
 from desktop.core.hooks import PromptEvent
 from desktop.core.memory.launch import new_run
@@ -176,9 +176,13 @@ class ChatGPTController:
     _close_task: asyncio.Task[None] | None = None
     _session_lock: Any = None
     stop_hook_blocked: bool = False
+    last_turn_end: TurnEnd | None = None
+    _save_failed: bool = False
+    _checkpoint_written: bool = False
 
     def __post_init__(self) -> None:
         self.saved = SavedSession(id=self.session_id, project=str(self.project))
+        self._outputs = self.manager.sessions.outputs(self.session_id)
 
     # ------------------------------------------------------------------ plumbing
 
@@ -285,13 +289,15 @@ class ChatGPTController:
             raise ChatGPTError("这个会话的存档找不到了。", code="missing_session")
         recovered = recover(saved)
         self.saved = saved
+        self._checkpoint_written = True
         self.requested_model = saved.model
         self.reasoning = saved.reasoning
         self.autonomy = normalize_level(saved.autonomy) or DEFAULT_LEVEL
         self.mode = PLAN if saved.mode == PLAN else "auto"
         self.saved_title = saved.title or self.saved_title
         self.transcript.model = saved.model or None
-        self.transcript.add_history_turns(saved_history.build_turns(self.transcript, self.manager.registry, saved))
+        shown_items = await asyncio.to_thread(self._outputs.expand, saved.items, strict=False)
+        self.transcript.add_history_turns(saved_history.build_turns(self.transcript, self.manager.registry, replace(saved, items=shown_items)))
         usage = saved.usage
         if usage:
             self._usage_total = Tokens.of(usage)
@@ -400,7 +406,7 @@ class ChatGPTController:
             path = getattr(owner, name, None)
             if isinstance(path, Path):
                 protected.append(path)
-        self._context = self._context or ToolContext(self.project, threading.Event(), protected=tuple(protected))
+        self._context = self._context or ToolContext(self.project, threading.Event(), protected=tuple(protected), outputs=self._outputs)
         names = getattr(providers, "secret_environment_names", None)
         if names is not None:
             from desktop.core.providers import ProviderError
@@ -549,6 +555,7 @@ class ChatGPTController:
         self.used_at = self.active_at = time.time()
         self.state = SessionState.RUNNING
         self.stop_hook_blocked = False
+        self.last_turn_end = None
         self._turn_model, self._turn_reasoning, self._turn_mode = self.model, self.reasoning, self.mode
         self._turn_start = len(self.saved.items)  # even setup failures belong to a new boundary, never the previous turn
         context = self.manager.hooks.prompt(PromptEvent(self.engine, self.project, text, frozenset(self.recalled), first=bool(self.preface)))
@@ -627,6 +634,7 @@ class ChatGPTController:
             self.saved.turns.append(SavedTurn(self._turn_start, time.time(), None, "running", "", model))
             self.saved.model, self.saved.reasoning, self.saved.autonomy = self.model, self.reasoning, self.autonomy
             self.saved.mode = PLAN if self.mode == PLAN else ""
+            self._save_now(required=True)  # The first request must have a durable input/goal checkpoint.
             if tuple(notes) != self._prompt_notes:
                 self._prompt_notes = tuple(notes)
                 for note in notes:
@@ -672,6 +680,7 @@ class ChatGPTController:
             self._turn_failed(turn, failure)
             return
         assert end is not None
+        self.last_turn_end = end
         note = ""
         if end.reason == "incomplete":
             note = STOP_NOTES.get(end.detail, f"回答没有说完（{end.detail}）。")
@@ -822,6 +831,7 @@ class ChatGPTController:
         self.used_at = time.time()
         self.state = SessionState.RUNNING
         self.stop_hook_blocked = False
+        self.last_turn_end = None
         self._turn_model, self._turn_reasoning, self._turn_mode = self.model, self.reasoning, self.mode
         self._turn_start = len(self.saved.items)  # even setup failures belong to a new boundary, never the previous turn
         self.transcript.output_probe = self._output_so_far
@@ -895,10 +905,10 @@ class ChatGPTController:
             self.context = state
             self._notify("context")
 
-    def _add_usage(self, usage: Usage, *, measures_context: bool = True) -> None:
+    def _add_usage(self, usage: Usage, *, measures_context: bool = True, model: str = "") -> None:
         tokens = usage.tokens()
         self._usage_total = tokens if self._usage_total is None else self._usage_total.plus(tokens)
-        model = self.running_model
+        model = model or self.running_model
         if model:
             self._usage_models[model] = self._usage_models.get(model, Tokens()).plus(tokens)
             self.saved.usage_models = {name: value.to_json() for name, value in self._usage_models.items()}
@@ -992,11 +1002,14 @@ class ChatGPTController:
                 turn=len(history) if manual else synthetic + self._turn_start - start,
                 on_usage=used,
                 whole=manual,
-                fallback=not manual,
+                fallback=False,
                 rebase=True,
+                output_reader=lambda reference: asyncio.to_thread(self._outputs.read, reference),
                 prefix_request=prefix,
                 on_request=requested,
             )
+        except compact.CompactionFailed as error:
+            raise ChatGPTError("摘要未完成，已暂停；原始历史和执行证据仍保留，没有用用户请求清单替代。可以重试压缩或换更大窗口的模型。", code="compaction") from error
         finally:
             if self._turn is owner:
                 self.transcript.set_working_state("thinking")
@@ -1096,16 +1109,27 @@ class ChatGPTController:
         if self._save_handle is not None:
             self._save_now()
 
-    def _save_now(self) -> None:
+    def _save_now(self, *, required: bool = False) -> bool:
         if self._save_handle is not None:
             self._save_handle.cancel()
             self._save_handle = None
-        if not self.saved.turns:
-            return
+        if not self.saved.turns and not self.saved.goal and not getattr(self, "_checkpoint_written", False):
+            return True
         try:
             self.manager.sessions.save(self._snapshot())
-        except OSError:
+        except OSError as error:
             log.warning("could not save the conversation", exc_info=True)
+            message = "会话保存失败，请检查存储空间和权限；未保存的内容在退出后可能丢失，后续请求和写操作已暂停。"
+            if not self._save_failed:
+                self._save_failed = True
+                self.transcript.add_notice(message)
+                self._changed()
+            if required:
+                raise ChatGPTError(message, code="checkpoint") from error
+            return False
+        self._checkpoint_written = True
+        self._save_failed = False
+        return True
 
     # ------------------------------------------------------------------ approvals
 
@@ -1262,13 +1286,28 @@ class _Watch(Observer):
         if not self.current:
             return
         spec = self.tools.registry.get(call.name)
-        if spec is None or spec.kind != "read":
-            self.ctl._save_pending()  # (the call is on disk before it can change anything: a crash then reads "result unknown")
+        if spec is None or spec.kind != "read" or self.tools.connections is not None:
+            self.ctl._save_now(required=True)  # Failure must prevent the tool and its hooks from running.
         turn = self._turn
         tool = turn.tools.get(call.call_id) if turn is not None else None
         if turn is not None and tool is not None:
             self.ctl.transcript.tool_running(turn, tool)
             self.ctl._changed()
+
+    async def retain_output(self, call: Call, outcome: Outcome) -> None:
+        from desktop.core.harness.outputs import RETAIN_CHARS
+        if not self.current or call.name == "read_output" or outcome.reference or len(outcome.output) <= RETAIN_CHARS:
+            return
+        work = asyncio.create_task(asyncio.to_thread(self.ctl._outputs.put, outcome.output))
+        try:
+            outcome.reference = await asyncio.shield(work)
+        except asyncio.CancelledError:
+            with contextlib.suppress(Exception):
+                await work
+            raise
+        except (OSError, ToolError) as error:
+            self.call_done(call, outcome)  # Keep the live result inspectable even when durable retention fails.
+            raise ChatGPTError("工具已结束，但完整输出未能保存，已暂停以免丢失执行证据。请检查空间、权限或缩小输出范围。", code="output_storage") from error
 
     def call_done(self, call: Call, outcome: Outcome) -> None:
         if not self.current:
@@ -1335,6 +1374,8 @@ class _Watch(Observer):
     async def prepare(self, history: list[dict[str, Any]], estimate: int, overflow: bool) -> bool:
         if not self.current:
             return False
+        if self.ctl._save_failed:
+            self.ctl._save_now(required=True)
         window = self.ctl.manager.model_window(self.ctl.running_model)
         over = False
         if not overflow:

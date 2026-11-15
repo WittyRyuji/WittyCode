@@ -24,6 +24,7 @@ import "./plan.test.mjs";
 import "./turn-navigation.test.mjs";
 import "./factory.test.mjs";
 import "./qwebchannel.test.mjs";
+import "./turn-delta.test.ts";
 import "./starmap.test.mjs";
 
 test("API windows use exact specifications, preserve overrides and require unknown limits", () => {

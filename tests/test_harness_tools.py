@@ -59,10 +59,11 @@ def make_dir_link(link: Path, target: Path) -> None:
 # --------------------------------------------------------------------------- registry contract
 
 
-def test_default_registry_has_the_nine_tools(registry: ToolRegistry):
+def test_default_registry_has_the_ten_tools(registry: ToolRegistry):
     specs = {spec.name: spec for spec in registry.specs()}
-    assert list(specs) == ["read_file", "list_dir", "glob", "grep", "create_file", "edit_file", "shell", "todo_write", "skill"]
+    assert list(specs) == ["read_output", "read_file", "list_dir", "glob", "grep", "create_file", "edit_file", "shell", "todo_write", "skill"]
     assert {name: (spec.ui_name, spec.kind) for name, spec in specs.items()} == {
+        "read_output": ("ReadOutput", "read"),
         "read_file": ("Read", "read"),
         "list_dir": ("LS", "read"),
         "glob": ("Glob", "read"),
@@ -81,7 +82,8 @@ def test_schemas_are_plain_json_schema_with_required_lists(registry: ToolRegistr
     for spec in registry.specs():
         schema = spec.parameters
         assert schema["type"] == "object"
-        assert schema["required"] and set(schema["required"]) <= set(schema["properties"])
+        assert isinstance(schema["required"], list) and set(schema["required"]) <= set(schema["properties"])
+        assert schema["required"] or spec.name == "read_output", "listing retained output needs no arguments"
         assert "strict" not in schema and "additionalProperties" not in schema
         assert spec.description.isascii() and len(spec.description) > 40
         for prop in schema["properties"].values():

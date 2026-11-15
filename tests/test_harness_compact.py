@@ -158,11 +158,10 @@ def test_the_log_is_rendered_as_plain_text_without_what_carries_nothing():
     assert parts == ["USER: fix the bug", 'ASSISTANT CALLED TOOL read_file: {"file_path": "a.py"}', "TOOL RESULT: line", "ASSISTANT: fixed"]
 
 
-def test_long_pieces_are_cut_in_the_middle_and_images_are_counted():
-    long_output = "start " + "x" * 5000 + " finish"
+def test_long_pieces_keep_all_evidence_and_images_are_counted():
+    long_output = "start " + "x" * 2500 + "MIDDLE EVIDENCE" + "y" * 2500 + " finish"
     text = compact.render(fo("c1", long_output))
-    assert text.startswith("TOOL RESULT: start") and text.endswith("finish") and "characters left out" in text
-    assert len(text) < compact.RESULT_LIMIT + 120
+    assert text == "TOOL RESULT: " + long_output
     assert "[1 image(s) attached]" in compact.render(user_message("see", ["data:image/png;base64,AAAA"]))
 
 
@@ -174,8 +173,9 @@ def test_the_parts_are_grouped_to_the_budget_and_a_part_that_is_too_big_is_cut_d
     assert len(huge) == 1 and len(huge[0][0]) < 2000
 
 
-def test_the_chunk_budget_follows_the_window_between_a_floor_and_a_ceiling():
-    assert compact.chunk_budget(10_000) == compact.CHUNK_FLOOR
+def test_the_chunk_budget_never_exceeds_a_small_window():
+    assert compact.chunk_budget(10_000) == compact.budget(10_000)
+    assert compact.chunk_budget(4000) == compact.budget(4000)
     assert compact.chunk_budget(100_000) == 40_000
     assert compact.chunk_budget(10_000_000) == compact.CHUNK_CEILING
 
@@ -191,7 +191,7 @@ def test_the_digest_is_what_the_user_asked_oldest_dropped_first_when_it_is_too_l
 # ----------------------------------------------------------------------------------------------- the whole thing
 
 
-def long_view(turns: int = 6, size: int = 300) -> list[dict[str, Any]]:
+def long_view(turns: int = 6, size: int = 200) -> list[dict[str, Any]]:
     view: list[dict[str, Any]] = []
     for number in range(turns):
         view += [u(f"question {number} {words(size)}"), a(f"answer {number} {words(size)}")]
@@ -241,19 +241,20 @@ def test_what_is_too_big_for_one_request_is_summarised_in_pieces_each_carrying_t
     assert result.summary == f"S{len(script.requests)}", "the last piece's summary is the summary"
 
 
-def test_a_summary_that_comes_back_empty_or_cut_short_is_replaced_by_the_digest():
+def test_an_empty_or_cut_short_summary_stops_without_a_request_only_digest():
     view = long_view()
-    empty = run(compact.compact(view, stream=Script(say("   ")), model="m", reasoning=None, window=4000))
-    assert empty is not None and empty.mechanical and "empty" in empty.problem
-    assert "could not be summarised" in empty.summary and "question 0" in empty.summary
-    short = run(compact.compact(view, stream=Script([*say("part")[:-1], {"type": "response.incomplete", "response": {"id": "r", "incomplete_details": {"reason": "max_output_tokens"}}}]), model="m", reasoning=None, window=4000))
-    assert short is not None and short.mechanical and "cut short" in short.problem
+    with pytest.raises(compact.CompactionFailed, match="empty"):
+        run(compact.compact(view, stream=Script(say("   ")), model="m", reasoning=None, window=4000))
+    with pytest.raises(compact.CompactionFailed, match="cut short"):
+        run(compact.compact(view, stream=Script([*say("part")[:-1], {"type": "response.incomplete", "response": {"id": "r", "incomplete_details": {"reason": "max_output_tokens"}}}]), model="m", reasoning=None, window=4000))
+    assert view == long_view()
 
 
-def test_a_request_that_fails_does_not_end_the_conversation():
-    result = run(compact.compact(long_view(), stream=Script(fail("invalid_request_error", "overloaded")), model="m", reasoning=None, window=4000))
-    assert result is not None and result.mechanical and "overloaded" in result.problem
-    assert compact.is_summary(result.view[0])
+def test_a_failed_summary_does_not_replace_the_execution_record():
+    view = long_view()
+    with pytest.raises(ChatGPTError, match="overloaded"):
+        run(compact.compact(view, stream=Script(fail("invalid_request_error", "overloaded")), model="m", reasoning=None, window=4000))
+    assert view == long_view()
 
 
 def _pauses(monkeypatch: pytest.MonkeyPatch) -> list[float]:
@@ -278,13 +279,14 @@ def test_a_summary_request_that_failed_in_a_way_that_may_pass_is_asked_again(mon
 def test_a_summary_request_is_asked_again_a_few_times_at_most_and_never_for_a_failure_that_stays(monkeypatch):
     pauses = _pauses(monkeypatch)
     busy = Script(*[fail("server_error", "overloaded") for _ in range(len(compact.RETRY_DELAYS) + 1)])
-    result = run(compact.compact(long_view(), stream=busy, model="m", reasoning=None, window=4000))
-    assert result is not None and result.mechanical and "overloaded" in result.problem
+    with pytest.raises(ChatGPTError, match="overloaded"):
+        run(compact.compact(long_view(), stream=busy, model="m", reasoning=None, window=4000))
     assert len(busy.requests) == len(compact.RETRY_DELAYS) + 1 and pauses == list(compact.RETRY_DELAYS)
     pauses.clear()
     wrong = Script(fail("invalid_request_error", "bad request"), say("never"))
-    result = run(compact.compact(long_view(), stream=wrong, model="m", reasoning=None, window=4000))
-    assert result is not None and result.mechanical and len(wrong.requests) == 1 and pauses == []
+    with pytest.raises(ChatGPTError, match="bad request"):
+        run(compact.compact(long_view(), stream=wrong, model="m", reasoning=None, window=4000))
+    assert len(wrong.requests) == 1 and pauses == []
 
 
 def test_a_summary_request_waits_as_long_as_the_server_asks_within_a_limit(monkeypatch):

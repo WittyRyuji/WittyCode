@@ -120,6 +120,22 @@ class ChatGPTEngine:
         self._signin: SignIn | None = None
         self._tasks: set[asyncio.Task[Any]] = set()
 
+    def record_side_usage(self, usage: Any, model: str) -> None:
+        """Unowned side requests have a separate durable ledger, never a fake context-window measurement."""
+        from desktop.core.harness.store import _write
+        from desktop.core.usage import Tokens
+        path = self.root / "side-usage.json"
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            ledger = raw if isinstance(raw, dict) else {}
+        except (OSError, ValueError):
+            ledger = {}
+        ledger[model] = (Tokens.of(ledger.get(model)) or Tokens()).plus(usage.tokens()).to_json()
+        try:
+            _write(path, ledger)
+        except OSError:
+            log.warning("could not persist side-request usage", exc_info=True)
+
     # ------------------------------------------------------------------ listeners
 
     def add_listener(self, callback: Callable[[ChatGPTController, str], None]) -> None:
@@ -252,8 +268,9 @@ class ChatGPTEngine:
         """Ask the model: a fresh access token, the request, the events of the answer. A model of an API provider is asked at the
         provider, with its own key."""
         if self.api is not None and is_api_model(str(request.get("model") or "")):
-            async for event in self.api.stream(request):
-                yield event
+            async with contextlib.aclosing(self.api.stream(request)) as events:
+                async for event in events:
+                    yield event
             return
         client_id = self.accounts.active_id()
         token = await self.tokens.access_token(client_id)

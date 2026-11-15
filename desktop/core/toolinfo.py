@@ -51,6 +51,7 @@ _TOOL_CATEGORIES: dict[str, Category] = {
             "ListAutomationTemplates",
             "View",
             "ReadFile",
+            "ReadOutput",
             "ListDirectory",
         ),
         Category.READ,
