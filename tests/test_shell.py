@@ -265,6 +265,7 @@ def test_notification_player_loads_all_bundled_wavs_and_picker_only_accepts_one_
             for kind in sounds.KINDS:
                 path = sounds.sound_path(kind)
                 platform.play_sound(path)
+                assert platform._sound.isMuted(), "hidden test windows must never play through the user's speakers"
                 await wait_for(lambda: platform._sound.status() in (QSoundEffect.Status.Ready, QSoundEffect.Status.Error))
                 assert platform._sound.status() is QSoundEffect.Status.Ready
                 assert platform._sound.source().toLocalFile() == path.replace("\\", "/")

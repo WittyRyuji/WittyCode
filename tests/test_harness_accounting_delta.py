@@ -134,8 +134,8 @@ def test_a_cache_snapshot_ahead_of_the_page_cannot_supply_delta_references(monke
         preview=False, sent_ids=["turn"], sent_versions={"turn": 1}, json_cache={"turn": (2, current)}, meta={}, cache_dirty=False)
     emitted = []
     core = SimpleNamespace(_thumb=None, emit=lambda name, payload: emitted.append((name, payload)),
-        _mark_cache_dirty=lambda conv: None, _session_meta=lambda conv: {}, _note_run=lambda conv: None,
-        _flush_agent=lambda conv: None, _settle_inflight=lambda conv: None)
+        _mark_cache_dirty=lambda conv: None, _session_meta=lambda conv: {"mark": "ready"}, _note_run=lambda conv: None,
+        _notify_session=lambda conv, mark: None, _flush_agent=lambda conv: None, _settle_inflight=lambda conv: None)
     conv.cid = "demo"
     monkeypatch.setattr(app_core, "turn_json", lambda *args: current)
     app_core.AppCore._flush(core, conv)

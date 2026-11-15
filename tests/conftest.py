@@ -37,12 +37,22 @@ def _no_files_of_the_real_user(tmp_path_factory, monkeypatch):
 def qapp():
     pytest.importorskip("PySide6.QtWebEngineWidgets")
     from PySide6 import QtWebEngineWidgets  # noqa: F401  (must be imported before the QApplication exists)
+    from PySide6.QtMultimedia import QSoundEffect
     from PySide6.QtWidgets import QApplication
 
     app = QApplication.instance() or QApplication(["wittycode-tests"])
     # Destroying a test's last window must not end the event loop that is still awaiting the test.
     app.setQuitOnLastWindowClosed(False)
-    yield app
+    play = QSoundEffect.play
+
+    def play_silently(effect):
+        # Offscreen hides windows, not speakers. Keep the real loading/playback lifecycle without audible test chimes.
+        effect.setMuted(True)
+        play(effect)
+
+    with pytest.MonkeyPatch.context() as patches:
+        patches.setattr(QSoundEffect, "play", play_silently)
+        yield app
 
 
 HANG_SECONDS = 75

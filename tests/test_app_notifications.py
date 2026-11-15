@@ -77,6 +77,7 @@ def test_new_question_and_permission_each_sound_once_and_final_failure_is_not_co
             await core.call("session.send", {"id": cid, "text": "Ask first"})
             await until(lambda: controller.transcript.pending_prompts())
             prompt = controller.transcript.pending_prompts()[0]
+            await until(lambda: len(platform.played_sounds) == 1)
             for _ in range(5):
                 controller._changed()
                 await core.call("app.init")
@@ -90,6 +91,7 @@ def test_new_question_and_permission_each_sound_once_and_final_failure_is_not_co
             await core.call("session.send", {"id": cid, "text": "Create file"})
             await until(lambda: controller.transcript.pending_prompts())
             prompt = controller.transcript.pending_prompts()[0]
+            await until(lambda: len(platform.played_sounds) == 3)
             controller._changed()
             assert [Path(p).stem for p in platform.played_sounds][-1] == "question"
             controller.answer_permission(prompt.id, "cancel")
@@ -98,6 +100,7 @@ def test_new_question_and_permission_each_sound_once_and_final_failure_is_not_co
             plan.script(fail("bad_request", "An expected test failure"))
             await core.call("session.send", {"id": cid, "text": "Fail this turn"})
             await idle(core, cid)
+            await until(lambda: len(platform.played_sounds) == 5)
             controller._changed()
             assert [Path(p).stem for p in platform.played_sounds] == ["question", "complete", "question", "complete", "error"]
         finally:

@@ -58,7 +58,7 @@ def test_goal_rounds_do_not_sound_until_the_whole_goal_is_done(tmp_path, ending,
             plan.release("goal-final")
             await until(lambda: core._by_cid[cid].goal is None)
             await idle(core, cid)
-            await asyncio.sleep(0)
+            await until(lambda: not core._by_cid[cid].ran and not core._by_cid[cid].dirty)
             assert played(platform) == expected
         finally:
             await core.shutdown()
@@ -83,7 +83,7 @@ def test_queued_turns_form_one_completion_boundary(tmp_path, ending, expected):
                 await core.call("session.stop", {"id": cid})
             plan.release("last")
             await idle(core, cid)
-            await asyncio.sleep(0)
+            await until(lambda: not core._by_cid[cid].ran and not core._by_cid[cid].dirty)
             assert played(platform) == expected
         finally:
             await core.shutdown()
@@ -107,7 +107,7 @@ def test_unfinished_turns_are_not_announced_as_completed(tmp_path, ending):
             plan.script(answer)
             await core.call("session.send", {"id": cid, "text": "Do the whole task."})
             await idle(core, cid)
-            await asyncio.sleep(0)
+            await until(lambda: not core._by_cid[cid].ran and not core._by_cid[cid].dirty)
             assert core._by_cid[cid].controller.saved.turns[-1].status in ("incomplete", "limit")
             assert played(platform) == []
         finally:

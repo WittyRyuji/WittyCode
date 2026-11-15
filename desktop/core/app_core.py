@@ -240,6 +240,8 @@ class Conversation:
     activity_state: SessionState | None = None
     sound_prompts: set[str] = field(default_factory=set)
     sound_complete_pending: bool = False
+    sound_result: str = ""
+    """A settled result waiting for the same publication that updates the session's status dot."""
     preview: bool = False
     """The page shows the cached conversation while the real history is still being loaded."""
     cached_turns: list[dict[str, Any]] = field(default_factory=list)
@@ -1175,6 +1177,7 @@ class AppCore:
         if running and not conv.activity_running:
             conv.sound_prompts.clear()
             conv.sound_complete_pending = False
+            conv.sound_result = ""
             self._promote_session(conv)
         elif conv.activity_running and state in (SessionState.READY, SessionState.DEAD):
             turns = controller.transcript.turns
@@ -1184,21 +1187,30 @@ class AppCore:
                 if status is TurnStatus.DONE and state is SessionState.READY:
                     conv.sound_complete_pending = True
                 else:
-                    self._play_notification("error")
+                    conv.sound_result = "error"
             elif state is SessionState.DEAD:
-                self._play_notification("error")
+                conv.sound_result = "error"
         elif state is SessionState.DEAD and conv.activity_state is not state:
-            self._play_notification("error")
+            conv.sound_result = "error"
         conv.activity_running, conv.activity_state = running, state
-        if running:
-            pending = controller.transcript.pending_prompts()
-            ids = {p.id for p in pending}
+
+    def _notify_session(self, conv: Conversation, mark: str) -> None:
+        """Publish sounds with the status dot, never from intermediate engine events."""
+        result, conv.sound_result = conv.sound_result, ""
+        if self._shutting_down or conv.switching:
+            return
+        if mark == "attention":
+            ids = {p.id for p in self._attention_prompts(conv)}
             if ids - conv.sound_prompts:
                 conv.sound_prompts.update(ids)
                 self._play_notification("question")
+        elif mark == "ready" and result == "complete":
+            self._play_notification("complete")
+        elif mark in ("ready", "dead") and result == "error":
+            self._play_notification("error")
 
     def _notify_complete(self, conv: Conversation, previous_goal: goals.Goal | None) -> None:
-        """Only the settled conversation is complete, never a tool step or an intermediate goal/queued turn."""
+        """Stage completion only for the settled conversation, never a tool step or an intermediate goal/queued turn."""
         pending, conv.sound_complete_pending = conv.sound_complete_pending, False
         controller = conv.controller
         if not pending or self._shutting_down or conv.switching or controller.state is not SessionState.READY or conv.queue or conv.goal is not None:
@@ -1221,7 +1233,9 @@ class AppCore:
             stop = getattr(controller, "_stop", None)
             if stop and stop.get("stopReason", "end_turn") != "end_turn":
                 return
-        self._play_notification("complete")
+        conv.sound_result = "complete"
+        conv.dirty = True
+        self._schedule_flush()
 
     def _adopt_or_create(self, controller: Any) -> Conversation:
         if self._adopt is not None:
@@ -1355,12 +1369,15 @@ class AppCore:
         left = self._settings_of(conv.engine, saved) if saved is not None else dict(conv.cached_meta.get("settings") or {})
         return {**left, **conv.requested}
 
+    def _attention_prompts(self, conv: Conversation) -> list[Any]:
+        controller = conv.controller
+        return [*controller.transcript.pending_prompts(), *getattr(controller, "agent_prompts", lambda: [])()]
+
     def _mark(self, conv: Conversation) -> str:
         controller = conv.controller
         state = controller.state
         if state is SessionState.RUNNING:
-            asking = controller.transcript.pending_prompts() or getattr(controller, "agent_prompts", lambda: [])()
-            return "attention" if asking else "running"
+            return "attention" if self._attention_prompts(conv) else "running"
         return {SessionState.READY: "ready", SessionState.OPENING: "opening", SessionState.DEAD: "dead"}.get(state, "ready")
 
     def _feed_usage(self, conv: Conversation) -> None:
@@ -1507,6 +1524,7 @@ class AppCore:
             self.emit("session", {"id": conv.cid, "patch": {"id": conv.cid, **patch}})
             if "usage" in patch or "context" in patch or "speed" in patch:
                 conv.cache_dirty = self.cache.enabled
+        self._notify_session(conv, meta["mark"])
         if conv.cache_dirty:
             self._mark_cache_dirty(conv)  # (it only schedules the write once the session is idle)
         self._flush_agent(conv)
