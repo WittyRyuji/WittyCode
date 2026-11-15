@@ -3,6 +3,8 @@ import asyncio
 import json
 import threading
 
+import pytest
+
 from desktop.core.chatgpt import http, side
 from desktop.core.chatgpt.responses import Usage
 from desktop.core.turn_delta import changed_blocks
@@ -48,6 +50,67 @@ def test_title_and_main_usage_are_both_counted_without_changing_context(tmp_path
             saved = engine.sessions.load(ctl.session_id)
             assert saved.usage["input"] == 220 and any(r.get("kind") == "title" for r in saved.requests)
         finally:
+            await core.shutdown()
+    asyncio.run(go())
+
+
+def test_serial_compaction_still_counts_towards_turn_speed(tmp_path):
+    async def go():
+        engine = make_engine(tmp_path, None)
+        ctl = await engine.open_new(tmp_path / "project", model="gpt-6.1-sol")
+        try:
+            ctl._add_usage(Usage(input_tokens=100, output_tokens=20), measures_context=False)
+            ctl._add_usage(Usage(input_tokens=100, output_tokens=400), measures_context=False, counts_speed=False)
+            ctl._add_usage(Usage(input_tokens=100, output_tokens=10))
+            assert ctl._output_so_far() == 30 and ctl.usage.output_tokens == 430
+            assert ctl.context.used == 110
+        finally:
+            await engine.close_all()
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("title_first", [True, False])
+def test_title_usage_never_enters_main_turn_speed_even_after_reopening(tmp_path, title_first):
+    from desktop.core.session_state import SessionState
+    from tests.app_support import ready_core
+    from tests.chatgpt_support import finish_turn, until
+    from tests.test_app_usage_models import meta, new
+    async def go():
+        core, plan, events, _, _ = await ready_core(tmp_path)
+        try:
+            title = say("Demo title", used=usage(120, 400))
+            main = say("Main answer", used=usage(100, 10))
+            plan.fake.title_turn = title if title_first else [("hold", "title"), *title]
+            plan.script([("hold", "main"), *main] if title_first else main)
+            cid = await new(core, events, tmp_path)
+            await core.call("session.send", {"id": cid, "text": "Verify the demo"})
+            ctl = core._by_cid[cid].controller
+            if title_first:
+                await until(lambda: ctl.usage is not None and ctl.usage.output_tokens == 400)
+                plan.release("main")
+            await finish_turn(ctl)
+            assert ctl.transcript.turns[-1].output_tokens == 10
+            if not title_first:
+                plan.release("title")
+            await until(lambda: ctl.usage is not None and ctl.usage.output_tokens == 410)
+            assert ctl.context.used == 110
+            plan.script(say("Second answer", used=usage(100, 15)))
+            await core.call("session.send", {"id": cid, "text": "Continue"})
+            await finish_turn(ctl)
+            assert ctl.transcript.turns[-1].output_tokens == 15 and ctl.usage.output_tokens == 425
+            native = ctl.session_id
+            await core.call("session.close", {"id": cid})
+            await until(lambda: ctl.state is SessionState.CLOSED)
+            reopened = (await core.call("session.openSaved", {"projectId": str(tmp_path / "proj"), "id": "cg:" + native}))["id"]
+            await until(lambda: meta(events, reopened).get("mark") == "ready")
+            ctl = core._by_cid[reopened].controller
+            plan.script(say("After reopening", used=usage(100, 7)))
+            await core.call("session.send", {"id": reopened, "text": "Continue again"})
+            await finish_turn(ctl)
+            assert ctl.transcript.turns[-1].output_tokens == 7 and ctl.usage.output_tokens == 432
+        finally:
+            plan.release("main")
+            plan.release("title")
             await core.shutdown()
     asyncio.run(go())
 

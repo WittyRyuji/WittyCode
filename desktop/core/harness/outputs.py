@@ -96,14 +96,22 @@ class OutputStore:
 
     def expand(self, items: list[dict], *, strict: bool = True) -> list[dict]:
         result = []
+        expanded: dict[str, str] = {}
+        unavailable: set[str] = set()
         for item in items:
             reference = item.get("wc_output_ref") if item.get("type") == "function_call_output" else None
             if reference:
                 try:
-                    item = {**item, "output": self.read(reference) + "\n" + hint(reference)}
+                    if not isinstance(reference, str) or reference in unavailable:
+                        raise ToolError("Invalid or unavailable output reference.")
+                    if reference not in expanded:
+                        expanded[reference] = self.read(reference) + "\n" + hint(reference)
+                    item = {**item, "output": expanded[reference]}
                 except ToolError:
                     if strict:
                         raise
+                    if isinstance(reference, str):
+                        unavailable.add(reference)
                     item = {**item, "output": str(item.get("output") or "") + "\n[Full retained output is unavailable or damaged.]"}
             result.append(item)
         return result

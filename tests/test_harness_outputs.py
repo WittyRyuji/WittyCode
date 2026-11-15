@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -10,9 +12,9 @@ from desktop.core.chatgpt.responses import user_message
 from desktop.core.harness import compact, outputs
 from desktop.core.harness.outputs import OutputStore, read_output
 from desktop.core.harness.tools import ToolContext, ToolError, ToolResult, ToolSpec
-from tests.chatgpt_support import finish_turn, make_engine
-from tests.fake_responses import FakeResponses, call, say
-from tests.test_harness_loop import Script
+from tests.chatgpt_support import finish_turn, make_engine, until
+from tests.fake_responses import FakeResponses, call, calls, say
+from tests.test_harness_loop import Script, assert_paired
 
 
 def test_outputs_are_immutable_scoped_paged_and_checked(tmp_path):
@@ -32,6 +34,35 @@ def test_outputs_are_immutable_scoped_paged_and_checked(tmp_path):
     (store.root / (ref + ".txt")).write_text("tampered", encoding="utf-8")
     with pytest.raises(ToolError, match="integrity"):
         store.read(ref)
+
+
+def test_reopening_shares_repeated_output_but_checks_it_again_next_time(tmp_path, monkeypatch):
+    store = OutputStore(tmp_path)
+    full = "a" * (2 * 1024 * 1024) + "EVIDENCE"
+    ref = store.put(full)
+    items = [{"type": "function_call_output", "call_id": str(i), "output": "preview", "wc_output_ref": ref} for i in range(12)]
+    original_read = store.read
+    reads = []
+    def counted(reference):
+        reads.append(reference)
+        return original_read(reference)
+    monkeypatch.setattr(store, "read", counted)
+    expanded = store.expand(items)
+    assert reads == [ref]
+    assert all(item["output"] == full + "\n" + outputs.hint(ref) for item in expanded)
+    assert all(item["output"] is expanded[0]["output"] for item in expanded)
+    assert all(item["output"] == "preview" for item in items)
+    (store.root / (ref + ".txt")).write_text("tampered", encoding="utf-8")
+    with pytest.raises(ToolError, match="integrity"):
+        store.expand(items)
+    assert reads == [ref, ref], "the cache must not survive a later reopen"
+    damaged = store.expand(items, strict=False)
+    assert all("unavailable or damaged" in item["output"] for item in damaged)
+    assert reads == [ref, ref, ref], "a damaged reference is checked only once per reopen"
+    invalid = [{"type": "function_call_output", "output": "preview", "wc_output_ref": ["bad"]}]
+    assert "unavailable or damaged" in store.expand(invalid, strict=False)[0]["output"]
+    with pytest.raises(ToolError):
+        store.expand(invalid)
 
 
 def test_quota_does_not_prune_evidence(tmp_path, monkeypatch):
@@ -114,20 +145,169 @@ def test_retention_failure_keeps_the_live_result_but_stops_requests(tmp_path, mo
         project.mkdir()
         (project / "evidence.txt").write_text("EVIDENCE\n" * 1000, encoding="utf-8")
         with FakeResponses() as fake:
-            fake.script(call("read_file", {"file_path": "evidence.txt"}), say("must not run"))
+            fake.script(call("read_file", {"file_path": "evidence.txt"}), say("Continued."))
             engine = make_engine(tmp_path, fake)
             ctl = await engine.open_new(project, model="gpt-6.1-sol")
+            original_put = ctl._outputs.put
+            attempts = []
             def full(text):
+                attempts.append(text)
                 raise OSError("demo output storage full")
             monkeypatch.setattr(ctl._outputs, "put", full)
             try:
                 ctl.send_prompt("Read evidence.txt")
                 await finish_turn(ctl)
                 assert len(fake.requests) == 1 and ctl.saved.turns[-1].status == "failed"
+                assert len(attempts) == 1, "cleanup must not retry the failed retention"
                 assert any("EVIDENCE" in (tool.result or "") for turn in ctl.transcript.turns for tool in turn.tools.values())
+                assert_paired(ctl.saved.items)
+                result = next(item["output"] for item in ctl.saved.items if item.get("type") == "function_call_output")
+                assert "EVIDENCE" in result and "not" in result.lower() and "retain" in result.lower()
+                assert_paired(engine.sessions.load(ctl.session_id).items)
+                monkeypatch.setattr(ctl._outputs, "put", original_put)
+                ctl.send_prompt("Storage is available; continue")
+                await finish_turn(ctl)
+                assert len(fake.requests) == 2
+                assert_paired(fake.requests[-1]["input"])
+                assert ctl.saved.turns[-1].status == "done"
             finally:
                 await engine.close_all()
     asyncio.run(go())
+
+
+@pytest.mark.parametrize("fail_names", [{"first", "second", "third"}, {"first", "third"}])
+def test_parallel_retention_failures_pair_every_completed_result(tmp_path, monkeypatch, fail_names):
+    async def go():
+        project = tmp_path / "project"
+        project.mkdir()
+        for name in ("first", "second", "third"):
+            (project / f"{name}.txt").write_text((name + " evidence\n") * 500, encoding="utf-8")
+        with FakeResponses() as fake:
+            fake.script(calls([("read_file", json.dumps({"file_path": f"{name}.txt"}), name, "f-" + name)
+                               for name in ("first", "second", "third")]))
+            engine = make_engine(tmp_path, fake)
+            ctl = await engine.open_new(project, model="gpt-6.1-sol")
+            original_put = ctl._outputs.put
+            attempts = []
+            def full(text):
+                name = next(name for name in ("first", "second", "third") if name + " evidence" in text)
+                attempts.append(name)
+                if name in fail_names:
+                    raise OSError("demo output storage full")
+                return original_put(text)
+            monkeypatch.setattr(ctl._outputs, "put", full)
+            try:
+                ctl.send_prompt("Read all three files")
+                await finish_turn(ctl)
+                assert ctl.saved.turns[-1].status == "failed" and len(fake.requests) == 1
+                assert attempts == ["first", "second", "third"], "each completed result gets at most one retention attempt"
+                assert_paired(ctl.saved.items)
+                results = {item["call_id"]: item for item in ctl.saved.items if item.get("type") == "function_call_output"}
+                assert set(results) == {"first", "second", "third"}
+                assert all(name + " evidence" in item["output"] and "retain" in item["output"].lower() for name, item in results.items())
+                for name, item in results.items():
+                    assert ("wc_output_ref" in item) == (name not in fail_names)
+                assert_paired(engine.sessions.load(ctl.session_id).items)
+            finally:
+                await engine.close_all()
+    asyncio.run(go())
+
+
+def test_retention_failure_does_not_repeat_a_completed_write(tmp_path, monkeypatch):
+    from desktop.core.harness.loop import Verdict
+    async def go():
+        with FakeResponses() as fake:
+            fake.script(call("demo_write", {}), say("Continued."))
+            engine = make_engine(tmp_path, fake)
+            writes = []
+            def write(args, ctx):
+                writes.append("done")
+                return ToolResult("WRITE COMPLETED\n" + "x" * 2000)
+            engine.registry.register(ToolSpec("demo_write", "demo", {"type": "object", "properties": {}}, "Demo", "write"), write, ui_input=dict)
+            ctl = await engine.open_new(tmp_path / "project", model="gpt-6.1-sol")
+            tools = await ctl._ensure_tools()
+            tools.check = lambda call: Verdict("allow")
+            original_put = ctl._outputs.put
+            def full(text):
+                raise OSError("demo output storage full")
+            monkeypatch.setattr(ctl._outputs, "put", full)
+            try:
+                ctl.send_prompt("Make one change")
+                await finish_turn(ctl)
+                assert writes == ["done"] and ctl.saved.turns[-1].status == "failed"
+                assert_paired(ctl.saved.items)
+                result = next(item["output"] for item in ctl.saved.items if item.get("type") == "function_call_output")
+                assert "WRITE COMPLETED" in result and "before repeating" in result
+                monkeypatch.setattr(ctl._outputs, "put", original_put)
+                ctl.send_prompt("Check before continuing")
+                await finish_turn(ctl)
+                assert writes == ["done"] and ctl.saved.turns[-1].status == "done"
+                assert_paired(fake.requests[-1]["input"])
+            finally:
+                await engine.close_all()
+    asyncio.run(go())
+
+
+def test_cancel_during_retention_keeps_the_completed_reference(tmp_path, monkeypatch):
+    async def go():
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "evidence.txt").write_text("EVIDENCE\n" * 1000, encoding="utf-8")
+        with FakeResponses() as fake:
+            fake.script(call("read_file", {"file_path": "evidence.txt"}))
+            engine = make_engine(tmp_path, fake)
+            ctl = await engine.open_new(project, model="gpt-6.1-sol")
+            original_put = ctl._outputs.put
+            started, release = threading.Event(), threading.Event()
+            attempts = []
+            def held(text):
+                attempts.append(text)
+                started.set()
+                if not release.wait(10):
+                    raise OSError("demo retention timed out")
+                return original_put(text)
+            monkeypatch.setattr(ctl._outputs, "put", held)
+            try:
+                ctl.send_prompt("Read evidence.txt")
+                await until(started.is_set)
+                interrupt = asyncio.create_task(ctl.interrupt())
+                await until(lambda: ctl._turn_task.cancelling() > 0)
+                release.set()
+                await interrupt
+                assert len(attempts) == 1
+                assert_paired(ctl.saved.items)
+                result = next(item for item in ctl.saved.items if item.get("type") == "function_call_output")
+                assert "EVIDENCE" in ctl._outputs.read(result["wc_output_ref"])
+                assert "read_output" in result["output"]
+            finally:
+                release.set()
+                await engine.close_all()
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("legacy_preview", [False, True])
+def test_output_preview_is_stable_across_repeated_save_and_load(tmp_path, legacy_preview):
+    from desktop.core.harness.loop import clip_output
+    from desktop.core.harness.store import SessionStore, SavedSession
+    store = SessionStore(tmp_path)
+    session = SavedSession(id="a" * 32, project="demo")
+    output_store = store.outputs(session.id)
+    full = "HEAD\n" + "x" * 10000 + "\nFAILED CHECK\nExit code: 1"
+    reference = output_store.put(full)
+    note = outputs.hint(reference)
+    text = full + "\n" + note
+    if legacy_preview:
+        text = clip_output(text, outputs.RETAIN_CHARS) + "\n" + note
+    session.items = [{"type": "function_call_output", "call_id": "demo", "output": text, "wc_output_ref": reference}]
+    previews = []
+    for _ in range(4):
+        store.save(session)
+        session = store.load(session.id)
+        previews.append(session.items[0]["output"])
+    assert len(set(previews)) == 1
+    assert "FAILED CHECK" in previews[0] and "Exit code: 1" in previews[0]
+    assert previews[0].count(note) == 1 and len(previews[0]) < 1600
+    assert output_store.read(reference) == full
 
 
 def test_deleting_a_session_removes_only_its_retained_outputs(tmp_path):

@@ -144,12 +144,21 @@ def diff_from_json(raw: Any) -> FileDiff | None:
 def _session_json(session: SavedSession) -> dict[str, Any]:
     from desktop.core.harness.outputs import RETAIN_CHARS, hint
     from desktop.core.harness.loop import clip_output
-    # Full results are immutable sidecars written once, not re-encoded at every checkpoint.
-    items = [
-        {**item, "output": clip_output(str(item["output"]), RETAIN_CHARS) + "\n" + hint(item["wc_output_ref"])}
-        if item.get("type") == "function_call_output" and item.get("wc_output_ref") and len(str(item.get("output") or "")) > RETAIN_CHARS
-        else item for item in session.items
-    ]
+    # Full results are immutable sidecars written once, not re-encoded at every checkpoint. Remove the reference
+    # before clipping so it cannot displace the tail; leave room for clip_output's omission marker on later saves.
+    def preview(item: dict[str, Any]) -> dict[str, Any]:
+        reference = item.get("wc_output_ref") if item.get("type") == "function_call_output" else None
+        if not reference:
+            return item
+        suffix = "\n" + hint(reference)
+        text = str(item.get("output") or "")
+        while text.endswith(suffix):
+            text = text[:-len(suffix)]
+        if len(text) > RETAIN_CHARS + 64:
+            text = clip_output(text, RETAIN_CHARS)
+        return {**item, "output": text + suffix}
+
+    items = [preview(item) for item in session.items]
     data: dict[str, Any] = {
         "version": VERSION,
         "id": session.id,

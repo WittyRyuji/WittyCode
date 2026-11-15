@@ -547,12 +547,16 @@ class AgentLoop:
         # nor all of them together make a request that cannot be sent)
         room = self.observer.tool_room(self.estimate(history), self._answer)
         outcomes: dict[int, Outcome] = {}
+        attempted: set[int] = set()
+        notified: set[int] = set()
         tasks: list[asyncio.Task[Any]] = []
         safe = getattr(self.tools, "parallel_safe", lambda call: False)
 
         async def commit(index: int, call: Call, outcome: Outcome) -> None:
             nonlocal room
+            attempted.add(index)
             await self.observer.retain_output(call, outcome)
+            notified.add(index)
             self.observer.call_done(call, outcome)
             from desktop.core.harness.outputs import hint
             reference_note = "\n" + hint(outcome.reference) if outcome.reference else ""
@@ -591,17 +595,37 @@ class AgentLoop:
                 task.cancel()
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
-            # Keep completed concurrent reads, and pair every unfinished call without executing it again.
+            # Keep completed concurrent reads, and pair every unfinished call without executing it again. A failed
+            # commit must not be retried: retention may still be unavailable, and cleanup must pair the other calls too.
             for index, call in enumerate(calls):
                 if call.call_id in answered:
                     continue
                 outcome = outcomes.get(index)
-                if outcome is not None:
-                    await commit(index, call, outcome)
-                else:
+                if outcome is not None and index not in attempted:
+                    try:
+                        await commit(index, call, outcome)
+                    except (Exception, asyncio.CancelledError):
+                        pass  # Preserve the original failure, then record a bounded fallback for this result.
+                if call.call_id in answered:
+                    continue
+                if outcome is None:
                     item = call_output(call.call_id, INTERRUPTED)
-                    history.append(item)
-                    self.observer.history_grew([item])
+                else:
+                    if index not in notified:
+                        with contextlib.suppress(Exception):
+                            self.observer.call_done(call, outcome)
+                    note = "The tool finished, but its result could not be committed normally. "
+                    if not outcome.reference:
+                        note += "A full retained artifact is not available; the preview may be incomplete. "
+                    note += "Inspect the state before repeating any side effect.\n"
+                    item = call_output(call.call_id, note + clip_output(outcome.output))
+                    if outcome.reference:
+                        from desktop.core.harness.outputs import hint
+                        item["output"] += "\n" + hint(outcome.reference)
+                        item["wc_output_ref"] = outcome.reference
+                history.append(item)
+                answered.add(call.call_id)
+                self.observer.history_grew([item])
             raise
 
     def reminder(self, call: Call, outcome: Outcome) -> str:

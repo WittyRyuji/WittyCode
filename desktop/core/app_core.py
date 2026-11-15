@@ -2012,7 +2012,7 @@ class AppCore:
                 if owner.state is SessionState.CLOSED or not hasattr(owner, "_add_usage"):
                     self.chatgpt.record_side_usage(usage, used_model)
                     return
-                owner._add_usage(usage, measures_context=False, model=used_model)
+                owner._add_usage(usage, measures_context=False, counts_speed=False, model=used_model)
                 owner.saved.requests.append({"kind": "title", "model": used_model, "usage": usage.tokens().to_json()})
                 owner._save_now()
             answer = await chatgpt_side.ask(self.chatgpt, prompt, model_id=model, instructions=session_title.SYSTEM, timeout=30, on_usage=spent)

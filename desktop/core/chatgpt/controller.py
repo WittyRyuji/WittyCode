@@ -60,7 +60,7 @@ from desktop.core.prompts import APPROVAL_OPTIONS, QuestionView
 from desktop.core.session_state import SESSION_STATE_LABELS, LiveSettings, SessionState, SteerOutcome
 from desktop.core.toolinfo import working_label as label_for_working_state
 from desktop.core.transcript import PromptStatus, ToolStatus, Transcript, Turn, TurnStatus, UserBlock
-from desktop.core.usage import Tokens, own_output
+from desktop.core.usage import Tokens
 
 if TYPE_CHECKING:
     from desktop.core.chatgpt.engine import ChatGPTEngine
@@ -139,6 +139,8 @@ class ChatGPTController:
     recalled: set[str] = field(default_factory=set)
     saved: SavedSession = field(init=False)
     _usage_total: Tokens | None = None
+    _speed_output: int = 0
+    """Output since opening from model requests on the turn's path, excluding concurrent title requests."""
     _usage_models: dict[str, Tokens] = field(default_factory=dict)
     _trace: RequestTrace = field(default_factory=RequestTrace)
     _connection_started: bool = False
@@ -254,8 +256,8 @@ class ChatGPTController:
     def usage_model_series(self) -> dict[str, tuple[str, Tokens]]:
         return {f"model:{model}": (model, tokens) for model, tokens in self._usage_models.items()}
 
-    def _output_so_far(self) -> int | None:
-        return own_output(self.usage_series())
+    def _output_so_far(self) -> int:
+        return self._speed_output
 
     @property
     def working_label(self) -> str:
@@ -905,16 +907,18 @@ class ChatGPTController:
             self.context = state
             self._notify("context")
 
-    def _add_usage(self, usage: Usage, *, measures_context: bool = True, model: str = "") -> None:
+    def _add_usage(self, usage: Usage, *, measures_context: bool = True, counts_speed: bool = True, model: str = "") -> None:
         tokens = usage.tokens()
         self._usage_total = tokens if self._usage_total is None else self._usage_total.plus(tokens)
+        if counts_speed:
+            self._speed_output += tokens.output_tokens
         model = model or self.running_model
         if model:
             self._usage_models[model] = self._usage_models.get(model, Tokens()).plus(tokens)
             self.saved.usage_models = {name: value.to_json() for name, value in self._usage_models.items()}
         total = self._usage_total
         self.saved.usage = total.to_json()
-        if not measures_context:  # (a summary request: it counts, but it says nothing about how full the conversation is)
+        if not measures_context:  # Summary and title requests say nothing about the conversation's context size.
             self._changed()
             return
         self.saved.context_used = usage.context
@@ -1303,10 +1307,9 @@ class _Watch(Observer):
             outcome.reference = await asyncio.shield(work)
         except asyncio.CancelledError:
             with contextlib.suppress(Exception):
-                await work
+                outcome.reference = await work
             raise
         except (OSError, ToolError) as error:
-            self.call_done(call, outcome)  # Keep the live result inspectable even when durable retention fails.
             raise ChatGPTError("工具已结束，但完整输出未能保存，已暂停以免丢失执行证据。请检查空间、权限或缩小输出范围。", code="output_storage") from error
 
     def call_done(self, call: Call, outcome: Outcome) -> None:
