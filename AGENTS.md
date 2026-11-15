@@ -1,6 +1,6 @@
 # 代理守则（WittyCode）
 
-这里只写硬约束。项目是什么、命令、模块、做法和历史都在 `docs/`：先读 `docs/handoff.md` 的「当前状态」，再按需读 `docs/development.md`（命令和环境）、`docs/project.md`（概况和模块图）、`docs/knowledge.md`（事实、决定和坑，先看索引）。**不要把项目信息写进本文件。**
+这里只写硬约束。项目是什么、命令、模块、做法和历史都在 `docs/`，按需读，不要每个需求一开始就去读：`docs/development.md`（命令和环境）、`docs/project.md`（概况和模块图）、`docs/knowledge.md`（事实、决定和坑，先看索引）、`docs/handoff.md`（最近做了什么；要接着之前的工作时，读「当前状态」最上面几条，新的在上）。**不要把项目信息写进本文件。**
 
 ## 规则
 
