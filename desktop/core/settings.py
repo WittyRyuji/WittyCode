@@ -34,6 +34,7 @@ CHATGPT_PERMISSIONS = ("ask", "code", "full")
 MODES = ("auto", "spec")
 THEMES = ("system", "light", "dark")
 FONT_SCALES = ("sm", "md", "lg")
+LANGUAGES = ("auto", "zh-CN", "en")
 FOLLOW_UPS = ("queue", "steer")
 """What Enter does with a message typed while a turn runs: ``queue`` holds it until the turn is over, ``steer`` gives it
 to the running turn now. Ctrl+Enter does the other one."""
@@ -99,7 +100,9 @@ class AppSettings:
     max_steps: int = DEFAULT_MAX_STEPS
     """Model decision steps allowed in one turn of the own loop; read again between steps."""
     think_chinese: bool = True
-    """Ask every model to write its thinking in Chinese (``core/language``)."""
+    """Legacy fallback for thinking_language when no explicit language has been saved."""
+    answer_language: str = "auto"
+    thinking_language: str = ""
     sound_enabled: bool = True
     sound_question: str = ""
     sound_complete: str = ""
@@ -355,6 +358,8 @@ def settings_from_dict(raw: object) -> AppSettings:
         chatgpt_compact_at=compact_at,
         max_steps=max_steps,
         think_chinese=think_chinese,
+        answer_language=text("answer_language", LANGUAGES),
+        thinking_language=text("thinking_language", ("", *LANGUAGES)),
         sound_enabled=raw.get("sound_enabled") if isinstance(raw.get("sound_enabled"), bool) else defaults.sound_enabled,
         sound_question=text("sound_question").strip(),
         sound_complete=text("sound_complete").strip(),

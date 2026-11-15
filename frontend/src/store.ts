@@ -81,6 +81,8 @@ export interface Landing {
   projectId: string | null;
   /** the conversation is being opened for the message just sent */
   starting: boolean;
+  /** This unsent conversation only; never written back to the saved defaults. */
+  settings?: SessionSettings;
 }
 
 /** The data (owned by Python in the live app, mock data in the design review), what only the page knows, and the
@@ -92,6 +94,10 @@ export interface Store extends LiveData {
   /** live app: why it could not connect to Python */
   bootError: string | null;
   settingsPage: string | null; // which page of the settings dialog is open; null: closed
+  settingsDirty: boolean;
+  setSettingsDirty: (dirty: boolean) => void;
+  settingsSaving: boolean;
+  setSettingsSaving: (saving: boolean) => void;
   providerEdit: string | null; // the provider being edited in the settings: its id, "new", or null
   sidebarOpen: boolean;
   openGroups: Record<string, boolean>;
@@ -176,6 +182,7 @@ export interface Store extends LiveData {
   /** read the skills and custom commands again, for the project of a conversation (or the first message box's) */
   refreshSkills: (id?: string) => void;
   choose: (field: keyof SessionSettings, value: string) => void;
+  chooseLanding: (field: keyof SessionSettings, value: string) => void;
   answerPermission: (sessionId: string, promptId: string, value: string) => void;
   /** answers: one per question (the chosen options of a multi-select one), or null when the user skips the questions */
   answerQuestion: (sessionId: string, promptId: string, answers: QuestionAnswer[] | null) => void;
@@ -221,6 +228,7 @@ export interface Store extends LiveData {
   setCompactAt: (percent: number) => void;
   /** ask every model to write its thinking in Chinese */
   setThinkChinese: (on: boolean) => void;
+  setLanguage: (key: "answerLanguage" | "thinkingLanguage", value: LiveData["answerLanguage"]) => void;
   setSoundEnabled: (on: boolean) => void;
   setSoundPath: (key: SoundKey, path: string) => void;
   pickSound: (kind: SoundKind) => void;
@@ -293,6 +301,8 @@ function mockData(): LiveData {
     compactAuto: true,
     compactAt: COMPACT_AT_DEFAULT,
     thinkChinese: true,
+    answerLanguage: "auto",
+    thinkingLanguage: "zh-CN",
     soundEnabled: true,
     soundQuestion: "C:\\Apps\\WittyCode\\app\\desktop\\assets\\sounds\\question.wav",
     soundComplete: "C:\\Apps\\WittyCode\\app\\desktop\\assets\\sounds\\complete.wav",
@@ -319,6 +329,10 @@ export const useStore = create<Store>((set, get) => ({
   ready: !LIVE,
   bootError: null,
   settingsPage: null,
+  settingsDirty: false,
+  setSettingsDirty: (settingsDirty) => set({ settingsDirty }),
+  settingsSaving: false,
+  setSettingsSaving: (settingsSaving) => set({ settingsSaving }),
   providerEdit: null,
   sidebarOpen: true,
   openGroups: {},
@@ -364,7 +378,7 @@ export const useStore = create<Store>((set, get) => ({
 
   newSession: (projectId) => {
     // (from a conversation: its project is where the next one starts, as it always was)
-    set((s) => ({ currentId: null, pendingSelect: null, landing: { ...s.landing, projectId: projectId ?? s.sessions[s.currentId ?? ""]?.projectId ?? s.landing.projectId } }));
+    set((s) => ({ currentId: null, pendingSelect: null, landing: { ...s.landing, settings: undefined, projectId: projectId ?? s.sessions[s.currentId ?? ""]?.projectId ?? s.landing.projectId } }));
     window.dispatchEvent(new Event("wc:focus-composer"));
   },
 
@@ -374,7 +388,7 @@ export const useStore = create<Store>((set, get) => ({
   createSession: async (pid) => {
     const st = get();
     const id = `s-new-${++sessionCounter}`;
-    const settings = { ...st.defaults };
+    const settings = { ...(st.landing.settings ?? st.defaults) };
     const m = findModel(st.models, settings.model);
     const session: Session = {
       id,
@@ -610,12 +624,12 @@ export const useStore = create<Store>((set, get) => ({
 
   choose: (field, value) => {
     const id = get().currentId;
-    if (!id) return get().setDefault(field, value);
+    if (!id) return get().chooseLanding(field, value);
     const st = get();
     const session = st.sessions[id]!;
     if (field !== "model") {
       get().patchSession(id, (s) => ({ ...s, settings: { ...s.settings, [field]: value } }));
-      return get().setDefault(field, value);
+      return;
     }
     const model = findModel(st.models, value);
     if (!model) return;
@@ -630,7 +644,6 @@ export const useStore = create<Store>((set, get) => ({
           : `${model.label} 不支持「${effortLabel(session.settings.reasoning)}」推理，已改为「${effortLabel(settings.reasoning)}」。`,
       );
     }
-    get().setDefault("model", value);
   },
 
   answerPermission: (sessionId, promptId, value) => settlePrompt(sessionId, promptId, value),
@@ -653,7 +666,14 @@ export const useStore = create<Store>((set, get) => ({
   setTheme: (themeChoice) => set({ themeChoice }),
   setFontScale: (fontScale) => set({ fontScale }),
   setFollowUp: (followUp) => set({ followUp }),
-  openSettings: (settingsPage, providerEdit = null) => set({ settingsPage, providerEdit }),
+  openSettings: (settingsPage, providerEdit = null) => {
+    if (settingsPage === get().settingsPage) return set({ providerEdit });
+    if (get().settingsSaving) return get().say("规则正在保存，请稍候。");
+    const leave = () => set({ settingsPage, providerEdit, settingsDirty: false });
+    if (get().settingsDirty && settingsPage !== get().settingsPage) {
+      get().openDialog({ title: "放弃未保存的规则？", body: "AGENTS.md 的更改尚未保存。", confirmLabel: "放弃更改", danger: true, onConfirm: leave });
+    } else leave();
+  },
   setProviderEdit: (providerEdit) => set({ providerEdit }),
 
   saveProvider: async (draft) => {
@@ -719,6 +739,11 @@ export const useStore = create<Store>((set, get) => ({
   chatgptWelcome: async () => set({ chatgpt: await bridge.chatgpt.welcomed() }),
   recheckDevin: async () => get().say("已重新检测：仍然没有找到 devin。"),
 
+  chooseLanding: (field, value) => set((s) => {
+    const base = s.landing.settings ?? s.defaults;
+    const settings = field === "model" ? settingsForModel(s.models, base, value).settings : { ...base, [field]: value };
+    return { landing: { ...s.landing, settings } };
+  }),
   setDefault: (field, value) =>
     set((s) => {
       if (field !== "model") return { defaults: { ...s.defaults, [field]: value } };
@@ -734,7 +759,8 @@ export const useStore = create<Store>((set, get) => ({
   setMemoryCurate: (memoryCurate) => set({ memoryCurate }),
   setMemoryEngines: (memoryEngines) => set({ memoryEngines }),
   setCompactAuto: (compactAuto) => set({ compactAuto }),
-  setThinkChinese: (thinkChinese) => set({ thinkChinese }),
+  setThinkChinese: (thinkChinese) => set({ thinkChinese, thinkingLanguage: thinkChinese ? "zh-CN" : "auto" }),
+  setLanguage: (key, value) => set({ [key]: value, ...(key === "thinkingLanguage" ? { thinkChinese: value === "zh-CN" } : {}) }),
   setSoundEnabled: (soundEnabled) => set({ soundEnabled }),
   setSoundPath: (key, path) => set({ [key]: path || mockData()[key] }),
   pickSound: () => get().say("演示界面不选择本机声音文件。"),
@@ -848,7 +874,6 @@ function switchEngine(id: string, model: ModelChoice, was: ModelChoice | undefin
   st.say(
     `已换到 ${model.label}（${engineLabel(model.source)}）。${h.carried > 0 ? `之前 ${h.carried} 条对话的文字会随下一条消息交给它。` : ""}${changed.includes("autonomy") ? `权限回到「${level}」。` : ""}`,
   );
-  st.setDefault("model", model.id);
 }
 
 export const currentSession = (s: Store): Session | null => (s.currentId ? (s.sessions[s.currentId] ?? null) : null);

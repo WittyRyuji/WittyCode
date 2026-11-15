@@ -71,6 +71,8 @@ export interface SettingsView {
   compactAt: number;
   /** every model is asked to write its thinking in Chinese */
   thinkChinese?: boolean;
+  answerLanguage?: Language;
+  thinkingLanguage?: Language;
   soundEnabled?: boolean;
   /** Resolved paths, including bundled defaults (never an ambiguous empty selection). */
   soundQuestion?: string;
@@ -80,7 +82,8 @@ export interface SettingsView {
   lastProject?: string;
 }
 export type FollowUp = "queue" | "steer";
-export type SettingKey = "theme" | "fontScale" | "followUp" | "maxOpen" | "maxSteps" | "sidebarWidth" | "devinPath" | "memoryEnabled" | "memoryRecall" | "memoryCapture" | "memoryCurate" | "memoryEngines" | "compactAuto" | "compactAt" | "thinkChinese" | "soundEnabled" | SoundKey;
+export type Language = "auto" | "zh-CN" | "en";
+export type SettingKey = "theme" | "fontScale" | "followUp" | "maxOpen" | "maxSteps" | "sidebarWidth" | "devinPath" | "memoryEnabled" | "memoryRecall" | "memoryCapture" | "memoryCurate" | "memoryEngines" | "compactAuto" | "compactAt" | "thinkChinese" | "answerLanguage" | "thinkingLanguage" | "soundEnabled" | SoundKey;
 export type SoundKind = "question" | "complete" | "error";
 export type SoundKey = "soundQuestion" | "soundComplete" | "soundError";
 export type SettingValue = string | number | boolean | string[];
@@ -246,9 +249,27 @@ export interface ConnectionEntry {
 export interface ConnectionScan { items: ConnectionEntry[]; errors: { source: string; text: string }[]; hookEvents: string[] }
 export interface ConnectionPreview { preview: string; items: ConnectionEntry[]; commands: { name: string; kind: string; command: string; args: string[] }[] }
 
+export type ConnectorId = "github" | "google-workspace";
+export interface ConnectorConfig { clientId: string; clientSecretEnv: string; port: number; enabled: boolean }
+export interface ConnectorView extends ConnectorConfig { id: ConnectorId; name: string; connected: boolean; signingIn: boolean; scopes: string; helpUrl: string; callbackUrl: string }
+export type SkillSource = "openai" | "anthropic";
+export interface MarketSkill { source: SkillSource; name: string; commit: string; url: string; installed: boolean }
+export interface SkillInstallPreview { preview: string; source: SkillSource; name: string; commit: string; url: string; description: string; license: string; licenseText: string; files: number }
+export interface RulesDocument { path: string; text: string; revision: string; exists: boolean }
+
 export interface FactoryState { cli: "found" | "missing"; cliPath: string; path: string; enabled: boolean }
 
 export interface Calls {
+  "connectors.list": { params: None; result: ConnectorView[] };
+  "connectors.configure": { params: { provider: ConnectorId; config: Partial<ConnectorConfig> }; result: ConnectorView[] };
+  "connectors.login": { params: { provider: ConnectorId }; result: ConnectorView[] };
+  "connectors.cancel": { params: { provider: ConnectorId }; result: ConnectorView[] };
+  "connectors.disconnect": { params: { provider: ConnectorId }; result: ConnectorView[] };
+  "marketplace.list": { params: { source: SkillSource; refresh?: boolean }; result: { items: MarketSkill[]; warning: string } };
+  "marketplace.preview": { params: { source: SkillSource; name: string }; result: SkillInstallPreview };
+  "marketplace.install": { params: { preview: string; confirmed: boolean }; result: { ok: boolean; path: string; source: string } };
+  "marketplace.cancel": { params: { preview: string }; result: { ok: boolean } };
+  "connections.addMcp": { params: { projectId: string; name: string; configText: string; confirmed: boolean }; result: { ok: boolean; id: string } };
   "connections.list": { params: { projectId?: string }; result: ConnectionScan };
   "connections.preview": { params: { projectId?: string; path: string }; result: ConnectionPreview };
   "connections.import": { params: { preview: string; confirmed: boolean }; result: { ok: boolean; count: number } };
@@ -264,7 +285,7 @@ export interface Calls {
   "project.refresh": { params: { id?: string }; result: null };
   "project.reveal": { params: { id: string }; result: null };
   /** `fromId`: the conversation whose project to use when there is no `projectId` */
-  "session.new": { params: { projectId?: string; modelId?: string; fromId?: string }; result: { id: string | null } };
+  "session.new": { params: { projectId?: string; modelId?: string; fromId?: string; settings?: SessionSettings }; result: { id: string | null } };
   "session.openSaved": { params: { id: string; projectId: string; title?: string }; result: { id: string | null } };
   "session.reorder": { params: { projectId: string; id: string; targetId: string; after: boolean }; result: { ok: boolean } };
   "session.close": { params: { id: string }; result: null };
@@ -322,6 +343,8 @@ export interface Calls {
   /** the whole picture as a data: URI, for the big view; null when Python no longer has it */
   "attachments.full": { params: { id?: string; attachmentId: string }; result: { url: string | null } };
   "settings.set": { params: { key: SettingKey; value: SettingValue }; result: SettingsView };
+  "customization.read": { params: { projectId: string }; result: RulesDocument };
+  "customization.save": { params: { projectId: string; text: string; revision: string }; result: RulesDocument };
   "sounds.pick": { params: { kind: SoundKind }; result: SettingsView };
   "sounds.preview": { params: { kind: SoundKind }; result: { ok: boolean } };
   /** the shared memory (desktop/core/memory): notes that the own loop and Devin read and write, and the user too.

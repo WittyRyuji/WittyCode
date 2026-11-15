@@ -273,7 +273,7 @@ export function Composer() {
     }
   };
 
-  const values = session?.settings ?? defaults;
+  const values = session?.settings ?? landing.settings ?? defaults;
   const chipsDisabled = !!session && dead;
   // An open session knows its engine even before the model list has arrived (the demo's sessions do not say: their model does).
   const modelSource = useStore((s) => s.models.find((m) => m.id === values.model)?.source);

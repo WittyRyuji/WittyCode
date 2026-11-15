@@ -152,9 +152,9 @@ def test_codex_skill_can_be_disabled_without_editing_it(rig):
     assert file.read_bytes() == before
 
 
-def test_invalid_or_remote_configs_are_explicitly_rejected(rig):
+def test_invalid_and_insecure_remote_configs_are_explicitly_rejected(rig):
     store, _, project = rig
-    for config in ({"url": "https://example.com/mcp"}, {"command": "python", "args": "bad"}, {"command": "python", "env": {"VALUE": "plaintext"}}):
+    for config in ({"url": "http://example.com/mcp"}, {"command": "python", "args": "bad"}, {"command": "python", "env": {"VALUE": "plaintext"}}):
         file = write_json(project / ".mcp.json", {"mcpServers": {"demo": config}})
         with pytest.raises(ConnectionError):
             store.preview(str(file))

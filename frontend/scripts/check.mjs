@@ -202,15 +202,15 @@ ok("the TPS tooltip says in its first line that the figure is an estimate", awai
 // settings: the button, the pages, and a change that takes effect at once
 await page.click(".foot-btn", 1);
 ok("the settings button opens the settings", await page.eval("!!document.querySelector('.settings')"));
-ok("the settings pages also include Connections", await page.eval("[...document.querySelectorAll('.snav')].map(e => e.textContent.trim()).join(',') === '外观,账号与模型,新会话默认值,会话,共享记忆5,外部程序,项目,快捷键,Connections,关于'"));
+ok("settings merge defaults into sessions, add customization and plugins, and keep About last", await page.eval("[...document.querySelectorAll('.snav')].map(e => e.textContent.trim()).join(',') === '外观,账号与模型,会话,自定义,共享记忆5,外部程序,项目,插件,关于'"));
 await page.click(".snav", 2);
-ok("defaults page lists model / reasoning / permission / mode", await page.eval("document.querySelectorAll('.settings-scroll .field').length === 4"));
+ok("the session page includes model / reasoning / permission / mode defaults", await page.eval("document.querySelectorAll('.sessions-columns > section:first-child .field').length === 4"));
 await page.click(".snav", 0);
 await page.click(".segc button", 1); // light
 ok("theme can be changed in the settings", await page.eval("document.documentElement.dataset.theme === 'light'"));
 await page.click(".segc button", 5); // font size: large (the theme has buttons 0-2, the size 3-5)
 ok("font size can be changed", await page.eval("document.documentElement.dataset.fs === 'lg'"));
-await page.click(".snav", 3);
+await page.click(".snav", 2);
 ok("the sessions page: the compaction switch is on and says 85% (the default), the session limit says 4", await page.eval("(() => { const sw = document.querySelector('.settings-body .field .switch'); const n = [...document.querySelectorAll('.stepper span')].map(e => e.textContent); return sw.getAttribute('aria-checked') === 'true' && n.join() === '85%,4'; })()"));
 await page.click(".stepper button", 1);
 ok("the compaction stepper moves by 5 points", await page.eval("document.querySelector('.stepper span').textContent === '90%'"));

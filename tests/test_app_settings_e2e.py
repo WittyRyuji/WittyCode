@@ -29,7 +29,7 @@ def test_notification_controls_are_last_show_paths_and_select_reset_preview_and_
 
             rig.window.platform.pick_sound = choose
             await rig.press(",", Qt.KeyboardModifier.ControlModifier)
-            await rig.click(".snav", 3)
+            await rig.click_text(".snav", "会话")
             await rig.wait_for(".sound-setting", 3)
             assert await rig.js("document.querySelector('.settings-scroll').lastElementChild.classList.contains('sound-settings')")
             for kind in sounds.KINDS:
@@ -49,7 +49,7 @@ def test_notification_controls_are_last_show_paths_and_select_reset_preview_and_
             rig.window.view.reload()
             await rig.wait_for(".boot", 0)
             await rig.press(",", Qt.KeyboardModifier.ControlModifier)
-            await rig.click(".snav", 3)
+            await rig.click_text(".snav", "会话")
             assert await rig.js("document.querySelector('[aria-label=\"提示音总开关\"]').getAttribute('aria-checked')") == "false"
             assert played == [str(custom)], "reloading does not replay sounds"
         finally:

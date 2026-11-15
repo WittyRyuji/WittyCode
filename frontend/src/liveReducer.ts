@@ -59,6 +59,8 @@ export interface LiveData {
   compactAt: number;
   /** every model is asked to write its thinking in Chinese */
   thinkChinese: boolean;
+  answerLanguage: "auto" | "zh-CN" | "en";
+  thinkingLanguage: "auto" | "zh-CN" | "en";
   soundEnabled: boolean;
   soundQuestion: string;
   soundComplete: string;
@@ -134,6 +136,8 @@ export function emptyLiveData(theme: ThemeChoice = "system", fontScale: FontScal
     compactAuto: true,
     compactAt: COMPACT_AT_DEFAULT,
     thinkChinese: true,
+    answerLanguage: "auto",
+    thinkingLanguage: "zh-CN",
     soundEnabled: true,
     soundQuestion: "",
     soundComplete: "",
@@ -219,6 +223,8 @@ export function settingsFields(v: SettingsView): Partial<LiveData> {
     compactAuto: v.compactAuto ?? true,
     compactAt: v.compactAt ?? COMPACT_AT_DEFAULT,
     thinkChinese: v.thinkChinese ?? true,
+    answerLanguage: v.answerLanguage ?? "auto",
+    thinkingLanguage: v.thinkingLanguage ?? (v.thinkChinese === false ? "auto" : "zh-CN"),
     soundEnabled: v.soundEnabled ?? true,
     soundQuestion: v.soundQuestion ?? "",
     soundComplete: v.soundComplete ?? "",

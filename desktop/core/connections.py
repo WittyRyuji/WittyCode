@@ -11,6 +11,7 @@ import asyncio
 from collections.abc import Mapping
 import hashlib
 import json
+from functools import wraps
 import os
 from pathlib import Path
 import re
@@ -22,6 +23,8 @@ from typing import Any
 from desktop.core.harness.mcp import McpClient
 from desktop.core.memory.launch import McpCommand
 from desktop.core.memory.safety import find_secret
+from desktop.core.plugin_lock import lock_file
+from desktop.core.plugin_http import PluginError
 from desktop.core.settings import default_settings_path
 from desktop.core.winproc import CREATE_NO_WINDOW
 
@@ -33,6 +36,17 @@ SYSTEM32 = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32"
 
 class ConnectionError(ValueError):
     pass
+
+
+def _transaction(method):
+    @wraps(method)
+    def locked(self, *args, **kwargs):
+        try:
+            with lock_file(self.file):
+                return method(self, *args, **kwargs)
+        except PluginError as error:
+            raise ConnectionError(str(error)) from error
+    return locked
 
 
 def _local(path: str | Path) -> Path:
@@ -191,8 +205,18 @@ class ConnectionStore:
             unsupported = sorted(set(config) & {"cwd", "enabled_tools", "disabled_tools", "startup_timeout_sec", "tool_timeout_sec"})
             if unsupported:
                 raise ConnectionError("这份 MCP 包含本批尚未支持的选项：" + "、".join(unsupported) + "。未忽略它们或启用服务器。")
-            if config.get("url") or not isinstance(config.get("command"), str) or not config["command"].strip():
-                raise ConnectionError("本批只支持本地 stdio MCP；远程 MCP／OAuth 暂不支持。")
+            if config.get("url"):
+                from desktop.core.http_mcp import validate_http_config
+                try:
+                    validate_http_config(config)
+                except ValueError as error:
+                    raise ConnectionError(str(error)) from error
+            else:
+                unsupported = set(config) - {"command", "args", "env", "env_vars", "type"}
+                if unsupported or config.get("type") not in (None, "stdio"):
+                    raise ConnectionError("stdio MCP 含不支持的选项或传输类型，未启用。")
+                if not isinstance(config.get("command"), str) or not config["command"].strip():
+                    raise ConnectionError("MCP 需要启动命令或 HTTPS 服务地址。")
             if not isinstance(config.get("args", []), list) or any(not isinstance(v, str) for v in config.get("args", [])):
                 raise ConnectionError("MCP args 必须是字符串数组。")
             variables = config.get("env_vars", [])
@@ -202,8 +226,10 @@ class ConnectionStore:
                 raise ConnectionError("MCP env 必须是环境变量引用表。")
             if any(not isinstance(v, str) or not re.fullmatch(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}", v) for v in config.get("env", {}).values()):
                 raise ConnectionError("MCP env 的值只接受 ${变量名}；不保存明文密钥。")
-            if entry["name"] == "wittycode-memory":
+            if entry["name"].casefold() == "wittycode-memory":
                 raise ConnectionError("这个 MCP 名称由内置共享记忆使用，请换一个名称。")
+            if entry["name"].casefold() in ("wittycode-github", "wittycode-google-workspace"):
+                raise ConnectionError("这个 MCP 名称由内置连接器使用，请换一个名称。")
         elif entry["kind"] == "skill":
             raw = config.get("path")
             if not isinstance(raw, str) or not raw.strip():
@@ -350,8 +376,9 @@ class ConnectionStore:
             self._validate(entry)
         key = _digest(entries)
         self._preview[key] = entries
-        return {"preview": key, "items": entries, "commands": [{"name": e["name"], "kind": e["kind"], "command": e["config"].get("command", ""), "args": e["config"].get("args", [])} for e in entries if e["kind"] in ("hook", "mcp")]}
+        return {"preview": key, "items": entries, "commands": [{"name": e["name"], "kind": e["kind"], "command": e["config"].get("command") or e["config"].get("url", ""), "args": e["config"].get("args", [])} for e in entries if e["kind"] in ("hook", "mcp")]}
 
+    @_transaction
     def commit(self, key, confirmed):
         if not isinstance(key, str) or not key:
             raise ConnectionError("导入预览标识不合法，请重新预览。")
@@ -456,6 +483,52 @@ class ConnectionStore:
         unique_errors = {(os.path.normcase(error["source"]), error["text"]): error for error in errors}
         return {"items": items, "errors": list(unique_errors.values()), "hookEvents": sorted(HOOK_EVENTS)}
 
+    def add_mcp(self, name, config_text, project="", *, confirmed=False):
+        if not isinstance(config_text, str) or len(config_text) > LIMIT:
+            raise ConnectionError("MCP 配置内容不合法或过长。")
+        try:
+            config = json.loads(config_text) if config_text.lstrip().startswith("{") else tomllib.loads(config_text)
+        except (ValueError, tomllib.TOMLDecodeError) as error:
+            raise ConnectionError("MCP 配置必须是有效的 JSON 或 TOML。") from error
+        if not isinstance(config, dict):
+            raise ConnectionError("MCP 配置必须是对象。")
+        servers = config.get("mcp_servers", config.get("mcpServers"))
+        if servers is not None:
+            if not isinstance(servers, dict) or len(servers) != 1:
+                raise ConnectionError("每次添加一个 MCP 服务器。")
+            parsed_name, config = next(iter(servers.items()))
+            if name and name != parsed_name:
+                raise ConnectionError("名称与配置中的服务器名称不一致。")
+            name = parsed_name
+        return self.create_mcp(name, config, project, confirmed=confirmed)
+
+    @_transaction
+    def create_mcp(self, name, config, project="", *, confirmed=False):
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", name) or not isinstance(config, dict):
+            raise ConnectionError("MCP 名称只使用英文字母、数字、点、短横线或下划线。")
+        if confirmed is not True:
+            raise ConnectionError("请先确认这个 MCP 的命令或服务地址。")
+        entries = self._load()
+        if any(e["kind"] == "mcp" and e["name"].casefold() == name.casefold() and e["project"] == str(project) for e in entries):
+            raise ConnectionError("这个范围已有同名 MCP，请编辑已有项。")
+        entry = {"kind": "mcp", "name": name, "config": dict(config)}
+        self._validate(entry)
+        source = _local(self.file.parent / "custom-mcp" / (_digest([name, str(project)])[:24] + ".json"))
+        if source.exists():
+            raise ConnectionError("同名 MCP 配置文件已存在，未覆盖。")
+        source.parent.mkdir(parents=True, exist_ok=True)
+        with source.open("x", encoding="utf-8") as stream:
+            json.dump({"mcpServers": {name: config}}, stream, ensure_ascii=False, indent=2)
+        entry = _entry("mcp", name, source, dict(config), str(project))
+        entry.update(enabled=True, imported=True, managed=True)
+        try:
+            self._save([*entries, entry])
+        except BaseException:
+            source.unlink(missing_ok=True)
+            raise
+        return {"ok": True, "id": entry["id"]}
+
+    @_transaction
     def update(self, entry_id, *, enabled=None, config=None, confirmed=False, project=""):
         stored = {e["id"]: e for e in self._load()}
         entry = stored.get(entry_id)
@@ -549,10 +622,10 @@ class ConnectionStore:
         for entry in self.active("mcp", project):
             if entry["name"] not in selected or entry.get("project") or not selected[entry["name"]].get("project"):
                 selected[entry["name"]] = entry
-        return [self._mcp_command(entry) for entry in selected.values()]
+        from desktop.core.connector_auth import ConnectorStore
+        return [self._mcp_command(entry) for entry in selected.values()] + ConnectorStore(self.file.parent).commands()
 
-    @staticmethod
-    def _mcp_command(entry):
+    def _mcp_command(self, entry):
         config = entry["config"]
         env = {}
         for name, reference in config.get("env", {}).items():
@@ -563,6 +636,15 @@ class ConnectionStore:
         for name in config.get("env_vars", []):
             if name in os.environ:
                 env[name] = os.environ[name]
+        if config.get("url"):
+            from desktop.core.memory.launch import PACKAGE_ROOT, console_python
+            for variable in [config.get("bearer_token_env_var"), *config.get("env_http_headers", {}).values()]:
+                if variable:
+                    if variable not in os.environ:
+                        raise ConnectionError(f"MCP 环境变量 {variable} 尚未设置。")
+                    env[variable] = os.environ[variable]
+            env.update(PYTHONPATH=str(PACKAGE_ROOT), PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
+            return McpCommand(entry["name"], console_python(), ("-m", "desktop.core.plugin_server", "--registry", str(self.file), "--mcp", entry["id"], "--project", entry["project"]), env)
         return McpCommand(entry["name"], config["command"], tuple(config.get("args", [])), env)
 
     async def test(self, entry_id, project):

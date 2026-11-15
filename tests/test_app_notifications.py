@@ -55,6 +55,7 @@ def test_three_concurrent_streams_stay_put_but_each_final_result_promotes_within
                 expected.remove(cid)
                 expected.insert(0, cid)
                 assert core.project_rows()[0]["sessionIds"] == expected
+            await until(lambda: len(platform.played_sounds) == 3)
             assert [Path(p).stem for p in platform.played_sounds] == ["complete"] * 3
             order = list(core.settings.session_order)
             await core.call("app.init")
@@ -82,6 +83,7 @@ def test_new_question_and_permission_each_sound_once_and_final_failure_is_not_co
             assert [Path(p).stem for p in platform.played_sounds] == ["question"]
             controller.answer_question(prompt.id, ["Files"])
             await idle(core, cid)
+            await until(lambda: len(platform.played_sounds) == 2)
             assert [Path(p).stem for p in platform.played_sounds] == ["question", "complete"]
             plan.script(call("create_file", {"file_path": "demo.txt", "content": "demo"}), say("Saved"))
             controller.autonomy = "ask"
@@ -92,6 +94,7 @@ def test_new_question_and_permission_each_sound_once_and_final_failure_is_not_co
             assert [Path(p).stem for p in platform.played_sounds][-1] == "question"
             controller.answer_permission(prompt.id, "cancel")
             await idle(core, cid)
+            await until(lambda: len(platform.played_sounds) == 4)
             plan.script(fail("bad_request", "An expected test failure"))
             await core.call("session.send", {"id": cid, "text": "Fail this turn"})
             await idle(core, cid)

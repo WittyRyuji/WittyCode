@@ -22,10 +22,14 @@ for (const live of [false, true]) for (const theme of ["light", "dark"]) {
     if (live) {
       await page.waitFor("!!document.querySelector('.sidebar')", 6000);
       await page.key(",", { code: "Comma", vk: 188, modifiers: 2 });
-      await clickText(".snav", "Connections");
+      await clickText(".snav", "插件");
     }
-    await page.waitFor("document.querySelectorAll('.connection-tabs [role=tab]').length === 4 && !!document.querySelector('.connection-row')", 6000);
-    assert.deepEqual(await page.eval("[...document.querySelectorAll('.connection-tabs button')].map(e => e.textContent.replace(/[0-9]/g, '').trim())"), ["Skills", "Plugins", "Hooks", "MCP"]);
+    await page.waitFor("document.querySelectorAll('.connection-tabs [role=tab]').length === 6 && document.querySelectorAll('.connector-card').length === 2", 6000);
+    assert.deepEqual(await page.eval("[...document.querySelectorAll('.connection-tabs button')].map(e => e.textContent.replace(/[0-9]/g, '').trim())"), ["连接器", "Skills", "插件包", "Hooks", "MCP", "技能商店"]);
+    assert(await page.eval("[...document.querySelectorAll('.connector-card b')].map(e => e.textContent).join() === 'GitHub,Google Workspace'"));
+    await page.shot(resolve(`shots/builtin-connectors-${live ? "live" : "design"}-${theme}.png`));
+    await page.click('.connection-tabs [data-kind=skill]');
+    await page.waitFor("!!document.querySelector('.connection-row')", 3000);
     assert.equal(await page.eval("[...document.querySelectorAll('.snav')].at(-1).textContent.trim()"), "关于", "About must remain the final settings page");
     if (live) {
       assert(await page.eval("document.querySelector('.connection-issues summary').textContent.includes('2') && !document.querySelector('.connection-issues').open && !document.querySelector('.connection-error')"), "compatibility notes are visible as a collapsed summary, not a wall of operation errors");
@@ -101,7 +105,8 @@ for (const theme of ["light", "dark"]) {
     await clickText(".snav", "外观");
     await clickText(".segc button", theme === "light" ? "浅色" : "深色");
     await page.waitFor(`document.documentElement.dataset.theme === '${theme}'`, 3000);
-    await clickText(".snav", "Connections");
+    await clickText(".snav", "插件");
+    await page.click('.connection-tabs [data-kind=skill]');
     await page.waitFor("document.querySelectorAll('.connection-row').length === 3", 6000);
     assert.deepEqual(await page.eval("[...document.querySelectorAll('.connection-info b')].map(e => e.textContent)"), ["alpha", "Beta", "Zeta"], "sorting must not depend on discovery order or case");
     await page.eval("window.__orderRows = [...document.querySelectorAll('.connection-row')]; true");
@@ -109,7 +114,7 @@ for (const theme of ["light", "dark"]) {
       await page.click('.connection-row .switch', 1);
       await page.waitFor(`!document.querySelector('.connection-row .switch').disabled && document.querySelectorAll('.connection-row .switch')[1].getAttribute('aria-checked') === '${enabled}'`, 3000);
       assert(await page.eval("document.querySelectorAll('.connection-row').length === 3 && __orderRows.every((e, i) => e === document.querySelectorAll('.connection-row')[i])"), "switches keep the same DOM rows in the same order");
-      assert.equal(await page.eval("document.querySelector('.connection-tabs .num').textContent"), "3");
+      assert.equal(await page.eval("document.querySelector('.connection-tabs [aria-selected=true] .num').textContent"), "3");
     }
     await clickText(".snav", "外观");
     assert.deepEqual(await page.eval("[...document.querySelectorAll('.settings-scroll .field-label')].map(e => e.textContent)"), ["主题", "文字大小"]);

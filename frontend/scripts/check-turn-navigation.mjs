@@ -33,12 +33,12 @@ for (const [theme, width] of [["light", 1500], ["dark", 900]]) {
     assert(await page.eval(aligned));
     await page.waitFor("document.querySelectorAll('.turn-marker[aria-current=step]').length === 1 && document.querySelectorAll('.turn-marker')[5].getAttribute('aria-current') === 'step'");
     assert(await page.eval("document.querySelector('.turn-nav').getBoundingClientRect().right < document.querySelector('.transcript').getBoundingClientRect().left"), "the outline belongs in the left gutter, not on top of the messages");
-    assert(await page.eval("(() => { const a = [...document.querySelectorAll('.turn-marker')].map(e => e.getBoundingClientRect()); return a.every((r, i) => r.height <= 12 && (!i || r.top - a[i - 1].top <= 12)); })()"), "markers use a compact 12px pitch");
-    const navTop = await page.eval("document.querySelector('.turn-nav').getBoundingClientRect().top");
+    assert(await page.eval("(() => { const a = [...document.querySelectorAll('.turn-marker')].map(e => e.getBoundingClientRect()); return a.every((r, i) => r.height <= 6 && (!i || r.top - a[i - 1].top <= 6)); })()"), "markers use a compact 6px pitch");
+    const centered = "(() => { const n=document.querySelector('.turn-nav').getBoundingClientRect(), s=document.querySelector('.stage').getBoundingClientRect(); return Math.abs(n.top+n.height/2-s.top-s.height/2)<1; })()";
     const fillDraft = (text) => page.eval(`(() => { const e = document.querySelector('.input'); Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(e, ${JSON.stringify(text)}); e.dispatchEvent(new Event('input', {bubbles: true})); })()`);
     await fillDraft("输入多行草稿，导航保持固定。\n".repeat(12));
     await page.wait(180);
-    assert(Math.abs(await page.eval("document.querySelector('.turn-nav').getBoundingClientRect().top") - navTop) < 1, "growing the input does not move the outline");
+    assert(await page.eval(centered), "growing the input keeps the outline centered");
     assert(await page.eval(atEnd), "growing the input preserves following latest");
     await fillDraft("");
     await page.wait(150);
@@ -67,7 +67,7 @@ for (const [theme, width] of [["light", 1500], ["dark", 900]]) {
     await fillDraft("继续输入多行，不抢历史位置。\n".repeat(10));
     await page.wait(150);
     assert(Math.abs(await page.eval("document.querySelector('.scroller').scrollTop") - historicalTop) < 2);
-    assert(Math.abs(await page.eval("document.querySelector('.turn-nav').getBoundingClientRect().top") - navTop) < 1);
+    assert(await page.eval(centered));
     await fillDraft("");
     await page.eval("document.querySelector('.turn-marker[aria-current=step]').focus({preventScroll: true})");
     await page.key("Home", { vk: 36 });
@@ -128,8 +128,8 @@ for (const [theme, width] of [["light", 1500], ["dark", 900]]) {
 
     await page.eval("window.dispatchEvent(new Event('wc:scroll-end'))");
     await page.waitFor(atEnd);
-    await emit(Array.from({ length: 80 }, (_, i) => turn(i, 1)), true);
-    await page.waitFor("document.querySelectorAll('.turn-marker').length === 80");
+    await emit(Array.from({ length: 160 }, (_, i) => turn(i, 1)), true);
+    await page.waitFor("document.querySelectorAll('.turn-marker').length === 160");
     await page.waitFor(atEnd);
     assert(await page.eval("(() => { const n = document.querySelector('.turn-nav'), s = document.querySelector('.stage').getBoundingClientRect(), r = n.getBoundingClientRect(); return n.scrollHeight > n.clientHeight && r.top >= s.top && r.bottom <= s.bottom && document.querySelectorAll('.main .transcript').length === 1; })()"));
     await page.eval("document.querySelector('.turn-marker[aria-current=step]').focus()");
@@ -138,13 +138,13 @@ for (const [theme, width] of [["light", 1500], ["dark", 900]]) {
     await page.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
     await page.key("End", { vk: 35 });
     await page.waitFor(atEnd, 1000);
-    assert.equal(await page.eval("document.activeElement.dataset.turnId"), "turn-79");
-    await emit(Array.from({ length: 80 }, (_, i) => ({ ...turn(i, 1), id: `restored-${i}` })), true);
-    await page.waitFor("document.querySelector('.turn-marker[aria-current=step]')?.dataset.turnId === 'restored-79'", 2000);
+    assert.equal(await page.eval("document.activeElement.dataset.turnId"), "turn-159");
+    await emit(Array.from({ length: 160 }, (_, i) => ({ ...turn(i, 1), id: `restored-${i}` })), true);
+    await page.waitFor("document.querySelector('.turn-marker[aria-current=step]')?.dataset.turnId === 'restored-159'", 2000);
     assert(await page.eval("document.querySelectorAll('.turn-marker[tabindex=\"0\"]').length === 1"), "a same-size restored snapshot still has an active, keyboard-reachable marker");
     assert.equal(page.consoleErrors().length, 0, page.errorTexts().join("\n"));
     assert.equal(page.cspViolations().length, 0);
-    console.log(`PASS conversation navigation: ${theme}, ${width}px, alignment, hover, keyboard, manual scroll, streaming, draggable fading scrollbar, plan dismissal, 80 turns, same-size history replacement, reduced motion`);
+    console.log(`PASS conversation navigation: ${theme}, ${width}px, alignment, hover, keyboard, manual scroll, streaming, draggable fading scrollbar, plan dismissal, 160 turns, same-size history replacement, reduced motion`);
   } finally {
     await page.close();
   }

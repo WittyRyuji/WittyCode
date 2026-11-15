@@ -631,7 +631,7 @@ test("a call that waits for the user has no timeout; any other call gives up aft
     );
     return box;
   };
-  const kinds = ["chatgpt.login", "devin.login", "project.add", "attachments.pick", "sounds.pick", "providers.list", "devin.account"];
+  const kinds = ["chatgpt.login", "devin.login", "connectors.login", "project.add", "attachments.pick", "sounds.pick", "providers.list", "devin.account"];
   const boxes = kinds.map((method) => outcome(transport.call(method)));
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(calls, kinds, "all of them were sent");
@@ -639,7 +639,7 @@ test("a call that waits for the user has no timeout; any other call gives up aft
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(
     boxes.map((b) => b.state),
-    ["waiting", "waiting", "waiting", "waiting", "waiting", "WittyCode 后台 120 秒没有回应（providers.list）。", "WittyCode 后台 120 秒没有回应（devin.account）。"],
+    ["waiting", "waiting", "waiting", "waiting", "waiting", "waiting", "WittyCode 后台 120 秒没有回应（providers.list）。", "WittyCode 后台 120 秒没有回应（devin.account）。"],
     "the sign-ins and the file dialogs wait for as long as the user takes",
   );
 });

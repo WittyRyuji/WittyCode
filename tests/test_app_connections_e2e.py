@@ -28,8 +28,8 @@ def test_qt_import_requires_consent_and_really_tests_the_stdio_server(qapp, loop
         try:
             await rig.press(",", Qt.KeyboardModifier.ControlModifier)
             await rig.wait_for(".settings")
-            await rig.click_text(".snav", "Connections")
-            await rig.wait_for(".connection-tabs [role=tab]", 4)
+            await rig.click_text(".snav", "插件")
+            await rig.wait_for(".connection-tabs [role=tab]", 6)
             await rig.click_text(".connection-tabs button", "MCP")
             await rig.click('.connection-import input')
             await rig.type(str(source))
@@ -107,7 +107,7 @@ def test_qt_opens_a_real_catalog_without_counting_cached_copies_or_covering_it_w
     file = home / ".agents/skills/personal-demo/SKILL.md"
     file.parent.mkdir(parents=True)
     file.write_text("---\nname: personal-demo\ndescription: Review local changes\n---\nInspect the local diff.", encoding="utf-8")
-    (home / ".codex/config.toml").write_text('[mcp_servers.remote]\nurl = "https://example.com/mcp"\n[mcp_servers.local]\ncommand = "python"\nstartup_timeout_sec = 12\n', encoding="utf-8")
+    (home / ".codex/config.toml").write_text('[mcp_servers.remote]\nurl = "http://example.com/mcp"\n[mcp_servers.local]\ncommand = "python"\nstartup_timeout_sec = 12\n', encoding="utf-8")
 
     async def scenario():
         rig = await open_rig(tmp_path, size=(width, 960))
@@ -115,16 +115,17 @@ def test_qt_opens_a_real_catalog_without_counting_cached_copies_or_covering_it_w
             await rig.core.call("settings.set", {"key": "theme", "value": theme})
             await rig.press(",", Qt.KeyboardModifier.ControlModifier)
             await rig.wait_for(".settings")
-            await rig.click_text(".snav", "Connections")
+            await rig.click_text(".snav", "插件")
+            await rig.click_text(".connection-tabs button", "Skills")
             await rig.wait_for(".connection-row", 2)
-            assert await rig.texts(".connection-tabs .num") == ["2", "1", "0", "0"]
+            assert await rig.texts(".connection-tabs .num") == ["2", "2", "1", "0", "0"]
             assert await rig.text(".connection-issues summary") == "发现提示 · 2"
             assert await rig.js("!document.querySelector('.connection-issues').open")
             assert not await rig.exists(".connection-error[role=alert]")
             await rig.click(".connection-issues summary")
             assert await rig.count(".connection-issue") == 2
             await rig.click(".connection-issues summary")
-            await rig.click_text(".connection-tabs button", "Plugins")
+            await rig.click_text(".connection-tabs button", "插件包")
             await rig.wait_for(".connection-row", 1)
             assert await rig.text(".connection-info b") == "demo-plugin"
             await rig.click_text(".connection-row .btn", "导入")
@@ -169,7 +170,8 @@ def test_qt_skill_switches_keep_sorted_rows_scroll_and_runtime_state_and_setting
             await rig.core.call("settings.set", {"key": "theme", "value": theme})
             await rig.press(",", Qt.KeyboardModifier.ControlModifier)
             await rig.wait_for(".settings")
-            await rig.click_text(".snav", "Connections")
+            await rig.click_text(".snav", "插件")
+            await rig.click_text(".connection-tabs button", "Skills")
             await rig.wait_for(".connection-row", len(expected))
             assert await rig.texts(".connection-info b") == expected
             at = expected.index("middle")
@@ -183,7 +185,7 @@ def test_qt_skill_switches_keep_sorted_rows_scroll_and_runtime_state_and_setting
                 assert await rig.texts(".connection-info b") == expected
                 assert await rig.js("__skillRows.every((e, i) => e === document.querySelectorAll('.connection-row')[i])")
                 assert await rig.js("Math.abs(document.querySelector('.settings-scroll').scrollTop - __skillScroll) < 2")
-                assert await rig.text(".connection-tabs .num") == str(len(expected))
+                assert await rig.text('.connection-tabs [aria-selected="true"] .num') == str(len(expected))
                 available = skills.discover(rig.project, home)
                 assert ("middle" in [item.name for item in available]) is enabled
                 assert next(item.path for item in available if item.name == "shared") == selected
@@ -192,7 +194,8 @@ def test_qt_skill_switches_keep_sorted_rows_scroll_and_runtime_state_and_setting
             await rig.press("Escape")
             await rig.wait_for(".settings", 0)
             await rig.press(",", Qt.KeyboardModifier.ControlModifier)
-            await rig.click_text(".snav", "Connections")
+            await rig.click_text(".snav", "插件")
+            await rig.click_text(".connection-tabs button", "Skills")
             await rig.wait_for(".connection-row", len(expected))
             assert await rig.texts(".connection-info b") == expected
             await rig.click_text(".snav", "外观")

@@ -21,7 +21,7 @@ def test_the_step_limit_can_be_saved_in_settings_and_raised_while_a_turn_runs(qa
             async def settings():
                 await rig.press(Qt.Key.Key_Comma, Qt.KeyboardModifier.ControlModifier)
                 await rig.wait_for(".settings")
-                await rig.click(".snav", 3)
+                await rig.click_text(".snav", "会话")
                 await rig.wait_for(".step-limit-setting")
 
             async def type_limit(text):

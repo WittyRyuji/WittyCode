@@ -616,16 +616,16 @@ def test_a_failed_send_with_room_in_the_box_restores_quietly(tmp_path):
 # --------------------------------------------------------------------------- settings and models
 
 
-def test_reasoning_and_the_defaults_follow_the_choice(tmp_path):
+def test_session_choices_do_not_change_the_saved_defaults(tmp_path):
     async def scenario():
         core, _, events, _, _ = await ready_core(tmp_path)
         cid = await new_session(core, events, tmp_path / "proj")
         events.clear()
         assert (await core.call("session.choose", {"id": cid, "field": "reasoning", "value": "high"})) == {"ok": True}
         await until(lambda: sessions_of(events).get(cid, {}).get("settings", {}).get("reasoning") == "high")
-        assert core.settings.reasoning_effort == "high" and events.last("defaults")["defaults"]["reasoning"] == "high"
+        assert core.settings.reasoning_effort == "medium" and events.of("defaults") == []
         assert (await core.call("session.choose", {"id": cid, "field": "autonomy", "value": "full"}))["ok"]
-        assert core.settings.chatgpt_autonomy == "full"
+        assert core.settings.chatgpt_autonomy == "code"
         # A model that does not offer the current level gets its own default, and the page is told why.
         events.clear()
         assert (await core.call("session.choose", {"id": cid, "field": "model", "value": OTHER_MODEL}))["ok"]

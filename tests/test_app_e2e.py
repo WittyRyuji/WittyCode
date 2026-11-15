@@ -391,7 +391,7 @@ def test_a_pasted_picture_becomes_an_attachment_and_goes_out_with_the_message(qa
     run(loop, scenario())
 
 
-def test_the_settings_under_the_message_box_change_the_session_and_the_defaults(qapp, loop, tmp_path):
+def test_the_message_box_changes_only_the_session_not_the_saved_defaults(qapp, loop, tmp_path):
     async def scenario():
         rig = await open_rig(tmp_path)
         await new_conversation(rig)
@@ -403,7 +403,7 @@ def test_the_settings_under_the_message_box_change_the_session_and_the_defaults(
         await rig.wait_for(".menu-item")
         await rig.click_text(".menu-item", "High")
         await until(lambda: controller.live_settings().reasoning == "high")
-        assert rig.core.settings.reasoning_effort == "high"
+        assert rig.core.settings.reasoning_effort == "medium", "the saved new-session default is independent"
         await rig.wait_text(".controls .chip-v", "High")
         await rig.click(".controls .chip", 3)  # mode
         await rig.click_text(".menu-item", "Plan")
@@ -741,7 +741,7 @@ def test_a_waiting_message_can_be_taken_back_and_the_setting_swaps_the_two_keys(
         # the setting: Enter steers, Ctrl+Enter queues
         await rig.press(",", Qt.KeyboardModifier.ControlModifier)
         await rig.wait_for(".settings")
-        await rig.click(".snav", 3)  # 外观 / 账号与模型 / 新会话默认值 / 会话
+        await rig.click_text(".snav", "会话")
         await rig.click_text(".segc button", "立即引导")
         await wait_for(lambda: rig.core.settings.follow_up == "steer", message="the setting to reach the core")
         await rig.press("Escape")

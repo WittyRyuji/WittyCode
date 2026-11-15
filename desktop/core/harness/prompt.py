@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from desktop.core.harness.skills import Skill, skills_prompt
-from desktop.core.language import THINK_CHINESE
+from desktop.core.language import THINK_CHINESE, rules_for
 
 AGENTS_FILE = "AGENTS.md"
 AGENTS_LIMIT = 24_000
@@ -210,7 +210,9 @@ def load_agents(project: Path, *, limit: int = AGENTS_LIMIT) -> AgentsContext:
     loaded: list[AgentsFile] = []
     for path in _agents_files(project):
         try:
-            text = path.read_text(encoding="utf-8", errors="replace").strip()
+            raw = path.read_bytes()
+            encoding = "utf-16" if raw.startswith((b"\xff\xfe", b"\xfe\xff")) else "utf-8-sig"
+            text = raw.decode(encoding, errors="replace").replace("\r\n", "\n").strip()
         except OSError:
             continue
         if not text:
@@ -257,6 +259,8 @@ def build_instructions(
     plan: bool = False,
     skills: Sequence[Skill] = (),
     think_chinese: bool = True,
+    answer_language: str = "auto",
+    thinking_language: str = "",
     sections: dict[str, str] | None = None,
 ) -> str:
     """``servers``: ``(name, instructions)`` of the MCP servers connected to the conversation. ``notes``, when given, gets
@@ -267,7 +271,7 @@ def build_instructions(
     runs = "Only reading and searching run (Plan mode)." if plan else LEVEL_RULES.get(level, LEVEL_RULES["ask"])
     fields = {
         "workflow": BASE,
-        "language": THINK_CHINESE if think_chinese else "The Chinese thinking-language preference is off. Answer in the user's language.",
+        "language": rules_for(answer_language, thinking_language, legacy_chinese=think_chinese),
         "environment": f"Environment:\n- Working folder: {project}\n- Operating system: Windows ({os.environ.get('OS', 'Windows_NT')})",
         "date": f"- Date: {day.isoformat()}",
         "model": f"- Model: {model}",
@@ -278,6 +282,10 @@ def build_instructions(
     for name, text in sorted(servers):
         if text.strip():
             fields[f"server:{name}"] = f"Notes from the connected tool server `{name}`:\n{text.strip()}"
+    from desktop.core.customization import global_instructions
+    global_rules = global_instructions()
+    if global_rules:
+        fields["customization:global"] = "WittyCode global AGENTS.md instructions (project rules take precedence):\n" + global_rules
     agents = load_agents(project)
     for index, item in enumerate(agents.files):
         nearest = index == len(agents.files) - 1

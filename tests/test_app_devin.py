@@ -274,12 +274,12 @@ def test_a_new_session_starts_with_the_default_permission_of_devin_and_remembers
         assert meta(events, cid)["settings"]["autonomy"] == "code"
         assert await core.call("session.choose", {"id": cid, "field": "autonomy", "value": "smart"}) == {"ok": True}
         await until(lambda: meta(events, cid)["settings"]["autonomy"] == "smart")
-        assert core.settings.devin_autonomy == "smart" and core.settings.chatgpt_autonomy == "code", "the own loop's level is not touched"
+        assert core.settings.devin_autonomy == "code" and core.settings.chatgpt_autonomy == "code", "session choices do not overwrite saved permissions"
         cid2 = await new_devin(core, events, tmp_path)
-        assert meta(events, cid2)["settings"]["autonomy"] == "smart"
-        assert harness.state()["sessions"][core._by_cid[cid2].controller.session_id]["mode"] == "smart"
+        assert meta(events, cid2)["settings"]["autonomy"] == "code"
+        assert harness.state()["sessions"][core._by_cid[cid2].controller.session_id]["mode"] == "accept-edits"
         # a level of another engine's scale is not a level of this one
-        assert core._open_settings("devin:swe-2-high", {"autonomy": "readonly", "reasoning": "high"})["autonomy"] == "smart"
+        assert core._open_settings("devin:swe-2-high", {"autonomy": "readonly", "reasoning": "high"})["autonomy"] == "code"
         await core.shutdown()
 
     run(scenario())

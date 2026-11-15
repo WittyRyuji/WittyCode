@@ -212,7 +212,8 @@ function liveActions(): Partial<Store> {
     },
     createSession: async (projectId) => {
       const movedBefore = moved;
-      const r = await attempt(liveCall("session.new", { projectId }));
+      const settings = get().landing.settings;
+      const r = await attempt(liveCall("session.new", settings ? { projectId, settings } : { projectId }));
       if (r === FAILED || !r.id) return null;
       showOpened(r.id, movedBefore);
       set({ lastProject: projectId });
@@ -387,7 +388,8 @@ function liveActions(): Partial<Store> {
     },
     choose: async (field, value) => {
       const id = get().currentId;
-      const r = await attempt(liveCall("session.choose", id ? { id, field, value } : { field, value }));
+      if (!id) return get().chooseLanding(field, value);
+      const r = await attempt(liveCall("session.choose", { id, field, value }));
       if (r !== FAILED && id && r.choose) askWhichAttachments(id, value, r.choose);
     },
     setDefault: (field, value) => void attempt(liveCall("session.choose", { field, value })),
@@ -417,6 +419,7 @@ function liveActions(): Partial<Store> {
     setMemoryEngines: (engines) => void setting("memoryEngines", engines),
     setCompactAuto: (on) => void setting("compactAuto", on),
     setThinkChinese: (on) => void setting("thinkChinese", on),
+    setLanguage: (key, value) => void setting(key, value),
     setSoundEnabled: (on) => void setting("soundEnabled", on),
     setSoundPath: (key, path) => void setting(key, path),
     pickSound: async (kind) => {

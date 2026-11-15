@@ -607,6 +607,8 @@ class ChatGPTController:
                 plan=plan,
                 skills=found,
                 think_chinese=self.manager.settings.think_chinese,
+                answer_language=self.manager.settings.answer_language,
+                thinking_language=self.manager.settings.thinking_language,
                 sections=sections,
             )
             snapshot = self.saved.prompt
