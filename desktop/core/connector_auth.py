@@ -19,6 +19,7 @@ import tempfile
 import time
 import urllib.parse
 
+from desktop.core import connector_clients
 from desktop.core.plugin_http import PluginError, PluginHttp, checked_json
 from desktop.core.plugin_lock import lock_file as _credential_lock
 from desktop.core.settings import default_settings_path
@@ -104,6 +105,10 @@ class TokenStore:
             token = json.loads(_crypt(base64.b64decode(value, validate=True), decrypt=True))
             if not isinstance(token, dict) or not _credential(token.get("access_token")) or not _credential(token.get("refresh_token", ""), optional=True) or type(token.get("expires_at", 0)) not in (int, float) or not math.isfinite(token.get("expires_at", 0)):
                 raise ValueError()
+            client_id = token.get("client_id", "")
+            variable = token.get("client_secret_env", "")
+            if not _credential(client_id, optional=True) or not isinstance(variable, str) or variable and not VARIABLE.fullmatch(variable):
+                raise ValueError()
             return token
         except (ValueError, TypeError, UnicodeError) as error:
             raise PluginError("账号凭据损坏，请重新授权。") from error
@@ -152,6 +157,7 @@ class OAuthFlow:
         self.callback = None
         self.cancelled = False
         self.connections = set()
+        self._pending = None
 
     def cancel(self):
         self.cancelled = True
@@ -159,6 +165,8 @@ class OAuthFlow:
             def stop():
                 if not self.callback.done():
                     self.callback.set_exception(PluginError("授权已取消。"))
+                if self._pending is not None:
+                    self._pending.cancel()
             self.callback.get_loop().call_soon_threadsafe(stop)
 
     async def _receive(self, reader, writer):
@@ -188,19 +196,29 @@ class OAuthFlow:
             self.connections.discard(task)
 
     async def run(self):
+        if self.cancelled:
+            raise PluginError("授权已取消。")
         definition = PROVIDERS[self.provider]
         self.callback = asyncio.get_running_loop().create_future()
         try:
             server = await asyncio.start_server(self._receive, "127.0.0.1", self.config["port"], limit=16_384)
         except OSError as error:
-            self.callback.cancel()
+            if self.callback.done() and not self.callback.cancelled():
+                self.callback.exception()
+            else:
+                self.callback.cancel()
+            if self.cancelled:
+                raise PluginError("授权已取消。") from None
             raise PluginError("授权回调端口不可用，请更改端口或关闭占用该端口的程序。") from error
-        redirect = f"http://127.0.0.1:{self.config['port']}{definition['callbackPath']}"
+        port = server.sockets[0].getsockname()[1]
+        redirect = f"http://127.0.0.1:{port}{definition['callbackPath']}"
         challenge = base64.urlsafe_b64encode(hashlib.sha256(self.verifier.encode()).digest()).decode().rstrip("=")
         params = {"client_id": self.config["clientId"], "redirect_uri": redirect, "response_type": "code", "scope": definition["scopes"], "state": self.state, "code_challenge": challenge, "code_challenge_method": "S256"}
         if self.provider == "google-workspace":
             params.update(access_type="offline", prompt="consent")
         try:
+            if self.cancelled:
+                raise PluginError("授权已取消。")
             self.open_browser(definition["authorize"] + "?" + urllib.parse.urlencode(params))
             try:
                 code = await asyncio.wait_for(self.callback, 300)
@@ -213,7 +231,19 @@ class OAuthFlow:
                 if not secret:
                     raise PluginError("客户端密钥环境变量尚未设置，请设置后重试。")
                 form["client_secret"] = secret
-            token = checked_json(await self.http.request("POST", definition["token"], form=form))
+            if self.cancelled:
+                raise PluginError("授权已取消。")
+            task = asyncio.create_task(self.http.request("POST", definition["token"], form=form))
+            self._pending = task
+            try:
+                token = checked_json(await task)
+            except asyncio.CancelledError:
+                if self.cancelled:
+                    raise PluginError("授权已取消。") from None
+                raise
+            finally:
+                if self._pending is task:
+                    self._pending = None
             if self.cancelled:
                 raise PluginError("授权已取消。")
             return _token_response(token, default_expires=0 if self.provider == "github" else 3600)
@@ -228,6 +258,104 @@ class OAuthFlow:
                 self.callback.cancel()
             elif not self.callback.cancelled():
                 self.callback.exception()
+
+
+class GitHubDeviceFlow:
+    """GitHub's public-client device flow: the user authorizes in the browser, without a client secret."""
+
+    def __init__(self, config, http, open_browser):
+        self.config, self.http, self.open_browser = config, http, open_browser
+        self.cancelled = False
+        self.user_code = ""
+        self._loop = None
+        self._cancel = None
+        self._pending = None
+
+    def cancel(self):
+        self.cancelled = True
+        if self._loop is not None and self._cancel is not None:
+            def stop():
+                self._cancel.set()
+                if self._pending is not None:
+                    self._pending.cancel()
+            self._loop.call_soon_threadsafe(stop)
+
+    async def _request(self, url, form):
+        if self.cancelled:
+            raise PluginError("授权已取消。")
+        task = asyncio.create_task(self.http.request("POST", url, form=form))
+        self._pending = task
+        try:
+            return checked_json(await task)
+        except asyncio.CancelledError:
+            if self.cancelled:
+                raise PluginError("授权已取消。") from None
+            raise
+        finally:
+            self._pending = None
+
+    async def _pause(self, seconds):
+        if self.cancelled:
+            raise PluginError("授权已取消。")
+        try:
+            await asyncio.wait_for(self._cancel.wait(), seconds)
+        except TimeoutError:
+            return
+        raise PluginError("授权已取消。")
+
+    async def run(self):
+        self._loop = asyncio.get_running_loop()
+        self._cancel = asyncio.Event()
+        if self.cancelled:
+            raise PluginError("授权已取消。")
+        definition = PROVIDERS["github"]
+        device = await self._request("https://github.com/login/device/code", {
+            "client_id": self.config["clientId"], "scope": definition["scopes"],
+        })
+        if self.cancelled:
+            raise PluginError("授权已取消。")
+        if not isinstance(device, dict):
+            raise PluginError("GitHub 未返回有效的设备授权信息。")
+        code, user = device.get("device_code"), device.get("user_code")
+        expires, interval = device.get("expires_in"), device.get("interval", 5)
+        if (not _credential(code) or not isinstance(user, str) or not re.fullmatch(r"[A-Z0-9-]{4,32}", user)
+                or device.get("verification_uri") != "https://github.com/login/device"
+                or type(expires) is not int or not 1 <= expires <= 1800
+                or type(interval) is not int or not 1 <= interval <= 60):
+            raise PluginError("GitHub 返回的设备授权信息不合法。")
+        deadline = time.monotonic() + expires
+        self.user_code = user
+        self.open_browser("https://github.com/login/device")
+        while True:
+            if self.cancelled:
+                raise PluginError("授权已取消。")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise PluginError("设备授权已过期，请重试。")
+            await self._pause(min(interval, remaining))
+            if self.cancelled:
+                raise PluginError("授权已取消。")
+            if time.monotonic() >= deadline:
+                raise PluginError("设备授权已过期，请重试。")
+            response = await self._request(definition["token"], {
+                "client_id": self.config["clientId"], "device_code": code,
+                "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+            })
+            if self.cancelled:
+                raise PluginError("授权已取消。")
+            error = response.get("error") if isinstance(response, dict) else None
+            if error == "authorization_pending":
+                continue
+            if error == "slow_down":
+                interval += 5
+                continue
+            if error == "access_denied":
+                raise PluginError("账号授权已被拒绝。")
+            if error == "expired_token":
+                raise PluginError("设备授权已过期，请重试。")
+            if error:
+                raise PluginError("GitHub 设备授权失败，请重试。")
+            return _token_response(response, default_expires=0)
 
 
 class ConnectorStore:
@@ -251,7 +379,16 @@ class ConnectorStore:
         return {key: stored.get(key, value) for key, value in defaults.items()}
 
     def views(self):
-        return [{"id": provider, "name": definition["name"], **self.config(provider), "connected": self.tokens.load(provider) is not None, "signingIn": provider in self.flows, "scopes": definition["scopes"], "helpUrl": definition["help"], "callbackUrl": f"http://127.0.0.1:{self.config(provider)['port']}{definition['callbackPath']}"} for provider, definition in PROVIDERS.items()]
+        rows = []
+        for provider, definition in PROVIDERS.items():
+            config = self.config(provider)
+            flow = self.flows.get(provider)
+            rows.append({"id": provider, "name": definition["name"], **config,
+                         "connected": self.tokens.load(provider) is not None, "signingIn": flow is not None,
+                         "available": bool(connector_clients.client_id(provider) or config["clientId"]),
+                         "userCode": getattr(flow, "user_code", ""), "scopes": definition["scopes"],
+                         "helpUrl": definition["help"], "callbackUrl": f"http://127.0.0.1:{config['port']}{definition['callbackPath']}"})
+        return rows
 
     def configure(self, provider, config):
         with _credential_lock(self.file):
@@ -285,16 +422,21 @@ class ConnectorStore:
         config = self.config(provider)
         if provider in self.flows:
             raise PluginError("这个连接器正在等待浏览器授权。")
-        if not config["clientId"] or provider == "github" and not config["clientSecretEnv"]:
-            raise PluginError("请先配置 OAuth Client ID 和客户端密钥环境变量。")
+        published = connector_clients.client_id(provider)
+        if published:
+            # New installations use the publisher's public identity, not an old user-supplied client or its secret.
+            config = {**config, "clientId": published, "clientSecretEnv": "", "port": 0 if provider == "google-workspace" else config["port"]}
+        if not config["clientId"]:
+            raise PluginError("此连接器暂不可用：WittyCode 尚未完成服务方应用注册。")
         if config["clientSecretEnv"] and not os.environ.get(config["clientSecretEnv"]):
-            raise PluginError("客户端密钥环境变量尚未设置，请设置后重试。")
-        flow = OAuthFlow(provider, config, self.http, open_browser)
+            raise PluginError("原有客户端密钥环境变量尚未设置，请等待 WittyCode 完成应用注册。")
+        flow = GitHubDeviceFlow(config, self.http, open_browser) if provider == "github" and not config["clientSecretEnv"] else OAuthFlow(provider, config, self.http, open_browser)
         self.flows[provider] = flow
         try:
             token = await flow.run()
             if flow.cancelled:
                 raise PluginError("授权已取消。")
+            token.update(client_id=config["clientId"], client_secret_env=config["clientSecretEnv"])
             before, expected = await asyncio.to_thread(self.tokens.save, provider, token, valid=lambda: not flow.cancelled, activate=True)
             if flow.cancelled:
                 await asyncio.to_thread(self.tokens.restore, provider, before, expected)
@@ -349,13 +491,20 @@ class ConnectorStore:
             config = self.config(provider)
             if not token.get("refresh_token"):
                 raise PluginError("账号授权已过期，请重新连接。")
-            form = {"grant_type": "refresh_token", "refresh_token": token["refresh_token"], "client_id": config["clientId"]}
-            if config["clientSecretEnv"]:
-                secret = os.environ.get(config["clientSecretEnv"])
+            client_id = token.get("client_id") or config["clientId"] or connector_clients.client_id(provider)
+            if not client_id:
+                raise PluginError("账号对应的应用身份不可用，请重新连接。")
+            form = {"grant_type": "refresh_token", "refresh_token": token["refresh_token"], "client_id": client_id}
+            variable = token.get("client_secret_env", config["clientSecretEnv"])
+            if variable:
+                secret = os.environ.get(variable)
                 if not secret:
                     raise PluginError("刷新授权需要的客户端密钥环境变量尚未设置。")
                 form["client_secret"] = secret
             refreshed = checked_json(asyncio.run(self.http.request("POST", PROVIDERS[provider]["token"], form=form)))
             updated = _token_response(refreshed, previous=token)
+            for key in ("client_id", "client_secret_env"):
+                if key in token:
+                    updated[key] = token[key]
             self.tokens._save(provider, updated)
             return updated["access_token"]

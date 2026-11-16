@@ -252,10 +252,10 @@ export interface ConnectionPreview { preview: string; items: ConnectionEntry[]; 
 
 export type ConnectorId = "github" | "google-workspace";
 export interface ConnectorConfig { clientId: string; clientSecretEnv: string; port: number; enabled: boolean }
-export interface ConnectorView extends ConnectorConfig { id: ConnectorId; name: string; connected: boolean; signingIn: boolean; scopes: string; helpUrl: string; callbackUrl: string }
+export interface ConnectorView extends ConnectorConfig { id: ConnectorId; name: string; connected: boolean; signingIn: boolean; available: boolean; userCode: string; scopes: string; helpUrl: string; callbackUrl: string }
 export type SkillSource = "openai" | "anthropic";
-export interface MarketSkill { source: SkillSource; name: string; commit: string; url: string; installed: boolean }
-export interface SkillInstallPreview { preview: string; source: SkillSource; name: string; commit: string; url: string; description: string; license: string; licenseText: string; files: number }
+export interface MarketSkill { source: SkillSource; name: string; commit: string; url: string; installed: boolean; active?: boolean }
+export interface SkillInstallPreview { preview: string; source: SkillSource; name: string; skillName?: string; userInvocable?: boolean; modelInvocable?: boolean; existing?: boolean; commit: string; url: string; description: string; license: string; licenseText: string; files: number }
 export interface RulesDocument { path: string; text: string; revision: string; exists: boolean }
 
 export interface FactoryState { cli: "found" | "missing"; cliPath: string; path: string; enabled: boolean }

@@ -14,6 +14,12 @@ from desktop.core.connector_auth import ConnectorStore, PROVIDERS, _token_respon
 from desktop.core.plugin_http import PluginError
 
 
+@pytest.fixture(autouse=True)
+def no_publisher_client(monkeypatch):
+    from desktop.core import connector_clients
+    monkeypatch.setattr(connector_clients, "client_id", lambda provider: "")
+
+
 class FakeHttp:
     def __init__(self, value=None, status=200):
         self.calls = []
@@ -158,6 +164,7 @@ def test_invalid_configuration_is_rejected_without_changing_an_existing_file(tmp
         with pytest.raises(PluginError):
             store.configure("github", value)
         assert store.file.read_bytes() == before
-    with pytest.raises(PluginError):
-        asyncio.run(store.login("github", lambda url: None))
-    assert store.tokens.load("github") is None
+    unregistered = ConnectorStore(tmp_path / "unregistered", http=FakeHttp())
+    with pytest.raises(PluginError, match="注册"):
+        asyncio.run(unregistered.login("github", lambda url: None))
+    assert unregistered.tokens.load("github") is None and not unregistered.http.calls

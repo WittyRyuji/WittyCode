@@ -27,6 +27,17 @@ for (const live of [false, true]) for (const theme of ["light", "dark"]) {
     await page.waitFor("document.querySelectorAll('.connection-tabs [role=tab]').length === 6 && document.querySelectorAll('.connector-card').length === 2", 6000);
     assert.deepEqual(await page.eval("[...document.querySelectorAll('.connection-tabs button')].map(e => e.textContent.replace(/[0-9]/g, '').trim())"), ["连接器", "Skills", "插件包", "Hooks", "MCP", "技能商店"]);
     assert(await page.eval("[...document.querySelectorAll('.connector-card b')].map(e => e.textContent).join() === 'GitHub,Google Workspace'"));
+    assert(await page.eval("!document.querySelector('.connector-card input, .connector-card details')"), "users must not be asked for OAuth client configuration");
+    if (live) {
+      await page.click('.connector-card[data-connector=github] .btn');
+      await page.waitFor("document.querySelector('.connector-card[data-connector=github]').textContent.includes('已连接') && !document.querySelector('.connector-card[data-connector=github] .btn').disabled", 3000);
+      assert.deepEqual(await page.eval("__fake.callsOf('connectors.login').at(-1)"), { provider: "github" });
+      await clickText('.connector-card[data-connector=github] .btn', '断开连接');
+      await page.waitFor("!!document.querySelector('.dialog .danger-solid')", 3000);
+      await page.click('.dialog .danger-solid');
+      await page.waitFor("document.querySelector('.connector-card[data-connector=github]').textContent.includes('未连接')", 3000);
+      assert.deepEqual(await page.eval("__fake.callsOf('connectors.disconnect').at(-1)"), { provider: "github" });
+    }
     await page.shot(resolve(`shots/builtin-connectors-${live ? "live" : "design"}-${theme}.png`));
     await page.click('.connection-tabs [data-kind=skill]');
     await page.waitFor("!!document.querySelector('.connection-row')", 3000);
@@ -91,6 +102,39 @@ for (const live of [false, true]) for (const theme of ["light", "dark"]) {
     assert.equal(page.consoleErrors().length, 0);
     assert.equal(page.cspViolations().length, 0);
     console.log(`PASS Connections and optional Factory UI: ${live ? "real QWebChannel" : "design"}, ${theme}, consent, edit, MCP test and switches`);
+  } finally { await page.close(); }
+}
+
+{
+  const { scripts } = fakeBackendScripts({ initDelay: 0, accountDelay: 0, connectorLoginDelay: 1800 });
+  const page = await openPage(`${index}?live=1&theme=light`, { init: scripts, width: 1500, height: 950 });
+  try {
+    await page.waitFor("!!document.querySelector('.sidebar')", 6000);
+    await page.key(",", { code: "Comma", vk: 188, modifiers: 2 });
+    const tab = await page.eval("[...document.querySelectorAll('.snav')].findIndex(e => e.textContent.includes('插件'))");
+    await page.click('.snav', tab);
+    await page.waitFor("!!document.querySelector('.connector-card[data-connector=github] .btn')", 6000);
+    await page.click('.connector-card[data-connector=github] .btn');
+    await page.waitFor("document.querySelector('.connector-card[data-connector=github]').textContent.includes('DEMO-1234')", 3000);
+    await page.eval("__fake.delayReply('connectors.list', 1800)");
+    await page.waitFor("document.querySelector('.connector-card[data-connector=github]').textContent.includes('已连接')", 4000);
+    await page.eval("window.__connectorRegressed = false; window.__connectorWatch = new MutationObserver(() => { if (document.querySelector('.connector-card[data-connector=github]')?.textContent.includes('等待浏览器授权')) window.__connectorRegressed = true; }); __connectorWatch.observe(document.querySelector('.connector-card[data-connector=github]'), { subtree: true, childList: true, characterData: true }); true");
+    await new Promise((resolve) => setTimeout(resolve, 2200));
+    assert(!(await page.eval("__connectorRegressed")), "a slow, stale poll must not overwrite successful authorization");
+    assert(await page.eval("document.querySelector('.connector-card[data-connector=github]').textContent.includes('已连接') && !document.querySelector('.connector-card[data-connector=github]').textContent.includes('DEMO-1234')"));
+    await page.click('.connector-card[data-connector=github] .btn', 1);
+    await page.waitFor("!!document.querySelector('.dialog .danger-solid')", 3000);
+    await page.click('.dialog .danger-solid');
+    await page.waitFor("document.querySelector('.connector-card[data-connector=github]').textContent.includes('未连接')", 3000);
+    await page.click('.connector-card[data-connector=github] .btn');
+    await page.waitFor("document.querySelector('.connector-card[data-connector=github]').textContent.includes('DEMO-1234')", 3000);
+    await page.click('.connector-card[data-connector=github] .btn');
+    await page.waitFor("document.querySelector('.connector-card[data-connector=github]').textContent.includes('未连接')", 3000);
+    await new Promise((resolve) => setTimeout(resolve, 1900));
+    assert(await page.eval("document.querySelector('.connector-card[data-connector=github]').textContent.includes('未连接') && !document.querySelector('.connector-card[data-connector=github]').textContent.includes('DEMO-1234')"));
+    assert.deepEqual(await page.eval("__fake.callsOf('connectors.cancel').at(-1)"), { provider: "github" });
+    assert.equal(page.consoleErrors().length, 0);
+    console.log("PASS connector device code, cancellation and stale polling response");
   } finally { await page.close(); }
 }
 

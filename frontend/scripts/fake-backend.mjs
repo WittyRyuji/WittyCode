@@ -247,7 +247,7 @@ function fakeBackend(config) {
     devin: { cli: "found", auth: "checking", enabled: true },
     chatgpt: clone(CHATGPT_OUT),
     rules: {},
-    connectors: ["github", "google-workspace"].map((id, i) => ({ id, name: i ? "Google Workspace" : "GitHub", clientId: "", clientSecretEnv: "", port: 8766 + i, enabled: false, connected: false, signingIn: false, scopes: i ? "Drive, Gmail, Calendar read-only" : "repo read:user", helpUrl: i ? "https://developers.google.com/identity/protocols/oauth2/native-app" : "https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps", callbackUrl: `http://127.0.0.1:${8766 + i}${i ? "/" : "/oauth/callback"}` })),
+    connectors: ["github", "google-workspace"].map((id, i) => ({ id, name: i ? "Google Workspace" : "GitHub", clientId: "", clientSecretEnv: "", port: 8766 + i, available: true, userCode: "", enabled: false, connected: false, signingIn: false, scopes: i ? "Drive, Gmail, Calendar read-only" : "repo read:user", helpUrl: i ? "https://developers.google.com/identity/protocols/oauth2/native-app" : "https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps", callbackUrl: `http://127.0.0.1:${8766 + i}${i ? "/" : "/oauth/callback"}` })),
     marketInstalled: {},
     marketPreview: null,
   };
@@ -939,8 +939,17 @@ function fakeBackend(config) {
     },
     "connectors.list": () => clone(S.connectors),
     "connectors.configure": (p) => { Object.assign(S.connectors.find((r) => r.id === p.provider), p.config); return clone(S.connectors); },
-    "connectors.login": (p) => { Object.assign(S.connectors.find((r) => r.id === p.provider), { connected: true, enabled: true, signingIn: false }); return clone(S.connectors); },
-    "connectors.cancel": (p) => { S.connectors.find((r) => r.id === p.provider).signingIn = false; return clone(S.connectors); },
+    "connectors.login": async (p) => {
+      const row = S.connectors.find((r) => r.id === p.provider);
+      if (config.connectorLoginDelay) {
+        Object.assign(row, { signingIn: true, userCode: p.provider === "github" ? "DEMO-1234" : "" });
+        await sleep(config.connectorLoginDelay);
+        if (!row.signingIn) throw new Error("授权已取消。");
+      }
+      Object.assign(row, { connected: true, enabled: true, signingIn: false, userCode: "" });
+      return clone(S.connectors);
+    },
+    "connectors.cancel": (p) => { Object.assign(S.connectors.find((r) => r.id === p.provider), { signingIn: false, userCode: "" }); return clone(S.connectors); },
     "connectors.disconnect": (p) => { S.connectors.find((r) => r.id === p.provider).connected = false; return clone(S.connectors); },
     "marketplace.list": (p) => ({ items: ["demo-skill", "pdf"].map((name) => ({ source: p.source, name, commit: "a".repeat(40), url: `https://github.com/${p.source === "openai" ? "openai" : "anthropics"}/skills`, installed: !!S.marketInstalled[`${p.source}/${name}`] })), warning: "" }),
     "marketplace.preview": (p) => (S.marketPreview = { preview: "market-preview", source: p.source, name: p.name, commit: "a".repeat(40), url: `https://github.com/${p.source === "openai" ? "openai" : "anthropics"}/skills`, description: "Review local changes", license: "MIT", licenseText: "Synthetic test license.", files: 3 }),

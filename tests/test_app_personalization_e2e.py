@@ -12,7 +12,7 @@ from desktop.core.harness import skills
 from tests.app_support import MODEL, OTHER_MODEL
 from tests.e2e_support import open_rig
 from tests.fake_responses import say
-from tests.test_connector_auth import FakeHttp, callback, free_port
+from tests.test_connector_onboarding import DeviceService
 from tests.test_connections import mcp_script
 from tests.test_skill_marketplace import OfficialFake
 from tests.ui_support import run, wait_for
@@ -143,25 +143,35 @@ def test_landing_and_live_choices_never_overwrite_persistent_defaults_even_after
 
 
 def test_native_connector_oauth_and_custom_mcp_work_in_the_real_window(qapp, loop, tmp_path, monkeypatch):
-    monkeypatch.setenv("DEMO_OAUTH_SECRET", "demo-" + "client-secret")
+    from desktop.core import connector_auth, connector_clients
+    monkeypatch.setattr(connector_clients, "BUNDLED", tmp_path / "no-clients.json")
+    monkeypatch.setenv(connector_clients.CLIENT_ENV["github"], "demo-client")
+    monkeypatch.delenv(connector_clients.CLIENT_ENV["google-workspace"], raising=False)
+    async def fast_pause(self, seconds):
+        pass
+    monkeypatch.setattr(connector_auth.GitHubDeviceFlow, "_pause", fast_pause)
     async def scenario():
         rig = await open_rig(tmp_path)
-        peers = []
+        release, opened = asyncio.Event(), []
+        class HeldDevice(DeviceService):
+            async def request(self, method, url, **kwargs):
+                if url.endswith("/access_token"):
+                    await release.wait()
+                return await super().request(method, url, **kwargs)
         try:
-            rig.core.connectors.http = FakeHttp()
-            rig.window.platform.open_url = lambda url: peers.append(asyncio.create_task(callback(url)))
+            rig.core.connectors.http = HeldDevice()
+            rig.window.platform.open_url = lambda url: opened.append(url)
             await rig.press(",", Qt.KeyboardModifier.ControlModifier)
             await rig.click_text(".snav", "插件")
             await rig.wait_for(".connector-card", 2)
-            await rig.click('[data-connector="github"] summary')
-            await fill(rig, '[aria-label="GitHub Client ID"]', "demo-client")
-            await fill(rig, '[aria-label="GitHub 客户端密钥环境变量"]', "DEMO_OAUTH_SECRET")
-            await fill(rig, '[aria-label="GitHub 回调端口"]', str(free_port()))
-            await rig.click_text('[data-connector="github"] .btn', "保存客户端配置")
-            await wait_for(lambda: rig.core.connectors.config("github")["clientId"] == "demo-client")
+            assert await rig.js("!document.querySelector('.connector-card input') && !document.querySelector('.connector-card details')")
+            assert "暂未开放" in await rig.text('[data-connector="google-workspace"]')
+            assert await rig.js("document.querySelector('[data-connector=google-workspace] .primary').disabled")
             await rig.click_text('[data-connector="github"] .btn', "浏览器授权并连接")
+            await rig.wait_text('[data-connector="github"] [role=status]', "ABCD-EFGH")
+            assert opened == ["https://github.com/login/device"]
+            release.set()
             await rig.wait_text('[data-connector="github"] .connection-state', "已连接 · 已启用")
-            await asyncio.gather(*peers)
             assert [c.name for c in rig.core.connections.mcp_commands(rig.project)] == ["wittycode-github"]
             await rig.click_text(".connection-tabs button", "MCP")
             await rig.click_text(".connections .btn", "添加自定义 MCP")
@@ -177,6 +187,7 @@ def test_native_connector_oauth_and_custom_mcp_work_in_the_real_window(qapp, loo
             await rig.wait_text(".connection-result", "echo")
             assert rig.plan.requests == []
         finally:
+            release.set()
             await rig.finish()
     run(loop, scenario())
 
@@ -222,9 +233,22 @@ def test_skill_store_installs_both_sources_with_consent_and_selects_the_latest_s
                 await rig.click(".skill-store .connection-consent input")
                 await rig.click_text(".skill-store .btn", "确认安装")
                 await rig.wait_text(".skill-store [role=status]", "已安装 demo-skill")
+                assert "/demo-skill" in await rig.text(".skill-store [role=status]")
                 selected = [s for s in skills.discover(rig.project) if s.name == "demo-skill"]
                 assert len(selected) == 1 and source in str(selected[0].path)
-            assert rig.plan.requests == []
+            await rig.click_text(".skill-store .segc button", "OpenAI")
+            await rig.wait_text(".skill-card .btn", "启用")
+            await rig.click_text(".skill-card .btn", "启用")
+            await rig.wait_text(".skill-store .connection-preview", "原版本未经验证")
+            await rig.click(".skill-store .connection-consent input")
+            await rig.click_text(".skill-store .btn", "确认启用")
+            await rig.wait_text(".skill-store [role=status]", "已启用 demo-skill")
+            assert "openai" in str(next(s for s in skills.discover(rig.project) if s.name == "demo-skill").path)
+            await rig.press("Escape")
+            rig.plan.script(say("Skill loaded."))
+            await rig.send("/demo-skill inspect")
+            await rig.wait_text(".block.text-block", "Skill loaded.")
+            assert any("Read the diff and summarize it." in json.dumps(request) for request in rig.plan.requests)
         finally:
             release.set()
             await rig.finish()

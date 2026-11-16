@@ -21,14 +21,11 @@
 
 ## 内置连接器
 
-「设置 → 插件 → 连接器」内置 GitHub 和 Google Workspace，不依赖发现其他程序的安装记录。两者均由用户配置自己的 OAuth 客户端，浏览器授权后使用；不内置开发者密钥，也不要求把密钥值粘贴到配置里。
+「设置 → 插件 → 连接器」内置 GitHub 和 Google Workspace。应用注册完成后，用户只需点「浏览器授权并连接」，不需要在界面填写 OAuth 客户端、密钥或回调端口。**两家应用尚未注册时，连接器显示暂未开放，不能实际授权。**
 
 ### GitHub
 
-1. 创建自己的 **OAuth App**，不是 GitHub App。
-2. 将回调地址配置为卡片显示的地址，默认 `http://127.0.0.1:8766/oauth/callback`；修改端口时两边保持一致。
-3. 在进程环境中设置客户端密钥，只在设置中填写环境变量名称；填写 Client ID 并保存客户端配置。
-4. 点「浏览器授权并连接」。
+点击连接后浏览器打开 GitHub 设备授权页，在网页输入应用显示的一次性验证码并同意授权；无需客户端密钥或远程中转。
 
 申请的 OAuth 范围为 `repo read:user`。**`repo` 本身包含写权限，虽然 WittyCode 当前仅提供只读工具**：代码搜索、仓库文本文件读取、Issue／PR 搜索。是否能读取私有仓库仍受账号、组织与 GitHub 策略限制。
 
@@ -36,20 +33,23 @@
 
 ### Google Workspace
 
-1. 在自己的 Google Cloud 项目启用 Drive、Gmail、Calendar API，配置 OAuth 同意屏幕和需要的测试用户。
-2. 创建 **Desktop app** OAuth 客户端，填写 Client ID；如客户端信息包含 client secret，将其放入环境变量，在设置中只填写变量名。
-3. 使用卡片显示的回调地址，默认 `http://127.0.0.1:8767/`。
-4. 保存配置后点「浏览器授权并连接」。
+点击连接后，在浏览器完成 Google 授权；应用以 PKCE 和随机本机回环端口接收结果，不需要客户端密钥或远程中转。
 
 申请 Drive、Gmail、Calendar 的只读范围。工具支持文件搜索、文本与 Google 文档读取、Gmail 搜索与正文读取、日历事件查询。Google Sheets 导出为第一张工作表的 CSV；不提供写入、发送邮件或修改事件。Gmail HTML 正文转为文本，不执行其中脚本或加载外部内容。
 
-Gmail 只读属于受限范围；测试用户、管理员限制与 Google 的验证要求由自己的 OAuth 项目决定。
+Gmail 只读属于受限范围；测试用户、管理员限制与 Google 的验证要求由 WittyCode 的 OAuth 项目决定。
 
-官方配置说明：https://developers.google.com/identity/protocols/oauth2/native-app
+官方说明：https://developers.google.com/identity/protocols/oauth2/native-app
+
+### 发布者注册应用
+
+发布者需先在 GitHub 注册 OAuth App 并启用设备授权；在 Google Cloud 注册 Desktop app，启用 Drive、Gmail、Calendar API 并完成适用的同意屏幕和权限验证。GitHub 设备授权和 Google 桌面公开客户端使用公开 Client ID，不需要在应用内或发布包中保存客户端密钥。
+
+注册后，在发布环境提供公开 Client ID：`WITTYCODE_GITHUB_CLIENT_ID` 和 `WITTYCODE_GOOGLE_CLIENT_ID`。发布工作流从同名仓库变量读取，构建时只把有效的公开 ID 写入发布包；源代码和用户界面不填写它们。开发运行时也可从进程环境读取这两个 ID。未配置的连接器保持不可用，不会冒充授权成功。
 
 ### 凭据与断开
 
-授权使用 PKCE、随机 state 和本机回环回调；可取消等待。Windows 下令牌使用当前用户的 DPAPI 加密，和客户端配置保存在设置目录的 `connector-settings.json`，刷新、配置及断开会跨进程序列化。
+Google 授权使用 PKCE、随机 state 和本机回环回调；GitHub 使用设备验证码，两者均可取消等待。Windows 下令牌使用当前用户的 DPAPI 加密，保存在设置目录的 `connector-settings.json`，刷新、配置及断开会跨进程序列化。已有连接及其旧客户端配置保留，不会在安装更新时删除。
 
 停用后不再提供连接器工具；重新启用后按下次连接时的配置生效。「断开」删除本地凭据，**不等于在服务端撤销授权**，需要时还应在 GitHub／Google 的账号设置中撤销。不要把此凭据文件随公开包分发，新环境应重新授权。
 
@@ -91,4 +91,4 @@ env_http_headers = { "X-Service-Value" = "DEMO_SERVICE_VALUE" }
 
 下载会拒绝路径越界、链接、Windows 数据流及过大的包；安装前再次核对预览指纹。离开页面后完成的下载会取消；最多保留五份未安装预览，退出时清理仍受管理的临时下载，已经确认的安装不会因预览清理被删除。
 
-安装后进入原有 Skill 管理与发现流程。同一范围的同名技能选用最新明确安装的来源，关闭项仍保留；项目覆盖、来源变更重确认和权限约束不变。使用技能前仍需查看其许可、依赖和具体操作。
+确认安装后自动注册并启用，立即刷新会话技能列表；用户可在会话输入技能声明的 `/名称`，模型也可按技能声明的调用权限使用。声明为停用或既不允许用户调用也不允许模型调用的技能不会被伪装成可用。两家来源在同一范围有同名技能时选用最新明确安装的来源；目录存在但未启用时可再次预览并确认启用，不覆盖或删除已有文件，本地内容的来源和原始版本不会假称已验证。项目覆盖、来源变更重确认和权限约束不变。使用技能前仍需查看其许可、依赖和具体操作。

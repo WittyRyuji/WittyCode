@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import re
 import shutil
 import subprocess
@@ -107,7 +108,18 @@ def copy_packages(dists: list[metadata.Distribution], target: Path) -> None:
 def copy_app(target: Path) -> None:
     if not (ROOT / "desktop" / "ui_dist" / "index.html").is_file():
         raise SystemExit("the page is not built: cd frontend; npm run build:app")
-    shutil.copytree(ROOT / "desktop", target / "desktop", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from desktop.core.connector_clients import from_environment
+    try:
+        clients = from_environment()
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
+    shutil.copytree(ROOT / "desktop", target / "desktop", ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "connector-clients.json"))
+    if clients:
+        file = target / "desktop" / "core" / "connector-clients.json"
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text(json.dumps(clients), encoding="utf-8")
     shutil.copy2(ROOT / "WittyCode.pyw", target / "WittyCode.pyw")
 
 

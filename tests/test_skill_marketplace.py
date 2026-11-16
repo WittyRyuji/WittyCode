@@ -77,10 +77,117 @@ def test_installs_both_official_sources_with_resources_licenses_and_explicit_con
         assert (found[0].path.parent / "scripts/demo.py").is_file()
         assert (found[0].path.parent / "repository-LICENSE.txt").is_file()
         assert not (tmp_path / "should-not-run").exists()
-        assert (await market.catalog(source))["items"][0]["installed"]
+        entry = (await market.catalog(source))["items"][0]
+        assert entry["installed"] and entry["active"]
         assert len(fake.calls) == 3, "catalogue is reused; archive downloads are pinned"
-        with pytest.raises(PluginError, match="已.*存在"):
+        with pytest.raises(PluginError, match="已经安装"):
             await market.preview(source, "demo-skill")
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("source", list(SOURCES))
+def test_installed_skill_is_immediately_callable_and_uses_its_declared_name(tmp_path, monkeypatch, source):
+    from desktop.core.harness import skill_tool
+    from desktop.core.harness.tools import ToolContext
+    from desktop.core.hooks import PromptEvent
+    async def scenario():
+        text = SKILL.replace("name: demo-skill", "name: Actual Skill")
+        market, store, _, home = setup_market(tmp_path, source, skill=text)
+        monkeypatch.setenv("WITTYCODE_SETTINGS", str(store.file.with_name("settings.json")))
+        monkeypatch.setattr(skills, "USER_HOME", home)
+        preview = await market.preview(source, "demo-skill")
+        assert preview["skillName"] == "actual-skill" and preview["userInvocable"] and preview["modelInvocable"]
+        market.install(preview["preview"], confirmed=True)
+        assert [item["name"] for item in skills.listing(tmp_path, home)] == ["actual-skill"]
+        context = skills.prompt_hook(PromptEvent("chatgpt", tmp_path, "/actual-skill review"))
+        assert context and "Read the diff and summarize it." in context.text
+        result = skill_tool.run({"skill": "actual-skill"}, ToolContext(tmp_path))
+        assert not result.is_error and "Read the diff and summarize it." in result.output
+        assert [skill.name for skill in skills.discover(tmp_path, home)] == ["actual-skill"]
+        assert len(ConnectionStore(store.file, home=home).active("skill", "")) == 1
+        assert not (tmp_path / "should-not-run").exists()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("source", list(SOURCES))
+def test_existing_but_unregistered_skill_can_be_confirmed_without_overwriting_or_redownloading(tmp_path, monkeypatch, source):
+    async def scenario():
+        market, store, fake, home = setup_market(tmp_path, source)
+        monkeypatch.setenv("WITTYCODE_SETTINGS", str(store.file.with_name("settings.json")))
+        monkeypatch.setattr(skills, "USER_HOME", home)
+        first = await market.preview(source, "demo-skill")
+        market.install(first["preview"], confirmed=True)
+        target = market._target(source, "demo-skill")
+        original = (target / "SKILL.md").read_bytes()
+        store.file.unlink()  # An interrupted registration leaves the already downloaded directory in place.
+        row = (await market.catalog(source))["items"][0]
+        assert row["installed"] and not row["active"]
+        fake.fail = True  # Re-enabling local files must not require another network request.
+        preview = await market.preview(source, "demo-skill")
+        assert preview["existing"] and preview["commit"] == ""
+        market.cancel(preview["preview"])
+        assert (target / "SKILL.md").read_bytes() == original
+        preview = await market.preview(source, "demo-skill")
+        (target / "scripts/demo.py").write_text("changed after preview", encoding="utf-8")
+        with pytest.raises(PluginError, match="变化"):
+            market.install(preview["preview"], confirmed=True)
+        market.cancel(preview["preview"])
+        assert (target / "scripts/demo.py").read_text(encoding="utf-8") == "changed after preview"
+        preview = await market.preview(source, "demo-skill")
+        assert market.install(preview["preview"], confirmed=True)["ok"]
+        assert (target / "SKILL.md").read_bytes() == original and len(fake.calls) == 3
+        assert (await market.catalog(source))["items"][0]["active"]
+        assert [skill.name for skill in skills.discover(tmp_path, home)] == ["demo-skill"]
+        market.close()
+        assert target.is_dir(), "cancelling or closing an existing preview must never delete installed files"
+    asyncio.run(scenario())
+
+
+def test_closing_an_existing_skill_preview_never_deletes_installed_files(tmp_path):
+    async def scenario():
+        market, store, _, _ = setup_market(tmp_path)
+        preview = await market.preview("openai", "demo-skill")
+        market.install(preview["preview"], confirmed=True)
+        target = market._target("openai", "demo-skill")
+        entry = store.active("skill", "")[0]
+        store.update(entry["id"], enabled=False)
+        preview = await market.preview("openai", "demo-skill")
+        assert preview["existing"]
+        market.close()
+        assert (target / "SKILL.md").is_file() and not market.previews
+    asyncio.run(scenario())
+
+
+def test_switching_between_same_named_installed_sources_keeps_both_files(tmp_path, monkeypatch):
+    async def scenario():
+        market, store, _, home = setup_market(tmp_path, "openai")
+        monkeypatch.setenv("WITTYCODE_SETTINGS", str(store.file.with_name("settings.json")))
+        monkeypatch.setattr(skills, "USER_HOME", home)
+        first = await market.preview("openai", "demo-skill")
+        market.install(first["preview"], confirmed=True)
+        market.http = OfficialFake("anthropic")
+        second = await market.preview("anthropic", "demo-skill")
+        market.install(second["preview"], confirmed=True)
+        assert not (await market.catalog("openai"))["items"][0]["active"]
+        assert (await market.catalog("anthropic"))["items"][0]["active"]
+        preview = await market.preview("openai", "demo-skill")
+        assert preview["existing"]
+        market.install(preview["preview"], confirmed=True)
+        assert (await market.catalog("openai"))["items"][0]["active"]
+        assert not (await market.catalog("anthropic"))["items"][0]["active"]
+        assert "openai" in str(skills.discover(tmp_path, home)[0].path)
+        assert all((market._target(source, "demo-skill") / "SKILL.md").is_file() for source in SOURCES)
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("flags", ["enabled: false", "user-invocable: false\ndisable-model-invocation: true"])
+def test_store_refuses_a_skill_which_cannot_be_used(tmp_path, flags):
+    async def scenario():
+        text = SKILL.replace("license: MIT", "license: MIT\n" + flags)
+        market, store, _, _ = setup_market(tmp_path, skill=text)
+        with pytest.raises(PluginError, match="停用|禁止调用"):
+            await market.preview("openai", "demo-skill")
+        assert not store.file.exists() and not market.previews
     asyncio.run(scenario())
 
 
