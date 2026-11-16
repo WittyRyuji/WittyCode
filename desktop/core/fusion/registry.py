@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
+from desktop.core.fusion.reasoning import reasoning_map
+
 
 class FusionError(ValueError):
     """A Fusion action cannot be performed under the session's policy."""
@@ -32,8 +34,13 @@ class Policy:
     max_tokens: int = 0
     max_seconds: int = 900
     preference: int = 50  # 0 favours cost, 100 favours efficiency
+    reasoning: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        try:
+            object.__setattr__(self, "reasoning", reasoning_map(self.reasoning))
+        except ValueError as error:
+            raise FusionError(str(error)) from error
         if not _model(self.main, external=True):
             raise FusionError("Choose a valid Fusion main model.")
         if not self.workers or not all(_model(model, external=True) for model in self.workers):
@@ -51,14 +58,15 @@ class Policy:
 
     def to_json(self) -> dict[str, Any]:
         return {"main": self.main, "workers": list(self.workers), "light": self.light, "maxCalls": self.max_calls,
-                "maxTokens": self.max_tokens, "maxSeconds": self.max_seconds, "preference": self.preference}
+                "maxTokens": self.max_tokens, "maxSeconds": self.max_seconds, "preference": self.preference,
+                "reasoning": dict(self.reasoning)}
 
     @classmethod
     def from_json(cls, raw: Any) -> Policy:
         if not isinstance(raw, Mapping) or not isinstance(raw.get("workers"), list):
             raise FusionError("The Fusion policy is missing or damaged.")
         return cls(raw.get("main"), tuple(raw["workers"]), raw.get("light"), raw.get("maxCalls"), raw.get("maxTokens", 0),
-                   raw.get("maxSeconds", 900), raw.get("preference", 50))
+                   raw.get("maxSeconds", 900), raw.get("preference", 50), raw.get("reasoning", {}))
 
 
 @dataclass(slots=True)

@@ -61,6 +61,7 @@ export interface LiveData {
   fusionMain: string;
   fusionWorkers: string[];
   fusionLight: string;
+  fusionReasoning: Record<string, string>;
   fusionPreference: number;
   fusionMaxCalls: number;
   fusionMaxTokens: number;
@@ -146,6 +147,7 @@ export function emptyLiveData(theme: ThemeChoice = "system", fontScale: FontScal
     fusionMain: "",
     fusionWorkers: [],
     fusionLight: "",
+    fusionReasoning: {},
     fusionPreference: 50,
     fusionMaxCalls: 8,
     fusionMaxTokens: 500000,
@@ -240,6 +242,7 @@ export function settingsFields(v: SettingsView): Partial<LiveData> {
     fusionMain: v.fusionMain ?? "",
     fusionWorkers: v.fusionWorkers ?? [],
     fusionLight: v.fusionLight ?? "",
+    fusionReasoning: v.fusionReasoning ?? {},
     fusionPreference: v.fusionPreference ?? 50,
     fusionMaxCalls: v.fusionMaxCalls ?? 8,
     fusionMaxTokens: v.fusionMaxTokens ?? 500000,

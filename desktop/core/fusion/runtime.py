@@ -7,6 +7,7 @@ import json
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
+from desktop.core.fusion.reasoning import configured_effort
 from desktop.core.fusion.registry import Expert, FusionError, FusionRegistry
 from desktop.core.harness.loop import Outcome
 from desktop.core.session_state import SessionState
@@ -181,6 +182,13 @@ class FusionRuntime:
         self.parent._changed()
         return replacement.id
 
+    def reasoning_for(self, model: str) -> str | None:
+        info = self.parent.manager.model_info(native_model(model))
+        try:
+            return configured_effort(self.registry.policy.reasoning, model, info.efforts if info is not None else ())
+        except ValueError as error:
+            raise FusionError(str(error)) from error
+
     def change_main(self, model: str, reasoning: str | None = None) -> bool:
         parent = self.parent
         if parent.state is not SessionState.READY or self._active is not None:
@@ -192,6 +200,9 @@ class FusionRuntime:
             return False
         if parent.saved.plan.get("status") == "pending":
             raise FusionError("Decide or revise the pending plan before changing its main model.")
+        configured = self.reasoning_for(model)
+        if configured is not None:
+            reasoning = configured
         previous = (self.registry.policy, parent.requested_model, parent.transcript.model, parent.reasoning,
                     parent.saved.model, parent.saved.reasoning, parent.saved.fusion)
         self.registry.policy = replace(self.registry.policy, main=model)
@@ -261,6 +272,7 @@ class FusionRuntime:
         from desktop.core.chatgpt.controller import ChatGPTController
         from desktop.core.settings import same_folder
 
+        reasoning = self.reasoning_for(view.record.model)
         if view.controller is not None and view.controller.is_open:
             return view.controller
         parent, expert = self.parent, view.record
@@ -274,7 +286,7 @@ class FusionRuntime:
             raise FusionError("The expert session is already open elsewhere.")
         model = native_model(expert.model)
         child = ChatGPTController(manager=parent.manager, project=parent.project, session_id=expert.id,
-                                  requested_model=model, autonomy=parent.autonomy, _fusion_parent=parent)
+                                  requested_model=model, reasoning=reasoning or "", autonomy=parent.autonomy, _fusion_parent=parent)
         child.saved.origin = {"app": "fusion", "parent": parent.session_id}
         parent.manager.controllers.append(child)
         view.controller = child

@@ -313,6 +313,7 @@ function mockData(): LiveData {
     fusionMain: "",
     fusionWorkers: [],
     fusionLight: "",
+    fusionReasoning: {},
     fusionPreference: 50,
     fusionMaxCalls: 8,
     fusionMaxTokens: 500000,
@@ -408,6 +409,7 @@ export const useStore = create<Store>((set, get) => ({
     const id = `s-new-${++sessionCounter}`;
     const base = st.landing.settings ?? st.defaults;
     const settings = st.landing.fusion ? settingsForModel(st.models, base, st.fusionMain).settings : { ...base };
+    if (st.landing.fusion && st.fusionReasoning[st.fusionMain]) settings.reasoning = st.fusionReasoning[st.fusionMain]!;
     const m = findModel(st.models, settings.model);
     const session: Session = {
       id,

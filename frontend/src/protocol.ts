@@ -53,6 +53,7 @@ export interface SettingsView {
   fusionMain?: string;
   fusionWorkers?: string[];
   fusionLight?: string;
+  fusionReasoning?: Record<string, string>;
   fusionPreference?: number;
   fusionMaxCalls?: number;
   fusionMaxTokens?: number;
@@ -92,11 +93,11 @@ export interface SettingsView {
 }
 export type FollowUp = "queue" | "steer";
 export type Language = "auto" | "zh-CN" | "en";
-export type FusionSettingKey = "fusionMain" | "fusionWorkers" | "fusionLight" | "fusionPreference" | "fusionMaxSeconds";
+export type FusionSettingKey = "fusionMain" | "fusionWorkers" | "fusionLight" | "fusionReasoning" | "fusionPreference" | "fusionMaxSeconds";
 export type SettingKey = "theme" | "fontScale" | "followUp" | "maxOpen" | "maxSteps" | "sidebarWidth" | "devinPath" | "memoryEnabled" | "memoryRecall" | "memoryCapture" | "memoryCurate" | "memoryEngines" | "compactAuto" | "compactAt" | "thinkChinese" | "answerLanguage" | "thinkingLanguage" | "soundEnabled" | SoundKey | FusionSettingKey;
 export type SoundKind = "question" | "complete" | "error";
 export type SoundKey = "soundQuestion" | "soundComplete" | "soundError";
-export type SettingValue = string | number | boolean | string[];
+export type SettingValue = string | number | boolean | string[] | Record<string, string>;
 
 /** What `memory.list` can be narrowed by (all optional). `query`: words to look for; `status` "all" lists forgotten notes too. */
 export interface MemoryFilter {

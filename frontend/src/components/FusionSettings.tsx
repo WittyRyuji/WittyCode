@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { useStore } from "../store";
 import { sourceLabel } from "../lib/models";
-import type { FusionSettingKey } from "../protocol";
+import { effortLabel, reasoningChoices } from "../lib/vocab";
+import type { FusionSettingKey, SettingValue } from "../protocol";
 import { Field, Select } from "./formkit";
-import { fusionChoices, fusionDisabledReason } from "./fusionModels";
+import { fusionChoices, fusionDisabledReason, fusionSelectedModels } from "./fusionModels";
 import type { MenuItem } from "./ui";
 
 function BudgetInput({ label, value, max, onChange }: { label: string; value: number; max: number; onChange: (value: number) => void }) {
@@ -44,8 +45,15 @@ export function FusionSettings() {
     id: model.id, label: model.label, description: fusionDisabledReason(model, main) || sourceLabel(model.source, s.providers),
     checked: selected.includes(model.id), disabled: model.disabled, onSelect: () => choose(model.id),
   }));
-  const set = (key: FusionSettingKey, value: string | string[] | number) => s.setFusionSetting(key, value);
+  const set = (key: FusionSettingKey, value: SettingValue) => s.setFusionSetting(key, value);
   const workers = s.fusionWorkers.map(name).join("、") || "请选择一个或多个";
+  const selected = fusionSelectedModels(s.fusionMain, s.fusionWorkers, s.fusionLight);
+  const setReasoning = (id: string, effort: string) => {
+    const next = { ...s.fusionReasoning };
+    if (effort) next[id] = effort;
+    else delete next[id];
+    set("fusionReasoning", next);
+  };
   return (
     <>
       <h3 className="settings-section-title">自有 Fusion</h3>
@@ -59,6 +67,24 @@ export function FusionSettings() {
       <Field label="轻量模型" hint="供简单任务使用，不会为了保活定时调用。">
         <Select value={name(s.fusionLight)} items={items([s.fusionLight], (id) => set("fusionLight", id))} />
       </Field>
+      {selected.length > 0 && <Field label="各模型思考等级" hint="按模型分别保存；同一模型兼任多个角色时共用。选择「默认」保留原有默认行为。实际支持以模型和服务商为准。">
+        <div className="fusion-reasoning">
+          {selected.map(({ id, roles }) => {
+            const model = s.models.find((item) => item.id === id);
+            const effort = s.fusionReasoning[id] ?? "";
+            const choices = model ? reasoningChoices(model) : [];
+            const unsupported = !!effort && !choices.some((item) => item.value === effort);
+            const value = effort ? `${effortLabel(effort)}${unsupported ? "（已不支持）" : ""}` : !model ? "模型不可用" : choices.length ? "默认" : "不支持";
+            return <div className="fusion-reasoning-row" key={id} data-model={id} role="group" aria-label={`${name(id)} 思考等级`}>
+              <div className="fusion-reasoning-model"><span title={name(id)}>{name(id)}</span><small>{roles.join(" · ")}</small></div>
+              <Select value={value} disabled={!effort && !choices.length} minWidth={160} items={[
+                { id: "default", label: "默认", checked: !effort, onSelect: () => setReasoning(id, "") },
+                ...choices.map((choice) => ({ id: choice.value, label: choice.label, checked: effort === choice.value, onSelect: () => setReasoning(id, choice.value) })),
+              ]} />
+            </div>;
+          })}
+        </div>
+      </Field>}
       <Field label="成本与效率倾向" hint="作为主代理选择轻量模型或工作模型的相对权重，不是价格、速度或费用上限的保证。">
         <PreferenceInput value={s.fusionPreference} onChange={(v) => set("fusionPreference", v)} />
       </Field>

@@ -37,7 +37,8 @@ def test_own_main_can_delegate_to_acp_and_forward_approval_and_restore_context(t
             cid = (await core.call("session.new", {"projectId": str(tmp_path / "proj"), "autonomy": "ask"}))["id"]
             main = core._by_cid[cid].controller
             await main.update_settings(autonomy="ask")
-            main.enable_fusion(Policy("chatgpt:gpt-6.1-sol", ("devin:swe-2-high",), "devin:swe-2-high", 0))
+            main.enable_fusion(Policy("chatgpt:gpt-6.1-sol", ("devin:swe-2-high",), "devin:swe-2-high", 0,
+                                      reasoning={"devin:swe-2-high": "medium"}))
             task = {"scope": "src", "model": "devin:swe-2-high", "role": "worker", "task": "[fusion-write] Create the marker."}
             model.script(call("delegate_task", task), say("Reviewed."))
             await core.call("session.send", {"id": cid, "text": "Inspect"})
@@ -50,6 +51,10 @@ def test_own_main_can_delegate_to_acp_and_forward_approval_and_restore_context(t
             await finish_turn(main, timeout=30)
             assert (tmp_path / "proj" / "marker.txt").read_text() == "guarded ACP write"
             assert expert.record.status == "done" and expert.controller.saved.origin["fusionAcp"]["session"]
+            assert expert.agent_effort == "medium"
+            requests = [json.loads(line) for path in (tmp_path / "guarded").rglob("received.jsonl") for line in path.read_text(encoding="utf-8").splitlines()]
+            assert any(item.get("method") == "session/set_config_option" and item["params"].get("configId") == "thought_level"
+                       and item["params"].get("value") == "medium" for item in requests)
             native = expert.controller.saved.origin["fusionAcp"]["session"]
             saved_id = main.session_id
             await main.close()
@@ -77,6 +82,10 @@ def test_acp_main_delegates_to_either_runner_and_keeps_one_conversation(tmp_path
             core.settings.fusion_main = "devin:swe-2-high"
             core.settings.fusion_workers = [worker]
             core.settings.fusion_light = worker
+            levels = {"devin:swe-2-high": "medium"}
+            if worker.startswith("chatgpt:"):
+                levels[worker] = "low"
+            await core.call("settings.set", {"key": "fusionReasoning", "value": levels})
             cid = (await core.call("session.new", {"projectId": str(tmp_path / "proj"), "fusion": True}))["id"]
             main = core._by_cid[cid].controller
             model.script(say("Worker evidence."))
@@ -86,6 +95,7 @@ def test_acp_main_delegates_to_either_runner_and_keeps_one_conversation(tmp_path
             expert = next(iter(main.agents.values()))
             assert expert.record.status == "done", expert.controller.last_error
             assert expert.record.model == worker and main.model == "devin:swe-2-high"
+            assert main.reasoning == "medium" and expert.agent_effort == levels[worker]
             assert main.saved.turns[-1].status == "done"
         finally:
             await core.shutdown()

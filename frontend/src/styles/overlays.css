@@ -89,6 +89,12 @@
 .field-label { font-weight: 700; }
 .field-hint { margin-top: 2px; font-size: 12px; color: var(--muted); max-width: 340px; }
 .field-ctl { flex: none; }
+.fusion-reasoning { width: 360px; max-width: 100%; display: grid; gap: 10px; }
+.fusion-reasoning-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.fusion-reasoning-model { min-width: 0; }
+.fusion-reasoning-model > span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fusion-reasoning-model > small { color: var(--muted); font-size: 11px; }
+.fusion-reasoning-row .selectbox { flex: none; }
 .fusion-preference { width: 220px; max-width: 100%; }
 .fusion-preference input { display: block; width: 100%; margin: 0; accent-color: var(--ink); }
 .fusion-preference-labels { display: flex; justify-content: space-between; margin-top: 4px; font-size: 12px; color: var(--fg-2); }

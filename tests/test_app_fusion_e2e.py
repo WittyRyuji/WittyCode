@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import pytest
+from PySide6.QtCore import Qt
 
 from tests.e2e_support import open_rig
 from tests.fake_responses import call, say
@@ -23,6 +24,19 @@ def test_configure_and_start_fusion_with_a_local_fake(qapp, loop, tmp_path):
                 await rig.wait_text(".menu-item", name)
                 await rig.click_text(".menu-item", name)
             await until(lambda: rig.core.settings.fusion_main == "chatgpt:gpt-6.1-sol" and rig.core.settings.fusion_light == "chatgpt:gpt-6-luna" and rig.core.settings.fusion_workers == ["chatgpt:gpt-6-luna"])
+            await rig.wait_for(".fusion-reasoning-row", 2)  # The worker and lightweight role share one model.
+            for model_id, level in [("chatgpt:gpt-6.1-sol", "High"), ("chatgpt:gpt-6-luna", "Low")]:
+                await rig.click(f'.fusion-reasoning-row[data-model="{model_id}"] .selectbox')
+                if model_id.endswith("luna"):
+                    assert await rig.texts(".menu-item .menu-label") == ["默认", "Low"]
+                await rig.click_text(".menu-item", level)
+            levels = {"chatgpt:gpt-6.1-sol": "high", "chatgpt:gpt-6-luna": "low"}
+            await until(lambda: rig.core.settings.fusion_reasoning == levels)
+            await rig.click('.settings-body button[aria-label="关闭"]')
+            await rig.press(",", Qt.KeyboardModifier.ControlModifier)
+            await rig.click_text(".snav", "Fusion")
+            await rig.wait_text('.fusion-reasoning-row[data-model="chatgpt:gpt-6.1-sol"] .selectbox', "High")
+            await rig.wait_text('.fusion-reasoning-row[data-model="chatgpt:gpt-6-luna"] .selectbox', "Low")
             assert not await rig.exists('input[aria-label="专家调用次数"]')
             assert not await rig.exists('input[aria-label="Token 预算"]')
             await rig.click('input[aria-label="成本与效率倾向"]')
@@ -41,6 +55,8 @@ def test_configure_and_start_fusion_with_a_local_fake(qapp, loop, tmp_path):
             await rig.wait_text(".transcript", "主代理已检查报告")
             assert len(rig.core.order) == 1
             assert [request["model"] for request in rig.plan.requests] == ["gpt-6.1-sol", "gpt-6-luna", "gpt-6.1-sol"]
+            assert [request["reasoning"]["effort"] for request in rig.plan.requests] == ["high", "low", "high"]
+            assert rig.core.order[0].controller._fusion.registry.policy.reasoning == levels
             await rig.click(".agent-chip")
             await rig.wait_text(".agentpanel", "专家检查完成")
             assert rig.window.grab().save(str(tmp_path / "fusion-expert.png"))

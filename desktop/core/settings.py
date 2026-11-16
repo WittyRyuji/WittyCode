@@ -18,6 +18,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from desktop.core.fusion.reasoning import reasoning_map
+
 log = logging.getLogger("desktop.settings")
 
 SETTINGS_ENV = "WITTYCODE_SETTINGS"
@@ -102,6 +104,8 @@ class AppSettings:
     fusion_main: str = ""
     fusion_workers: list[str] = field(default_factory=list)
     fusion_light: str = ""
+    fusion_reasoning: dict[str, str] = field(default_factory=dict)
+    """Page model id -> explicit effort for new Fusion sessions; missing keeps the existing default."""
     fusion_preference: int = 50
     fusion_max_calls: int = 8  # Legacy defaults are kept for settings compatibility, not applied to new sessions.
     fusion_max_tokens: int = 500_000
@@ -288,6 +292,10 @@ def settings_from_dict(raw: object) -> AppSettings:
     think_chinese = raw.get("think_chinese")
     if not isinstance(think_chinese, bool):
         think_chinese = defaults.think_chinese
+    try:
+        fusion_reasoning = reasoning_map(raw.get("fusion_reasoning", {}))
+    except ValueError:
+        fusion_reasoning = {}
 
     splitter = raw.get("splitter_sizes")
     if not (
@@ -367,6 +375,7 @@ def settings_from_dict(raw: object) -> AppSettings:
         fusion_main=text("fusion_main"),
         fusion_workers=list(dict.fromkeys(item for item in raw.get("fusion_workers", []) if isinstance(item, str) and item.strip()))[:32] if isinstance(raw.get("fusion_workers"), list) else [],
         fusion_light=text("fusion_light"),
+        fusion_reasoning=fusion_reasoning,
         fusion_preference=raw.get("fusion_preference") if isinstance(raw.get("fusion_preference"), int) and not isinstance(raw.get("fusion_preference"), bool) and 0 <= raw["fusion_preference"] <= 100 else defaults.fusion_preference,
         fusion_max_calls=raw.get("fusion_max_calls") if isinstance(raw.get("fusion_max_calls"), int) and not isinstance(raw.get("fusion_max_calls"), bool) and 1 <= raw["fusion_max_calls"] <= 1000 else defaults.fusion_max_calls,
         fusion_max_tokens=raw.get("fusion_max_tokens") if isinstance(raw.get("fusion_max_tokens"), int) and not isinstance(raw.get("fusion_max_tokens"), bool) and 1 <= raw["fusion_max_tokens"] <= 2**53 - 1 else defaults.fusion_max_tokens,

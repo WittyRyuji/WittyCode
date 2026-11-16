@@ -565,6 +565,7 @@ class AppCore:
             "fusionMain": self.settings.fusion_main,
             "fusionWorkers": list(self.settings.fusion_workers),
             "fusionLight": self.settings.fusion_light,
+            "fusionReasoning": dict(self.settings.fusion_reasoning),
             "fusionPreference": self.settings.fusion_preference,
             "fusionMaxCalls": self.settings.fusion_max_calls,
             "fusionMaxTokens": self.settings.fusion_max_tokens,
@@ -1727,7 +1728,8 @@ class AppCore:
             from desktop.core.fusion.registry import FusionError, Policy
             try:
                 policy = Policy(self.settings.fusion_main, tuple(self.settings.fusion_workers), self.settings.fusion_light,
-                                0, 0, self.settings.fusion_max_seconds, self.settings.fusion_preference)
+                                0, 0, self.settings.fusion_max_seconds, self.settings.fusion_preference,
+                                self.settings.fusion_reasoning)
             except FusionError as error:
                 raise AppError("请先在设置中配置 Fusion 的主模型、工作模型和轻量模型。") from error
             page_model = policy.main
@@ -1735,6 +1737,15 @@ class AppCore:
             if self.chatgpt is None or self.chatgpt.model_info(page_model if page_model.startswith("devin:") else target.model) is None:
                 raise AppError("Fusion 主模型当前不可用；不会自动替换成其他模型。")
         settings = self._open_settings(page_model, base)
+        if policy is not None:
+            from desktop.core.fusion.reasoning import configured_effort
+            chosen = self.catalog.find(page_model) or {}
+            try:
+                effort = configured_effort(policy.reasoning, page_model, chosen.get("efforts", ()))
+            except ValueError as error:
+                raise AppError("Fusion 主模型的思考等级已不受支持，请在设置中重新选择。") from error
+            if effort is not None:
+                settings["reasoning"] = effort
         if policy is not None and settings.get("autonomy") in ("plan", "smart"):
             if settings["autonomy"] == "plan":
                 settings["mode"] = "spec"
@@ -3219,6 +3230,19 @@ class AppCore:
             setattr(s, "fusion_main" if key == "fusionMain" else "fusion_light", value)
         elif key == "fusionWorkers" and isinstance(value, list) and len(value) <= 32 and all(isinstance(item, str) and len(item) <= 512 and item.startswith(("chatgpt:", "api:", "devin:")) for item in value):
             s.fusion_workers = list(dict.fromkeys(value))
+        elif key == "fusionReasoning":
+            from desktop.core.fusion.reasoning import reasoning_map
+            try:
+                levels = reasoning_map(value)
+            except ValueError as error:
+                raise AppError("Fusion 思考等级设置不合法。") from error
+            for model, effort in levels.items():
+                if s.fusion_reasoning.get(model) == effort:
+                    continue  # Keep older selections even if their model is temporarily unavailable.
+                chosen = self.catalog.find(model)
+                if chosen is None or effort not in chosen.get("efforts", ()):
+                    raise AppError("所选模型不支持这个思考等级。")
+            s.fusion_reasoning = levels
         elif key == "fusionPreference" and _is_int(value) and 0 <= value <= 100:
             s.fusion_preference = value
         elif key == "fusionMaxCalls" and _is_int(value) and 1 <= value <= 1000:
