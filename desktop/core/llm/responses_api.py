@@ -11,7 +11,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from desktop.core.chatgpt.responses import for_responses
-from desktop.core.llm.wire import Route
+from desktop.core.llm.wire import Route, apply_reasoning_args
 
 
 def responses_body(request: Mapping[str, Any], route: Route) -> dict[str, Any]:
@@ -26,5 +26,6 @@ def responses_body(request: Mapping[str, Any], route: Route) -> dict[str, Any]:
         body.pop("include", None)
     if route.max_output:
         body["max_output_tokens"] = route.max_output
+    apply_reasoning_args(body, request, route)
     body.update(route.extra_args)
     return body

@@ -6,6 +6,7 @@ import { KIND_INFO, PRESETS, REASONING, type Preset } from "../lib/vocab";
 import { envHintOf, envNameOf, envVarText } from "../lib/models";
 import { API_EFFORTS, contextProblem, imagesAfterKindChange, imagesByDefault, modelSpecification, withRemoteFigures } from "../lib/providerDefaults";
 import { messageOf } from "../lib/errors";
+import { hasAdvancedProviderOptions, reasoningArgsProblem } from "../lib/reasoningArgs";
 import { formatTokens } from "../lib/format";
 import type { ApiKind, ApiModel, EnvState, KeyMode, ProviderDraft, RemoteModel } from "../types";
 import { Seg, Select, Stack, Switch, TextInput } from "./formkit";
@@ -123,6 +124,8 @@ function validate(d: ProviderDraft): Record<string, string> {
       e.extraArgs = "不是合法的 JSON。";
     }
   }
+  const reasoningProblem = d.kind === "bedrock-converse" ? "" : reasoningArgsProblem(d.reasoningArgs);
+  if (reasoningProblem) e.reasoningArgs = reasoningProblem;
   return e;
 }
 
@@ -148,7 +151,7 @@ export function ProviderEditor({ editId }: { editId: string }) {
   const [tried, setTried] = useState(false);
   const [test, setTest] = useState<{ busy: boolean; ok?: boolean; text?: string }>({ busy: false });
   const [suggest, setSuggest] = useState<RemoteModel[] | null>(null);
-  const [advanced, setAdvanced] = useState(!!existing && (existing.headers.length > 0 || !!existing.extraArgs));
+  const [advanced, setAdvanced] = useState(hasAdvancedProviderOptions(existing));
   const [saving, setSaving] = useState(false);
   const isNew = !existing;
   const errors = useMemo(() => validate(d), [d]);
@@ -173,6 +176,8 @@ export function ProviderEditor({ editId }: { editId: string }) {
         kind: k,
         models: x.models.map((m) => ({ ...m, images: imagesAfterKindChange(m.images, x.kind, k) })),
         bearer: k === "anthropic" ? x.bearer : undefined,
+        reasoningArgs: k === "bedrock-converse" ? undefined : x.reasoningArgs,
+        reasoningArgsMixed: k === "bedrock-converse" ? undefined : x.reasoningArgsMixed,
         bedrock: k === "bedrock-converse" ? (x.bedrock ?? { method: "aws-credentials", region: "us-west-2", profile: "" }) : undefined,
         keyMode: k === "bedrock-converse" ? "none" : x.keyMode,
       })),
@@ -414,6 +419,11 @@ export function ProviderEditor({ editId }: { editId: string }) {
             <Stack label="额外参数（JSON）" error={shown("extraArgs")} hint="并进每个请求体，例如温度。">
               <textarea className="textin selectable mono area" rows={3} spellCheck={false} aria-label="额外参数" value={d.extraArgs} onChange={(e) => set("extraArgs", e.target.value)} placeholder='{"temperature": 0.7, "top_p": 0.9}' />
             </Stack>
+            {!isBedrock && <Stack label="思考档位参数（JSON，可选）" error={shown("reasoningArgs")} hint={d.reasoningArgsMixed
+              ? "这些模型的映射不同；未编辑时保留各自原值，输入后统一覆盖，填写 {} 可清除全部。"
+              : "按本轮档位覆盖顶层字段，null 删除字段；额外参数优先。此处保存到本 Provider 的全部模型；服务支持哪些字段和档位，以其文档为准。"}>
+              <textarea className="textin selectable mono area" rows={4} spellCheck={false} aria-label="思考档位参数" value={d.reasoningArgs ?? ""} onChange={(e) => set("reasoningArgs", e.target.value)} placeholder='{"off": {"thinking": {"type": "disabled"}}}' />
+            </Stack>}
           </div>
         )}
       </section>

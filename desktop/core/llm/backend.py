@@ -69,7 +69,8 @@ def route_of(spec: ApiModelSpec, key: str | None, headers: Mapping[str, str]) ->
         for existing in [k for k in sent if k.lower() == name.lower()]:
             del sent[existing]
         sent[name] = value
-    return Route(kind, spec.base_url, spec.native, sent, spec.extra_args, spec.max_output, spec.thinking)
+    return Route(kind, spec.base_url, spec.native, sent, spec.extra_args, spec.max_output, spec.thinking,
+                 spec.reasoning_args if spec.bedrock is None else {})
 
 
 def api_failure(error: ChatGPTError, spec: ApiModelSpec) -> ChatGPTError:

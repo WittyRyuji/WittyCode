@@ -665,6 +665,8 @@ export interface ApiProvider {
   models: ApiModel[];
   headers: { k: string; v: string }[]; // extraHeaders
   extraArgs: string; // extraArgs, as JSON text
+  reasoningArgs?: string; // effort -> top-level request body fragment; null fields are removed
+  reasoningArgsMixed?: boolean; // Keep distinct per-entry mappings unless the shared editor explicitly replaces them.
   status?: { ok: boolean; text: string };
 }
 

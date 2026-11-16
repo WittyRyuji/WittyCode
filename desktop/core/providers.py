@@ -28,7 +28,9 @@ Fields of one entry (``model`` is the only one that is always there):
   menu offer off/minimal/low/medium/high/xhigh/max), ``noImageSupport`` (bool; the default is true for ``generic-chat-completion-api`` and
   false for the other three), ``enableThinking`` / ``thinkingMaxTokens`` (anthropic and bedrock only), ``baseModelId`` /
   ``useInRouter`` (kept as they are), ``extraHeaders`` (object of str; names unique ignoring case), ``extraArgs``
-  (object, merged into the request body).
+  (object, merged into the request body last), ``reasoningArgs`` (effort -> top-level body fragment, applied before
+  ``extraArgs``; a null field removes it). The advanced editor shares a mapping across a provider's models; distinct existing
+  per-entry mappings are preserved unless explicitly replaced.
 - ``bedrock`` (object): ``authMethod`` (``aws-credentials`` | ``credentials-command`` | ``environment-api-key``;
   ``credentials-command`` needs ``awsCredentialExport``), ``awsRegion``, ``awsProfile``, ``bedrockBaseUrl``,
   ``awsAuthRefresh``, ``awsCredentialExport``, ``requestMetadata``.
@@ -324,6 +326,7 @@ class ApiModelSpec:
     """The entry's ``bedrock`` block as written (``${VAR}`` not yet filled in): the model is on Amazon Bedrock, whatever its ``kind``."""
     thinking: int | None = None
     """The thought budget of an entry that turned extended thinking on (``enableThinking``, ``thinkingMaxTokens``)."""
+    reasoning_args: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -419,6 +422,19 @@ def _resolve_headers(draft_headers: Sequence[tuple[str, str]], existing: Mapping
 # ------------------------------------------------------------------------------------------------------ views
 
 
+def _reasoning_args(value: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(value, dict):
+        raise ProviderError("思考档位参数要是一个 JSON 对象。")
+    for effort, fragment in value.items():
+        if effort not in EFFORTS or not isinstance(fragment, dict):
+            raise ProviderError("思考档位参数的键只能是 off/minimal/low/medium/high/xhigh/max，值必须是 JSON 对象；片段内的 null 删除对应顶层字段。")
+    try:
+        json.dumps(value, allow_nan=False)
+    except (TypeError, ValueError):
+        raise ProviderError("思考档位参数必须是合法 JSON，不能包含 NaN 或 Infinity。") from None
+    return copy.deepcopy(value)
+
+
 def _model_view(entry: dict) -> dict[str, Any]:
     display = entry.get("displayName")
     reasoning = entry.get("reasoningEffort")
@@ -467,6 +483,12 @@ def _provider_view(group: _Group, entries: Sequence[dict]) -> dict[str, Any]:
     view["headers"] = _headers_view(first)
     extra = first.get("extraArgs")
     view["extraArgs"] = json.dumps(extra, ensure_ascii=False) if isinstance(extra, dict) and extra else ""
+    if not is_bedrock:
+        mappings = [_reasoning_args(member.get("reasoningArgs", {})) for member in members]
+        if any(mapping != mappings[0] for mapping in mappings[1:]):
+            view["reasoningArgsMixed"] = True  # An unrelated edit must not replace distinct per-entry overrides.
+        elif mappings[0]:
+            view["reasoningArgs"] = json.dumps(mappings[0], ensure_ascii=False)
     return view
 
 
@@ -496,6 +518,7 @@ class _Draft:
     bedrock: dict[str, str] | None
     headers: list[tuple[str, str]]
     extra_args: dict[str, Any]
+    reasoning_args: dict[str, dict[str, Any]] | None
     models: list[_Row]
 
     @property
@@ -585,8 +608,20 @@ def _parse_draft(draft: Any, *, connection_only: bool = False) -> _Draft:
         headers.append((header, value))
 
     extra_args: dict[str, Any] = {}
+    reasoning_args = None  # Absent in older clients, or mixed entries: preserve their individual mappings.
     models: list[_Row] = []
     if not connection_only:
+        if "reasoningArgs" in draft:
+            text = draft["reasoningArgs"]
+            if not isinstance(text, str):
+                raise ProviderError("思考档位参数要是 JSON 文本。")
+            try:
+                parsed = json.loads(text) if text.strip() else {}
+            except ValueError:
+                raise ProviderError("思考档位参数不是合法的 JSON。") from None
+            reasoning_args = _reasoning_args(parsed)
+            if kind == BEDROCK and reasoning_args:
+                raise ProviderError("思考档位参数只适用于 Chat、Responses 和 Anthropic HTTP 接口，不适用于 Bedrock。")
         text = draft.get("extraArgs")
         if isinstance(text, str) and text.strip():
             try:
@@ -634,6 +669,7 @@ def _parse_draft(draft: Any, *, connection_only: bool = False) -> _Draft:
         bedrock=bedrock,
         headers=headers,
         extra_args=extra_args,
+        reasoning_args=reasoning_args,
         models=models,
     )
 
@@ -695,6 +731,8 @@ def _build_entry(existing: dict | None, draft: _Draft, row: _Row, headers: dict[
         entry["noImageSupport"] = not row.images
     _set_or_drop(entry, "extraHeaders", dict(headers) or None)
     _set_or_drop(entry, "extraArgs", dict(draft.extra_args) or None)
+    if draft.reasoning_args is not None and not is_bedrock:
+        _set_or_drop(entry, "reasoningArgs", copy.deepcopy(draft.reasoning_args) or None)
     if is_bedrock and draft.bedrock is not None:
         block = copy.deepcopy(entry["bedrock"]) if isinstance(entry.get("bedrock"), dict) else {}
         implied = "authMethod" not in block and entry.get("bedrock") is not None and draft.bedrock["method"] == "aws-credentials"
@@ -1077,6 +1115,7 @@ class ProviderStore:
                         bearer=entry.get("authMode") == "bearer",
                         headers=tuple((str(k), str(v)) for k, v in headers.items() if isinstance(v, str)) if isinstance(headers, dict) else (),
                         extra_args=dict(extra) if isinstance(extra, dict) else {},
+                        reasoning_args=_reasoning_args(entry.get("reasoningArgs", {})) if group.kind != BEDROCK else {},
                         key=_entry_key(entry),
                         bedrock=_bedrock_settings(entry.get("bedrock")),
                         thinking=(_positive_int(entry.get("thinkingMaxTokens")) or DEFAULT_THINKING)

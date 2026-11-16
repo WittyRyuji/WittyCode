@@ -34,6 +34,8 @@ class Route:
     max_output: int | None = None
     thinking: int | None = None
     """The thought budget (tokens) of an entry that turned extended thinking on itself (``enableThinking``); ``None``: the level decides."""
+    reasoning_args: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+    """Per-effort top-level body overrides, before extra_args; a null field removes that field."""
 
     @property
     def origin(self) -> str:
@@ -46,6 +48,17 @@ class Route:
         if self.kind == ANTHROPIC:
             return base + ("/messages" if base.endswith("/v1") else "/v1/messages")
         return base + ("/chat/completions" if self.kind == CHAT else "/responses")
+
+
+def apply_reasoning_args(body: dict[str, Any], request: Mapping[str, Any], route: Route) -> None:
+    """Resolve the current request's effort, including off, without changing the common protocol defaults."""
+    reasoning = request.get("reasoning")
+    effort = request.get("wc_reasoning_effort") or (reasoning.get("effort") if isinstance(reasoning, Mapping) else None)
+    for key, value in route.reasoning_args.get(effort, {}).items():
+        if value is None:
+            body.pop(key, None)
+        else:
+            body[key] = value
 
 
 async def sse_data(lines: AsyncIterator[str]) -> AsyncIterator[str]:

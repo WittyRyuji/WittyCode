@@ -35,7 +35,7 @@ from desktop.core.chatgpt.responses import (
     TextDone,
     Usage,
 )
-from desktop.core.llm.wire import Route, declared_functions, images_of, load_json, sse_data, text_of, usage_of
+from desktop.core.llm.wire import Route, apply_reasoning_args, declared_functions, images_of, load_json, sse_data, text_of, usage_of
 
 log = logging.getLogger("desktop.llm")
 
@@ -124,6 +124,7 @@ def chat_body(request: Mapping[str, Any], route: Route) -> dict[str, Any]:
         body["reasoning_effort"] = effort
     if route.max_output:
         body["max_completion_tokens" if "api.openai.com" in route.base_url else "max_tokens"] = route.max_output
+    apply_reasoning_args(body, request, route)
     body.update(route.extra_args)
     return body
 
