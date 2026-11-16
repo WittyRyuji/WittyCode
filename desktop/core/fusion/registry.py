@@ -31,31 +31,34 @@ class Policy:
     max_calls: int
     max_tokens: int = 0
     max_seconds: int = 900
+    preference: int = 50  # 0 favours cost, 100 favours efficiency
 
     def __post_init__(self) -> None:
-        if not _model(self.main):
-            raise FusionError("The main model must use WittyCode's own harness.")
+        if not _model(self.main, external=True):
+            raise FusionError("Choose a valid Fusion main model.")
         if not self.workers or not all(_model(model, external=True) for model in self.workers):
             raise FusionError("Choose at least one valid worker model.")
-        if not _model(self.light):
-            raise FusionError("Choose a valid lightweight model of the own harness.")
-        if (isinstance(self.max_calls, bool) or not isinstance(self.max_calls, int) or self.max_calls < 1
+        if not _model(self.light, external=True):
+            raise FusionError("Choose a valid lightweight model.")
+        if (isinstance(self.max_calls, bool) or not isinstance(self.max_calls, int) or self.max_calls < 0
                 or isinstance(self.max_tokens, bool) or not isinstance(self.max_tokens, int) or self.max_tokens < 0
-                or isinstance(self.max_seconds, bool) or not isinstance(self.max_seconds, int) or not 1 <= self.max_seconds <= 86_400):
-            raise FusionError("The budget is invalid.")
+                or isinstance(self.max_seconds, bool) or not isinstance(self.max_seconds, int) or not 1 <= self.max_seconds <= 86_400
+                or isinstance(self.preference, bool) or not isinstance(self.preference, int) or not 0 <= self.preference <= 100):
+            raise FusionError("The Fusion policy is invalid.")
 
     def allowed(self, model: str, role: str) -> bool:
         return model in self.workers if role == "worker" else role == "light" and model == self.light
 
     def to_json(self) -> dict[str, Any]:
         return {"main": self.main, "workers": list(self.workers), "light": self.light, "maxCalls": self.max_calls,
-                "maxTokens": self.max_tokens, "maxSeconds": self.max_seconds}
+                "maxTokens": self.max_tokens, "maxSeconds": self.max_seconds, "preference": self.preference}
 
     @classmethod
     def from_json(cls, raw: Any) -> Policy:
         if not isinstance(raw, Mapping) or not isinstance(raw.get("workers"), list):
             raise FusionError("The Fusion policy is missing or damaged.")
-        return cls(raw.get("main"), tuple(raw["workers"]), raw.get("light"), raw.get("maxCalls"), raw.get("maxTokens", 0), raw.get("maxSeconds", 900))
+        return cls(raw.get("main"), tuple(raw["workers"]), raw.get("light"), raw.get("maxCalls"), raw.get("maxTokens", 0),
+                   raw.get("maxSeconds", 900), raw.get("preference", 50))
 
 
 @dataclass(slots=True)
@@ -154,7 +157,7 @@ class FusionRegistry:
         return replacement
 
     def begin(self, agent_id: str, *, resume: bool = False) -> Expert:
-        if self.calls >= self.policy.max_calls or (self.policy.max_tokens and (self.unmetered or self.tokens >= self.policy.max_tokens)):
+        if (self.policy.max_calls and self.calls >= self.policy.max_calls) or (self.policy.max_tokens and (self.unmetered or self.tokens >= self.policy.max_tokens)):
             raise FusionError("The Fusion budget is exhausted or usage is unknown.")
         expert = self.agents.get(agent_id)
         if expert is None:

@@ -102,7 +102,8 @@ class AppSettings:
     fusion_main: str = ""
     fusion_workers: list[str] = field(default_factory=list)
     fusion_light: str = ""
-    fusion_max_calls: int = 8
+    fusion_preference: int = 50
+    fusion_max_calls: int = 8  # Legacy defaults are kept for settings compatibility, not applied to new sessions.
     fusion_max_tokens: int = 500_000
     fusion_max_seconds: int = 900
     think_chinese: bool = True
@@ -366,6 +367,7 @@ def settings_from_dict(raw: object) -> AppSettings:
         fusion_main=text("fusion_main"),
         fusion_workers=list(dict.fromkeys(item for item in raw.get("fusion_workers", []) if isinstance(item, str) and item.strip()))[:32] if isinstance(raw.get("fusion_workers"), list) else [],
         fusion_light=text("fusion_light"),
+        fusion_preference=raw.get("fusion_preference") if isinstance(raw.get("fusion_preference"), int) and not isinstance(raw.get("fusion_preference"), bool) and 0 <= raw["fusion_preference"] <= 100 else defaults.fusion_preference,
         fusion_max_calls=raw.get("fusion_max_calls") if isinstance(raw.get("fusion_max_calls"), int) and not isinstance(raw.get("fusion_max_calls"), bool) and 1 <= raw["fusion_max_calls"] <= 1000 else defaults.fusion_max_calls,
         fusion_max_tokens=raw.get("fusion_max_tokens") if isinstance(raw.get("fusion_max_tokens"), int) and not isinstance(raw.get("fusion_max_tokens"), bool) and 1 <= raw["fusion_max_tokens"] <= 2**53 - 1 else defaults.fusion_max_tokens,
         fusion_max_seconds=raw.get("fusion_max_seconds") if isinstance(raw.get("fusion_max_seconds"), int) and not isinstance(raw.get("fusion_max_seconds"), bool) and 1 <= raw["fusion_max_seconds"] <= 86_400 else defaults.fusion_max_seconds,

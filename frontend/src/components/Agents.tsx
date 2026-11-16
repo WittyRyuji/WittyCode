@@ -49,6 +49,7 @@ export function AgentPanel() {
   const session = useStore(currentSession);
   const close = useStore((s) => s.closeAgent);
   const models = useStore((s) => s.models);
+  const hidden = useStore((s) => s.hiddenModels);
   const openDialog = useStore((s) => s.openDialog);
   const transfer = useStore((s) => s.transferFusionExpert);
   const resume = useStore((s) => s.resumeFusionExpert);
@@ -78,7 +79,7 @@ export function AgentPanel() {
     ...session.fusionPolicy.workers.map((model) => ({ model, role: "worker" as const })),
     { model: session.fusionPolicy.light, role: "light" as const },
   ] : [];
-  const transferItems: MenuItem[] = choices.filter((choice) => !choice.model.startsWith("devin:") && (choice.model !== agent.fusionModel || choice.role !== agent.fusionRole)).map(({ model, role }) => {
+  const transferItems: MenuItem[] = choices.filter((choice) => !hidden.includes(choice.model) && (choice.model !== agent.fusionModel || choice.role !== agent.fusionRole)).map(({ model, role }) => {
     const name = models.find((item) => item.id === model)?.label ?? model;
     return { id: `${role}:${model}`, label: `${name} · ${role === "worker" ? "工作专家" : "轻量专家"}`, onSelect: () => openDialog({
       title: `把 ${agent.name} 转交给 ${name}？`,

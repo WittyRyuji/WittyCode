@@ -53,6 +53,7 @@ export interface SettingsView {
   fusionMain?: string;
   fusionWorkers?: string[];
   fusionLight?: string;
+  fusionPreference?: number;
   fusionMaxCalls?: number;
   fusionMaxTokens?: number;
   fusionMaxSeconds?: number;
@@ -91,7 +92,7 @@ export interface SettingsView {
 }
 export type FollowUp = "queue" | "steer";
 export type Language = "auto" | "zh-CN" | "en";
-export type FusionSettingKey = "fusionMain" | "fusionWorkers" | "fusionLight" | "fusionMaxCalls" | "fusionMaxTokens" | "fusionMaxSeconds";
+export type FusionSettingKey = "fusionMain" | "fusionWorkers" | "fusionLight" | "fusionPreference" | "fusionMaxSeconds";
 export type SettingKey = "theme" | "fontScale" | "followUp" | "maxOpen" | "maxSteps" | "sidebarWidth" | "devinPath" | "memoryEnabled" | "memoryRecall" | "memoryCapture" | "memoryCurate" | "memoryEngines" | "compactAuto" | "compactAt" | "thinkChinese" | "answerLanguage" | "thinkingLanguage" | "soundEnabled" | SoundKey | FusionSettingKey;
 export type SoundKind = "question" | "complete" | "error";
 export type SoundKey = "soundQuestion" | "soundComplete" | "soundError";

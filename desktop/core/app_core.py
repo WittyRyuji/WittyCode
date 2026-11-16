@@ -354,6 +354,8 @@ class AppCore:
         self.factory = factory
         self.devin = devin
         self.chatgpt = chatgpt
+        if chatgpt is not None:
+            chatgpt.devin = devin
         self.connections = ConnectionStore()
         self.connectors = ConnectorStore(self.connections.file.parent)
         self.skill_marketplace = SkillMarketplace(self.connections)
@@ -563,6 +565,7 @@ class AppCore:
             "fusionMain": self.settings.fusion_main,
             "fusionWorkers": list(self.settings.fusion_workers),
             "fusionLight": self.settings.fusion_light,
+            "fusionPreference": self.settings.fusion_preference,
             "fusionMaxCalls": self.settings.fusion_max_calls,
             "fusionMaxTokens": self.settings.fusion_max_tokens,
             "fusionMaxSeconds": self.settings.fusion_max_seconds,
@@ -1724,21 +1727,31 @@ class AppCore:
             from desktop.core.fusion.registry import FusionError, Policy
             try:
                 policy = Policy(self.settings.fusion_main, tuple(self.settings.fusion_workers), self.settings.fusion_light,
-                                self.settings.fusion_max_calls, self.settings.fusion_max_tokens, self.settings.fusion_max_seconds)
+                                0, 0, self.settings.fusion_max_seconds, self.settings.fusion_preference)
             except FusionError as error:
                 raise AppError("请先在设置中配置 Fusion 的主模型、工作模型和轻量模型。") from error
             page_model = policy.main
             target = self.catalog.target(page_model)
-            if target.engine != "chatgpt" or self.chatgpt is None or self.chatgpt.model_info(target.model) is None:
+            if self.chatgpt is None or self.chatgpt.model_info(page_model if page_model.startswith("devin:") else target.model) is None:
                 raise AppError("Fusion 主模型当前不可用；不会自动替换成其他模型。")
         settings = self._open_settings(page_model, base)
+        if policy is not None and settings.get("autonomy") in ("plan", "smart"):
+            if settings["autonomy"] == "plan":
+                settings["mode"] = "spec"
+                settings["autonomy"] = "ask"
+            else:
+                settings["autonomy"] = "code"  # Never inherit native Smart auto-approval into the common tool policy.
         if settings.get("mode") not in ("auto", "spec"):
             raise AppError("新会话的模式不合法。")
         await self._make_room()
         self._select_next = True
         self._opening_meta = settings
         try:
-            controller = await self._open_controller(folder, page_model, settings)
+            if policy is not None and page_model.startswith("devin:"):
+                controller = await self.chatgpt.open_new(folder, model=page_model, reasoning=settings.get("reasoning", ""),
+                                                         autonomy=settings.get("autonomy", "code"), mode=settings.get("mode", "auto"))
+            else:
+                controller = await self._open_controller(folder, page_model, settings)
             if policy is not None:
                 try:
                     controller.enable_fusion(policy)
@@ -2204,7 +2217,7 @@ class AppCore:
                 or not isinstance(model, str)):
             raise AppError("会话未就绪，暂时不能更换 Fusion 主模型。")
         chosen = self.catalog.find(model)
-        if not chosen or chosen.get("disabled") or self.catalog.target(model).engine != "chatgpt":
+        if not chosen or chosen.get("disabled") or self.catalog.target(model).engine not in ("chatgpt", "devin"):
             raise AppError("主模型当前不可用；未自动更换其他模型。")
         settings, changed = settings_for_model(self.catalog, self._page_settings(conv), model)
         reasoning = settings.get("reasoning", "") if "reasoning" in changed else None
@@ -3202,10 +3215,12 @@ class AppCore:
             s.chatgpt_compact_at = value
         elif key == "maxSteps" and _is_int(value) and MAX_STEPS_RANGE[0] <= value <= MAX_STEPS_RANGE[1]:
             s.max_steps = value
-        elif key in ("fusionMain", "fusionLight") and isinstance(value, str) and len(value) <= 512 and (not value or value.startswith(("chatgpt:", "api:"))):
+        elif key in ("fusionMain", "fusionLight") and isinstance(value, str) and len(value) <= 512 and (not value or value.startswith(("chatgpt:", "api:", "devin:"))):
             setattr(s, "fusion_main" if key == "fusionMain" else "fusion_light", value)
         elif key == "fusionWorkers" and isinstance(value, list) and len(value) <= 32 and all(isinstance(item, str) and len(item) <= 512 and item.startswith(("chatgpt:", "api:", "devin:")) for item in value):
             s.fusion_workers = list(dict.fromkeys(value))
+        elif key == "fusionPreference" and _is_int(value) and 0 <= value <= 100:
+            s.fusion_preference = value
         elif key == "fusionMaxCalls" and _is_int(value) and 1 <= value <= 1000:
             s.fusion_max_calls = value
         elif key == "fusionMaxTokens" and _is_int(value) and 1 <= value <= 2**53 - 1:

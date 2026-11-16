@@ -93,6 +93,7 @@ class ChatGPTEngine:
     ) -> None:
         self.settings = settings
         self.api = api
+        self.devin: Any = None  # Optional guarded ACP runner used only by Fusion sessions.
         """The API providers' models (``core/llm``): a request for one of them goes there, to the provider itself, and needs no sign-in."""
         self.root = Path(root)
         self.http = http or HttpClient()
@@ -327,12 +328,16 @@ class ChatGPTEngine:
         return models or list(FALLBACK_MODELS)
 
     def model_info(self, model_id: str) -> ChatGPTModel | None:
+        if model_id.startswith("devin:"):
+            return self.devin.model_info(model_id[6:]) if self.devin is not None and self.settings.devin_enabled else None
         if self.api is not None and is_api_model(model_id):
             spec = self.api.spec(model_id)
             return None if spec is None else model_of(spec)
         return next((m for m in self._models or FALLBACK_MODELS if m.id == model_id), None)
 
     def model_window(self, model_id: str) -> int | None:
+        if model_id.startswith("devin:"):
+            return self.devin.model_window(model_id[6:]) if self.devin is not None else None
         if self.api is not None and is_api_model(model_id):
             spec = self.api.spec(model_id)
             return None if spec is None else spec.window
@@ -370,7 +375,10 @@ class ChatGPTEngine:
     ) -> ChatGPTController:
         from desktop.core.chatgpt.controller import DEFAULT_LEVEL, PLAN, ChatGPTController, normalize_level
 
-        if not is_api_model(str(model or "")):  # (an API provider's model needs its key, not a ChatGPT sign-in)
+        if str(model or "").startswith("devin:"):
+            if self.model_info(str(model)) is None:
+                raise ChatGPTError("Devin 模型当前不可用；未选择替代模型。", code="fusion_acp")
+        elif not is_api_model(str(model or "")):  # (an API provider's model needs its key, not a ChatGPT sign-in)
             await self.ensure_ready()
         controller = ChatGPTController(
             manager=self,

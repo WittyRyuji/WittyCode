@@ -109,6 +109,12 @@ class FusionRuntime:
             "Call delegate_task only when it is useful. Experts cannot see your full conversation; give each task its goal, "
             "constraints and checks. Existing module owners must be reused. Do not delegate while planning. "
             f"Authorised worker models: {', '.join(policy.workers)}. Lightweight model: {policy.light}. "
+            f"User's relative decision weights: cost x{1.5 - policy.preference / 100:.2f}, "
+            f"efficiency x{0.5 + policy.preference / 100:.2f}. "
+            "Use these as a preference when weighing whether to delegate and choosing between the lightweight model "
+            "and a worker: lower cost weight favours capable workers, higher cost weight favours cheaper models when "
+            "appropriate. Consider difficulty, expected rework and available evidence about cost and speed; the weights "
+            "are not prices, guarantees or hard rules. Decide the number of calls and work needed yourself. "
             "Do not assume an expert's claim is proof; inspect the workspace and evidence before reporting success."
         )
 
@@ -116,11 +122,12 @@ class FusionRuntime:
         agents = [agent for agent in self.registry.agents.values() if agent.status != "retired" and (not expert_id or agent.id == expert_id)]
         data: dict[str, Any] = {
             "main_model": self.registry.policy.main,
+            "model_preference": self.registry.policy.preference,
             "owners": [{"scope": agent.scope, "model": agent.model, "role": agent.role, "status": agent.status, "task": agent.task} for agent in agents],
             "calls_used": self.registry.calls,
-            "max_calls": self.registry.policy.max_calls,
+            "max_calls": self.registry.policy.max_calls or None,
             "expert_tokens": self.registry.tokens,
-            "max_tokens": self.registry.policy.max_tokens,
+            "max_tokens": self.registry.policy.max_tokens or None,
             "usage_unknown": self.registry.unmetered,
             "historical_usage_unknown": self.registry.had_unknown,
         }
@@ -154,7 +161,7 @@ class FusionRuntime:
         return saved
 
     async def transfer(self, agent_id: str, model: str, role: str) -> str:
-        if model.startswith("devin:") or self.parent.manager.model_info(native_model(model)) is None:
+        if self.parent.manager.model_info(native_model(model)) is None:
             raise FusionError("The requested expert model is unavailable; no fallback was selected.")
         old = self.registry.agents.get(agent_id)
         if old is None:
@@ -178,7 +185,7 @@ class FusionRuntime:
         parent = self.parent
         if parent.state is not SessionState.READY or self._active is not None:
             raise FusionError("The main agent must be idle before its model can be changed.")
-        if (not isinstance(model, str) or not model.startswith(("chatgpt:", "api:"))
+        if (not isinstance(model, str) or not model.startswith(("chatgpt:", "api:", "devin:"))
                 or parent.manager.model_info(native_model(model)) is None):
             raise FusionError("The chosen main model is unavailable; no fallback was selected.")
         if model == self.registry.policy.main:
@@ -205,8 +212,8 @@ class FusionRuntime:
 
     def authorize_worker(self, model: str) -> bool:
         policy = self.registry.policy
-        if (not isinstance(model, str) or model.startswith("devin:") or self.parent.manager.model_info(native_model(model)) is None
-                or not model.startswith(("chatgpt:", "api:")) or len(policy.workers) >= 32):
+        if (not isinstance(model, str) or self.parent.manager.model_info(native_model(model)) is None
+                or not model.startswith(("chatgpt:", "api:", "devin:")) or len(policy.workers) >= 32):
             raise FusionError("The model is unavailable or the worker pool is full.")
         if model in policy.workers:
             return False
@@ -323,8 +330,6 @@ class FusionRuntime:
     async def delegate(self, scope: str, model: str, role: str, task: str) -> Outcome:
         from desktop.core.harness.outputs import hint
 
-        if model.startswith("devin:"):
-            return Outcome("This optional ACP expert is not available in the own-harness adapter.", True)
         native = native_model(model)
         if self.parent.manager.model_info(native) is None:
             return Outcome("The requested expert model is unavailable; no fallback was selected.", True)

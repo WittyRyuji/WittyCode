@@ -313,6 +313,7 @@ function mockData(): LiveData {
     fusionMain: "",
     fusionWorkers: [],
     fusionLight: "",
+    fusionPreference: 50,
     fusionMaxCalls: 8,
     fusionMaxTokens: 500000,
     fusionMaxSeconds: 900,

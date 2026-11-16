@@ -10,6 +10,7 @@ import { commandNamed, fromSkills, parseSlash, suggestions, unavailable, type Sc
 import type { Engine, Session, SessionSettings } from "../types";
 import { AttachmentCard } from "./Attachments";
 import { buildModelMenu } from "./modelMenu";
+import { fusionChoices, fusionDisabledReason } from "./fusionModels";
 import { QueueStrip } from "./QueueStrip";
 import { PlanApproval } from "./PlanApproval";
 import { MenuButton, Tip, type MenuItem } from "./ui";
@@ -43,7 +44,7 @@ function Controls({ values, disabled, fixedModel, live, onChoose }: { values: Se
   const chatgptLogin = useStore((s) => s.chatgptLogin);
   const model = models.find((m) => m.id === values.model);
   // An open session knows its engine even before the model list has arrived.
-  const engine = live?.engine ?? engineOfSource(model?.source ?? "chatgpt");
+  const engine = fixedModel ? "chatgpt" : live?.engine ?? engineOfSource(model?.source ?? "chatgpt");
   const levels = permissionsFor(engine);
   // No level chosen: the model's own default is what runs.
   const reasoning = values.reasoning || model?.defaultEffort || "";
@@ -93,12 +94,13 @@ function Controls({ values, disabled, fixedModel, live, onChoose }: { values: Se
 
 function FusionMain({ session }: { session: Session }) {
   const models = useStore((s) => s.models);
+  const hidden = useStore((s) => s.hiddenModels);
   const open = useStore((s) => s.openDialog);
   const change = useStore((s) => s.changeFusionMain);
   const current = session.settings.model;
-  const items: MenuItem[] = models.filter((model) => (model.source === "chatgpt" || model.source.startsWith("api:")) && model.id !== current && !model.disabled)
-    .map((model) => ({ id: model.id, label: model.label, onSelect: () => open({
-      title: `更换主模型为 ${model.label}？`, body: "确认后保留同一主代理、上下文、专家与预算，后续消息使用新模型；不会自动启动任务，也不改变新会话默认设置。",
+  const items: MenuItem[] = fusionChoices(models, hidden, true).filter((model) => model.id !== current)
+    .map((model) => ({ id: model.id, label: model.label, description: fusionDisabledReason(model, true), disabled: model.disabled, onSelect: () => open({
+      title: `更换主模型为 ${model.label}？`, body: "确认后保留同一主代理、上下文、专家与会话配置，后续消息使用新模型；不会自动启动任务，也不改变新会话默认设置。",
       confirmLabel: "更换主模型", noEnter: true, onConfirm: () => change(session.id, model.id),
     }) }));
   if (!items.length) return null;
@@ -107,12 +109,13 @@ function FusionMain({ session }: { session: Session }) {
 
 function FusionAuthorize({ session }: { session: Session }) {
   const models = useStore((s) => s.models);
+  const hidden = useStore((s) => s.hiddenModels);
   const open = useStore((s) => s.openDialog);
   const authorize = useStore((s) => s.authorizeFusionModel);
   const workers = session.fusionPolicy?.workers ?? [];
-  const items: MenuItem[] = models.filter((model) => (model.source === "chatgpt" || model.source.startsWith("api:")) && !workers.includes(model.id) && !model.disabled)
-    .map((model) => ({ id: model.id, label: model.label, onSelect: () => open({
-      title: `授权 ${model.label}？`, body: "确认后，主代理可以在本会话的权限与预算内自动把工作分配给此模型；不会启动任务，也不改变新会话默认设置。",
+  const items: MenuItem[] = fusionChoices(models, hidden, true).filter((model) => !workers.includes(model.id))
+    .map((model) => ({ id: model.id, label: model.label, description: fusionDisabledReason(model), disabled: model.disabled, onSelect: () => open({
+      title: `授权 ${model.label}？`, body: "确认后，主代理可以在本会话的权限内自动把工作分配给此模型；不会启动任务，也不改变新会话默认设置。",
       confirmLabel: "授权模型", noEnter: true, onConfirm: () => authorize(session.id, model.id),
     }) }));
   if (!items.length) return null;
@@ -124,7 +127,7 @@ function FusionBudget({ session }: { session: Session }) {
   const update = useStore((s) => s.updateFusionBudget);
   const say = useStore((s) => s.say);
   const policy = session.fusionPolicy;
-  if (!policy) return null;
+  if (!policy || (!policy.maxCalls && !policy.maxTokens)) return null;
   const change = () => open({
     title: "专家调用总上限", body: `目前已调用 ${policy.calls} 次，当前上限 ${policy.maxCalls} 次；只能提高或保持原上限。`,
     confirmLabel: "下一步", onConfirm: () => undefined,

@@ -72,6 +72,7 @@ class HarnessTools:
         self.plan_submitter: Callable[[str], None] | None = None
         self.fusion_runner: Callable[[str, str, str, str], Awaitable[Outcome]] | None = None
         self.strict_context = False
+        self.expert_command_approval = False
         self.plan = False
         """Plan mode (set by the controller for the turn): only reading, searching and read-only commands run."""
         self.remembered: set[str] = set()
@@ -121,7 +122,11 @@ class HarnessTools:
             return Verdict(ALLOW)  # Validated opaque references only, confined to this conversation.
         spec = self.registry.get(call.name)
         if spec is not None:
-            return self._planned(spec, call) if self.plan else self._decided(spec, call)
+            if self.plan:
+                return self._planned(spec, call)
+            if self.expert_command_approval and self.level == "full" and spec.kind == "exec":
+                return self._decided(spec, call, "code")
+            return self._decided(spec, call)
         client, tool = self._mcp[call.name]
         trusted = getattr(client, "trusted_annotations", False)
         if self.plan:

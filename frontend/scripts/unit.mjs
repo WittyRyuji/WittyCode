@@ -23,6 +23,7 @@ import "./usage.test.mjs";
 import "./plan.test.mjs";
 import "./turn-navigation.test.mjs";
 import "./factory.test.mjs";
+import "./fusion.test.mjs";
 import "./qwebchannel.test.mjs";
 import "./turn-delta.test.ts";
 import "./starmap.test.mjs";

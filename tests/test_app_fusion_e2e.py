@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import pytest
-from PySide6.QtCore import Qt
 
 from tests.e2e_support import open_rig
 from tests.fake_responses import call, say
@@ -24,6 +23,12 @@ def test_configure_and_start_fusion_with_a_local_fake(qapp, loop, tmp_path):
                 await rig.wait_text(".menu-item", name)
                 await rig.click_text(".menu-item", name)
             await until(lambda: rig.core.settings.fusion_main == "chatgpt:gpt-6.1-sol" and rig.core.settings.fusion_light == "chatgpt:gpt-6-luna" and rig.core.settings.fusion_workers == ["chatgpt:gpt-6-luna"])
+            assert not await rig.exists('input[aria-label="专家调用次数"]')
+            assert not await rig.exists('input[aria-label="Token 预算"]')
+            await rig.click('input[aria-label="成本与效率倾向"]')
+            await rig.press("End")
+            await until(lambda: rig.core.settings.fusion_preference == 100)
+            await rig.wait_text(".fusion-preference-weights", "效率 ×1.50")
             assert rig.window.grab().save(str(tmp_path / "fusion-settings.png"))
             await rig.click('.settings-body button[aria-label="关闭"]')
             await rig.click(".fusion-choice")
@@ -64,20 +69,79 @@ def test_configure_and_start_fusion_with_a_local_fake(qapp, loop, tmp_path):
             await rig.click_text(".dialog button", "确认转交")
             await until(lambda: len(main.agents) == 2)
             assert len(rig.plan.requests) == 3 and any(view.record.status == "retired" for view in main.agents.values())
-            await rig.click(".fusion-budget")
-            await rig.wait_text(".dialog", "专家调用总上限")
-            await rig.press("a", Qt.KeyboardModifier.ControlModifier)
-            await rig.type("9")
-            await rig.click_text(".dialog button", "下一步")
-            await rig.wait_text(".dialog", "已知 Token 总上限")
-            await rig.press("a", Qt.KeyboardModifier.ControlModifier)
-            await rig.type("600000")
-            await rig.click_text(".dialog button", "下一步")
-            await rig.wait_text(".dialog", "确认本会话预算")
-            assert main._fusion.registry.policy.max_calls == 8
-            await rig.click_text(".dialog button", "确认预算")
-            await until(lambda: main._fusion.registry.policy.max_calls == 9)
-            assert main._fusion.registry.policy.max_tokens == 600000 and len(rig.plan.requests) == 3
+            assert not await rig.exists(".fusion-budget")
+            assert (main._fusion.registry.policy.max_calls, main._fusion.registry.policy.max_tokens, main._fusion.registry.policy.preference) == (0, 0, 100)
+            assert "cost x0.50" in rig.plan.requests[0]["instructions"] and "efficiency x1.50" in rig.plan.requests[0]["instructions"]
+            assert len(rig.plan.requests) == 3
+        finally:
+            await rig.finish()
+    run(loop, scenario())
+
+
+def test_devin_fusion_main_and_plan_through_the_real_page(qapp, loop, tmp_path):
+    from tests.fusion_acp_support import make_guarded_engine
+
+    async def scenario():
+        harness = make_guarded_engine(tmp_path)
+        rig = await open_rig(tmp_path, devin_engine=harness.engine)
+        try:
+            await until(lambda: any(model["source"] == "devin" for model in rig.core.catalog.models), timeout=20)
+            for key, value in {"fusionMain": "devin:swe-2-high", "fusionWorkers": ["chatgpt:gpt-6-luna"], "fusionLight": "chatgpt:gpt-6-luna"}.items():
+                await rig.core.call("settings.set", {"key": key, "value": value})
+            await rig.click(".fusion-choice")
+            await rig.send("Inspect this module")
+            await rig.wait_for(".fusion-badge")
+            await rig.wait_text(".transcript", "ACP report.", timeout=30)
+            main = rig.core.order[0].controller
+            await until(lambda: main.state.value == "ready")
+            assert main.model == "devin:swe-2-high" and not rig.plan.requests
+            await rig.core.call("session.choose", {"id": rig.core.order[0].cid, "field": "mode", "value": "spec"})
+            await rig.send("[fusion-plan] Propose a plan")
+            await rig.wait_for(".plan-approval", timeout=30)
+            assert main.saved.plan["status"] == "pending"
+            assert rig.window.grab().save(str(tmp_path / "fusion-acp-main-plan.png"))
+            await rig.click_text(".plan-approval button", "执行方案")
+            await until(lambda: main.state.value == "ready" and main.saved.plan.get("status") == "approved", timeout=30)
+            assert main.saved.plan["execution"] == "started" and not rig.plan.requests
+        finally:
+            await rig.finish()
+    run(loop, scenario())
+
+
+def test_fusion_model_menus_respect_visibility_and_include_devin(qapp, loop, tmp_path):
+    import json
+    from desktop.core.providers import ProviderStore
+    from tests.devin_support import make_engine
+
+    async def scenario():
+        harness = make_engine(tmp_path)
+        path = tmp_path / "models.json"
+        path.write_text(json.dumps({"customModels": [{"model": "hidden-demo", "displayName": "Hidden API Demo",
+                         "baseUrl": "https://example.com/v1", "provider": "generic-chat-completion-api", "maxContextLimit": 64000}]}), encoding="utf-8")
+        providers = ProviderStore(models_file=path, sidecar=tmp_path / "providers.json", environ={}, registry_env=lambda: {})
+        rig = await open_rig(tmp_path, devin_engine=harness.engine, providers=providers)
+        try:
+            await until(lambda: any(model["source"] == "devin" for model in rig.core.catalog.models)
+                        and any(model["label"] == "Hidden API Demo" for model in rig.core.catalog.models), timeout=20)
+            api_id = next(model["id"] for model in rig.core.catalog.models if model["label"] == "Hidden API Demo")
+            await rig.core.call("models.setVisible", {"ids": ["chatgpt:gpt-6-luna", api_id], "visible": False})
+            await rig.click(".fusion-choice")
+            await rig.wait_text(".settings-body h2", "Fusion")
+            await rig.click(".settings-body .selectbox", 0)
+            assert "GPT-6-Luna" not in await rig.text(".menu") and "Hidden API Demo" not in await rig.text(".menu")
+            await rig.wait_text(".menu-item", "SWE-2")
+            assert not await rig.js("[...document.querySelectorAll('.menu-item')].find(e => e.textContent.includes('SWE-2')).disabled")
+            await rig.click_text(".menu-item", "SWE-2")
+            await until(lambda: rig.core.settings.fusion_main == "devin:swe-2-high")
+            await rig.click(".settings-body h2")
+            await rig.click(".settings-body .selectbox", 1)
+            await rig.wait_text(".menu-item", "SWE-2")
+            assert "GPT-6-Luna" not in await rig.text(".menu") and "Hidden API Demo" not in await rig.text(".menu")
+            assert not await rig.js("[...document.querySelectorAll('.menu-item')].find(e => e.textContent.includes('SWE-2')).disabled")
+            await rig.click_text(".menu-item", "SWE-2")
+            await until(lambda: rig.core.settings.fusion_workers == ["devin:swe-2-high"])
+            assert not harness.requests("session/prompt")
+            assert rig.window.grab().save(str(tmp_path / "fusion-models.png"))
         finally:
             await rig.finish()
     run(loop, scenario())

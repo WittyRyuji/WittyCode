@@ -186,6 +186,7 @@ class ChatGPTController:
     _checkpoint_written: bool = False
     _fusion: Any = None
     _fusion_parent: Any = None
+    _acp: Any = None
 
     def __post_init__(self) -> None:
         self.saved = SavedSession(id=self.session_id, project=str(self.project))
@@ -498,6 +499,7 @@ class ChatGPTController:
         # after reopening (its contract is cached), rather than invalidating every previous request's cache prefix.
         self._tools.level = self.autonomy
         self._tools.strict_context = self._fusion is not None or self._fusion_parent is not None
+        self._tools.expert_command_approval = self._fusion_parent is not None
         return self._tools
 
     def _claim_session(self) -> None:
@@ -535,6 +537,8 @@ class ChatGPTController:
                 await asyncio.wait_for(asyncio.shield(task), INTERRUPT_GRACE_SECONDS)
         if self._fusion is not None:
             await self._fusion.close()
+        if self._acp is not None:
+            await self._acp.close()
         if self._mcp_task is not None and not self._mcp_task.done():
             self._mcp_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -811,7 +815,14 @@ class ChatGPTController:
             )
             # The loop works on the view (what the model reads: the summary of the early part, then the rest); what it adds
             # reaches the log (``saved.items``) through ``_Watch.history_grew``.
-            end = await loop.run(compact.view_of(self.saved.items, self.saved.compaction))
+            if model.startswith("devin:"):
+                if self._fusion is None and self._fusion_parent is None:
+                    raise ChatGPTError("ACP 工具桥只用于 Fusion 会话。", code="fusion_acp")
+                from desktop.core.fusion.acp import AcpRun
+                self._acp = self._acp or AcpRun(self)
+                end = await self._acp.run(tools, loop.observer, compact.view_of(self.saved.items, self.saved.compaction), sent, attachments, snapshot.get("current", instructions))
+            else:
+                end = await loop.run(compact.view_of(self.saved.items, self.saved.compaction))
             if tools.connections is not None:
                 try:
                     await tools.connections.hooks("Stop", self.project, {"session_id": self.session_id, "stop_hook_active": True})
@@ -999,6 +1010,8 @@ class ChatGPTController:
         Why it cannot start (a sentence for the user), or ``None`` when it has started."""
         if self.state is not SessionState.READY:
             return "会话还没就绪，或这一轮还在运行：结束后再压缩。"
+        if self.model.startswith("devin:"):
+            return None if self.send_prompt("/compact") else "ACP 会话暂不能压缩。"
         if not self.saved.items:
             return "还没有对话可以压缩。"
         self.used_at = time.time()
@@ -1569,7 +1582,7 @@ class _Watch(Observer):
 
     def retry_allowed(self) -> bool:
         fusion = self.ctl._fusion or getattr(self.ctl._fusion_parent, "_fusion", None)
-        return fusion is None or not fusion.registry.unmetered
+        return fusion is None or not fusion.registry.policy.max_tokens or not fusion.registry.unmetered
 
     async def _fusion_context(self) -> tuple[str, dict[str, str], list[str], Any]:
         ctl = self.ctl

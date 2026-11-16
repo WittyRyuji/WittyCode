@@ -61,6 +61,7 @@ export interface LiveData {
   fusionMain: string;
   fusionWorkers: string[];
   fusionLight: string;
+  fusionPreference: number;
   fusionMaxCalls: number;
   fusionMaxTokens: number;
   fusionMaxSeconds: number;
@@ -145,6 +146,7 @@ export function emptyLiveData(theme: ThemeChoice = "system", fontScale: FontScal
     fusionMain: "",
     fusionWorkers: [],
     fusionLight: "",
+    fusionPreference: 50,
     fusionMaxCalls: 8,
     fusionMaxTokens: 500000,
     fusionMaxSeconds: 900,
@@ -238,6 +240,7 @@ export function settingsFields(v: SettingsView): Partial<LiveData> {
     fusionMain: v.fusionMain ?? "",
     fusionWorkers: v.fusionWorkers ?? [],
     fusionLight: v.fusionLight ?? "",
+    fusionPreference: v.fusionPreference ?? 50,
     fusionMaxCalls: v.fusionMaxCalls ?? 8,
     fusionMaxTokens: v.fusionMaxTokens ?? 500000,
     fusionMaxSeconds: v.fusionMaxSeconds ?? 900,

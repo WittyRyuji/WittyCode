@@ -119,6 +119,18 @@ def test_the_built_in_tools_follow_the_permission_level(tmp_path):
     assert code.check(outside).verdict == ASK
 
 
+def test_fusion_expert_full_access_still_asks_before_writing_commands(tmp_path):
+    tools = make(tmp_path, "full")
+    readonly = call("shell", command="git status")
+    write = call("shell", command="New-Item marker.txt")
+    assert tools.check(write).verdict == ALLOW  # Ordinary main sessions keep their selected permissions.
+    tools.expert_command_approval = True
+    assert tools.check(readonly).verdict == ALLOW
+    assert tools.check(write).verdict == ASK
+    tools.remember(write)
+    assert tools.check(write).verdict == ALLOW  # An explicit, command-specific session approval still works.
+
+
 def test_allowing_a_built_in_call_for_the_conversation_is_remembered(tmp_path):
     tools = make(tmp_path, "ask")
     write = call("create_file", file_path=str(tmp_path / "b.txt"), content="y")

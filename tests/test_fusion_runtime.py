@@ -102,6 +102,46 @@ def test_expert_permission_is_routed_to_the_main_conversation(tmp_path):
     asyncio.run(go())
 
 
+def test_unavailable_acp_worker_cannot_be_started_even_if_a_model_requests_it(tmp_path):
+    async def go():
+        with FakeResponses() as fake:
+            engine = make_engine(tmp_path, fake)
+            main = await engine.open_new(tmp_path / "project", model="gpt-6.1-sol")
+            main.enable_fusion(Policy("chatgpt:gpt-6.1-sol", ("devin:swe-2-high",), "chatgpt:gpt-6-luna", 0))
+            fake.script(call("delegate_task", {"scope": "src", "model": "devin:swe-2-high", "role": "worker", "task": "Inspect."}), say("Unavailable."))
+            try:
+                assert main.send_prompt("Inspect")
+                await finish_turn(main)
+                assert not main.agents and len(fake.requests) == 2
+                assert any(item.get("type") == "function_call_output" and "unavailable" in item.get("output", "") for item in main.saved.items)
+            finally:
+                await engine.close_all()
+    asyncio.run(go())
+
+
+def test_expert_coding_command_requires_approval_even_when_parent_is_full(tmp_path):
+    async def go():
+        core, model, _, _, _ = await ready_core(tmp_path)
+        try:
+            cid = (await core.call("session.new", {"projectId": str(tmp_path / "proj"), "autonomy": "full"}))["id"]
+            main = core._by_cid[cid].controller
+            assert await main.update_settings(autonomy="full")
+            main.enable_fusion(Policy("chatgpt:gpt-6.1-sol", ("chatgpt:gpt-6-luna",), "chatgpt:gpt-6-luna", 3))
+            model.script(call("delegate_task", {"scope": "src", "model": "chatgpt:gpt-6-luna", "role": "worker", "task": "Create a file."}),
+                         call("shell", {"command": "New-Item marker.txt"}), say("The command was declined."), say("Reported."))
+            await core.call("session.send", {"id": cid, "text": "Create a file"})
+            await until(lambda: bool(main.agent_prompts()) or main.state.value != "running")
+            assert main.agent_prompts() and not (tmp_path / "proj" / "marker.txt").exists()
+            expert = next(iter(main.agents.values()))
+            prompt = main.agent_prompts()[0]
+            assert (await core.call("session.answerPermission", {"id": cid, "agentId": expert.session_id, "promptId": prompt.id, "value": "cancel"}))["ok"]
+            await finish_turn(main)
+            assert not (tmp_path / "proj" / "marker.txt").exists()
+        finally:
+            await core.shutdown()
+    asyncio.run(go())
+
+
 def test_app_settings_start_fusion_explicitly_and_pin_the_main(tmp_path):
     async def go():
         core, _, events, _, _ = await ready_core(tmp_path)
