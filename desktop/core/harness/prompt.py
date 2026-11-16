@@ -71,7 +71,8 @@ PLAN_RULES = (
     "Plan mode is on. Nothing may be changed yet: file edits, file creation and every command that is not read-only are refused. "
     "Read and search to understand the task, then answer with a concrete plan: what you would change and in which files, in what "
     "order, how you would check it, and what is still open. Put a question the project cannot answer to the user with ask_user. "
-    "Stop after the plan. The user approves it by switching to Auto (the Mode chip, or /plan) and telling you to go ahead."
+    "When the complete plan is ready, call submit_plan with the full plan and stop. The user can approve that plan for "
+    "execution or ask for revisions. Never assume that changing modes or an ordinary follow-up approves a plan."
 )
 
 @dataclass(frozen=True, slots=True)

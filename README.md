@@ -11,7 +11,8 @@ A coding-agent desktop app for Windows, with its own agent loop: the answer come
 ![After a turn: the tool calls folded into one summary line, the answer up front](docs/screenshots/readme-conversation.png)
 
 - **Its own agent loop**: WittyCode calls the model itself — with your ChatGPT plan ("Sign in with ChatGPT") or your own API providers — and runs file, search and shell tools behind three permission levels. Long conversations are compacted, failed requests retried.
-- **One window for every model**: ChatGPT Plan, API providers (OpenAI, Anthropic, OpenAI-compatible endpoints such as DeepSeek / OpenRouter / Ollama, and AWS Bedrock), and optionally Devin or Factory CLI. A conversation can move to another model midway; the earlier text goes along.
+- **One window for every model**: ChatGPT Plan, API providers (OpenAI, Anthropic, OpenAI-compatible endpoints such as DeepSeek / OpenRouter / Ollama, and AWS Bedrock), and optionally Devin or Factory CLI. An ordinary conversation can move to another model midway; the earlier text goes along.
+- **Fusion and Plan**: the own main agent can delegate to reusable module experts; Plan waits for explicit approval of the current proposal before execution. See the [Fusion guide](docs/fusion.md) (Chinese) for configuration, budgets and limits.
 - **Asks while it works**: approvals and questions show up as cards, one answer per line; messages typed while a turn runs are queued or given to the running turn (steer).
 - **Slash commands and skills**: `/compact`, `/plan`, `/goal <goal>`; your skills and custom commands from `.wittycode/` (and the folders other agent apps use).
 - **Shared memory**: one set of local notes every engine reads and writes; notes and conversations can be imported from other apps.

@@ -15,6 +15,7 @@ import type {
   EnvState,
   FileView,
   FontScale,
+  FusionSessionPolicy,
   MemoryChange,
   MemoryEntry,
   MemoryKind,
@@ -49,6 +50,12 @@ export interface SettingsView {
   maxOpen: number;
   /** own-loop steps per turn; missing on an older sender: 80 */
   maxSteps?: number;
+  fusionMain?: string;
+  fusionWorkers?: string[];
+  fusionLight?: string;
+  fusionMaxCalls?: number;
+  fusionMaxTokens?: number;
+  fusionMaxSeconds?: number;
   devinPath: string;
   /** page model ids the user left out of the conversation's model menu */
   hiddenModels: string[];
@@ -84,7 +91,8 @@ export interface SettingsView {
 }
 export type FollowUp = "queue" | "steer";
 export type Language = "auto" | "zh-CN" | "en";
-export type SettingKey = "theme" | "fontScale" | "followUp" | "maxOpen" | "maxSteps" | "sidebarWidth" | "devinPath" | "memoryEnabled" | "memoryRecall" | "memoryCapture" | "memoryCurate" | "memoryEngines" | "compactAuto" | "compactAt" | "thinkChinese" | "answerLanguage" | "thinkingLanguage" | "soundEnabled" | SoundKey;
+export type FusionSettingKey = "fusionMain" | "fusionWorkers" | "fusionLight" | "fusionMaxCalls" | "fusionMaxTokens" | "fusionMaxSeconds";
+export type SettingKey = "theme" | "fontScale" | "followUp" | "maxOpen" | "maxSteps" | "sidebarWidth" | "devinPath" | "memoryEnabled" | "memoryRecall" | "memoryCapture" | "memoryCurate" | "memoryEngines" | "compactAuto" | "compactAt" | "thinkChinese" | "answerLanguage" | "thinkingLanguage" | "soundEnabled" | SoundKey | FusionSettingKey;
 export type SoundKind = "question" | "complete" | "error";
 export type SoundKey = "soundQuestion" | "soundComplete" | "soundError";
 export type SettingValue = string | number | boolean | string[];
@@ -157,6 +165,9 @@ export interface ConversationMeta {
   handoff: PendingHandoff | null;
   queued: QueuedMessage[];
   agents: AgentInfo[];
+  fusion?: boolean;
+  fusionPolicy?: FusionSessionPolicy | null;
+  pendingPlan?: { id: string; text: string; warning?: string } | null;
   /** the goal (`/goal`) the conversation is working toward; "" when none */
   goal?: string;
 }
@@ -286,7 +297,7 @@ export interface Calls {
   "project.refresh": { params: { id?: string }; result: null };
   "project.reveal": { params: { id: string }; result: null };
   /** `fromId`: the conversation whose project to use when there is no `projectId` */
-  "session.new": { params: { projectId?: string; modelId?: string; fromId?: string; settings?: SessionSettings }; result: { id: string | null } };
+  "session.new": { params: { projectId?: string; modelId?: string; fromId?: string; settings?: SessionSettings; fusion?: boolean }; result: { id: string | null } };
   "session.openSaved": { params: { id: string; projectId: string; title?: string }; result: { id: string | null } };
   "session.reorder": { params: { projectId: string; id: string; targetId: string; after: boolean }; result: { ok: boolean } };
   "session.close": { params: { id: string }; result: null };
@@ -318,6 +329,12 @@ export interface Calls {
   /** `agentId`: the approval is a sub-agent's (asked in its side panel) */
   "session.answerPermission": { params: { id: string; promptId: string; value: string; agentId?: string }; result: { ok: boolean } };
   "session.answerQuestion": { params: { id: string; promptId: string; answers: QuestionAnswer[] | null; agentId?: string }; result: { ok: boolean } };
+  "session.approvePlan": { params: { id: string; planId: string }; result: { ok: boolean } };
+  "fusion.transferExpert": { params: { id: string; agentId: string; model: string; role: "worker" | "light" }; result: { ok: boolean; agentId: string } };
+  "fusion.resumeExpert": { params: { id: string; agentId: string }; result: { ok: boolean } };
+  "fusion.updateBudget": { params: { id: string; maxCalls: number; maxTokens: number; acceptUnknown: boolean }; result: { ok: boolean } };
+  "fusion.authorizeModel": { params: { id: string; model: string }; result: { ok: boolean } };
+  "fusion.changeMain": { params: { id: string; model: string }; result: { ok: boolean } };
   /** a text file the conversation named, for the side panel; `path` as the model wrote it (relative to the project, an optional
    *  `:line` or `:line-line` at the end). An error is one sentence for the user (no such file, not text, a folder). */
   "files.read": { params: { id: string; path: string }; result: FileView };

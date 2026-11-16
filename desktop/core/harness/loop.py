@@ -186,6 +186,14 @@ class Observer:
         (``OUTPUT_LIMIT``)."""
         return None
 
+    def finish_requested(self) -> bool:
+        """A tool has requested a safe turn boundary, such as a submitted plan."""
+        return False
+
+    def retry_allowed(self) -> bool:
+        """Whether an unmetered failure may be retried automatically."""
+        return True
+
     def has_steer(self) -> bool:
         """Is something the user said waiting to be given to the model? (Asked when a step brought no tool call.)"""
         return False
@@ -382,7 +390,11 @@ class AgentLoop:
                     self.observer.history_grew([update])
                     continue
                 return TurnEnd("incomplete" if incomplete else "done", incomplete, step)
-            await self._run_calls(history, calls)
+            await self._run_calls(history, calls, incomplete=bool(incomplete))
+            if incomplete:
+                return TurnEnd("incomplete", incomplete, step)
+            if self.observer.finish_requested():
+                return TurnEnd("plan", steps=step)
         return TurnEnd("step_limit", steps=step)
 
     # ------------------------------------------------------------------ a step
@@ -438,7 +450,7 @@ class AgentLoop:
                     shortened = True
                 elif self._acknowledged and getattr(error, "code", None) in ("network", "stream", "stream_idle", "timeout"):
                     raise  # no blind resend after an accepted request goes silent; an explicit busy refusal can retry
-                elif repeats < len(self._retry_delays) and is_transient(error):
+                elif repeats < len(self._retry_delays) and is_transient(error) and self.observer.retry_allowed():
                     delay = self._retry_pause(repeats, error)
                     repeats += 1
                     log.warning("the request failed (%s); asking again in %.1f s (%d of %d)", error, delay, repeats, len(self._retry_delays))
@@ -532,20 +544,23 @@ class AgentLoop:
                 self._measured = (len(history), context)
             if kept:
                 self.observer.history_grew(kept)
-            self.observer.request_done(request, finished, time.monotonic() - started, failed)
-            close = getattr(stream, "aclose", None)
-            if close is not None:
-                with contextlib.suppress(Exception):
-                    await close()
+            try:
+                self.observer.request_done(request, finished, time.monotonic() - started, failed)
+            finally:
+                close = getattr(stream, "aclose", None)
+                if close is not None:
+                    with contextlib.suppress(Exception):
+                        await close()
         return calls, incomplete
 
     # ------------------------------------------------------------------ tools
 
-    async def _run_calls(self, history: list[dict[str, Any]], calls: list[Call]) -> None:
+    async def _run_calls(self, history: list[dict[str, Any]], calls: list[Call], *, incomplete: bool = False) -> None:
         answered: set[str] = set()
         # (the results of one step share the room the next request has: one long result must not crowd out the others,
         # nor all of them together make a request that cannot be sent)
         room = self.observer.tool_room(self.estimate(history), self._answer)
+        share, released = divmod(room, len(calls)) if room is not None else (0, 0)
         outcomes: dict[int, Outcome] = {}
         attempted: set[int] = set()
         notified: set[int] = set()
@@ -553,7 +568,7 @@ class AgentLoop:
         safe = getattr(self.tools, "parallel_safe", lambda call: False)
 
         async def commit(index: int, call: Call, outcome: Outcome) -> None:
-            nonlocal room
+            nonlocal room, released
             attempted.add(index)
             await self.observer.retain_output(call, outcome)
             notified.add(index)
@@ -562,13 +577,21 @@ class AgentLoop:
             reference_note = "\n" + hint(outcome.reference) if outcome.reference else ""
             output = clip_output(outcome.output) + self.reminder(call, outcome)
             if room is not None:
+                extra = released // (len(calls) - index)
+                released -= extra
+                quota = min(room, share + extra)
+                budget = max(OUTPUT_FLOOR, quota) - _OUTPUT_ITEM - estimate_text(reference_note)
+                fits = estimate_text(output) <= budget
                 clip = clip_read_output if call.name == "read_file" and not outcome.is_error else clip_tokens
-                output = clip(output, max(OUTPUT_FLOOR, room // (len(calls) - index)) - _OUTPUT_ITEM - estimate_text(reference_note))
+                output = clip(output, budget)
             item = call_output(call.call_id, output + reference_note)
             if outcome.reference:
                 item["wc_output_ref"] = outcome.reference
             if room is not None:
-                room = max(0, room - estimate_item(item))
+                used = estimate_item(item)
+                room = max(0, room - used)
+                if fits:
+                    released += max(0, quota - used)  # Redistribute genuinely short results, not line-rounding slack.
             history.append(item)
             answered.add(call.call_id)
             self.observer.history_grew([item])
@@ -579,6 +602,20 @@ class AgentLoop:
         try:
             index = 0
             while index < len(calls):
+                if incomplete:
+                    for position in range(index, len(calls)):
+                        await commit(position, calls[position], Outcome("Not run: the model response was incomplete.", True, cancelled=True))
+                    break
+                if self.observer.finish_requested():
+                    for position in range(index, len(calls)):
+                        await commit(position, calls[position], Outcome("Not run: this turn ended after the plan was submitted.", True, cancelled=True))
+                    break
+                if getattr(self.tools, "strict_context", False):
+                    check = getattr(self.observer, "before_tools", None)
+                    if check is None or not await check():
+                        for position in range(index, len(calls)):
+                            await commit(position, calls[position], Outcome("Not run: session rules changed; review the updated context before retrying.", True, cancelled=True))
+                        break
                 end = index + 1
                 if safe(calls[index]):
                     while end < min(index + MAX_PARALLEL_READS, len(calls)) and safe(calls[end]):

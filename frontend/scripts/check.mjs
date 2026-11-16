@@ -202,7 +202,7 @@ ok("the TPS tooltip says in its first line that the figure is an estimate", awai
 // settings: the button, the pages, and a change that takes effect at once
 await page.click(".foot-btn", 1);
 ok("the settings button opens the settings", await page.eval("!!document.querySelector('.settings')"));
-ok("settings merge defaults into sessions, add customization and plugins, and keep About last", await page.eval("[...document.querySelectorAll('.snav')].map(e => e.textContent.trim()).join(',') === '外观,账号与模型,会话,自定义,共享记忆5,外部程序,项目,插件,关于'"));
+ok("settings include Fusion, customization and plugins, and keep About last", await page.eval("[...document.querySelectorAll('.snav')].map(e => e.textContent.trim()).join(',') === '外观,账号与模型,会话,Fusion,自定义,共享记忆5,外部程序,项目,插件,关于'"));
 await page.click(".snav", 2);
 ok("the session page includes model / reasoning / permission / mode defaults", await page.eval("document.querySelectorAll('.sessions-columns > section:first-child .field').length === 4"));
 await page.click(".snav", 0);
@@ -224,7 +224,7 @@ ok("the session limit stepper works", await page.eval("[...document.querySelecto
 await page.click(".settings-body .field .switch", 0);
 ok("with the compaction switched off the percent is not offered, only the session limit", await page.eval("document.querySelector('.settings-body .field .switch').getAttribute('aria-checked') === 'false' && [...document.querySelectorAll('.stepper span')].map(e => e.textContent).join() === '5'"));
 await page.click(".settings-body .field .switch", 0);
-await page.click(".snav", 5);
+await clickText(".snav", "外部程序");
 ok("the 外部程序 page has only the Devin CLI, found automatically", await page.eval("[...document.querySelectorAll('.settings-body .field-label')].map(e => e.textContent).join() === 'Devin 命令行' && [...document.querySelectorAll('.settings-body .pathbox')].some(p => p.textContent.toLowerCase().endsWith('devin.exe'))"));
 await page.click(".settings-body .segc button", 1);
 const devinPath = 'input[aria-label="Devin 命令行 路径"]';

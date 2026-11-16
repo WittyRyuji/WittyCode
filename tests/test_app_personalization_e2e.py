@@ -38,7 +38,7 @@ def test_merged_settings_geometry_languages_and_rules_are_really_editable(qapp, 
             await rig.core.call("settings.set", {"key": "theme", "value": theme})
             await rig.press(",", Qt.KeyboardModifier.ControlModifier)
             await rig.wait_for(".settings")
-            assert await rig.texts(".snav") == ["外观", "账号与模型", "会话", "自定义", "共享记忆", "外部程序", "项目", "插件", "关于"]
+            assert await rig.texts(".snav") == ["外观", "账号与模型", "会话", "Fusion", "自定义", "共享记忆", "外部程序", "项目", "插件", "关于"]
             await wait_for(lambda: rig.js("(() => { const r=document.querySelector('.settings').getBoundingClientRect(); return Math.abs(r.width-Math.min(1150,innerWidth*.96))<1 && Math.abs(r.height-Math.min(800,innerHeight*.92))<1; })()"), 3, "settled enlarged settings geometry")
             await rig.click_text(".snav", "会话")
             assert (await rig.texts(".sessions-columns > section:first-child .field-label")) == ["模型", "推理", "权限", "模式"]

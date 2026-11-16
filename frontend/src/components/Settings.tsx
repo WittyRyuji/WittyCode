@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { version } from "../../package.json";
-import { Brain, Brush, Cpu, FolderOpen, Info, KeyRound, Layers, Minus, Plus, SlidersHorizontal, Trash2, X } from "lucide-react";
+import { Brain, Brush, Cpu, FolderOpen, Info, KeyRound, Layers, Minus, Plus, SlidersHorizontal, Sparkles, Trash2, X } from "lucide-react";
 import { useStore } from "../store";
 import { MODES, effortLabel, permissionsFor, reasoningChoices } from "../lib/vocab";
 import { engineOfSource, findModel } from "../lib/models";
@@ -19,12 +19,14 @@ import { StepLimitSetting } from "./StepLimitSetting";
 import { SoundSettings } from "./SoundSettings";
 import { ProviderEditor } from "./ProviderEditor";
 import { ProvidersPage } from "./ProvidersPage";
+import { FusionSettings } from "./FusionSettings";
 import type { MenuItem } from "./ui";
 
 const PAGES = [
   { id: "appearance", label: "外观", icon: <Brush size={15} /> },
   { id: "providers", label: "账号与模型", icon: <KeyRound size={15} /> },
   { id: "sessions", label: "会话", icon: <Layers size={15} /> },
+  { id: "fusion", label: "Fusion", icon: <Sparkles size={15} /> },
   { id: "customization", label: "自定义", icon: <SlidersHorizontal size={15} /> },
   { id: "memory", label: "共享记忆", icon: <Brain size={15} /> },
   { id: "programs", label: "外部程序", icon: <Cpu size={15} /> },
@@ -371,6 +373,7 @@ export function SettingsHost() {
             {current.id === "appearance" && <AppearancePage />}
             {current.id === "providers" && (editing ? <ProviderEditor key={editing} editId={editing} /> : <ProvidersPage />)}
             {current.id === "sessions" && <SessionsPage />}
+            {current.id === "fusion" && <FusionSettings />}
             {current.id === "customization" && <CustomizationPage />}
             {current.id === "memory" && <MemoryPage />}
             {current.id === "programs" && <ProgramsPage />}

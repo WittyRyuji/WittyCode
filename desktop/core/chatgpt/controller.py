@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import json
 import logging
 import threading
 import time
@@ -154,6 +155,8 @@ class ChatGPTController:
     _turn_mode: str = ""
     """What the running turn asks of the model. Fixed when it starts: the request, the summary, the window it is measured against
     and the figure on the page all belong to it, so a model chosen meanwhile cannot split them (it is the next turn's)."""
+    _proposed_plan: str = ""
+    """A plan submitted in the current turn; durable only after its call is paired and the turn ends."""
     _measure: tuple[str, tuple[Any, ...], int, int] | None = None
     """``(model, record, length, tokens)`` of the last response of the last turn: the size of the first ``length`` items of the
     conversation's view as the model counted it, valid while the model and the compaction record are the same."""
@@ -181,6 +184,8 @@ class ChatGPTController:
     last_turn_end: TurnEnd | None = None
     _save_failed: bool = False
     _checkpoint_written: bool = False
+    _fusion: Any = None
+    _fusion_parent: Any = None
 
     def __post_init__(self) -> None:
         self.saved = SavedSession(id=self.session_id, project=str(self.project))
@@ -201,7 +206,10 @@ class ChatGPTController:
                 callback(self, kind)
             except Exception:
                 log.exception("session listener failed")
-        self.manager._notify(self, kind)
+        if self._fusion_parent is not None:
+            self._fusion_parent._notify("changed")
+        else:
+            self.manager._notify(self, kind)
 
     def _changed(self) -> None:
         self._notify("changed")
@@ -211,6 +219,40 @@ class ChatGPTController:
         self._background.add(task)
         task.add_done_callback(self._background.discard)
         return task
+
+    def enable_fusion(self, policy: Any) -> None:
+        from desktop.core.fusion.registry import FusionError, FusionRegistry, Policy
+        from desktop.core.fusion.runtime import FusionRuntime, native_model
+        if (not isinstance(policy, Policy) or self._fusion_parent is not None or self._fusion is not None
+                or self.state is not SessionState.READY or self.saved.turns or native_model(policy.main) != self.model):
+            raise FusionError("Fusion must start in a new own-harness conversation with its configured main model.")
+        self._fusion = FusionRuntime(self, FusionRegistry(self.project, policy))
+        self.saved.fusion = self._fusion.registry.to_json()
+        try:
+            self._save_now(required=True)
+        except BaseException:
+            self._fusion = None
+            self.saved.fusion = {}
+            raise
+        if self._tools is not None:
+            self._tools.fusion_runner = self._fusion.delegate
+        self._changed()
+
+    @property
+    def agents(self) -> dict[str, Any]:
+        return self._fusion.agents if self._fusion is not None else {}
+
+    def agent_prompts(self) -> list[Any]:
+        return [prompt for view in self.agents.values() if view.controller is not None
+                for prompt in view.controller.transcript.pending_prompts()]
+
+    def answer_agent_permission(self, agent_id: str, prompt_id: str, value: str) -> bool:
+        view = self.agents.get(agent_id)
+        return bool(view and view.controller and view.controller.answer_permission(prompt_id, value))
+
+    def answer_agent_question(self, agent_id: str, prompt_id: str, answers: Any) -> bool:
+        view = self.agents.get(agent_id)
+        return bool(view and view.controller and view.controller.answer_question(prompt_id, answers))
 
     @property
     def busy(self) -> bool:
@@ -251,10 +293,16 @@ class ChatGPTController:
     def usage_series(self) -> dict[str, Tokens]:
         """One cumulative series for the whole conversation: a figure never goes down, and the file keeps it, so a reopened
         conversation reports where it was and adds nothing twice."""
-        return {"self": self._usage_total} if self._usage_total is not None else {}
+        series = {"self": self._usage_total} if self._usage_total is not None else {}
+        if self._fusion is not None:
+            series.update(self._fusion.usage_series())
+        return series
 
     def usage_model_series(self) -> dict[str, tuple[str, Tokens]]:
-        return {f"model:{model}": (model, tokens) for model, tokens in self._usage_models.items()}
+        series = {f"model:{model}": (model, tokens) for model, tokens in self._usage_models.items()}
+        if self._fusion is not None:
+            series.update(self._fusion.usage_model_series())
+        return series
 
     def _output_so_far(self) -> int:
         return self._speed_output
@@ -290,6 +338,11 @@ class ChatGPTController:
         if saved is None:
             raise ChatGPTError("这个会话的存档找不到了。", code="missing_session")
         recovered = recover(saved)
+        recovered_plan = saved.plan.get("status") == "approved" and saved.plan.get("execution") == "starting"
+        if recovered_plan:
+            saved.plan = {"id": uuid.uuid4().hex, "text": saved.plan["text"], "status": "pending",
+                          "warning": "上次批准后会话在启动阶段中断，可能已有副作用；请先检查，再明确选择是否执行。"}
+            saved.mode = PLAN
         self.saved = saved
         self._checkpoint_written = True
         self.requested_model = saved.model
@@ -315,6 +368,21 @@ class ChatGPTController:
                 saved.usage = self._usage_total.to_json()
         self.context = ContextState(used=saved.context_used or None, window=self.manager.model_window(self.model), model=self.model)
         self.saved_settings = LiveSettings(model=self.model, reasoning=self.reasoning, autonomy=self.autonomy, mode=self.mode)
+        if saved.fusion:
+            from desktop.core.fusion.registry import FusionError, FusionRegistry
+            from desktop.core.fusion.runtime import FusionRuntime, native_model
+            try:
+                registry = FusionRegistry.from_json(self.project, saved.fusion)
+                if self._fusion_parent is not None or native_model(registry.policy.main) != self.model:
+                    raise FusionError("The fixed main model does not match the saved session.")
+                self._fusion = FusionRuntime(self, registry)
+                saved.fusion = registry.to_json()
+                self._save_now(required=True)
+            except FusionError as error:
+                raise ChatGPTError("Fusion 状态损坏或主模型不一致，已暂停恢复，原始存档未被覆盖。", code="fusion") from error
+        if recovered_plan:
+            self._save_now(required=True)
+            self.transcript.add_notice(saved.plan["warning"])
         if recovered:
             log.warning("the ChatGPT conversation %s was saved in the middle of a turn (the application closed or crashed); repaired", self.session_id)
             try:
@@ -423,9 +491,13 @@ class ChatGPTController:
             if self._mcp_task is not None and not self._mcp_task.done() and (not self._clients or any(not c.tools for c in self._clients)):
                 self.transcript.add_notice("部分 MCP 工具仍在启动；本次工具清单已固定。待服务器就绪后，重新打开会话可使用新工具。")
             self._tools = HarnessTools(self.manager.registry, self._context, self.autonomy, self._clients, asker=self._ask_questions)
+            self._tools.plan_submitter = self._submit_plan
+            if self._fusion is not None:
+                self._tools.fusion_runner = self._fusion.delegate
         # The offered manifest is fixed for this open session. A first-time server that misses startup can be used
         # after reopening (its contract is cached), rather than invalidating every previous request's cache prefix.
         self._tools.level = self.autonomy
+        self._tools.strict_context = self._fusion is not None or self._fusion_parent is not None
         return self._tools
 
     def _claim_session(self) -> None:
@@ -461,6 +533,8 @@ class ChatGPTController:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await asyncio.wait_for(asyncio.shield(task), INTERRUPT_GRACE_SECONDS)
+        if self._fusion is not None:
+            await self._fusion.close()
         if self._mcp_task is not None and not self._mcp_task.done():
             self._mcp_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -491,12 +565,27 @@ class ChatGPTController:
     async def update_settings(self, *, model: str | None = None, reasoning: Any = None, autonomy: Any = None, mode: Any = None) -> bool:
         if self.state not in (SessionState.READY, SessionState.RUNNING):
             return False
+        if self._fusion is not None and model and str(model) != self.model:
+            self.transcript.add_notice("Fusion 主模型只能通过「更换主模型」明确确认。")
+            self._changed()
+            return False
+        if self._fusion is not None and autonomy is not None and any(view.record.status == "running" for view in self.agents.values()):
+            self.transcript.add_notice("专家任务运行时不能改变权限；请先停止或等待它结束。")
+            self._changed()
+            return False
         if autonomy is not None:
             level = normalize_level(autonomy)
             if level is None:
                 self.transcript.add_notice(f"设置更新失败：没有「{getattr(autonomy, 'value', autonomy)}」这个权限档位。")
                 self._changed()
                 return False
+            if level != self.autonomy:
+                if self._fusion is not None:
+                    for view in self.agents.values():
+                        if view.controller is not None and view.controller._tools is not None:
+                            view.controller._tools.remembered.clear()
+                if self._fusion_parent is not None and self._tools is not None:
+                    self._tools.remembered.clear()
             self.autonomy = level
             if self._tools is not None:
                 self._tools.level = level
@@ -537,6 +626,52 @@ class ChatGPTController:
 
     # ------------------------------------------------------------------ turns
 
+    def _submit_plan(self, text: str) -> None:
+        if self._proposed_plan:
+            raise ValueError("This turn already submitted a plan.")
+        self._proposed_plan = text
+
+    def approve_plan(self, plan_id: str) -> bool:
+        plan = self.saved.plan
+        if (self.state is not SessionState.READY or self.mode != PLAN or plan.get("status") != "pending"
+                or plan.get("id") != plan_id or not isinstance(plan.get("text"), str)):
+            return False
+        previous = plan
+        self.saved.plan = {"id": plan["id"], "text": plan["text"], "status": "approved", "execution": "starting"}
+        self.mode = "auto"
+        try:
+            self._save_now(required=True)
+        except BaseException:
+            self.saved.plan = previous
+            self.mode = PLAN
+            raise
+        old_task = self._turn_task
+        try:
+            if self.send_prompt("请执行我刚批准的方案。", approved_plan=plan["text"]):
+                return True
+        except BaseException:
+            self._restore_unstarted_plan(previous, old_task)
+            raise
+        self._restore_unstarted_plan(previous, old_task)
+        return False
+
+    def _restore_unstarted_plan(self, plan: dict[str, str], old_task: asyncio.Task[Any] | None) -> None:
+        # A synchronous start failure must not leave a phantom running turn or consume the only approval button.
+        if self._turn_task is not old_task and self._turn_task is not None:
+            self._turn_task.cancel()
+        if self._turn is not None:
+            self.transcript.abort_turn("启动失败，计划仍等待确认。")
+        self._turn = None
+        if self._turn_done is not None:
+            self._turn_done.set()
+        self._turn_model = self._turn_reasoning = self._turn_mode = ""
+        self.state = SessionState.READY
+        self.mode = PLAN
+        self.saved.plan = plan
+        self._save_now(required=True)
+        self._notify("state")
+        self._changed()
+
     def attachment_problem(self, attachments: Sequence[Attachment]) -> str | None:
         if any(item.kind == IMAGE for item in attachments):
             info = self.manager.model_info(self.model)
@@ -547,13 +682,26 @@ class ChatGPTController:
                 return f"ChatGPT 只能读 PDF 里的文字，「{item.name}」里没有提取到文字：请换成图片或文本文件再发送。"
         return None
 
-    def send_prompt(self, text: str, attachments: Sequence[Attachment] = ()) -> bool:
+    def send_prompt(self, text: str, attachments: Sequence[Attachment] = (), *, approved_plan: str = "") -> bool:
         text = text.strip()
         attachments = tuple(attachments)
         if attachments and not text:
             text = DEFAULT_PROMPT
         if not text or self.state is not SessionState.READY:
             return False
+        if self.saved.plan.get("status") == "pending":
+            if self.mode != PLAN:
+                self.transcript.add_notice("计划仍待确认；请切回 Plan 并明确执行或修改，切换模式和普通回复不会批准计划。")
+                self._changed()
+                return False
+            previous = self.saved.plan
+            self.saved.plan = {}
+            try:
+                self._save_now(required=True)
+            except BaseException:
+                self.saved.plan = previous
+                raise
+        self._proposed_plan = ""
         self.used_at = self.active_at = time.time()
         self.state = SessionState.RUNNING
         self.stop_hook_blocked = False
@@ -567,7 +715,8 @@ class ChatGPTController:
             sent = handoff.prefix + text
             carried = (handoff.carried, handoff.truncated) if handoff.carried else None
             outgoing = tuple(handoff.attachments) + attachments
-        sent += wrap_context(self.preface, context.text)  # (after the message: see core/context_envelope)
+        approval = "The user explicitly approved this plan for execution:\n\n" + approved_plan if approved_plan else ""
+        sent += wrap_context(self.preface, context.text, approval)  # (after the message: see core/context_envelope)
         self.transcript.output_probe = self._output_so_far
         turn = self.transcript.start_turn(text, attachments, handoff=carried)
         if context.notice:
@@ -620,6 +769,10 @@ class ChatGPTController:
                 thinking_language=self.manager.settings.thinking_language,
                 sections=sections,
             )
+            if self._fusion is not None:
+                fusion_instructions = self._fusion.instructions()
+                sections["fusion"] = fusion_instructions
+                instructions += "\n\n" + fusion_instructions
             snapshot = self.saved.prompt
             if not snapshot.get("instructions"):
                 snapshot.update(instructions=instructions, current=instructions, sections=sections)
@@ -634,6 +787,8 @@ class ChatGPTController:
             self._turn_start = len(self.saved.items)
             self.saved.items.append(item)
             self.saved.turns.append(SavedTurn(self._turn_start, time.time(), None, "running", "", model))
+            if self.saved.plan.get("status") == "approved" and self.saved.plan.get("execution") == "starting":
+                self.saved.plan["execution"] = "started"
             self.saved.model, self.saved.reasoning, self.saved.autonomy = self.model, self.reasoning, self.autonomy
             self.saved.mode = PLAN if self.mode == PLAN else ""
             self._save_now(required=True)  # The first request must have a durable input/goal checkpoint.
@@ -683,6 +838,21 @@ class ChatGPTController:
             return
         assert end is not None
         self.last_turn_end = end
+        if end.reason == "plan":
+            previous = self.saved.plan
+            self.mode = PLAN  # A mode change made during planning cannot approve or hide the submitted plan.
+            self.saved.plan = {"id": uuid.uuid4().hex, "text": self._proposed_plan, "status": "pending"}
+            record = self.saved.turns[-1] if self.saved.turns else None
+            before = (record.finished, record.status, record.error, record.note) if record is not None else None
+            self._record_turn("done")
+            try:
+                self._save_now(required=True)
+            except ChatGPTError as error:
+                self.saved.plan = previous
+                if record is not None and before is not None:
+                    record.finished, record.status, record.error, record.note = before
+                self._turn_failed(turn, error)
+                return
         note = ""
         if end.reason == "incomplete":
             note = STOP_NOTES.get(end.detail, f"回答没有说完（{end.detail}）。")
@@ -745,6 +915,7 @@ class ChatGPTController:
             self._connection_context = ""
         self._turn = None
         self._turn_model = self._turn_reasoning = self._turn_mode = ""
+        self._proposed_plan = ""
         if self._turn_done is not None:
             self._turn_done.set()
         self.active_at = time.time()
@@ -986,16 +1157,32 @@ class ChatGPTController:
         def used(usage: Usage) -> None:
             if self._turn is owner:
                 self._add_usage(usage, measures_context=False)
+        fusion = self._fusion or getattr(self._fusion_parent, "_fusion", None)
+        continuity = fusion.context_snapshot(expert_id=self.session_id if self._fusion_parent is not None else "") if fusion is not None else ""
+        if not continuity and self.saved.plan.get("status") == "approved":
+            continuity = json.dumps({"approved_plan": self.saved.plan.get("text", "")}, ensure_ascii=False)
         def requested(request: dict[str, Any], response: Finished | None, seconds: float, failed: bool) -> None:
             if self._turn is owner:
+                if fusion is not None:
+                    fusion.record_request(response, failed)
                 entry = self._trace.record(request, response, seconds, failed)
                 entry["kind"] = "summary"
                 self.saved.requests.append(entry)
                 del self.saved.requests[:-MAX_RECORDS]
+        async def summary_stream(request: dict[str, Any]):
+            if fusion is not None:
+                estimate = compact.estimate_items(request.get("input") or ()) + compact.estimate_text(str(request.get("instructions") or ""))
+                try:
+                    fusion.check_budget(estimate)
+                except ValueError as error:
+                    raise ChatGPTError("Fusion 预算不足或用量未知，已暂停摘要请求。", code="fusion_budget") from error
+            async with contextlib.aclosing(self.manager.stream(request)) as events:
+                async for event in events:
+                    yield event
         try:
             result = await compact.compact(
                 history,
-                stream=self.manager.stream,
+                stream=summary_stream if fusion is not None else self.manager.stream,
                 model=model,
                 reasoning=self._summary_effort(),
                 window=target,
@@ -1007,6 +1194,7 @@ class ChatGPTController:
                 on_usage=used,
                 whole=manual,
                 fallback=False,
+                continuity=continuity,
                 rebase=True,
                 output_reader=lambda reference: asyncio.to_thread(self._outputs.read, reference),
                 prefix_request=prefix,
@@ -1027,6 +1215,8 @@ class ChatGPTController:
                 "upto": upto, "summary": result.summary, "kept": result.kept, "at": time.time(), "before": result.before,
                 "after": result.after, "model": model, "mechanical": result.mechanical,
             }
+            if continuity:
+                entry["continuity"] = continuity
             if not compact.boundary_ok(self.saved.items, upto) or compact.view_of(self.saved.items, entry) != result.view:
                 # (the view and the log disagree: kept, this summary would give the next turn a different conversation,
                 # or one with a tool result whose call is gone)
@@ -1117,7 +1307,7 @@ class ChatGPTController:
         if self._save_handle is not None:
             self._save_handle.cancel()
             self._save_handle = None
-        if not self.saved.turns and not self.saved.goal and not getattr(self, "_checkpoint_written", False):
+        if not self.saved.turns and not self.saved.goal and not self.saved.fusion and not getattr(self, "_checkpoint_written", False):
             return True
         try:
             self.manager.sessions.save(self._snapshot())
@@ -1343,6 +1533,9 @@ class _Watch(Observer):
 
     def request_done(self, request: dict[str, Any], finished: Finished | None, seconds: float, failed: bool) -> None:
         if self.current:
+            fusion = self.ctl._fusion or getattr(self.ctl._fusion_parent, "_fusion", None)
+            if fusion is not None:
+                fusion.record_request(finished, failed)
             self.ctl.saved.requests.append(self.ctl._trace.record(request, finished, seconds, failed))
             del self.ctl.saved.requests[:-MAX_RECORDS]
             self.ctl._save_soon()
@@ -1374,11 +1567,68 @@ class _Watch(Observer):
         # point is near or past, what a compaction keeps word for word, with the answer that asked for them)
         return max(0, self._compact_at(window) - 1 - estimate, compact.keep_tokens(self.ctl._economic_window(window) or window) - step)
 
+    def retry_allowed(self) -> bool:
+        fusion = self.ctl._fusion or getattr(self.ctl._fusion_parent, "_fusion", None)
+        return fusion is None or not fusion.registry.unmetered
+
+    async def _fusion_context(self) -> tuple[str, dict[str, str], list[str], Any]:
+        ctl = self.ctl
+        found = await asyncio.to_thread(skills.discover, ctl.project)
+        settings = ctl.manager.settings
+        sections: dict[str, str] = {}
+        notes: list[str] = []
+        current = await asyncio.to_thread(
+            build_instructions, ctl.project, model=ctl.running_model, level=ctl.autonomy, servers=self.tools.servers(),
+            notes=notes, plan=ctl._turn_mode == PLAN, skills=found, think_chinese=settings.think_chinese,
+            answer_language=settings.answer_language, thinking_language=settings.thinking_language, sections=sections,
+        )
+        if ctl._fusion is not None:
+            own = ctl._fusion.instructions()
+            sections["fusion"] = own
+            current += "\n\n" + own
+        return current, sections, notes, found
+
+    async def before_tools(self) -> bool:
+        fusion = self.ctl._fusion or getattr(self.ctl._fusion_parent, "_fusion", None)
+        if fusion is None:
+            return True
+        _, sections, _, _ = await self._fusion_context()
+        previous = self.ctl.saved.prompt.get("sections")
+        return self.current and isinstance(previous, dict) and changed_context(previous, sections) is None
+
+    async def _refresh_fusion_context(self, history: list[dict[str, Any]]) -> int:
+        ctl = self.ctl
+        current, sections, notes, found = await self._fusion_context()
+        snapshot = ctl.saved.prompt
+        previous = snapshot.get("sections")
+        update = changed_context(previous, sections) if isinstance(previous, dict) else None
+        if update is None or not self.current:
+            return 0
+        if ctl._context is not None:
+            ctl._context.readable = skills.read_roots(found)
+        snapshot.update(current=current, sections=sections)
+        history.append(update)
+        ctl.saved.items.append(update)
+        ctl._save_now(required=True)
+        if tuple(notes) != ctl._prompt_notes:
+            ctl._prompt_notes = tuple(notes)
+            for note in notes:
+                ctl.transcript.add_notice(note)
+        ctl._changed()
+        return compact.estimate_item(update)
+
     async def prepare(self, history: list[dict[str, Any]], estimate: int, overflow: bool) -> bool:
         if not self.current:
             return False
+        fusion = self.ctl._fusion or getattr(self.ctl._fusion_parent, "_fusion", None)
         if self.ctl._save_failed:
             self.ctl._save_now(required=True)
+        if fusion is not None:
+            estimate += await self._refresh_fusion_context(history)
+            try:
+                fusion.check_budget(estimate)
+            except ValueError as error:
+                raise ChatGPTError("Fusion 预算不足或用量未知，已暂停后续请求；请检查预算及模型用量。", code="fusion_budget") from error
         window = self.ctl.manager.model_window(self.ctl.running_model)
         over = False
         if not overflow:
@@ -1400,6 +1650,9 @@ class _Watch(Observer):
         # (after one that could not help too: it is not tried again before the conversation has grown)
         self._compacted_to = compact.estimate_items(history) + fixed if done else estimate
         return done
+
+    def finish_requested(self) -> bool:
+        return self.current and self.ctl._turn_mode == PLAN and bool(self.ctl._proposed_plan)
 
     def has_steer(self) -> bool:
         return self.current and bool(self.ctl._steers)

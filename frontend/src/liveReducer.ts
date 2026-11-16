@@ -58,6 +58,12 @@ export interface LiveData {
   /** ChatGPT Plan: summarise the early part of a long conversation at this percent of the model's window (off: only after the server refuses) */
   compactAuto: boolean;
   compactAt: number;
+  fusionMain: string;
+  fusionWorkers: string[];
+  fusionLight: string;
+  fusionMaxCalls: number;
+  fusionMaxTokens: number;
+  fusionMaxSeconds: number;
   /** every model is asked to write its thinking in Chinese */
   thinkChinese: boolean;
   answerLanguage: "auto" | "zh-CN" | "en";
@@ -136,6 +142,12 @@ export function emptyLiveData(theme: ThemeChoice = "system", fontScale: FontScal
     memoryEngines: [...ALL_ENGINES],
     compactAuto: true,
     compactAt: COMPACT_AT_DEFAULT,
+    fusionMain: "",
+    fusionWorkers: [],
+    fusionLight: "",
+    fusionMaxCalls: 8,
+    fusionMaxTokens: 500000,
+    fusionMaxSeconds: 900,
     thinkChinese: true,
     answerLanguage: "auto",
     thinkingLanguage: "zh-CN",
@@ -223,6 +235,12 @@ export function settingsFields(v: SettingsView): Partial<LiveData> {
     memoryEngines: v.memoryEngines ?? [...ALL_ENGINES],
     compactAuto: v.compactAuto ?? true,
     compactAt: v.compactAt ?? COMPACT_AT_DEFAULT,
+    fusionMain: v.fusionMain ?? "",
+    fusionWorkers: v.fusionWorkers ?? [],
+    fusionLight: v.fusionLight ?? "",
+    fusionMaxCalls: v.fusionMaxCalls ?? 8,
+    fusionMaxTokens: v.fusionMaxTokens ?? 500000,
+    fusionMaxSeconds: v.fusionMaxSeconds ?? 900,
     thinkChinese: v.thinkChinese ?? true,
     answerLanguage: v.answerLanguage ?? "auto",
     thinkingLanguage: v.thinkingLanguage ?? (v.thinkChinese === false ? "auto" : "zh-CN"),

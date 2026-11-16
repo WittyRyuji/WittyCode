@@ -383,6 +383,17 @@ class Room(Recorder):
         return self.room
 
 
+def test_line_rounding_does_not_give_later_long_reads_a_larger_share():
+    tools = FakeTools()
+    page = "\n".join(f"{number:6}\t" + CJK * 600 for number in range(1, 101))
+    tools.handlers["read_file"] = lambda call: Outcome(page)
+    script = Script(calls([("read_file", "{}", f"c{n}", f"i{n}") for n in range(6)]), say("done"))
+    history = [user_message("go")]
+    asyncio.run(AgentLoop(script, tools, Room(230_000), model="m", reasoning=None, instructions="x").run(history))
+    sizes = [compact.estimate_item(item) for item in history if item["type"] == "function_call_output"]
+    assert len(sizes) == 6 and max(sizes) - min(sizes) < 10
+
+
 def test_the_results_of_one_step_share_the_room_in_turn_and_a_short_one_is_left_whole():
     tools = FakeTools()
     tools.handlers["big"] = lambda call: Outcome("x" * 35_000)  # (about 10,000 tokens)

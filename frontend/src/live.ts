@@ -212,8 +212,8 @@ function liveActions(): Partial<Store> {
     },
     createSession: async (projectId) => {
       const movedBefore = moved;
-      const settings = get().landing.settings;
-      const r = await attempt(liveCall("session.new", settings ? { projectId, settings } : { projectId }));
+      const { settings, fusion } = get().landing;
+      const r = await attempt(liveCall("session.new", { projectId, ...(settings ? { settings } : {}), ...(fusion ? { fusion: true } : {}) }));
       if (r === FAILED || !r.id) return null;
       showOpened(r.id, movedBefore);
       set({ lastProject: projectId });
@@ -306,6 +306,26 @@ function liveActions(): Partial<Store> {
       const panel = get().agentPanel;
       set({ agentPanel: null, agentTurns: [] });
       if (panel) void attempt(liveCall("agents.unwatch", { id: panel.sessionId }));
+    },
+    transferFusionExpert: async (id, agentId, model, role) => {
+      const result = await attempt(liveCall("fusion.transferExpert", { id, agentId, model, role }));
+      if (result !== FAILED && result.ok) get().say("专家归属已转交；不会自动启动任务，请告诉主代理下一步要做什么。");
+    },
+    resumeFusionExpert: async (id, agentId) => {
+      const result = await attempt(liveCall("fusion.resumeExpert", { id, agentId }));
+      if (result !== FAILED) get().say(result.ok ? "已允许原专家继续；不会自动重做，请告诉主代理下一步。" : "现在不能继续，请检查专家和会话状态。");
+    },
+    updateFusionBudget: async (id, maxCalls, maxTokens, acceptUnknown) => {
+      const result = await attempt(liveCall("fusion.updateBudget", { id, maxCalls, maxTokens, acceptUnknown }));
+      if (result !== FAILED && result.ok) get().say("本会话的 Fusion 预算已更新；不会自动继续任务。");
+    },
+    authorizeFusionModel: async (id, model) => {
+      const result = await attempt(liveCall("fusion.authorizeModel", { id, model }));
+      if (result !== FAILED) get().say(result.ok ? "已授权本会话的工作模型；不会自动启动任务。" : "这个模型已经获得授权。");
+    },
+    changeFusionMain: async (id, model) => {
+      const result = await attempt(liveCall("fusion.changeMain", { id, model }));
+      if (result !== FAILED) get().say(result.ok ? "主模型已更换；同一会话继续，不会自动启动任务。" : "本会话已经使用这个主模型。");
     },
     addProject: () => void attempt(liveCall("project.add", {})),
     removeProject: (id) => confirmRemoveProject(id, () => void attempt(liveCall("project.remove", { id }))),
@@ -402,6 +422,10 @@ function liveActions(): Partial<Store> {
       const [cid, agentId] = id.split("::");
       void attempt(liveCall("session.answerPermission", agentId ? { id: cid!, agentId, promptId, value } : { id, promptId, value }));
     },
+    approvePlan: async (id, planId) => {
+      const result = await attempt(liveCall("session.approvePlan", { id, planId }));
+      if (result !== FAILED && !result.ok) say("计划已经变化或会话尚未就绪，请重新查看。");
+    },
     answerQuestion: (id, promptId, answers) => {
       const [cid, agentId] = id.split("::");
       void attempt(liveCall("session.answerQuestion", agentId ? { id: cid!, agentId, promptId, answers } : { id, promptId, answers }));
@@ -418,6 +442,7 @@ function liveActions(): Partial<Store> {
     setMemoryCurate: (on) => void setting("memoryCurate", on),
     setMemoryEngines: (engines) => void setting("memoryEngines", engines),
     setCompactAuto: (on) => void setting("compactAuto", on),
+    setFusionSetting: (key, value) => void setting(key, value),
     setThinkChinese: (on) => void setting("thinkChinese", on),
     setLanguage: (key, value) => void setting(key, value),
     setSoundEnabled: (on) => void setting("soundEnabled", on),

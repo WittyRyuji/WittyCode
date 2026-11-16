@@ -99,6 +99,12 @@ class AppSettings:
     """The percent of the window at which that happens (``COMPACT_AT_RANGE``)."""
     max_steps: int = DEFAULT_MAX_STEPS
     """Model decision steps allowed in one turn of the own loop; read again between steps."""
+    fusion_main: str = ""
+    fusion_workers: list[str] = field(default_factory=list)
+    fusion_light: str = ""
+    fusion_max_calls: int = 8
+    fusion_max_tokens: int = 500_000
+    fusion_max_seconds: int = 900
     think_chinese: bool = True
     """Legacy fallback for thinking_language when no explicit language has been saved."""
     answer_language: str = "auto"
@@ -357,6 +363,12 @@ def settings_from_dict(raw: object) -> AppSettings:
         chatgpt_compact=chatgpt_compact,
         chatgpt_compact_at=compact_at,
         max_steps=max_steps,
+        fusion_main=text("fusion_main"),
+        fusion_workers=list(dict.fromkeys(item for item in raw.get("fusion_workers", []) if isinstance(item, str) and item.strip()))[:32] if isinstance(raw.get("fusion_workers"), list) else [],
+        fusion_light=text("fusion_light"),
+        fusion_max_calls=raw.get("fusion_max_calls") if isinstance(raw.get("fusion_max_calls"), int) and not isinstance(raw.get("fusion_max_calls"), bool) and 1 <= raw["fusion_max_calls"] <= 1000 else defaults.fusion_max_calls,
+        fusion_max_tokens=raw.get("fusion_max_tokens") if isinstance(raw.get("fusion_max_tokens"), int) and not isinstance(raw.get("fusion_max_tokens"), bool) and 1 <= raw["fusion_max_tokens"] <= 2**53 - 1 else defaults.fusion_max_tokens,
+        fusion_max_seconds=raw.get("fusion_max_seconds") if isinstance(raw.get("fusion_max_seconds"), int) and not isinstance(raw.get("fusion_max_seconds"), bool) and 1 <= raw["fusion_max_seconds"] <= 86_400 else defaults.fusion_max_seconds,
         think_chinese=think_chinese,
         answer_language=text("answer_language", LANGUAGES),
         thinking_language=text("thinking_language", ("", *LANGUAGES)),

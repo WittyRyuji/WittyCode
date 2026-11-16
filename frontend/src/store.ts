@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import type { ApiProvider, AttachmentView, Engine, FileView, MemoryState, ModelChoice, ProviderDraft, Session, SessionSettings, SkillItem, SwitchBlock, Turn } from "./types";
-import type { FollowUp, HandoffChoice, QuestionAnswer, SavedRow, SoundKey, SoundKind } from "./protocol";
+import type { FollowUp, FusionSettingKey, HandoffChoice, QuestionAnswer, SavedRow, SettingValue, SoundKey, SoundKind } from "./protocol";
 import {
   API_PROVIDERS,
   CHATGPT_ACCOUNT,
@@ -83,6 +83,8 @@ export interface Landing {
   starting: boolean;
   /** This unsent conversation only; never written back to the saved defaults. */
   settings?: SessionSettings;
+  /** An explicit choice for this new conversation only. */
+  fusion?: boolean;
 }
 
 /** The data (owned by Python in the live app, mock data in the design review), what only the page knows, and the
@@ -124,6 +126,7 @@ export interface Store extends LiveData {
   newSession: (projectId?: string) => void;
   setLandingDraft: (draft: string) => void;
   setLandingProject: (projectId: string | null) => void;
+  setLandingFusion: (enabled: boolean) => void;
   /** open a conversation in `projectId`; its id, or null when it could not be opened (the user was told why) */
   createSession: (projectId: string) => Promise<string | null>;
   /** send the first message box: the conversation is opened for it, then the message goes */
@@ -147,6 +150,11 @@ export interface Store extends LiveData {
   /** open a sub-agent's run in the side panel / close the panel */
   openAgent: (sessionId: string, agentId: string) => void;
   closeAgent: () => void;
+  transferFusionExpert: (sessionId: string, agentId: string, model: string, role: "worker" | "light") => void;
+  resumeFusionExpert: (sessionId: string, agentId: string) => void;
+  updateFusionBudget: (sessionId: string, maxCalls: number, maxTokens: number, acceptUnknown: boolean) => void;
+  authorizeFusionModel: (sessionId: string, model: string) => void;
+  changeFusionMain: (sessionId: string, model: string) => void;
   /** open a file the conversation named (`ref` as the model wrote it): in the side panel, or outside the window with the
    *  default program / the system's "open with" / its folder */
   openFile: (ref: string, how?: "panel" | "default" | "choose" | "reveal") => void;
@@ -184,6 +192,7 @@ export interface Store extends LiveData {
   choose: (field: keyof SessionSettings, value: string) => void;
   chooseLanding: (field: keyof SessionSettings, value: string) => void;
   answerPermission: (sessionId: string, promptId: string, value: string) => void;
+  approvePlan: (sessionId: string, planId: string) => Promise<void>;
   /** answers: one per question (the chosen options of a multi-select one), or null when the user skips the questions */
   answerQuestion: (sessionId: string, promptId: string, answers: QuestionAnswer[] | null) => void;
 
@@ -226,6 +235,7 @@ export interface Store extends LiveData {
   /** ChatGPT Plan: summarise a long conversation before it outgrows the model's window (switch), at this percent of it (50 to 95) */
   setCompactAuto: (on: boolean) => void;
   setCompactAt: (percent: number) => void;
+  setFusionSetting: (key: FusionSettingKey, value: SettingValue) => void;
   /** ask every model to write its thinking in Chinese */
   setThinkChinese: (on: boolean) => void;
   setLanguage: (key: "answerLanguage" | "thinkingLanguage", value: LiveData["answerLanguage"]) => void;
@@ -300,6 +310,12 @@ function mockData(): LiveData {
     memoryEngines: ["devin", "chatgpt", "factory"],
     compactAuto: true,
     compactAt: COMPACT_AT_DEFAULT,
+    fusionMain: "",
+    fusionWorkers: [],
+    fusionLight: "",
+    fusionMaxCalls: 8,
+    fusionMaxTokens: 500000,
+    fusionMaxSeconds: 900,
     thinkChinese: true,
     answerLanguage: "auto",
     thinkingLanguage: "zh-CN",
@@ -378,22 +394,25 @@ export const useStore = create<Store>((set, get) => ({
 
   newSession: (projectId) => {
     // (from a conversation: its project is where the next one starts, as it always was)
-    set((s) => ({ currentId: null, pendingSelect: null, landing: { ...s.landing, settings: undefined, projectId: projectId ?? s.sessions[s.currentId ?? ""]?.projectId ?? s.landing.projectId } }));
+    set((s) => ({ currentId: null, pendingSelect: null, landing: { ...s.landing, settings: undefined, fusion: false, projectId: projectId ?? s.sessions[s.currentId ?? ""]?.projectId ?? s.landing.projectId } }));
     window.dispatchEvent(new Event("wc:focus-composer"));
   },
 
   setLandingDraft: (draft) => set((s) => ({ landing: { ...s.landing, draft } })),
   setLandingProject: (projectId) => set((s) => ({ landing: { ...s.landing, projectId } })),
+  setLandingFusion: (fusion) => set((s) => ({ landing: { ...s.landing, fusion } })),
 
   createSession: async (pid) => {
     const st = get();
     const id = `s-new-${++sessionCounter}`;
-    const settings = { ...(st.landing.settings ?? st.defaults) };
+    const base = st.landing.settings ?? st.defaults;
+    const settings = st.landing.fusion ? settingsForModel(st.models, base, st.fusionMain).settings : { ...base };
     const m = findModel(st.models, settings.model);
     const session: Session = {
       id,
       projectId: pid,
       title: "新会话",
+      fusion: !!st.landing.fusion,
       mark: "opening",
       modified: "刚刚",
       turns: [],
@@ -541,6 +560,11 @@ export const useStore = create<Store>((set, get) => ({
   },
   openAgent: () => undefined, // ... and have no sub-agents
   closeAgent: () => set({ agentPanel: null, agentTurns: [] }),
+  transferFusionExpert: () => get().say("（演示）已确认转交。"),
+  resumeFusionExpert: () => get().say("（演示）已允许继续。"),
+  updateFusionBudget: () => get().say("（演示）已调整会话预算。"),
+  authorizeFusionModel: () => get().say("（演示）已授权工作模型。"),
+  changeFusionMain: () => get().say("（演示）已更换主模型。"),
   openFile: (ref, how = "panel") => {
     const sessionId = get().currentId;
     if (!sessionId) return;
@@ -647,6 +671,11 @@ export const useStore = create<Store>((set, get) => ({
   },
 
   answerPermission: (sessionId, promptId, value) => settlePrompt(sessionId, promptId, value),
+  approvePlan: async (id, planId) => {
+    if (get().sessions[id]?.pendingPlan?.id !== planId) return;
+    get().patchSession(id, (session) => ({ ...session, pendingPlan: null, settings: { ...session.settings, mode: "auto" } }));
+    get().say("（演示）已批准计划。");
+  },
   answerQuestion: (sessionId, promptId, answers) => {
     const joined = (a: QuestionAnswer | undefined) => (Array.isArray(a) ? a.join("、") : (a ?? ""));
     const turn = get().sessions[sessionId]?.turns.find((t) => t.prompts.some((p) => p.id === promptId));
@@ -759,6 +788,7 @@ export const useStore = create<Store>((set, get) => ({
   setMemoryCurate: (memoryCurate) => set({ memoryCurate }),
   setMemoryEngines: (memoryEngines) => set({ memoryEngines }),
   setCompactAuto: (compactAuto) => set({ compactAuto }),
+  setFusionSetting: (key, value) => set({ [key]: value } as Partial<LiveData>),
   setThinkChinese: (thinkChinese) => set({ thinkChinese, thinkingLanguage: thinkChinese ? "zh-CN" : "auto" }),
   setLanguage: (key, value) => set({ [key]: value, ...(key === "thinkingLanguage" ? { thinkChinese: value === "zh-CN" } : {}) }),
   setSoundEnabled: (soundEnabled) => set({ soundEnabled }),

@@ -683,7 +683,7 @@ await page.click(".stepper button", 3);
 await waitCalls("settings.set", 7);
 ok("the session limit too", isDeepStrictEqual(await lastCall("settings.set"), { key: "maxOpen", value: 5 }));
 await page.waitFor("document.querySelectorAll('.stepper span')[1].textContent === '5'", 2000);
-await page.click(".snav", 5);
+await clickText(".snav", "外部程序");
 ok("the 外部程序 page has only the Devin CLI, and no 浏览… (there is no such call)", await js("[...document.querySelectorAll('.settings-body .field-label')].map(e => e.textContent).join() === 'Devin 命令行' && ![...document.querySelectorAll('.settings-body .btn')].some(b => b.textContent.includes('浏览'))"));
 await page.click(".settings-body .segc button", 1); // Devin 命令行: 指定路径 starts from the one that was found
 await waitCalls("settings.set", 8);

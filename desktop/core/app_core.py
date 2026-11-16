@@ -560,6 +560,12 @@ class AppCore:
             "compactAuto": self.settings.chatgpt_compact,
             "compactAt": self.settings.chatgpt_compact_at,
             "maxSteps": self.settings.max_steps,
+            "fusionMain": self.settings.fusion_main,
+            "fusionWorkers": list(self.settings.fusion_workers),
+            "fusionLight": self.settings.fusion_light,
+            "fusionMaxCalls": self.settings.fusion_max_calls,
+            "fusionMaxTokens": self.settings.fusion_max_tokens,
+            "fusionMaxSeconds": self.settings.fusion_max_seconds,
             "thinkChinese": self.settings.think_chinese,
             "answerLanguage": self.settings.answer_language,
             "thinkingLanguage": self.settings.thinking_language or ("zh-CN" if self.settings.think_chinese else "auto"),
@@ -1185,7 +1191,11 @@ class AppCore:
             if status in (TurnStatus.DONE, TurnStatus.FAILED):
                 self._promote_session(conv)
                 if status is TurnStatus.DONE and state is SessionState.READY:
-                    conv.sound_complete_pending = True
+                    plan = getattr(getattr(controller, "saved", None), "plan", {})
+                    if isinstance(plan, dict) and plan.get("status") == "pending":
+                        self._play_notification("question")
+                    else:
+                        conv.sound_complete_pending = True
                 else:
                     conv.sound_result = "error"
             elif state is SessionState.DEAD:
@@ -1426,6 +1436,12 @@ class AppCore:
         model_id = settings.get("model", "")
         model = self.catalog.find(model_id)
         handoff = getattr(controller, "handoff", None)
+        plan = getattr(getattr(controller, "saved", None), "plan", {})
+        pending_plan = ({"id": plan["id"], "text": plan["text"]}
+                        if isinstance(plan, dict) and plan.get("status") == "pending" and settings.get("mode") == "spec"
+                        and isinstance(plan.get("id"), str) and isinstance(plan.get("text"), str) else None)
+        if pending_plan is not None and isinstance(plan.get("warning"), str) and plan["warning"]:
+            pending_plan["warning"] = plan["warning"]
         active = datetime.fromtimestamp(controller.active_at, timezone.utc)
         self._feed_usage(conv)
         # What the running turn has cost so far but the engine has not booked yet (Devin gives a prompt's figure only when
@@ -1468,6 +1484,13 @@ class AppCore:
             "context": context,
             "queued": self._queued_json(conv),
             "agents": self._agents_json(conv),
+            "fusion": getattr(controller, "_fusion", None) is not None,
+            "fusionPolicy": ({"workers": list(controller._fusion.registry.policy.workers), "light": controller._fusion.registry.policy.light,
+                              "maxCalls": controller._fusion.registry.policy.max_calls, "calls": controller._fusion.registry.calls,
+                              "maxTokens": controller._fusion.registry.policy.max_tokens, "knownTokens": controller._fusion.known_tokens(),
+                              "unknown": controller._fusion.registry.unmetered, "hadUnknown": controller._fusion.registry.had_unknown}
+                             if getattr(controller, "_fusion", None) is not None else None),
+            "pendingPlan": pending_plan,
             "goal": conv.goal.text if conv.goal is not None else "",
             "handoff": (
                 {
@@ -1692,7 +1715,22 @@ class AppCore:
         if overrides is not None and (not isinstance(overrides, dict) or set(overrides) - {"model", "reasoning", "autonomy", "mode"} or any(not isinstance(v, str) for v in overrides.values())):
             raise AppError("新会话的临时设置不合法。")
         base = {**self.defaults(), **overrides} if overrides is not None else None
+        fusion = params.get("fusion", False)
+        if not isinstance(fusion, bool):
+            raise AppError("Fusion 模式设置不合法。")
+        policy = None
         page_model = params.get("modelId") or (base or self.defaults())["model"]
+        if fusion:
+            from desktop.core.fusion.registry import FusionError, Policy
+            try:
+                policy = Policy(self.settings.fusion_main, tuple(self.settings.fusion_workers), self.settings.fusion_light,
+                                self.settings.fusion_max_calls, self.settings.fusion_max_tokens, self.settings.fusion_max_seconds)
+            except FusionError as error:
+                raise AppError("请先在设置中配置 Fusion 的主模型、工作模型和轻量模型。") from error
+            page_model = policy.main
+            target = self.catalog.target(page_model)
+            if target.engine != "chatgpt" or self.chatgpt is None or self.chatgpt.model_info(target.model) is None:
+                raise AppError("Fusion 主模型当前不可用；不会自动替换成其他模型。")
         settings = self._open_settings(page_model, base)
         if settings.get("mode") not in ("auto", "spec"):
             raise AppError("新会话的模式不合法。")
@@ -1701,6 +1739,12 @@ class AppCore:
         self._opening_meta = settings
         try:
             controller = await self._open_controller(folder, page_model, settings)
+            if policy is not None:
+                try:
+                    controller.enable_fusion(policy)
+                except Exception:
+                    await controller.close()
+                    raise
         finally:
             self._opening_meta = None
             self._select_next = False
@@ -2011,6 +2055,9 @@ class AppCore:
     # ------------------------------------------------------------------ messages
 
     def _start_title(self, conv: Conversation, question: str) -> None:
+        # A side request cannot reserve the shared Fusion budget while the main request is running.
+        if getattr(conv.controller, "_fusion", None) is not None:
+            return
         if conv.title_started or sum(t.user_block is not None for t in conv.controller.transcript.turns) != 1:
             return
         conv.title_started = True
@@ -2084,6 +2131,9 @@ class AppCore:
         if how is not None and how not in FOLLOW_UPS:
             raise AppError("发送方式不合法。")
         state = controller.state
+        plan = getattr(getattr(controller, "saved", None), "plan", {})
+        if isinstance(plan, dict) and plan.get("status") == "pending" and getattr(controller, "mode", "") != "spec":
+            raise AppError("计划仍待确认；请切回 Plan 并明确执行或修改，切换模式和普通回复不会批准计划。")
 
         def taken() -> None:
             conv.drafts = [a for a in conv.drafts if a.id not in wanted]
@@ -2124,6 +2174,85 @@ class AppCore:
             conv.inflight = (controller.transcript.turns[-1], text, tuple(attachments))
         return {"ok": True}
 
+    async def _m_session_approvePlan(self, params: dict[str, Any]) -> dict[str, Any]:
+        conv = self._conversation(params["id"])
+        plan_id = params.get("planId")
+        approve = getattr(conv.controller, "approve_plan", None)
+        if conv.switching or conv.queue or conv.drafts or not isinstance(plan_id, str) or approve is None:
+            return {"ok": False}
+        return {"ok": bool(approve(plan_id))}
+
+    async def _m_fusion_transferExpert(self, params: dict[str, Any]) -> dict[str, Any]:
+        from desktop.core.fusion.registry import FusionError
+        conv = self._conversation(params["id"])
+        fusion = getattr(conv.controller, "_fusion", None)
+        agent_id, model, role = params.get("agentId"), params.get("model"), params.get("role")
+        if (fusion is None or conv.switching or conv.queue or conv.controller.state is not SessionState.READY
+                or not all(isinstance(item, str) for item in (agent_id, model, role))):
+            raise AppError("会话未就绪，暂时不能转交专家。")
+        try:
+            replacement = await fusion.transfer(agent_id, model, role)
+        except FusionError as error:
+            raise AppError("无法转交：请确认原专家存档完整、新模型可用且已在本会话的授权池中。") from error
+        return {"ok": True, "agentId": replacement}
+
+    async def _m_fusion_changeMain(self, params: dict[str, Any]) -> dict[str, Any]:
+        from desktop.core.fusion.registry import FusionError
+        conv = self._conversation(params["id"])
+        fusion, model = getattr(conv.controller, "_fusion", None), params.get("model")
+        if (fusion is None or conv.switching or conv.queue or conv.controller.state is not SessionState.READY
+                or not isinstance(model, str)):
+            raise AppError("会话未就绪，暂时不能更换 Fusion 主模型。")
+        chosen = self.catalog.find(model)
+        if not chosen or chosen.get("disabled") or self.catalog.target(model).engine != "chatgpt":
+            raise AppError("主模型当前不可用；未自动更换其他模型。")
+        settings, changed = settings_for_model(self.catalog, self._page_settings(conv), model)
+        reasoning = settings.get("reasoning", "") if "reasoning" in changed else None
+        try:
+            return {"ok": fusion.change_main(model, reasoning)}
+        except FusionError as error:
+            raise AppError("无法更换主模型：请先处理待审批计划，并确认所选模型可用。") from error
+
+    async def _m_fusion_authorizeModel(self, params: dict[str, Any]) -> dict[str, Any]:
+        from desktop.core.fusion.registry import FusionError
+        conv = self._conversation(params["id"])
+        fusion, model = getattr(conv.controller, "_fusion", None), params.get("model")
+        if fusion is None or conv.switching or conv.queue or conv.controller.state is not SessionState.READY or not isinstance(model, str):
+            raise AppError("会话未就绪，暂时不能授权模型。")
+        try:
+            return {"ok": fusion.authorize_worker(model)}
+        except FusionError as error:
+            raise AppError("模型当前不可用，或本会话的工作模型池已满。") from error
+
+    async def _m_fusion_updateBudget(self, params: dict[str, Any]) -> dict[str, Any]:
+        from desktop.core.fusion.registry import FusionError
+        conv = self._conversation(params["id"])
+        fusion = getattr(conv.controller, "_fusion", None)
+        unknown = params.get("acceptUnknown", False)
+        if (fusion is None or conv.switching or conv.queue or conv.controller.state is not SessionState.READY
+                or not isinstance(unknown, bool)):
+            raise AppError("会话未就绪，暂时不能调整 Fusion 预算。")
+        try:
+            fusion.update_budget(params.get("maxCalls"), params.get("maxTokens"), accept_unknown=unknown)
+        except FusionError as error:
+            raise AppError("预算不能低于原上限或已知用量；存在未知用量时须明确确认。") from error
+        return {"ok": True}
+
+    async def _m_fusion_resumeExpert(self, params: dict[str, Any]) -> dict[str, Any]:
+        from desktop.core.fusion.registry import FusionError
+        conv = self._conversation(params["id"])
+        fusion, agent_id = getattr(conv.controller, "_fusion", None), params.get("agentId")
+        if (fusion is None or conv.switching or conv.queue or conv.controller.state is not SessionState.READY
+                or not isinstance(agent_id, str)):
+            return {"ok": False}
+        try:
+            await fusion._archive(agent_id)
+        except FusionError as error:
+            raise AppError("专家存档无法读取，未自动创建新专家。") from error
+        if conv.controller.state is not SessionState.READY or conv.switching or conv.queue:
+            return {"ok": False}
+        return {"ok": fusion.acknowledge(agent_id)}
+
     async def _until_ready(self, conv: Conversation, timeout: float) -> bool:
         """Wait for a connecting session; ``False`` when it did not get ready (it died, closed, or took too long)."""
         loop = asyncio.get_running_loop()
@@ -2151,6 +2280,9 @@ class AppCore:
                     "effort": agent.agent_effort,
                     "task": agent.task,
                     "status": agent.status,
+                    "fusionState": getattr(getattr(agent, "record", None), "status", None),
+                    "fusionModel": getattr(getattr(agent, "record", None), "model", None),
+                    "fusionRole": getattr(getattr(agent, "record", None), "role", None),
                     "startedAt": int(agent.started_at_s * 1000),
                     "finishedAt": int(agent.finished_at_s * 1000) if agent.finished_at_s else None,
                 }
@@ -2183,6 +2315,14 @@ class AppCore:
         agent_id = str(params.get("agentId") or "")
         if agent_id not in (getattr(conv.controller, "agents", None) or {}):
             raise AppError("这个子任务已经不在了。")
+        fusion = getattr(conv.controller, "_fusion", None)
+        if fusion is not None:
+            view = fusion.agents[agent_id]
+            if view.controller is None and not (view.record.status == "idle" and view.record.transferred_from and not view.record.started_at):
+                try:
+                    await fusion._open(view, created=False)
+                except Exception as error:
+                    raise AppError("专家上下文无法恢复，原记录仍保留；不会自动创建新的专家。") from error
         conv.watching = agent_id
         conv.agent_sent_ids, conv.agent_sent_versions = ["fresh"], {}  # the first push is the whole run, replacing the panel's
         self._flush_agent(conv)
@@ -2227,6 +2367,10 @@ class AppCore:
         """Send the next queued message, if the session can take one now."""
         controller = conv.controller
         if not conv.queue or controller.state is not SessionState.READY or conv.cid not in self._by_cid:
+            return
+        plan = getattr(getattr(controller, "saved", None), "plan", {})
+        if isinstance(plan, dict) and plan.get("status") == "pending":
+            self._unqueue_all(conv, "计划等待确认：排队的消息没有发出，已放回输入框；请明确执行或修改计划。")
             return
         head = conv.queue[0]
         if not controller.send_prompt(head.text, head.attachments):
@@ -2603,7 +2747,12 @@ class AppCore:
         self, conv: Conversation, page_model: str, carry_ids: Sequence[str] | None = None, over_ok: bool = False
     ) -> dict[str, Any]:
         target = self.catalog.target(page_model)
+        if getattr(conv.controller, "_fusion", None) is not None and (target.engine != conv.engine or target.model != conv.controller.model):
+            raise AppError("Fusion 主模型只能在会话中通过「更换主模型」明确确认。")
         if target.engine != conv.engine:
+            plan = getattr(getattr(conv.controller, "saved", None), "plan", {})
+            if isinstance(plan, dict) and plan.get("status") == "pending":
+                raise AppError("计划仍待确认；请先执行或修改计划，再切换引擎。")
             return await self._switch_engine(conv, page_model, carry_ids, over_ok)
         current = self._page_settings(conv)
         settings, changed = settings_for_model(self.catalog, current, page_model)
@@ -2940,6 +3089,8 @@ class AppCore:
 
     def _curate(self, conv: Conversation) -> None:
         """A turn has just ended: show the curator what was said (once per turn, and only a turn that went well)."""
+        if getattr(conv.controller, "_fusion", None) is not None:
+            return  # Do not make an unbudgeted side-model call from a Fusion session.
         curator = self.curator
         turns = conv.controller.transcript.turns
         if curator is None or not turns or self._shutting_down:
@@ -3051,6 +3202,16 @@ class AppCore:
             s.chatgpt_compact_at = value
         elif key == "maxSteps" and _is_int(value) and MAX_STEPS_RANGE[0] <= value <= MAX_STEPS_RANGE[1]:
             s.max_steps = value
+        elif key in ("fusionMain", "fusionLight") and isinstance(value, str) and len(value) <= 512 and (not value or value.startswith(("chatgpt:", "api:"))):
+            setattr(s, "fusion_main" if key == "fusionMain" else "fusion_light", value)
+        elif key == "fusionWorkers" and isinstance(value, list) and len(value) <= 32 and all(isinstance(item, str) and len(item) <= 512 and item.startswith(("chatgpt:", "api:", "devin:")) for item in value):
+            s.fusion_workers = list(dict.fromkeys(value))
+        elif key == "fusionMaxCalls" and _is_int(value) and 1 <= value <= 1000:
+            s.fusion_max_calls = value
+        elif key == "fusionMaxTokens" and _is_int(value) and 1 <= value <= 2**53 - 1:
+            s.fusion_max_tokens = value
+        elif key == "fusionMaxSeconds" and _is_int(value) and 1 <= value <= 86_400:
+            s.fusion_max_seconds = value
         elif key == "thinkChinese" and isinstance(value, bool):
             s.think_chinese = value
             s.thinking_language = "zh-CN" if value else "auto"

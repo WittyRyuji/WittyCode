@@ -89,6 +89,10 @@ class SavedSession:
     """The original instructions and their latest rendered state; updates are appended to ``items``."""
     goal: dict[str, Any] = field(default_factory=dict)
     """An unfinished goal checkpoint; reopening never auto-executes it (explicit /goal resume)."""
+    plan: dict[str, Any] = field(default_factory=dict)
+    """A submitted plan and its approval state; reopening never executes it automatically."""
+    fusion: dict[str, Any] = field(default_factory=dict)
+    """The session's fixed Fusion policy, expert ownership, and execution checkpoints."""
     requests: list[dict[str, Any]] = field(default_factory=list)
     """The most recent content-free request diagnostics (``harness.diagnostics``)."""
     context_used: int = 0
@@ -179,6 +183,10 @@ def _session_json(session: SavedSession) -> dict[str, Any]:
     }
     if session.goal:
         data["goal"] = session.goal
+    if session.plan:
+        data["plan"] = session.plan
+    if session.fusion:
+        data["fusion"] = session.fusion
     if session.prompt:
         data["prompt"] = session.prompt
     if session.requests:
@@ -202,9 +210,28 @@ def _compaction_from(raw: Any, count: int) -> dict[str, Any]:
     return dict(raw)
 
 
+def _plan_from(raw: Any) -> dict[str, str]:
+    from desktop.core.harness.plan_approval import MAX_PLAN_CHARS
+    if not isinstance(raw, Mapping):
+        return {}
+    ident, text, status = raw.get("id"), raw.get("text"), raw.get("status")
+    if (not isinstance(ident, str) or not _ID.fullmatch(ident) or not isinstance(text, str) or not text.strip()
+            or len(text) > MAX_PLAN_CHARS or status not in ("pending", "approved")):
+        return {}
+    result = {"id": ident, "text": text, "status": status}
+    execution, warning = raw.get("execution"), raw.get("warning")
+    if status == "approved" and execution in ("starting", "started"):
+        result["execution"] = execution
+    if status == "pending" and isinstance(warning, str) and len(warning) <= 1000:
+        result["warning"] = warning
+    return result
+
+
 def _session_from(raw: Any) -> SavedSession | None:
     if not isinstance(raw, Mapping) or raw.get("version") != VERSION or not _ID.match(str(raw.get("id") or "")):
         return None
+    if "fusion" in raw and (not isinstance(raw["fusion"], Mapping) or not raw["fusion"]):
+        return None  # Never silently reopen a damaged Fusion session as an ordinary conversation.
     try:
         turns = [
             SavedTurn(int(t["start"]), float(t["at"]), t.get("finished"), str(t.get("status") or "done"), str(t.get("error") or ""), str(t.get("model") or ""), str(t.get("note") or ""))
@@ -234,6 +261,8 @@ def _session_from(raw: Any) -> SavedSession | None:
             requests=[dict(entry) for entry in raw.get("requests", [])[-128:] if isinstance(entry, Mapping)] if isinstance(raw.get("requests"), list) else [],
             usage_models={str(k): dict(v) for k, v in raw.get("usage_models", {}).items() if isinstance(v, Mapping)} if isinstance(raw.get("usage_models"), Mapping) else {},
             goal=dict(raw["goal"]) if isinstance(raw.get("goal"), Mapping) else {},
+            plan=_plan_from(raw.get("plan")),
+            fusion=dict(raw["fusion"]) if isinstance(raw.get("fusion"), Mapping) else {},
             context_used=int(raw.get("context_used") or 0),
             recalled=[str(x) for x in raw.get("recalled") or ()],
             origin=dict(raw["origin"]) if isinstance(raw.get("origin"), Mapping) else {},
@@ -489,6 +518,8 @@ class SessionStore:
     def rows(self, project: str | None = None, limit: int | None = None) -> list[SavedRow]:
         rows = []
         for session_id, raw in self._index().items():
+            if raw.get("fusion_expert") is True:
+                continue
             if project is not None and not same_folder(raw.get("project", ""), project):
                 continue
             rows.append(
@@ -504,7 +535,10 @@ class SessionStore:
 
     @staticmethod
     def _row_json(session: SavedSession) -> dict[str, Any]:
-        return {"project": session.project, "title": session.title, "created_at": session.created_at, "modified_at": session.modified_at, "messages": session.messages, "model": session.model}
+        row = {"project": session.project, "title": session.title, "created_at": session.created_at, "modified_at": session.modified_at, "messages": session.messages, "model": session.model}
+        if session.origin.get("app") == "fusion":
+            row["fusion_expert"] = True
+        return row
 
     def _index(self) -> dict[str, dict[str, Any]]:
         path = self.root / INDEX

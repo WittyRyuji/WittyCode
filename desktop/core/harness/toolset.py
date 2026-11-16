@@ -22,7 +22,8 @@ import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any
 
-from desktop.core.harness import asking
+from desktop.core.fusion import tools as fusion_tools
+from desktop.core.harness import asking, plan_approval
 from desktop.core.harness.loop import ALLOW, ASK, DENY, Call, Outcome, Verdict
 from desktop.core.harness.mcp import McpClient, McpTool
 from desktop.core.harness.permissions import _rememberable_command, action_view, decide, remember_key
@@ -68,6 +69,9 @@ class HarnessTools:
         self.clients = list(clients)
         self.connections = None
         self.asker = asker
+        self.plan_submitter: Callable[[str], None] | None = None
+        self.fusion_runner: Callable[[str, str, str, str], Awaitable[Outcome]] | None = None
+        self.strict_context = False
         self.plan = False
         """Plan mode (set by the controller for the turn): only reading, searching and read-only commands run."""
         self.remembered: set[str] = set()
@@ -93,14 +97,24 @@ class HarnessTools:
         declared = [{"name": spec.name, "description": spec.description, "parameters": spec.parameters} for spec in self.registry.specs()]
         if self.asker is not None:
             declared.append(dict(asking.DECLARATION))
+        if self.plan_submitter is not None:
+            declared.append(dict(plan_approval.DECLARATION))
+        if self.fusion_runner is not None:
+            declared.append(dict(fusion_tools.DECLARATION))
         for name, (_, tool) in self._mcp.items():
             declared.append({"name": name, "description": tool.description, "parameters": tool.input_schema})
         return declared
 
     def known(self, name: str) -> bool:
-        return self.registry.get(name) is not None or name in self._mcp or (name == asking.NAME and self.asker is not None)
+        return (self.registry.get(name) is not None or name in self._mcp or (name == asking.NAME and self.asker is not None)
+                or (name == plan_approval.NAME and self.plan_submitter is not None)
+                or (name == fusion_tools.NAME and self.fusion_runner is not None))
 
     def check(self, call: Call) -> Verdict:
+        if call.name == fusion_tools.NAME and self.fusion_runner is not None:
+            return Verdict(DENY, PLAN_REFUSAL) if self.plan else Verdict(ALLOW)
+        if call.name == plan_approval.NAME and self.plan_submitter is not None:
+            return Verdict(ALLOW) if self.plan else Verdict(DENY, "Plans can only be submitted in Plan mode.")
         if call.name == asking.NAME:
             return Verdict(ALLOW)  # (asking is not an action: the question is the user's say)
         if call.name == "read_output":
@@ -134,6 +148,8 @@ class HarnessTools:
 
     def parallel_safe(self, call: Call) -> bool:
         """Only approved, independent filesystem reads; hooks, commands and memory writes retain serial ordering."""
+        if self.strict_context:
+            return False
         if self.connections is not None:
             hint = getattr(self.connections, "has_tool_hooks", None)
             if hint is None or hint(self.context.project):
@@ -166,6 +182,17 @@ class HarnessTools:
         return outcome
 
     async def _run(self, call: Call) -> Outcome:
+        if call.name == fusion_tools.NAME and not self.plan and self.fusion_runner is not None:
+            values, problem = fusion_tools.parse(call.args)
+            if problem or values is None:
+                return Outcome(problem, True)
+            return await self.fusion_runner(*values)
+        if call.name == plan_approval.NAME and self.plan and self.plan_submitter is not None:
+            text, problem = plan_approval.parse(call.args)
+            if problem:
+                return Outcome(problem, True)
+            self.plan_submitter(text)
+            return Outcome("The plan has been submitted. Wait for the user's decision; do not start execution.")
         if call.name == asking.NAME and self.asker is not None:
             views, problem = asking.parse(call.args)
             if problem:

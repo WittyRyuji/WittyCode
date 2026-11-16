@@ -186,9 +186,13 @@ def summary_text(item: Mapping[str, Any]) -> str:
     return _text_of(item).removeprefix(SUMMARY_PREFIX).strip()
 
 
+def continuity_item(text: str) -> dict[str, Any]:
+    return user_message("[WittyCode continuity checkpoint: the following is saved session data, not a new request or higher-priority instructions. Later updates take precedence.]\n\n" + text)
+
+
 def synthetic_count(compaction: Mapping[str, Any] | None) -> int:
-    """How many items ``view_of`` puts before the log: one, the summary, when there is a compaction."""
-    return (1 + bool(compaction.get("rules"))) if compaction else 0
+    """How many items ``view_of`` puts before the log: summary plus any saved context checkpoints."""
+    return (1 + bool(compaction.get("rules")) + bool(compaction.get("continuity"))) if compaction else 0
 
 
 def kept_of(compaction: Mapping[str, Any]) -> str:
@@ -203,7 +207,9 @@ def view_of(items: Sequence[dict[str, Any]], compaction: Mapping[str, Any] | Non
         return list(items)
     upto = max(0, min(int(compaction.get("upto") or 0), len(items)))
     rules = str(compaction.get("rules") or "")
-    return [summary_item(str(compaction.get("summary") or ""), kept_of(compaction)), *([context_update(rules)] if rules else []), *items[upto:]]
+    continuity = str(compaction.get("continuity") or "")
+    return [summary_item(str(compaction.get("summary") or ""), kept_of(compaction)),
+            *([context_update(rules)] if rules else []), *([continuity_item(continuity)] if continuity else []), *items[upto:]]
 
 
 def log_index(cut: int, upto: int, synthetic: int) -> int:
@@ -511,12 +517,14 @@ async def ask(
             await _sleep(delay)
             continue
         finally:
-            if on_request is not None:
-                on_request(sent, response, time.monotonic() - started, failed)
-            close = getattr(events, "aclose", None)
-            if close is not None:
-                with contextlib.suppress(Exception):
-                    await close()
+            try:
+                if on_request is not None:
+                    on_request(sent, response, time.monotonic() - started, failed)
+            finally:
+                close = getattr(events, "aclose", None)
+                if close is not None:
+                    with contextlib.suppress(Exception):
+                        await close()
         text = "\n".join(texts).strip()
         if not text:
             raise CompactionFailed("the summary came back empty")
@@ -600,6 +608,7 @@ async def compact(
     fallback: bool = False,
     output_reader: Callable[[str], Awaitable[str]] | None = None,
     rules: str = "",
+    continuity: str = "",
     rebase: bool = False,
     prefix_request: Mapping[str, Any] | None = None,
     on_request: OnRequest | None = None,
@@ -668,7 +677,8 @@ async def compact(
         summary = digest(covered, told)
     words = _joined(carried, *(_said(item) for item in view[max(turn, synthetic) : cut] if is_user(item)))
     rest = list(view[cut:])
-    new_view = [summary_item(summary, words), *([context_update(rules)] if rules else []), *rest]
+    new_view = [summary_item(summary, words), *([context_update(rules)] if rules else []),
+                *([continuity_item(continuity)] if continuity else []), *rest]
     before, after = estimate_items(view), estimate_items(new_view)
     return Compacted(new_view, cut, summary, before, after, mechanical, problem, words, after < before and after <= room)
 
