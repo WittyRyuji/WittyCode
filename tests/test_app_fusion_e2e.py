@@ -12,12 +12,19 @@ from tests.ui_support import run
 pytestmark = pytest.mark.ui
 
 
+async def select_fusion(rig):
+    await rig.wait_for(".chip-model")
+    await rig.click(".chip-model")
+    await rig.wait_text(".menu-item .menu-label", "Fusion")
+    assert (await rig.texts(".menu-item .menu-label"))[0] == "Fusion"
+    await rig.click_text(".menu-item", "Fusion")
+
+
 def test_configure_and_start_fusion_with_a_local_fake(qapp, loop, tmp_path):
     async def scenario():
         rig = await open_rig(tmp_path)
         try:
-            await rig.wait_for(".fusion-choice")
-            await rig.click(".fusion-choice")  # The incomplete setup opens settings instead of silently enabling Fusion.
+            await select_fusion(rig)  # The incomplete setup opens settings instead of silently enabling Fusion.
             await rig.wait_text(".settings-body h2", "Fusion")
             for index, name in [(0, "GPT-6.1-Sol"), (1, "GPT-6-Luna"), (2, "GPT-6-Luna")]:
                 await rig.click(".settings-body .selectbox", index)
@@ -45,12 +52,15 @@ def test_configure_and_start_fusion_with_a_local_fake(qapp, loop, tmp_path):
             await rig.wait_text(".fusion-preference-weights", "效率 ×1.50")
             assert rig.window.grab().save(str(tmp_path / "fusion-settings.png"))
             await rig.click('.settings-body button[aria-label="关闭"]')
-            await rig.click(".fusion-choice")
-            assert await rig.js('document.querySelector(".fusion-choice").getAttribute("aria-pressed")') == "true"
+            await select_fusion(rig)
+            await rig.wait_text(".chip-model .chip-v", "Fusion")
+            await rig.wait_text(".chip-reasoning .chip-v", "High")
+            assert await rig.js('document.querySelector(".chip-reasoning").disabled')
+            assert not await rig.exists(".hint .fusion-choice, .fusion-badge")
             rig.plan.script(call("delegate_task", {"scope": "src", "model": "chatgpt:gpt-6-luna", "role": "worker", "task": "Inspect the module."}),
                             say("专家检查完成。"), say("主代理已检查报告。"))
             await rig.send("请检查模块")
-            await rig.wait_for(".fusion-badge")
+            await rig.wait_text(".chip-model .chip-v", "Fusion")
             await rig.wait_text(".agent-chip", "src")
             await rig.wait_text(".transcript", "主代理已检查报告")
             assert len(rig.core.order) == 1
@@ -104,9 +114,9 @@ def test_devin_fusion_main_and_plan_through_the_real_page(qapp, loop, tmp_path):
             await until(lambda: any(model["source"] == "devin" for model in rig.core.catalog.models), timeout=20)
             for key, value in {"fusionMain": "devin:swe-2-high", "fusionWorkers": ["chatgpt:gpt-6-luna"], "fusionLight": "chatgpt:gpt-6-luna"}.items():
                 await rig.core.call("settings.set", {"key": key, "value": value})
-            await rig.click(".fusion-choice")
+            await select_fusion(rig)
             await rig.send("Inspect this module")
-            await rig.wait_for(".fusion-badge")
+            await rig.wait_text(".chip-model .chip-v", "Fusion")
             await rig.wait_text(".transcript", "ACP report.", timeout=30)
             main = rig.core.order[0].controller
             await until(lambda: main.state.value == "ready")
@@ -141,7 +151,7 @@ def test_fusion_model_menus_respect_visibility_and_include_devin(qapp, loop, tmp
                         and any(model["label"] == "Hidden API Demo" for model in rig.core.catalog.models), timeout=20)
             api_id = next(model["id"] for model in rig.core.catalog.models if model["label"] == "Hidden API Demo")
             await rig.core.call("models.setVisible", {"ids": ["chatgpt:gpt-6-luna", api_id], "visible": False})
-            await rig.click(".fusion-choice")
+            await select_fusion(rig)
             await rig.wait_text(".settings-body h2", "Fusion")
             await rig.click(".settings-body .selectbox", 0)
             assert "GPT-6-Luna" not in await rig.text(".menu") and "Hidden API Demo" not in await rig.text(".menu")

@@ -9,7 +9,7 @@ import { LIVE } from "../mode";
 import { commandNamed, fromSkills, parseSlash, suggestions, unavailable, type Scene, type SlashCommand } from "../lib/commands";
 import type { Engine, Session, SessionSettings } from "../types";
 import { AttachmentCard } from "./Attachments";
-import { buildModelMenu } from "./modelMenu";
+import { buildModelMenu, type ModelMenuInput } from "./modelMenu";
 import { fusionChoices, fusionDisabledReason } from "./fusionModels";
 import { QueueStrip } from "./QueueStrip";
 import { PlanApproval } from "./PlanApproval";
@@ -38,13 +38,13 @@ function Chip({ label, value, items, disabled, tag, title, extra, bare }: { labe
 }
 
 /** `live`: the open session's state, or null when the controls edit the defaults for new sessions. */
-function Controls({ values, disabled, fixedModel, live, onChoose }: { values: SessionSettings; disabled: boolean; fixedModel: boolean; live: { running: boolean; fresh: boolean; engine?: Engine } | null; onChoose: (f: keyof SessionSettings, v: string) => void }) {
+function Controls({ values, disabled, fixedModel, fusion, live, onChoose }: { values: SessionSettings; disabled: boolean; fixedModel: boolean; fusion: ModelMenuInput["fusion"]; live: { running: boolean; fresh: boolean; engine?: Engine } | null; onChoose: (f: keyof SessionSettings, v: string) => void }) {
   const { models, providers, devin, chatgpt, hiddenModels } = useStore();
   const openSettings = useStore((s) => s.openSettings);
   const chatgptLogin = useStore((s) => s.chatgptLogin);
   const model = models.find((m) => m.id === values.model);
   // An open session knows its engine even before the model list has arrived.
-  const engine = fixedModel ? "chatgpt" : live?.engine ?? engineOfSource(model?.source ?? "chatgpt");
+  const engine = fusion?.selected ? "chatgpt" : live?.engine ?? engineOfSource(model?.source ?? "chatgpt");
   const levels = permissionsFor(engine);
   // No level chosen: the model's own default is what runs.
   const reasoning = values.reasoning || model?.defaultEffort || "";
@@ -58,9 +58,9 @@ function Controls({ values, disabled, fixedModel, live, onChoose }: { values: Se
         label="模型"
         bare
         extra="chip-model"
-        value={model?.label ?? shown(values.model)}
-        tag={model ? sourceTag(model.source) : undefined}
-        title={model ? `${model.label}${sourceLabel(model.source, providers) ? ` · ${sourceLabel(model.source, providers)}` : ""}` : undefined}
+        value={fusion?.selected ? "Fusion" : model?.label ?? shown(values.model)}
+        tag={!fusion?.selected && model ? sourceTag(model.source) : undefined}
+        title={fusion?.selected ? `Fusion · 主模型：${model?.label ?? shown(values.model)}` : model ? `${model.label}${sourceLabel(model.source, providers) ? ` · ${sourceLabel(model.source, providers)}` : ""}` : undefined}
         disabled={disabled || fixedModel}
         items={buildModelMenu({
           models,
@@ -72,6 +72,7 @@ function Controls({ values, disabled, fixedModel, live, onChoose }: { values: Se
           engine: live ? engine : undefined,
           running: live?.running,
           fresh: live?.fresh,
+          fusion,
           onPick: (id) => onChoose("model", id),
           onManage: (edit) => openSettings("providers", edit),
           onChatGPTLogin: (forceConsent) => void chatgptLogin({ forceConsent }),
@@ -82,8 +83,8 @@ function Controls({ values, disabled, fixedModel, live, onChoose }: { values: Se
         bare
         extra="chip-reasoning"
         value={noReasoning ? "—" : shown(effortLabel(reasoning))}
-        disabled={disabled || noReasoning}
-        title={noReasoning ? "这个模型没有推理档位" : "推理强度"}
+        disabled={disabled || noReasoning || (!!fusion?.selected && !live)}
+        title={fusion?.selected && !live ? "在 Fusion 设置中调整各模型的思考等级" : noReasoning ? "这个模型没有推理档位" : "推理强度"}
         items={pick("reasoning", reasoningChoices(model), reasoning)}
       />
       <Chip label="权限" bare extra="chip-permission" title="权限：不经询问能做多少事" value={shown(levels.find((r) => r.value === values.autonomy)?.label ?? values.autonomy)} disabled={disabled} items={pick("autonomy", levels)} />
@@ -225,6 +226,7 @@ export function Composer() {
   const defaults = useStore((s) => s.defaults);
   const landing = useStore((s) => s.landing);
   const fusionMain = useStore((s) => s.fusionMain);
+  const fusionReasoning = useStore((s) => s.fusionReasoning);
   const fusionReady = useStore((s) => !!s.fusionMain && !!s.fusionLight && s.fusionWorkers.length > 0);
   const models = useStore((s) => s.models);
   const { setDraft, setLandingDraft, setLandingFusion, openSettings, startSession, adoptLanding, send, stop, choose, attachFiles, pickAttachments, removeAttachment, say, reconnect, compact, startGoal } = useStore.getState();
@@ -338,7 +340,11 @@ export function Composer() {
   };
 
   const baseValues = session?.settings ?? landing.settings ?? defaults;
-  const values = !session && landing.fusion ? settingsForModel(models, baseValues, fusionMain).settings : baseValues;
+  const values = !session && landing.fusion ? {
+    ...settingsForModel(models, baseValues, fusionMain).settings,
+    ...(fusionReasoning[fusionMain] ? { reasoning: fusionReasoning[fusionMain] } : {}),
+  } : baseValues;
+  const fusionSelected = session ? !!session.fusion : !!landing.fusion;
   const chipsDisabled = !!session && dead;
   // An open session knows its engine even before the model list has arrived (the demo's sessions do not say: their model does).
   const modelSource = useStore((s) => s.models.find((m) => m.id === values.model)?.source);
@@ -448,9 +454,16 @@ export function Composer() {
           <Controls
             values={values}
             disabled={chipsDisabled || (!session && landing.starting)}
-            fixedModel={!!session?.fusion || (!session && !!landing.fusion)}
+            fixedModel={!!session?.fusion}
+            fusion={{ selected: fusionSelected, disabled: !!session,
+              description: session ? "仅新会话可选择 Fusion" : fusionReady ? `主模型：${models.find((m) => m.id === fusionMain)?.label ?? fusionMain}` : "先配置主模型、工作模型和轻量模型",
+              onSelect: () => fusionReady ? setLandingFusion(true) : openSettings("fusion"),
+            }}
             live={session ? { running, fresh: session.turns.length === 0, engine: session.engine } : null}
-            onChoose={choose}
+            onChoose={(field, value) => {
+              if (!session && field === "model") setLandingFusion(false);
+              choose(field, value);
+            }}
           />
           <span className="spacer" />
           <div className="bar-actions">
@@ -481,10 +494,7 @@ export function Composer() {
       {(!session || session.fusion || (dead && session) || (session?.handoff && !running) || onPlan) && (
         <div className={`hint${session?.handoff && !running ? " handoff" : ""}`}>
           {!session && <ProjectChip disabled={landing.starting} />}
-          {!session && <button type="button" className={`chip fusion-choice${landing.fusion ? " on" : ""}`} aria-pressed={!!landing.fusion}
-            disabled={landing.starting} title={fusionReady ? "为这次新会话启用或关闭 Fusion" : "先配置 Fusion 模型"}
-            onClick={() => fusionReady ? setLandingFusion(!landing.fusion) : openSettings("fusion")}>Fusion</button>}
-          {session?.fusion && <><span className="fusion-badge" title="自有 Fusion · 主模型只可明确更换">Fusion</span><FusionMain session={session} /><FusionBudget session={session} /><FusionAuthorize session={session} /></>}
+          {session?.fusion && <><FusionMain session={session} /><FusionBudget session={session} /><FusionAuthorize session={session} /></>}
           {session && dead ? (
             <span className="hint-text">
               连接已断开 ·{" "}

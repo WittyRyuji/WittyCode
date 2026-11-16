@@ -506,7 +506,7 @@ def test_a_saved_session_opens_with_its_history_and_is_resumed(qapp, loop, tmp_p
     run(loop, scenario())
 
 
-def test_the_sidebar_keeps_creation_order_while_clicks_and_messages_update_status(qapp, loop, tmp_path):
+def test_sidebar_clicks_keep_order_but_messages_and_answers_promote_the_session(qapp, loop, tmp_path):
     async def scenario():
         rig = await open_rig(tmp_path, saved=SAVED)
         model = Model(rig)
@@ -539,15 +539,19 @@ def test_the_sidebar_keeps_creation_order_while_clicks_and_messages_update_statu
             await rig.send("继续 go on")
             await model.asked()
 
-            async def older_row_has_new_activity() -> bool:
-                return "刚刚" in (await rig.texts(".srow .ssub"))[1]
+            active_order = list(reversed(order))
 
-            await wait_for(older_row_has_new_activity, 10, "the older row's activity time to update in place")
+            async def older_row_has_new_activity() -> bool:
+                titles, subs = await where()
+                return titles == active_order and "刚刚" in subs[0]
+
+            await wait_for(older_row_has_new_activity, 10, "the sent message to promote the older row and update its activity time")
             titles, subs = await where()
-            assert titles == order and "刚刚" not in subs[0], "the older session stays second while running"
+            assert titles == active_order and "刚刚" not in subs[1], "sending promotes only the active session"
             model.go()
             await rig.wait_text(".statusbar .st-left", "就绪")
-            assert await rig.texts(".srow .stitle") == order, "finishing the answer does not reorder the rows either"
+            await rig.wait_text(".srow:first-child .stitle", active_order[0])
+            assert await rig.texts(".srow .stitle") == active_order, "the final answer keeps the active session at the top"
         finally:
             await finish(rig, model)
 

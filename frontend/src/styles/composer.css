@@ -99,9 +99,6 @@
 .hint-text { flex: 1 1 auto; min-width: 0; }
 .hint .linkbtn { font-size: 11.5px; padding: 0; }
 .hint.handoff { color: var(--fg-2); font-weight: 600; }
-.fusion-choice { padding: 0 10px; color: var(--fg-2); }
-.fusion-choice.on, .fusion-badge { background: var(--ink); color: var(--paper); font-weight: 700; }
-.fusion-badge { padding: 4px 9px; font-size: 11px; }
 
 /* In a narrow window the chips drop their "Model / Reasoning / ..." labels, so the row and the send button stay on one line.
    With the labels the row needs about 660px (a long model name more): a composer between 600 and that used to wrap, and the

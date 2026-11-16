@@ -16,6 +16,8 @@ export interface ModelMenuInput {
   running?: boolean;
   /** the session has no messages yet: changing engine loses nothing */
   fresh?: boolean;
+  /** Composer-only choice for a new Fusion session; not a provider's model id. */
+  fusion?: { selected: boolean; disabled?: boolean; description?: string; onSelect: () => void };
   onPick: (id: string) => void;
   /** open the settings page where accounts and providers are managed */
   onManage: (providerEdit?: string | null) => void;
@@ -37,10 +39,14 @@ function byGroup(models: ModelChoice[]): [string | null, ModelChoice[]][] {
   return [...groups];
 }
 
-/** The model menu: ChatGPT Plan's models and Devin's (or the way to sign in), then each API provider's, then the way to add one.
+/** The model menu: the composer's optional Fusion choice first, then ChatGPT Plan, Devin and each API provider's models.
  *  Models an engine lists as disabled are left out, and so are the ones the user hid (unless one is the model in use). */
 export function buildModelMenu(i: ModelMenuInput): MenuItem[] {
   const items: MenuItem[] = [];
+  if (i.fusion) items.push(
+    { id: "fusion", label: "Fusion", checked: i.fusion.selected, disabled: i.fusion.disabled, description: i.fusion.description, onSelect: i.fusion.onSelect },
+    { id: "sep-fusion", separator: true },
+  );
   const hidden = new Set(i.hidden ?? []);
   const available = i.models.filter((m) => !m.disabled);
   const usable = available.filter((m) => !hidden.has(m.id) || m.id === i.current);
@@ -61,7 +67,7 @@ export function buildModelMenu(i: ModelMenuInput): MenuItem[] {
     id: m.id,
     label: m.label,
     description: foreign(m) && i.running ? crossing(m) : hidden.has(m.id) ? "已在设置里隐藏，正在使用所以还显示" : m.note,
-    checked: m.id === i.current,
+    checked: !i.fusion?.selected && m.id === i.current,
     disabled: foreign(m) && !!i.running,
     onSelect: () => i.onPick(m.id),
   });
