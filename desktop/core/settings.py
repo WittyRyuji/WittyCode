@@ -105,7 +105,7 @@ class AppSettings:
     fusion_workers: list[str] = field(default_factory=list)
     fusion_light: str = ""
     fusion_reasoning: dict[str, str] = field(default_factory=dict)
-    """Page model id -> explicit effort for new Fusion sessions; missing keeps the existing default."""
+    """Role:page-model-id -> effort for new Fusion sessions; legacy per-model keys remain readable."""
     fusion_preference: int = 50
     fusion_max_calls: int = 8  # Legacy defaults are kept for settings compatibility, not applied to new sessions.
     fusion_max_tokens: int = 500_000

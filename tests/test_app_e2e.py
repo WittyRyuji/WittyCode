@@ -1414,7 +1414,7 @@ def test_the_permission_of_a_devin_conversation_is_one_of_its_modes(qapp, loop, 
             await rig.click_text(".menu-item", "智能")
             await wait_for(lambda: rig.core._by_cid[cid].controller.autonomy == "smart", 10, "the mode to change")
             assert harness.state()["sessions"][rig.core._by_cid[cid].controller.session_id]["mode"] == "smart"
-            assert await rig.text(".controls .chip-v", 2) == "智能"
+            await rig.wait_text(".chip-permission .chip-v", "智能")
             await rig.click(".controls .chip", 1)
             assert await rig.texts(".menu-label") == ["Medium", "High", "Max"], "the model's own thought levels"
             await rig.press("Escape")
@@ -1490,7 +1490,7 @@ def test_a_devin_question_is_shown_once_and_names_devin_not_the_app(qapp, loop, 
                     "config": {"type": "string", "title": "配置文件", "description": question, "enum": ["保留", "移除"]},
                 }, "required": ["config"]},
             }
-            waiting = asyncio.ensure_future(harness.engine._route_request(harness.clients[0], "elicitation/create", request, "form1"))
+            waiting = asyncio.ensure_future(harness.engine._route_request(controller._client, "elicitation/create", request, "form1"))
             await rig.wait_for(".prompt.ask", 1)
             assert (await rig.text(".prompt.ask .phead")).strip() == "Devin 想先问你几个问题"
             assert (await rig.text(".prompt.ask .qtext")).strip() == question

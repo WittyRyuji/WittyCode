@@ -62,6 +62,8 @@ for (const [theme, width] of [["light", 1500], ["dark", 900]]) {
     await page.click('.tab', 1);
     await page.click('.tab', 0);
     await page.waitFor("document.querySelectorAll('.turn-marker').length === 6");
+    // Marker nodes can mount before the saved scroll position is applied on the layout/resize frame.
+    await page.waitFor(`Math.abs(document.querySelector('.scroller').scrollTop - ${historicalTop}) < 2`);
     assert(Math.abs(await page.eval("document.querySelector('.scroller').scrollTop") - historicalTop) < 2, "each session restores its historical reading position");
     assert.equal(await page.eval("document.querySelector('.turn-marker[aria-current=step]')?.dataset.turnId"), "turn-1");
     await fillDraft("继续输入多行，不抢历史位置。\n".repeat(10));

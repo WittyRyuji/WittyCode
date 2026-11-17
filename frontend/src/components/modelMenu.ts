@@ -16,7 +16,7 @@ export interface ModelMenuInput {
   running?: boolean;
   /** the session has no messages yet: changing engine loses nothing */
   fresh?: boolean;
-  /** Composer-only choice for a new Fusion session; not a provider's model id. */
+  /** Composer-only mode, selectable in an idle conversation; not a provider's model id. */
   fusion?: { selected: boolean; disabled?: boolean; description?: string; onSelect: () => void };
   onPick: (id: string) => void;
   /** open the settings page where accounts and providers are managed */
@@ -66,9 +66,9 @@ export function buildModelMenu(i: ModelMenuInput): MenuItem[] {
   const modelItem = (m: ModelChoice): MenuItem => ({
     id: m.id,
     label: m.label,
-    description: foreign(m) && i.running ? crossing(m) : hidden.has(m.id) ? "已在设置里隐藏，正在使用所以还显示" : m.note,
+    description: foreign(m) && i.running ? crossing(m) : i.fusion?.selected ? "退出 Fusion 并使用此普通模型" : hidden.has(m.id) ? "已在设置里隐藏，正在使用所以还显示" : m.note,
     checked: !i.fusion?.selected && m.id === i.current,
-    disabled: foreign(m) && !!i.running,
+    disabled: !!i.running && (foreign(m) || !!i.fusion?.selected),
     onSelect: () => i.onPick(m.id),
   });
 

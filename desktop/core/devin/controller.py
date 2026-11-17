@@ -486,6 +486,7 @@ class DevinController:
         self.state = SessionState.CLOSED
         self._notify("state")
         self.manager._forget(self)
+        await self.manager.release_idle()
 
     def _connection_lost(self, error: BaseException) -> None:
         """The ``devin acp`` process is gone: DEAD, with a way back (``reconnect``)."""

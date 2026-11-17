@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import re
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
@@ -72,15 +73,20 @@ class ExpertView:
 
 
 class FusionRuntime:
-    def __init__(self, parent: ChatGPTController, registry: FusionRegistry) -> None:
+    def __init__(self, parent: ChatGPTController, registry: FusionRegistry, *, owner: str | None = None, main_tokens: int | None = None) -> None:
         self.parent = parent
         self.registry = registry
+        self.owner = owner if owner is not None else parent.saved.origin.get("fusionOwner", parent.session_id)
+        self.main_tokens = main_tokens if main_tokens is not None else parent.saved.origin.get("fusionMainTokens", 0)
+        if (not isinstance(self.owner, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", self.owner)
+                or type(self.main_tokens) is not int or not 0 <= self.main_tokens <= 2**63 - 1):
+            raise FusionError("The retained Fusion owner or usage checkpoint is invalid.")
         self.agents = {key: ExpertView(expert) for key, expert in registry.agents.items()}
         self._active: ChatGPTController | None = None
         self._active_before: Tokens | None = None
 
     def known_tokens(self) -> int:
-        used = (self.parent.usage.total if self.parent.usage is not None else 0) + self.registry.tokens
+        used = self.main_tokens + (self.parent.usage.total if self.parent.usage is not None else 0) + self.registry.tokens
         if self._active is not None and self._active.usage is not None:
             delta = self._active.usage if self._active_before is None else self._active.usage.since(self._active_before)
             if delta is None:
@@ -140,6 +146,8 @@ class FusionRuntime:
 
     def _checkpoint(self) -> None:
         self.parent.saved.fusion = self.registry.to_json()
+        if self.parent._fusion is not self:
+            self.parent.saved.fusion["enabled"] = False
         self.parent._save_now(required=True)
 
     def usage_series(self) -> dict[str, Tokens]:
@@ -156,7 +164,7 @@ class FusionRuntime:
     async def _archive(self, agent_id: str) -> Any:
         from desktop.core.settings import same_folder
         saved = await asyncio.to_thread(self.parent.manager.sessions.load, agent_id)
-        if (saved is None or saved.origin.get("app") != "fusion" or saved.origin.get("parent") != self.parent.session_id
+        if (saved is None or saved.origin.get("app") != "fusion" or saved.origin.get("parent") != self.owner
                 or not same_folder(saved.project, self.parent.project)):
             raise FusionError("The expert's saved context is unavailable or does not belong to this conversation.")
         return saved
@@ -182,10 +190,10 @@ class FusionRuntime:
         self.parent._changed()
         return replacement.id
 
-    def reasoning_for(self, model: str) -> str | None:
+    def reasoning_for(self, model: str, role: str = "main") -> str | None:
         info = self.parent.manager.model_info(native_model(model))
         try:
-            return configured_effort(self.registry.policy.reasoning, model, info.efforts if info is not None else ())
+            return configured_effort(self.registry.policy.reasoning, model, info.efforts if info is not None else (), role=role)
         except ValueError as error:
             raise FusionError(str(error)) from error
 
@@ -272,13 +280,13 @@ class FusionRuntime:
         from desktop.core.chatgpt.controller import ChatGPTController
         from desktop.core.settings import same_folder
 
-        reasoning = self.reasoning_for(view.record.model)
+        reasoning = self.reasoning_for(view.record.model, view.record.role)
         if view.controller is not None and view.controller.is_open:
             return view.controller
         parent, expert = self.parent, view.record
         saved = await asyncio.to_thread(parent.manager.sessions.load, expert.id)
         if saved is not None:
-            if saved.origin.get("app") != "fusion" or saved.origin.get("parent") != parent.session_id or not same_folder(saved.project, parent.project):
+            if saved.origin.get("app") != "fusion" or saved.origin.get("parent") != self.owner or not same_folder(saved.project, parent.project):
                 raise FusionError("The expert archive does not belong to this conversation.")
         elif not created:
             raise FusionError("The expert's saved context is unavailable; it was not recreated or reassigned.")
@@ -287,7 +295,7 @@ class FusionRuntime:
         model = native_model(expert.model)
         child = ChatGPTController(manager=parent.manager, project=parent.project, session_id=expert.id,
                                   requested_model=model, reasoning=reasoning or "", autonomy=parent.autonomy, _fusion_parent=parent)
-        child.saved.origin = {"app": "fusion", "parent": parent.session_id}
+        child.saved.origin = {"app": "fusion", "parent": self.owner}
         parent.manager.controllers.append(child)
         view.controller = child
         try:

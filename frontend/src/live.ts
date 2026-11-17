@@ -121,7 +121,7 @@ async function setting(key: SettingKey, value: SettingValue): Promise<void> {
 /** Changing the engine of a conversation that has attachments: which of them go along is the user's call, one by one
  *  (Python changes nothing until it is told which). Cancel (or Esc) leaves the conversation where it is. */
 function askWhichAttachments(id: string, model: string, choice: HandoffChoice): void {
-  const label = get().models.find((m) => m.id === model)?.label ?? model;
+  const label = model === "fusion" ? "Fusion" : get().models.find((m) => m.id === model)?.label ?? model;
   const n = choice.attachments.length;
   get().openDialog({
     title: `带哪些附件去 ${label}？`,

@@ -37,9 +37,9 @@ def side_engine(tmp_path, **env):
 async def connected(tmp_path, *, models=True, **env):
     """An engine whose ``devin acp`` runs; ``models``: the model list has been read, as the application does at start."""
     harness = side_engine(tmp_path, **env)
-    await harness.engine.connection()
     if models:
         await harness.engine.list_models()
+    await harness.engine.connection()  # Metadata-only discovery no longer keeps an unused process alive.
     return harness
 
 
@@ -97,7 +97,7 @@ def test_the_answer_comes_back_from_a_free_model_in_ask_mode_and_the_session_is_
         assert str(project) not in json.dumps(harness.received())
         assert session not in sessions(harness) and session not in await listed(harness, engine._scratch())
         assert await engine.list_sessions(engine._scratch()) == []
-        assert engine._sessions == {} and engine.controllers == [] and engine.running
+        assert engine._sessions == {} and engine.controllers == [] and not engine.running
 
     run(scenario())
 
@@ -314,6 +314,7 @@ def test_a_hung_question_ends_after_its_timeout_and_its_session_is_stopped_and_d
 
     async def scenario(marker):
         harness = await connected(tmp_path / marker.strip("[]"), models=False)
+        await harness.engine.ensure_signed_in()  # Time the prompt, not a separate auth-status process under load.
         since = Since(harness)
         began = time.monotonic()
         assert await side.ask(harness.engine, str(tmp_path), f"{marker} {PROMPT}", timeout=0.6) is None
@@ -321,7 +322,8 @@ def test_a_hung_question_ends_after_its_timeout_and_its_session_is_stopped_and_d
         session = asked(since)
         assert since.requests("session/cancel") == [{"sessionId": session}]
         assert deleted(harness) == [session] and sessions(harness) == set() and harness.engine._sessions == {}
-        assert harness.engine._client._pending == {}, "a prompt that would not end is dropped, not left waiting"
+        assert harness.clients[-1]._pending == {}, "a prompt that would not end is dropped, not left waiting"
+        assert not harness.engine.running
 
     run(scenario("[slow]"))
     run(scenario("[stuck]"))
@@ -330,6 +332,7 @@ def test_a_hung_question_ends_after_its_timeout_and_its_session_is_stopped_and_d
 def test_a_timeout_while_the_session_is_being_made_still_deletes_it(tmp_path):
     async def scenario():
         harness = await connected(tmp_path, models=False, FAKE_SIDE_SLOW="session/new:1.0")
+        await harness.engine.ensure_signed_in()  # Ensure the timeout actually interrupts session/new.
         began = time.monotonic()
         assert await side.ask(harness.engine, str(tmp_path), PROMPT, timeout=0.3) is None
         assert time.monotonic() - began < 4.0
@@ -373,11 +376,28 @@ def test_two_questions_in_a_row_each_get_their_own_session_and_delete_it(tmp_pat
         harness = await connected(tmp_path)
         since = Since(harness)
         assert await side.ask(harness.engine, str(tmp_path), "one") == "echo: one"
+        assert not harness.engine.running
+        await harness.engine.connection()
         assert await side.ask(harness.engine, str(tmp_path), "two") == "echo: two"
         made = [params["sessionId"] for params in since.requests("session/prompt")]
         assert len(set(made)) == 2 and [p["sessionId"] for p in since.requests("session/delete")] == made
         assert sessions(harness) == set() and harness.engine._sessions == {}
 
+    run(scenario())
+
+
+def test_metadata_discovery_cannot_close_an_inflight_side_question(tmp_path):
+    async def scenario():
+        harness = await connected(tmp_path)
+        client = harness.engine._client
+        since = Since(harness)
+        asking = asyncio.create_task(side.ask(harness.engine, str(tmp_path), "[slow] inspect"))
+        await until(lambda: bool(since.requests("session/prompt")))
+        assert await harness.engine.list_models(refresh=True)
+        assert client.running and harness.engine._client is client
+        await client.notify("session/cancel", {"sessionId": asked(since)})
+        assert await asking is None
+        assert not client.running and not harness.engine.running
     run(scenario())
 
 

@@ -2232,10 +2232,16 @@ class AppCore:
             raise AppError("主模型当前不可用；未自动更换其他模型。")
         settings, changed = settings_for_model(self.catalog, self._page_settings(conv), model)
         reasoning = settings.get("reasoning", "") if "reasoning" in changed else None
+        conv.switching = True
         try:
-            return {"ok": fusion.change_main(model, reasoning)}
+            changed_main = fusion.change_main(model, reasoning)
+            if changed_main:
+                await conv.controller.release_inactive_acp()
+            return {"ok": changed_main}
         except FusionError as error:
             raise AppError("无法更换主模型：请先处理待审批计划，并确认所选模型可用。") from error
+        finally:
+            conv.switching = False
 
     async def _m_fusion_authorizeModel(self, params: dict[str, Any]) -> dict[str, Any]:
         from desktop.core.fusion.registry import FusionError
@@ -2339,7 +2345,7 @@ class AppCore:
         agent_id = str(params.get("agentId") or "")
         if agent_id not in (getattr(conv.controller, "agents", None) or {}):
             raise AppError("这个子任务已经不在了。")
-        fusion = getattr(conv.controller, "_fusion", None)
+        fusion = getattr(conv.controller, "_fusion", None) or getattr(conv.controller, "_paused_fusion", None)
         if fusion is not None:
             view = fusion.agents[agent_id]
             if view.controller is None and not (view.record.status == "idle" and view.record.transferred_from and not view.record.started_at):
@@ -2713,9 +2719,13 @@ class AppCore:
             raise AppError("没有这个设置。")
         cid = params.get("id")
         if not cid:
+            if field_name == "model" and value == "fusion":
+                raise AppError("Fusion 是会话模式，不能保存为默认模型。")
             self._set_default(field_name, value)
             return {"ok": True}
         conv = self._conversation(cid)
+        if field_name == "model" and value == "fusion" and conv.controller.state is SessionState.OPENING:
+            raise AppError("会话就绪后才能切换 Fusion。")
         if conv.controller.state is SessionState.OPENING:
             # Chosen while the session connects: shown at once, applied the moment it is ready.
             conv.requested[field_name] = value
@@ -2770,9 +2780,23 @@ class AppCore:
     async def _choose_model(
         self, conv: Conversation, page_model: str, carry_ids: Sequence[str] | None = None, over_ok: bool = False
     ) -> dict[str, Any]:
+        if page_model == "fusion":
+            return await self._enable_fusion(conv, carry_ids, over_ok)
         target = self.catalog.target(page_model)
-        if getattr(conv.controller, "_fusion", None) is not None and (target.engine != conv.engine or target.model != conv.controller.model):
-            raise AppError("Fusion 主模型只能在会话中通过「更换主模型」明确确认。")
+        if getattr(conv.controller, "_fusion", None) is not None:
+            self._check_fusion_switch(conv)
+            if target.engine == "chatgpt":
+                settings, _ = settings_for_model(self.catalog, self._page_settings(conv), page_model)
+                conv.switching = True
+                try:
+                    conv.controller.disable_fusion(target.model, settings.get("reasoning", ""))
+                    await conv.controller.release_inactive_acp()
+                except ValueError as error:
+                    raise AppError("无法退出 Fusion：所选模型不可用，原会话保持不变。") from error
+                finally:
+                    conv.switching = False
+                self.say("已退出 Fusion；历史和专家上下文保留，后续消息使用所选普通模型。")
+                return {"ok": True}
         if target.engine != conv.engine:
             plan = getattr(getattr(conv.controller, "saved", None), "plan", {})
             if isinstance(plan, dict) and plan.get("status") == "pending":
@@ -2793,6 +2817,81 @@ class AppCore:
                     else f"{model.get('label', page_model)} 不支持「{current.get('reasoning', '')}」推理，已改为「{settings['reasoning']}」。"
                 )
         return {"ok": ok}
+
+    def _check_fusion_switch(self, conv: Conversation) -> None:
+        controller = conv.controller
+        plan = getattr(getattr(controller, "saved", None), "plan", {})
+        if (conv.switching or conv.queue or conv.goal is not None or controller.state is not SessionState.READY
+                or getattr(controller, "_turn", None) is not None or self._attention_prompts(conv)):
+            raise AppError("请先结束本轮、排队消息或目标任务，再切换 Fusion。")
+        if isinstance(plan, dict) and plan.get("status") == "pending":
+            raise AppError("计划仍待确认；请先处理计划，再切换 Fusion。")
+
+    def _retained_fusion(self, conv: Conversation) -> dict[str, Any] | None:
+        controller = conv.controller
+        runtime = getattr(controller, "_fusion", None) or getattr(controller, "_paused_fusion", None)
+        if runtime is None:
+            return (conv.history or {}).get("fusion")
+        prefixes = tuple("agent:" + ident for ident in runtime.agents)
+        def expert_series(values):
+            return {key: tokens.to_json() for key, tokens in values.items()
+                    if any(key == prefix or key.startswith(prefix + ":") for prefix in prefixes)}
+        return {"owner": runtime.owner, "registry": runtime.registry.to_json(),
+                "mainTokens": runtime.main_tokens + (controller.usage.total if controller.usage is not None else 0),
+                "seen": expert_series(conv.ledger.seen), "modelSeen": expert_series(conv.ledger.model_seen)}
+
+    @staticmethod
+    def _fusion_series(retained: Any, agents: Any) -> tuple[dict[str, Tokens], dict[str, Tokens]]:
+        restored = ({}, {})
+        if retained is None:
+            return restored
+        prefixes = tuple("agent:" + ident for ident in agents)
+        for name, series in zip(("seen", "modelSeen"), restored):
+            values = retained.get(name, {})
+            if not isinstance(values, dict):
+                raise AppError("保留的专家用量记录损坏，原会话未改变。")
+            for key, raw in values.items():
+                tokens = Tokens.of(raw)
+                if (tokens is None or not isinstance(key, str)
+                        or not any(key == prefix or key.startswith(prefix + ":") for prefix in prefixes)):
+                    raise AppError("保留的专家用量记录损坏，原会话未改变。")
+                series[key] = tokens
+        return restored
+
+    async def _enable_fusion(self, conv: Conversation, carry_ids: Sequence[str] | None, over_ok: bool) -> dict[str, Any]:
+        from desktop.core.fusion.registry import FusionError, FusionRegistry, Policy
+        self._check_fusion_switch(conv)
+        if getattr(conv.controller, "_fusion", None) is not None:
+            return {"ok": True}
+        self._feed_usage(conv)
+        retained = self._retained_fusion(conv)
+        restored = ({}, {})
+        try:
+            if retained is not None:
+                if not isinstance(retained, dict):
+                    raise FusionError("Invalid retained Fusion state.")
+                registry = FusionRegistry.from_json(Path(conv.project), retained.get("registry"))
+                policy = registry.policy
+                restored = self._fusion_series(retained, registry.agents)
+            else:
+                policy = Policy(self.settings.fusion_main, tuple(self.settings.fusion_workers), self.settings.fusion_light,
+                                0, 0, self.settings.fusion_max_seconds, self.settings.fusion_preference, self.settings.fusion_reasoning)
+        except FusionError as error:
+            raise AppError("Fusion 配置不可用；请检查设置或保留的专家配置，原会话未改变。") from error
+        model = policy.main.removeprefix("chatgpt:")
+        if self.chatgpt is None or self.chatgpt.model_info(model) is None:
+            raise AppError("Fusion 主模型当前不可用；不会自动替换模型。")
+        settings = self._open_settings(policy.main, self._page_settings(conv))
+        if conv.engine != "chatgpt":
+            return await self._switch_engine(conv, policy.main, carry_ids, over_ok, fusion_policy=policy, fusion_retained=retained)
+        try:
+            conv.controller.enable_fusion(policy, reasoning=settings.get("reasoning", ""), retained=retained)
+        except FusionError as error:
+            raise AppError("无法启用 Fusion：模型档位或保留的专家配置不可用，原会话未改变。") from error
+        conv.ledger.seen.update(restored[0])
+        conv.ledger.model_seen.update(restored[1])
+        self.say("已在本会话启用 Fusion；历史和专家上下文保留，不会自动启动任务。")
+        return {"ok": True}
 
     async def _window_of(self, controller: Any, page_model: str) -> int:
         """The context window (tokens) of the model a session was just opened with: the model list's own figure, else what
@@ -2846,7 +2945,8 @@ class AppCore:
         return chosen
 
     async def _switch_engine(
-        self, conv: Conversation, page_model: str, carry_ids: Sequence[str] | None = None, over_ok: bool = False
+        self, conv: Conversation, page_model: str, carry_ids: Sequence[str] | None = None, over_ok: bool = False,
+        *, fusion_policy: Any = None, fusion_retained: Any = None,
     ) -> dict[str, Any]:
         """Continue this conversation with the other engine: a new native session, the earlier text handed over.
 
@@ -2903,13 +3003,18 @@ class AppCore:
             else None
         )
         settings = self._open_settings(page_model, {**self._page_settings(conv), "autonomy": ""})
-        target = self.catalog.target(page_model)
+        if fusion_policy is not None and settings.get("autonomy") in ("plan", "smart"):
+            if settings["autonomy"] == "plan":
+                settings["mode"], settings["autonomy"] = "spec", "ask"
+            else:
+                settings["autonomy"] = "code"
         previous_requested = conv.requested
         before = transcript.snapshot()
         # What the old session counted is final: the total keeps it, and the new session's figures (it counts from zero)
         # are new ones. A figure the shared transcript keeps goes too, or the new session would start from the one an
         # earlier session left there.
         self._feed_usage(conv)
+        retained = self._retained_fusion(conv)
         ledger_before = (conv.ledger.total, dict(conv.ledger.seen), dict(conv.ledger.model_seen))
         usage_before = transcript.usage
         conv.ledger.restart()
@@ -2919,9 +3024,18 @@ class AppCore:
         self._adopt = conv
         controller: Any = None
         try:
-            controller = await self._open_controller(
-                conv.project, page_model, settings, transcript=transcript, handoff=handoff, replacing=True
-            )
+            if fusion_policy is not None:
+                controller = await self.chatgpt.open_new(conv.project, model=page_model.removeprefix("chatgpt:"),
+                                                         reasoning=settings.get("reasoning", ""), autonomy=settings.get("autonomy", "code"),
+                                                         mode=settings.get("mode", "auto"), transcript=transcript, handoff=handoff)
+                controller.enable_fusion(fusion_policy, reasoning=settings.get("reasoning", ""), retained=fusion_retained)
+                restored = self._fusion_series(fusion_retained, controller.agents)
+                conv.ledger.seen.update(restored[0])
+                conv.ledger.model_seen.update(restored[1])
+            else:
+                controller = await self._open_controller(
+                    conv.project, page_model, settings, transcript=transcript, handoff=handoff, replacing=True
+                )
             if controller.state is not SessionState.READY:
                 raise AppError(controller.last_error or "没有切换成功：新的会话没有启动。")
             if handoff is not None and not window:
@@ -2930,15 +3044,17 @@ class AppCore:
                     handoff = controller.handoff = build_handoff(transcript.turns, window_tokens=window, carry=chosen)
             if handoff is not None and handoff.carried:
                 transcript.add_switch(
-                    from_model=was.get("label", ""), from_engine=engine_label(old.engine, was),
-                    to_model=model["label"], to_engine=engine_label(target.engine, model),
+                    from_model=was.get("label", ""), from_engine="Fusion" if getattr(old, "_fusion", None) is not None else engine_label(old.engine, was),
+                    to_model=model["label"], to_engine="Fusion" if fusion_policy is not None else engine_label(controller.engine, model),
                     carried=handoff.carried, total=handoff.total, size=handoff.size, truncated=handoff.truncated,
                 )
             new_row = self._row_of(conv)
             history = {"project": conv.project, "title": previous_title, "activeAt": old.active_at, "created": conv.created_at,
                        "turns": list(transcript.turns), "ledger": conv.ledger.to_json(), "handoff": handoff}
+            if retained is not None:
+                history["fusion"] = retained
             await asyncio.to_thread(self.history.save, new_row, history)
-            if target.engine == "chatgpt":
+            if controller.engine == "chatgpt":
                 # Preserve even an empty native segment: its previous turns are in the engine-neutral archive.
                 await asyncio.to_thread(self.chatgpt.sessions.save, controller._snapshot())
         except BaseException as error:
@@ -2965,13 +3081,14 @@ class AppCore:
         conv.history = history
         self._sync_sidebar_key(conv)
         self._save()
-        transcript.model = target.model
+        transcript.model = controller.model
         self._spawn(old.close(), quiet=True)
         self._emit_sidebar()
         conv.meta = {}
         conv.dirty = True
         self._flush(conv)
-        note = f"已换到 {model['label']}（{engine_label(target.engine, model)}）。"
+        note = (f"已在本会话启用 Fusion，主模型为 {model['label']}。" if fusion_policy is not None
+                else f"已换到 {model['label']}（{engine_label(controller.engine, model)}）。")
         if handoff is not None and not handoff.empty:
             if handoff.carried:
                 note += f"之前 {handoff.carried} 条对话的文字会随下一条消息交给它。"
@@ -3231,13 +3348,14 @@ class AppCore:
         elif key == "fusionWorkers" and isinstance(value, list) and len(value) <= 32 and all(isinstance(item, str) and len(item) <= 512 and item.startswith(("chatgpt:", "api:", "devin:")) for item in value):
             s.fusion_workers = list(dict.fromkeys(value))
         elif key == "fusionReasoning":
-            from desktop.core.fusion.reasoning import reasoning_map
+            from desktop.core.fusion.reasoning import reasoning_map, reasoning_model
             try:
                 levels = reasoning_map(value)
             except ValueError as error:
                 raise AppError("Fusion 思考等级设置不合法。") from error
-            for model, effort in levels.items():
-                if s.fusion_reasoning.get(model) == effort:
+            for key, effort in levels.items():
+                model = reasoning_model(key)
+                if s.fusion_reasoning.get(key, s.fusion_reasoning.get(model)) == effort:
                     continue  # Keep older selections even if their model is temporarily unavailable.
                 chosen = self.catalog.find(model)
                 if chosen is None or effort not in chosen.get("efforts", ()):

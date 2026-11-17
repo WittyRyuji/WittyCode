@@ -28,6 +28,7 @@ import "./reasoning-args.test.mjs";
 import "./qwebchannel.test.mjs";
 import "./turn-delta.test.ts";
 import "./starmap.test.mjs";
+import "./skill-icons.test.mjs";
 
 test("API windows use exact specifications, preserve overrides and require unknown limits", () => {
   const model = { id: "gpt-6.1-sol", displayName: "demo", images: true, reasoning: "max" };

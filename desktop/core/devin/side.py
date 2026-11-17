@@ -174,17 +174,18 @@ async def ask(engine: DevinEngine, project: str, prompt: str, *, timeout: float 
         return None
     if engine.cached_account().get("auth") == "signed-out":
         return None
-    question = _Question(engine, client)
-    try:
-        async with asyncio.timeout(timeout):
-            return await question.run(prompt)
-    except asyncio.CancelledError:
-        raise
-    except Exception as error:
-        log.info("the Devin side question was not answered: %s", reason(error, timeout))
-        return None
-    finally:
-        await finish(engine, question.clean_up())
+    async with engine.keep_connection():
+        question = _Question(engine, client)
+        try:
+            async with asyncio.timeout(timeout):
+                return await question.run(prompt)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            log.info("the Devin side question was not answered: %s", reason(error, timeout))
+            return None
+        finally:
+            await finish(engine, question.clean_up())
 
 
 __all__ = ["ask", "side_model"]

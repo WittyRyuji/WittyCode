@@ -4,7 +4,7 @@ loop (``core/chatgpt``).
 One long-lived ``devin acp`` process serves everything: the model list, the session list and every open session (every
 notification and request carries ``sessionId``; two sessions at once on one connection were exercised on the real
 program). The price: if the process dies, every open Devin session is DEAD at once; each comes back with ``reconnect`` (a
-new process, ``session/load``). The process starts on first use (``connection``) and lives until ``close_all``.
+new process, ``session/load``). Metadata queries release the process when no session uses it; open sessions keep it alive.
 
 The account is the CLI's own: ``devin auth status`` says whether it is signed in (and as whom), ``devin auth login`` is its
 browser sign-in, ``devin auth logout`` ends it. The tokens stay in Devin's ``credentials.toml``; the same sign-in serves the
@@ -25,7 +25,8 @@ import sys
 import tempfile
 import time
 import webbrowser
-from collections.abc import Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -179,6 +180,7 @@ class DevinEngine:
         self._retired: list[AcpClient] = []
         """Processes that were let go (the path changed, they died): ``close_all`` sees to it that each is really gone."""
         self._client_lock = asyncio.Lock()
+        self._connection_users = 0
         self._binary: DevinBinary | None = None
         self._binary_for: str | None = None
         self._located = False
@@ -200,6 +202,8 @@ class DevinEngine:
             self._listeners.remove(callback)
 
     def _notify(self, controller: DevinController, kind: str) -> None:
+        if kind == "state" and controller.state in (SessionState.CLOSED, SessionState.DEAD):
+            self._spawn(self.release_idle())
         for callback in list(self._listeners):
             try:
                 callback(controller, kind)
@@ -296,6 +300,32 @@ class DevinEngine:
             log.info("devin acp %s started (pid %s)", binary.version, client.pid)
             self._client = client
             return client
+
+    @asynccontextmanager
+    async def keep_connection(self) -> AsyncIterator[None]:
+        """Keep an in-flight metadata query or side question alive, without starting a process."""
+        self._connection_users += 1
+        try:
+            yield
+        finally:
+            self._connection_users -= 1
+            await self.release_idle()
+
+    @asynccontextmanager
+    async def _metadata_connection(self) -> AsyncIterator[AcpClient]:
+        async with self.keep_connection():
+            yield await self.connection()
+
+    async def release_idle(self) -> None:
+        """Release our unused process (and its Windows executable lock), never an open session's connection."""
+        async with self._client_lock:
+            if self._connection_users or self.open_controllers():
+                return
+            client, self._client = self._client, None
+            if client is not None:
+                self._retired.append(client)  # Shutdown can retry cleanup if this task is cancelled.
+                await client.close()
+                self._retired.remove(client)
 
     def _lost(self, client: AcpClient | None, error: Any) -> None:
         log.warning("devin acp exited: %s %s", error, getattr(error, "stderr", "")[-500:])
@@ -485,28 +515,28 @@ class DevinEngine:
         in turn shows that model's ``thought_level`` select (about 60 ms each)."""
         async with self._models_lock:
             if self._models is None or refresh:
-                client = await self.connection()
-                created = await client.request("session/new", {"cwd": self._scratch(), "mcpServers": []}, timeout=NEW_SESSION_SECONDS)
-                created = created if isinstance(created, Mapping) else {}
-                session_id = str(created.get("sessionId") or "")
-                entries = model_entries(created.get("configOptions"))
-                levels: dict[str, tuple[tuple[str, ...], str]] = {}
-                try:
-                    for model_id, _, _ in entries:
-                        try:
-                            after = await client.request(
-                                "session/set_config_option",
-                                {"sessionId": session_id, "configId": "model", "value": model_id},
-                                timeout=REQUEST_SECONDS,
-                            )
-                        except DevinRpcError:
-                            continue
-                        levels[model_id] = thought_levels(after.get("configOptions") if isinstance(after, Mapping) else None)
-                finally:
-                    if session_id:
-                        with contextlib.suppress(DevinError):
-                            await client.request("session/delete", {"sessionId": session_id}, timeout=REQUEST_SECONDS)
-                self._models = build_models(entries, levels, await self._cli_models())
+                async with self._metadata_connection() as client:
+                    created = await client.request("session/new", {"cwd": self._scratch(), "mcpServers": []}, timeout=NEW_SESSION_SECONDS)
+                    created = created if isinstance(created, Mapping) else {}
+                    session_id = str(created.get("sessionId") or "")
+                    entries = model_entries(created.get("configOptions"))
+                    levels: dict[str, tuple[tuple[str, ...], str]] = {}
+                    try:
+                        for model_id, _, _ in entries:
+                            try:
+                                after = await client.request(
+                                    "session/set_config_option",
+                                    {"sessionId": session_id, "configId": "model", "value": model_id},
+                                    timeout=REQUEST_SECONDS,
+                                )
+                            except DevinRpcError:
+                                continue
+                            levels[model_id] = thought_levels(after.get("configOptions") if isinstance(after, Mapping) else None)
+                    finally:
+                        if session_id:
+                            with contextlib.suppress(DevinError):
+                                await client.request("session/delete", {"sessionId": session_id}, timeout=REQUEST_SECONDS)
+                    self._models = build_models(entries, levels, await self._cli_models())
             return [self._with_window(model) for model in self._models]
 
     async def _cli_models(self) -> dict[str, Any]:
@@ -552,16 +582,16 @@ class DevinEngine:
         folder = normalize_folder(project)
         found: dict[str, DevinSavedSession] = {}
         try:
-            client = await self.connection()
-            for variant in cwd_variants(folder):
-                result = await client.request("session/list", {"cwd": variant}, timeout=REQUEST_SECONDS)
-                for raw in (result.get("sessions") if isinstance(result, Mapping) else None) or ():
-                    if not isinstance(raw, Mapping) or not raw.get("sessionId"):
-                        continue
-                    meta = raw.get("_meta") if isinstance(raw.get("_meta"), Mapping) else {}
-                    if meta.get("cognition.ai/hasUserMessages") is False:
-                        continue  # (made and never used: a scratch session, or one that was opened and left)
-                    found.setdefault(str(raw["sessionId"]), saved_session(raw))
+            async with self._metadata_connection() as client:
+                for variant in cwd_variants(folder):
+                    result = await client.request("session/list", {"cwd": variant}, timeout=REQUEST_SECONDS)
+                    for raw in (result.get("sessions") if isinstance(result, Mapping) else None) or ():
+                        if not isinstance(raw, Mapping) or not raw.get("sessionId"):
+                            continue
+                        meta = raw.get("_meta") if isinstance(raw.get("_meta"), Mapping) else {}
+                        if meta.get("cognition.ai/hasUserMessages") is False:
+                            continue  # (made and never used: a scratch session, or one that was opened and left)
+                        found.setdefault(str(raw["sessionId"]), saved_session(raw))
         except Exception as error:
             log.info("listing devin sessions failed: %s", error)
             if not found:

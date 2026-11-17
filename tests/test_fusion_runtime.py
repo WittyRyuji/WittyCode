@@ -154,10 +154,12 @@ def test_app_settings_start_fusion_explicitly_and_pin_the_main(tmp_path):
             main = core._by_cid[cid].controller
             assert main.model == "gpt-6.1-sol" and core._session_meta(core._by_cid[cid])["fusion"] is True
             assert core.settings.fusion_max_calls == 3 and main._fusion.registry.policy.max_seconds == 60
-            from desktop.core.app_core import AppError
-            with pytest.raises(AppError, match="主模型"):
-                await core.call("session.choose", {"id": cid, "field": "model", "value": "chatgpt:gpt-6-luna"})
+            assert not await main.update_settings(model="gpt-6-luna")
             assert main.model == "gpt-6.1-sol"
+            assert (await core.call("session.choose", {"id": cid, "field": "model", "value": "chatgpt:gpt-6-luna"}))["ok"]
+            assert main._fusion is None and main._paused_fusion is not None
+            assert (await core.call("session.choose", {"id": cid, "field": "model", "value": "fusion"}))["ok"]
+            assert main.model == "gpt-6.1-sol" and main._fusion is not None
             from desktop.core.settings import settings_from_dict, settings_to_dict
             restored = settings_from_dict(settings_to_dict(core.settings))
             assert restored.fusion_workers == ["chatgpt:gpt-6-luna"] and restored.fusion_max_tokens == 50_000
@@ -409,8 +411,7 @@ def test_explicit_main_model_change_preserves_session_and_never_falls_back(tmp_p
             await finish_turn(main)
             count = len(model.requests)
             native = main.session_id
-            with pytest.raises(AppError):
-                await core.call("session.choose", {"id": cid, "field": "model", "value": "chatgpt:gpt-6-luna"})
+            assert not await main.update_settings(model="gpt-6-luna")
             assert (await core.call("fusion.changeMain", {"id": cid, "model": "chatgpt:gpt-6-luna"}))["ok"]
             assert len(model.requests) == count and main.session_id == native
             assert main.model == "gpt-6-luna" and main._fusion.registry.policy.main == "chatgpt:gpt-6-luna"

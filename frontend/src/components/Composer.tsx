@@ -4,6 +4,7 @@ import type { FollowUp } from "../protocol";
 import { currentSession, landingProjectId, settingsForModel, useStore } from "../store";
 import { MODES, effortLabel, permissionsFor, reasoningChoices } from "../lib/vocab";
 import { engineOfSource, sourceLabel, sourceTag } from "../lib/models";
+import { fusionEffort } from "../lib/fusionReasoning";
 import { CHATGPT_USAGE_URL, chatgptReady } from "../lib/chatgpt";
 import { LIVE } from "../mode";
 import { commandNamed, fromSkills, parseSlash, suggestions, unavailable, type Scene, type SlashCommand } from "../lib/commands";
@@ -340,9 +341,10 @@ export function Composer() {
   };
 
   const baseValues = session?.settings ?? landing.settings ?? defaults;
+  const mainEffort = fusionEffort(fusionReasoning, "main", fusionMain);
   const values = !session && landing.fusion ? {
     ...settingsForModel(models, baseValues, fusionMain).settings,
-    ...(fusionReasoning[fusionMain] ? { reasoning: fusionReasoning[fusionMain] } : {}),
+    ...(mainEffort ? { reasoning: mainEffort } : {}),
   } : baseValues;
   const fusionSelected = session ? !!session.fusion : !!landing.fusion;
   const chipsDisabled = !!session && dead;
@@ -454,10 +456,10 @@ export function Composer() {
           <Controls
             values={values}
             disabled={chipsDisabled || (!session && landing.starting)}
-            fixedModel={!!session?.fusion}
-            fusion={{ selected: fusionSelected, disabled: !!session,
-              description: session ? "仅新会话可选择 Fusion" : fusionReady ? `主模型：${models.find((m) => m.id === fusionMain)?.label ?? fusionMain}` : "先配置主模型、工作模型和轻量模型",
-              onSelect: () => fusionReady ? setLandingFusion(true) : openSettings("fusion"),
+            fixedModel={!!session?.fusion && (session.mark !== "ready" || !!session.pendingPlan || !!session.queued?.length || !!session.goal)}
+            fusion={{ selected: fusionSelected, disabled: !!session && (session.mark !== "ready" || !!session.pendingPlan || !!session.queued?.length || !!session.goal),
+              description: session ? "空闲时可在本会话启用 Fusion；选择普通模型可退出，保留历史和专家配置" : fusionReady ? `主模型：${models.find((m) => m.id === fusionMain)?.label ?? fusionMain}` : "先配置主模型、工作模型和轻量模型",
+              onSelect: () => session ? void choose("model", "fusion") : fusionReady ? setLandingFusion(true) : openSettings("fusion"),
             }}
             live={session ? { running, fresh: session.turns.length === 0, engine: session.engine } : null}
             onChoose={(field, value) => {

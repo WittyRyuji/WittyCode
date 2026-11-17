@@ -17,6 +17,7 @@ import { readFiles } from "./mock/attachments";
 import { cancelRun, runTurn, settlePrompt } from "./mock/simulator";
 import { bridge } from "./bridge-instance";
 import { engineLabel, engineOfSource, findModel } from "./lib/models";
+import { fusionEffort } from "./lib/fusionReasoning";
 import { handoffOf } from "./lib/handoff";
 import { quitWarning } from "./lib/quit";
 import { effortLabel, permissionsFor, startingLevel } from "./lib/vocab";
@@ -409,7 +410,8 @@ export const useStore = create<Store>((set, get) => ({
     const id = `s-new-${++sessionCounter}`;
     const base = st.landing.settings ?? st.defaults;
     const settings = st.landing.fusion ? settingsForModel(st.models, base, st.fusionMain).settings : { ...base };
-    if (st.landing.fusion && st.fusionReasoning[st.fusionMain]) settings.reasoning = st.fusionReasoning[st.fusionMain]!;
+    const effort = fusionEffort(st.fusionReasoning, "main", st.fusionMain);
+    if (st.landing.fusion && effort) settings.reasoning = effort;
     const m = findModel(st.models, settings.model);
     const session: Session = {
       id,
@@ -658,8 +660,10 @@ export const useStore = create<Store>((set, get) => ({
       get().patchSession(id, (s) => ({ ...s, settings: { ...s.settings, [field]: value } }));
       return;
     }
+    if (value === "fusion") return get().say("（演示）真实应用中可在会话空闲时切换 Fusion，并保留历史和专家上下文。");
     const model = findModel(st.models, value);
     if (!model) return;
+    if (session.fusion) get().patchSession(id, (s) => ({ ...s, fusion: false }));
     const was = findModel(st.models, session.settings.model);
     if (engineOfSource(model.source) !== engineOfSource(was?.source ?? "chatgpt")) return switchEngine(id, model, was);
     const { settings, changed } = settingsForModel(st.models, session.settings, value);

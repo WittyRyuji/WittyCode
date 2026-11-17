@@ -59,6 +59,7 @@ def main() -> int:
                 continue
             method, params = message.get("method"), message.get("params", {})
             if method == "initialize":
+                request("tools/list")  # Verify inherited bridge access before advertising a usable MCP server.
                 result = {"protocolVersion": params.get("protocolVersion", "2025-11-25"), "capabilities": {"tools": {}},
                           "serverInfo": {"name": SERVER, "version": "1.0.0"},
                           "instructions": "Use only these WittyCode tools. Native tools are disabled. Follow the current Fusion task and permissions."}

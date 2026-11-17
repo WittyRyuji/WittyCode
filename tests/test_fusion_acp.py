@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shlex
 
 import pytest
 
@@ -24,6 +25,15 @@ def test_guard_denies_native_tools_and_keeps_only_the_private_bridge(tmp_path):
         result, code = hook({"hook_event_name": "PreToolUse", "tool_name": name})
         assert code == 2 and result["decision"] == "block"
     assert hook({"hook_event_name": "PreToolUse", "tool_name": PREFIX + "read_file"}) == ({}, 0)
+
+
+@pytest.mark.parametrize("python", [r"C:\Tools\Python\python.exe", r"C:\Tools With Spaces\python.exe", "C:/Tools' Profile/python.exe"])
+def test_guard_command_uses_posix_quoting_even_for_windows_paths(monkeypatch, python):
+    monkeypatch.setattr("desktop.core.fusion.acp.console_python", lambda: python)
+    config = guard_config()
+    for hooks in config["hooks"].values():
+        assert shlex.split(hooks[0]["hooks"][0]["command"]) == [python.replace("\\", "/"), "-m", "desktop.core.fusion.acp_server", "--hook"]
+    assert config["read_config_from"]["cloud"] is False
 
 
 def test_own_main_can_delegate_to_acp_and_forward_approval_and_restore_context(tmp_path):
@@ -82,9 +92,7 @@ def test_acp_main_delegates_to_either_runner_and_keeps_one_conversation(tmp_path
             core.settings.fusion_main = "devin:swe-2-high"
             core.settings.fusion_workers = [worker]
             core.settings.fusion_light = worker
-            levels = {"devin:swe-2-high": "medium"}
-            if worker.startswith("chatgpt:"):
-                levels[worker] = "low"
+            levels = {"main:devin:swe-2-high": "medium", f"worker:{worker}": "low" if worker.startswith("chatgpt:") else "max"}
             await core.call("settings.set", {"key": "fusionReasoning", "value": levels})
             cid = (await core.call("session.new", {"projectId": str(tmp_path / "proj"), "fusion": True}))["id"]
             main = core._by_cid[cid].controller
@@ -95,7 +103,7 @@ def test_acp_main_delegates_to_either_runner_and_keeps_one_conversation(tmp_path
             expert = next(iter(main.agents.values()))
             assert expert.record.status == "done", expert.controller.last_error
             assert expert.record.model == worker and main.model == "devin:swe-2-high"
-            assert main.reasoning == "medium" and expert.agent_effort == levels[worker]
+            assert main.reasoning == "medium" and expert.agent_effort == levels[f"worker:{worker}"]
             assert main.saved.turns[-1].status == "done"
         finally:
             await core.shutdown()
@@ -135,12 +143,13 @@ def test_acp_cannot_bypass_protected_paths_or_use_native_tools(tmp_path, action)
     asyncio.run(go())
 
 
-def test_missing_guard_stops_before_model_request_and_does_not_persist_bridge_secret(tmp_path, monkeypatch):
+@pytest.mark.parametrize("missing", ["GUARD", "BRIDGE"])
+def test_missing_guard_or_bridge_stops_before_model_request_and_does_not_persist_bridge_secret(tmp_path, monkeypatch, missing):
     from tests.fusion_acp_support import make_guarded_engine
     monkeypatch.setattr("desktop.core.fusion.acp.GUARD_SECONDS", 1.0)
 
     async def go():
-        harness = make_guarded_engine(tmp_path, FAKE_FUSION_NO_GUARD="1")
+        harness = make_guarded_engine(tmp_path, **{"FAKE_FUSION_NO_" + missing: "1"})
         core, _, _, _, _ = await ready_core(tmp_path, devin_engine=harness.engine)
         try:
             await until(lambda: any(item["source"] == "devin" for item in core.catalog.models), timeout=20)

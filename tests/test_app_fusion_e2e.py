@@ -32,13 +32,13 @@ def test_configure_and_start_fusion_with_a_local_fake(qapp, loop, tmp_path):
                 await rig.click_text(".menu-item", name)
             await until(lambda: rig.core.settings.fusion_main == "chatgpt:gpt-6.1-sol" and rig.core.settings.fusion_light == "chatgpt:gpt-6-luna" and rig.core.settings.fusion_workers == ["chatgpt:gpt-6-luna"])
             await rig.wait_for(".fusion-model-row", 3)
-            for role, level in [("main", "High"), ("worker", "Low")]:
+            for role, level in [("main", "High"), ("worker", "Low"), ("light", "Low")]:
                 await rig.click(f'.fusion-model-row[data-role="{role}"] .fusion-effort-picker .selectbox')
                 if role == "worker":
                     assert await rig.texts(".menu-item .menu-label") == ["默认", "Low"]
                 await rig.click_text(".menu-item", level)
-            await rig.wait_text('.fusion-model-row[data-role="light"] .fusion-effort-picker .selectbox', "Low")  # Shared model, shared effort.
-            levels = {"chatgpt:gpt-6.1-sol": "high", "chatgpt:gpt-6-luna": "low"}
+            await rig.wait_text('.fusion-model-row[data-role="light"] .fusion-effort-picker .selectbox', "Low")
+            levels = {"main:chatgpt:gpt-6.1-sol": "high", "worker:chatgpt:gpt-6-luna": "low", "light:chatgpt:gpt-6-luna": "low"}
             await until(lambda: rig.core.settings.fusion_reasoning == levels)
             await rig.click('.settings-body button[aria-label="关闭"]')
             await rig.press(",", Qt.KeyboardModifier.ControlModifier)

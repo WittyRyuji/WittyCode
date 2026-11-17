@@ -5,9 +5,10 @@ import pytest
 from PySide6.QtCore import Qt
 
 from tests.e2e_support import open_rig
+from tests.chatgpt_support import finish_turn
 from tests.fake_responses import say
 from tests.fakes import until
-from tests.ui_support import run
+from tests.ui_support import run, wait_for
 
 pytestmark = pytest.mark.ui
 
@@ -46,11 +47,30 @@ def test_fusion_is_first_in_model_menu_and_normal_model_exits_the_selection(qapp
             await rig.send("Inspect this module")
             await rig.wait_text(".transcript", "普通模型会话已完成")
             assert len(rig.core.order) == 1 and rig.core.order[0].controller._fusion is None
+            main = rig.core.order[0].controller
+            await finish_turn(main)
+            cid, native, count = rig.core.order[0].cid, main.session_id, len(rig.plan.requests)
             await rig.click(".chip-model")
             await rig.wait_text(".menu-item .menu-label", "Fusion")
-            assert await rig.js('document.querySelector(".menu-item").disabled')
-            assert "仅新会话" in await rig.text(".menu-item", 0)
-            assert not await rig.exists(".fusion-choice, .fusion-badge")
+            await wait_for(lambda: rig.js('!document.querySelector(".menu-item").disabled'))
+            assert "仅新会话" not in await rig.text(".menu-item", 0)
+            await rig.click_text(".menu-item", "Fusion")
+            await rig.wait_text(".chip-model .chip-v", "Fusion")
+            assert main._fusion is not None and rig.core.order[0].cid == cid and main.session_id == native
+            assert len(rig.plan.requests) == count and not await rig.exists(".fusion-choice, .fusion-badge")
+            await rig.click(".chip-model")
+            await rig.wait_text(".menu-item .menu-label", "Fusion")
+            assert await rig.count(".menu-item .menu-check svg") == 1
+            assert "退出 Fusion" in await rig.text(".menu")
+            assert rig.window.grab().save(str(tmp_path / "fusion-session-menu.png"))
+            await rig.click_text(".menu-item", "GPT-6-Luna")
+            await rig.wait_text(".chip-model .chip-v", "GPT-6-Luna")
+            assert main._fusion is None and main._paused_fusion is not None
+            assert main.session_id == native and rig.core.order[0].cid == cid and len(rig.plan.requests) == count
+            rig.plan.script(say("已回到普通模型。"))
+            await rig.send("Continue without Fusion")
+            await rig.wait_text(".transcript", "已回到普通模型")
+            assert "delegate_task" not in {tool.get("name") for tool in rig.plan.requests[-1]["tools"]}
         finally:
             await rig.finish()
     run(loop, scenario())

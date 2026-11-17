@@ -984,6 +984,10 @@ await clickText(".menu-item", "跳到最新消息");
 await page.wait(800);
 ok("跳到最新消息 in the app menu goes to the end too", await page.eval("(() => { const s = document.querySelector('.scroller'); return s.scrollHeight - s.scrollTop - s.clientHeight < 48 && !document.querySelector('.jump'); })()"));
 ok("nothing was blocked by the Content-Security-Policy (long answer, pictures, fonts)", page.cspViolations().length === 0);
+await page.click(".chip-model");
+await clickText(".menu-item", "Fusion");
+await page.waitFor("document.body.textContent.includes('真实应用中可在会话空闲时切换 Fusion')", 4000);
+ok("the design page explains Fusion switching instead of treating it as a provider model id", true);
 
 const errors = page.consoleErrors();
 ok("no console errors", errors.length === 0);

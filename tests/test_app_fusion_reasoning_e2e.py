@@ -9,7 +9,7 @@ from PySide6.QtCore import Qt
 from tests.e2e_support import open_rig
 from tests.fakes import until
 from tests.test_providers import draft, make_store, model
-from tests.ui_support import run
+from tests.ui_support import run, wait_for
 
 pytestmark = pytest.mark.ui
 
@@ -26,7 +26,7 @@ def test_fusion_efforts_are_per_model_and_default_clears_only_that_model(qapp, l
             await until(lambda: any(item["label"] == "API Plain" for item in rig.core.catalog.models))
             api = {item["label"]: item["id"] for item in rig.core.catalog.models if item["source"].startswith("api:")}
             reasoner, plain = api["API Reasoner With A Long Model Name"], api["API Plain"]
-            levels = {"chatgpt:gpt-6.1-sol": "high", reasoner: "off"}
+            levels = {"main:chatgpt:gpt-6.1-sol": "high", f"worker:{reasoner}": "off"}
             for key, value in {"fusionMain": "chatgpt:gpt-6.1-sol", "fusionWorkers": [reasoner, plain],
                                "fusionLight": "chatgpt:gpt-6-luna", "fusionReasoning": levels,
                                "fontScale": "lg" if size[0] == 900 else "md"}.items():
@@ -45,11 +45,12 @@ def test_fusion_efforts_are_per_model_and_default_clears_only_that_model(qapp, l
             assert await rig.text(plain_selector) == "不支持"
             await rig.click(reasoner_selector)
             assert "Max" in await rig.texts(".menu-item .menu-label")
+            await wait_for(lambda: rig.js("[...document.querySelectorAll('.settings, .menu')].every(e => e.getAnimations({subtree: true}).length === 0)"))
             await rig.click_text(".menu-item", "Max")
-            await until(lambda: rig.core.settings.fusion_reasoning.get(reasoner) == "max")
+            await until(lambda: rig.core.settings.fusion_reasoning.get(f"worker:{reasoner}") == "max")
             await rig.click(reasoner_selector)
             await rig.click_text(".menu-item", "默认")
-            await until(lambda: rig.core.settings.fusion_reasoning == {"chatgpt:gpt-6.1-sol": "high"})
+            await until(lambda: rig.core.settings.fusion_reasoning == {"main:chatgpt:gpt-6.1-sol": "high"})
             await rig.wait_text(reasoner_selector, "默认")
             bounds = json.loads(await rig.js("JSON.stringify([...document.querySelectorAll('.fusion-model-row')].map(e => {"
                                             "const row = e.getBoundingClientRect(), buttons = e.querySelectorAll('.selectbox'), "
@@ -67,7 +68,7 @@ def test_fusion_efforts_are_per_model_and_default_clears_only_that_model(qapp, l
     run(loop, scenario())
 
 
-def test_inline_worker_pairs_keep_multiselect_and_shared_model_efforts(qapp, loop, tmp_path):
+def test_inline_worker_pairs_keep_multiselect_and_independent_role_efforts(qapp, loop, tmp_path):
     async def scenario():
         rig = await open_rig(tmp_path)
         try:
@@ -84,28 +85,36 @@ def test_inline_worker_pairs_keep_multiselect_and_shared_model_efforts(qapp, loo
             worker = '.fusion-model-row[data-role="worker"][data-model="chatgpt:gpt-6.1-sol"]'
             await rig.click(worker + " .fusion-effort-picker .selectbox")
             await rig.click_text(".menu-item", "High")
-            await until(lambda: rig.core.settings.fusion_reasoning == {"chatgpt:gpt-6.1-sol": "high"})
-            assert await rig.texts(".fusion-effort-picker .selectbox") == ["High"] * 3
+            await until(lambda: rig.core.settings.fusion_reasoning == {"worker:chatgpt:gpt-6.1-sol": "high"})
+            assert await rig.texts(".fusion-effort-picker .selectbox") == ["默认", "High", "默认"]
             await rig.click(worker + " .fusion-model-picker .selectbox")
             await rig.click_text(".menu-item", "GPT-6-Luna")
             await rig.wait_for('.fusion-model-row[data-role="worker"]', 2)
             luna = '.fusion-model-row[data-role="worker"][data-model="chatgpt:gpt-6-luna"]'
             await rig.click(luna + " .fusion-effort-picker .selectbox")
             await rig.click_text(".menu-item", "Low")
-            await until(lambda: rig.core.settings.fusion_reasoning.get("chatgpt:gpt-6-luna") == "low")
+            await until(lambda: rig.core.settings.fusion_reasoning.get("worker:chatgpt:gpt-6-luna") == "low")
             assert await rig.texts('.fusion-model-row[data-role="worker"] .fusion-model-picker .selectbox') == ["GPT-6.1-Sol", "GPT-6-Luna"]
             await rig.click('.fusion-model-row[data-role="main"] .fusion-effort-picker .selectbox')
             await rig.click_text(".menu-item", "Medium")
-            await until(lambda: rig.core.settings.fusion_reasoning["chatgpt:gpt-6.1-sol"] == "medium")
-            assert await rig.texts(".fusion-effort-picker .selectbox") == ["Medium", "Medium", "Low", "Medium"]
+            await until(lambda: rig.core.settings.fusion_reasoning.get("main:chatgpt:gpt-6.1-sol") == "medium")
+            await rig.click('.fusion-model-row[data-role="light"] .fusion-effort-picker .selectbox')
+            await rig.click_text(".menu-item", "Low")
+            await until(lambda: rig.core.settings.fusion_reasoning.get("light:chatgpt:gpt-6.1-sol") == "low")
+            assert await rig.texts(".fusion-effort-picker .selectbox") == ["Medium", "High", "Low", "Low"]
             assert rig.window.grab().save(str(tmp_path / "fusion-inline-workers.png"))
+            await rig.click('.settings-body button[aria-label="关闭"]')
+            await rig.press(",", Qt.KeyboardModifier.ControlModifier)
+            await rig.click_text(".snav", "Fusion")
+            await rig.wait_text('.fusion-model-row[data-role="main"] .fusion-effort-picker .selectbox', "Medium")
+            assert await rig.texts(".fusion-effort-picker .selectbox") == ["Medium", "High", "Low", "Low"]
             await rig.click(luna + " .fusion-model-picker .selectbox")
             await rig.click_text(".menu-item", "GPT-6-Luna")
             await until(lambda: rig.core.settings.fusion_workers == ["chatgpt:gpt-6.1-sol"])
             await rig.click('.fusion-model-row[data-role="light"] .fusion-effort-picker .selectbox')
             await rig.click_text(".menu-item", "默认")
-            await until(lambda: rig.core.settings.fusion_reasoning == {"chatgpt:gpt-6-luna": "low"})
-            assert await rig.texts(".fusion-effort-picker .selectbox") == ["默认"] * 3
+            await until(lambda: "light:chatgpt:gpt-6.1-sol" not in rig.core.settings.fusion_reasoning)
+            assert await rig.texts(".fusion-effort-picker .selectbox") == ["Medium", "High", "默认"]
             await rig.click(worker + " .fusion-model-picker .selectbox")
             await rig.click_text(".menu-item", "GPT-6.1-Sol")
             await until(lambda: not rig.core.settings.fusion_workers)

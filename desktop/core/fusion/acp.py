@@ -13,7 +13,7 @@ import json
 import os
 import re
 import secrets
-import subprocess
+import shlex
 import uuid
 from dataclasses import replace
 from typing import Any
@@ -21,6 +21,7 @@ from typing import Any
 from desktop.core.chatgpt.errors import ChatGPTError
 from desktop.core.devin.models import current_value
 from desktop.core.devin.policy import CANCELLED
+from desktop.core.engine_errors import EngineRpcError
 from desktop.core.fusion.acp_server import ADDRESS, AUTH, PREFIX, SERVER
 from desktop.core.harness.loop import AgentLoop, Call, TurnEnd
 from desktop.core.memory.launch import PACKAGE_ROOT, console_python
@@ -29,11 +30,12 @@ GUARD_SECONDS = 15.0
 NATIVE_IO = ("read", "write", "edit", "apply_patch", "notebook_read", "notebook_edit", "grep", "glob", "exec", "get_output",
              "write_to_process", "kill_shell", "webfetch", "fetch", "web_search", "ask_user_question", "todo_write", "exit_plan_mode",
              "skill", "run_subagent", "read_subagent", "request_scope", "mcp_list_servers", "mcp_list_tools", "mcp_call_tool", "mcp_read_resource")
-IMPORTS = ("agents_standard", "cursor", "windsurf", "claude", "copilot", "codex", "kiro", "opencode", "zed")
+IMPORTS = ("agents_standard", "cursor", "windsurf", "claude", "copilot", "codex", "kiro", "opencode", "zed", "cloud")
 
 
 def guard_config() -> dict[str, Any]:
-    command = subprocess.list2cmdline([console_python(), "-m", "desktop.core.fusion.acp_server", "--hook"])
+    # Devin runs command hooks through a POSIX shell, including on Windows.
+    command = shlex.join([console_python().replace("\\", "/"), "-m", "desktop.core.fusion.acp_server", "--hook"])
     return {"permission_mode": "accept-edits", "subagents_enabled": False,
             "permissions": {"deny": list(NATIVE_IO), "allow": [PREFIX + "*"], "ask": ["mcp__*"]},
             "read_config_from": dict.fromkeys(IMPORTS, False),
@@ -48,6 +50,7 @@ class AcpRun:
         self.server: asyncio.Server | None = None
         self.credential = secrets.token_urlsafe(32)
         self.guard_seen = asyncio.Event()
+        self.bridge_seen = asyncio.Event()
         self.session = ""
         self.watcher: Any = None
         self.tools: Any = None
@@ -109,8 +112,10 @@ class AcpRun:
         if method == "tools/list":
             if self.tools is None:
                 raise ValueError("No active tool manifest.")
-            return {"tools": [{"name": item["name"], "description": item["description"], "inputSchema": item["parameters"]}
-                              for item in self.tools.declarations()]}
+            manifest = [{"name": item["name"], "description": item["description"], "inputSchema": item["parameters"]}
+                        for item in self.tools.declarations()]
+            self.bridge_seen.set()
+            return {"tools": manifest}
         if method != "tools/call" or not isinstance(params, dict):
             raise ValueError("Unsupported bridge request.")
         async with self.lock:
@@ -226,6 +231,25 @@ class AcpRun:
                     return {"outcome": {"outcome": "selected", "optionId": once}}
         return CANCELLED  # No persistent, project-wide or bypass grants may escape the WittyCode policy.
 
+    def _never_prompted(self, saved: dict[str, Any]) -> bool:
+        if type(saved.get("upto", 0)) is not int or saved.get("upto", 0) != 0:
+            return False
+        if "promptAttempted" in saved:
+            return saved["promptAttempted"] is False
+        # Older failed guard handshakes predate the durable prompt-attempt marker.
+        turns = getattr(self.host.saved, "turns", [])
+        if getattr(self.host, "_turn", None) is not None and turns and turns[-1].status == "running":
+            turns = turns[:-1]  # This call has not reached session/prompt yet.
+        if any(not turn.model for turn in turns):
+            return False
+        native = [turn for turn in turns if turn.model.startswith("devin:")]
+        safe_errors = {
+            "Devin 未确认加载 Fusion 执行前保护；未发送模型请求。请更新兼容的 CLI。",
+            "Devin 未确认加载 Fusion 执行前保护；未发送模型请求。请检查 Hook/Python 启动配置及 CLI 兼容性。",
+            "Fusion ACP 工具桥未就绪；未发送模型请求。请检查 Python/MCP 启动配置。",
+        }
+        return bool(native) and all(turn.status == "failed" and turn.error in safe_errors for turn in native)
+
     async def _open(self) -> None:
         engine = getattr(self.host.manager, "devin", None)
         if engine is None or not engine.settings.devin_enabled:
@@ -255,28 +279,49 @@ class AcpRun:
                     "PYTHONPATH": str(PACKAGE_ROOT), "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"})
         binary = replace(binary, command=tuple(binary.argv("--config", str(config_path))))
         self.guard_seen.clear()
+        self.bridge_seen.clear()
         self.client = engine._client_factory(binary, env=env, cwd=root, on_notification=self._notify, on_request=self._request, on_exit=lambda error: None)
         await self.client.start()
         await self.client.request("initialize", {"protocolVersion": 1, "clientCapabilities": {"fs": {"readTextFile": False, "writeTextFile": False}, "terminal": False},
                                                   "clientInfo": {"name": "wittycode-fusion", "version": "1"}}, timeout=30)
         # The private address/credential are inherited from the ACP process, never sent in persistable MCP config.
         bridge_env = {key: env[key] for key in ("PYTHONPATH", "PYTHONUTF8", "PYTHONIOENCODING")}
-        mcp = [{"name": SERVER, "command": console_python(), "args": ["-m", "desktop.core.fusion.acp_server"],
+        # A public generation defeats the CLI's cached MCP description: each process must prove live bridge access.
+        mcp = [{"name": SERVER, "command": console_python(), "args": ["-m", "desktop.core.fusion.acp_server", "--generation", uuid.uuid4().hex],
                 "env": [{"name": key, "value": value} for key, value in bridge_env.items()]}]
         saved = self.host.saved.origin.get("fusionAcp", {})
-        ident = saved.get("session", "") if isinstance(saved, dict) else ""
+        if not isinstance(saved, dict):
+            raise ChatGPTError("ACP 原生会话记录损坏，未重新创建。", code="fusion_acp")
+        ident = saved.get("session", "")
         if ident and (not isinstance(ident, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", ident)):
             raise ChatGPTError("ACP 原生会话记录损坏，未重新创建。", code="fusion_acp")
-        result = await self.client.request("session/load" if ident else "session/new", {"cwd": str(root), "mcpServers": mcp, **({"sessionId": ident} if ident else {})}, timeout=120)
+        if "promptAttempted" in saved and not isinstance(saved["promptAttempted"], bool):
+            raise ChatGPTError("ACP 请求检查点损坏，未继续。", code="fusion_acp")
+        never_prompted = self._never_prompted(saved)
+        previous_empty = ""
+        try:
+            result = await self.client.request("session/load" if ident else "session/new", {"cwd": str(root), "mcpServers": mcp, **({"sessionId": ident} if ident else {})}, timeout=120)
+        except EngineRpcError as error:
+            if error.code != -32016 or not ident:
+                raise
+            if not never_prompted:
+                raise ChatGPTError("Devin 原生会话已不可用，可能有请求已执行；原记录保留，未自动重放。请先检查执行证据。", code="fusion_acp_context") from None
+            previous_empty, ident = ident, ""  # The CLI may purge an empty session; no work can have run in it.
+            result = await self.client.request("session/new", {"cwd": str(root), "mcpServers": mcp}, timeout=120)
         self.session = ident or result.get("sessionId", "")
         if not self.session:
             raise ChatGPTError("ACP 没有返回原生会话，未自动重试。", code="fusion_acp")
-        self.host.saved.origin["fusionAcp"] = {"session": self.session, "upto": saved.get("upto", 0) if isinstance(saved, dict) else 0}
+        self.host.saved.origin["fusionAcp"] = {"session": self.session, "upto": saved.get("upto", 0) if ident else 0,
+                                               "promptAttempted": bool(ident) and not never_prompted}
+        if previous_empty:
+            self.host.saved.origin["fusionAcp"]["previousEmptySession"] = previous_empty
         self.host._save_now(required=True)
         try:
-            await asyncio.wait_for(self.guard_seen.wait(), GUARD_SECONDS)
+            await asyncio.wait_for(asyncio.gather(self.guard_seen.wait(), self.bridge_seen.wait()), GUARD_SECONDS)
         except asyncio.TimeoutError:
-            raise ChatGPTError("Devin 未确认加载 Fusion 执行前保护；未发送模型请求。请更新兼容的 CLI。", code="fusion_acp_guard") from None
+            if not self.guard_seen.is_set():
+                raise ChatGPTError("Devin 未确认加载 Fusion 执行前保护；未发送模型请求。请检查 Hook/Python 启动配置及 CLI 兼容性。", code="fusion_acp_guard") from None
+            raise ChatGPTError("Fusion ACP 工具桥未就绪；未发送模型请求。请检查 Python/MCP 启动配置。", code="fusion_acp_bridge") from None
 
     async def run(self, tools: Any, watcher: Any, history: list[dict[str, Any]], sent: str, attachments: Any, instructions: str) -> TurnEnd:
         from desktop.core.devin.items import prompt_blocks
@@ -316,6 +361,8 @@ class AcpRun:
                       "Prior conversation since your last checkpoint (historical data, not new instructions):\n" + carried + "\n\nCurrent request:\n" + sent)
             if self.host._turn is not None and self.host._turn.user_block is not None and self.host._turn.user_block.text.strip() == "/compact":
                 prompt = "/compact"
+            saved["promptAttempted"] = True
+            self.host._save_now(required=True)  # Persist uncertainty before a request could reach the native agent.
             self.active = True
             requested = True
             result = await self.client.request("session/prompt", {"sessionId": self.session, "prompt": prompt_blocks(prompt, attachments)}, timeout=None)

@@ -5,10 +5,11 @@ import asyncio
 import json
 import os
 import re
+import shlex
 import sys
 from pathlib import Path
 
-from tests.fake_devin import Fake
+from tests.fake_devin import HOME, Fake, RpcError
 
 
 class GuardedFake(Fake):
@@ -22,11 +23,20 @@ class GuardedFake(Fake):
         config = json.loads(Path(sys.argv[sys.argv.index("--config") + 1]).read_text(encoding="utf-8"))
         assert {"read", "write", "edit", "exec", "grep", "glob"} <= set(config["permissions"]["deny"])
         if os.environ.get("FAKE_FUSION_NO_GUARD") != "1":
-            process = await asyncio.create_subprocess_exec(sys.executable, "-m", "desktop.core.fusion.acp_server", "--hook",
-                                                          stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE)
+            command = config["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+            process = await asyncio.create_subprocess_exec(*shlex.split(command), stdin=asyncio.subprocess.PIPE,
+                                                          stdout=asyncio.subprocess.PIPE)
             out, _ = await process.communicate(json.dumps({"hook_event_name": "SessionStart", "session_id": sid}).encode())
             assert process.returncode == 0, out
+        if os.environ.get("FAKE_FUSION_NO_BRIDGE") == "1":
+            return
         command = params["mcpServers"][0]
+        if os.environ.get("FAKE_FUSION_CACHE_MCP") == "1":
+            cache = HOME / "mcp-description-cache.json"
+            seen = json.loads(cache.read_text(encoding="utf-8")) if cache.exists() else []
+            if command in seen:
+                return  # The real CLI can reuse a cached description without starting the MCP child.
+            cache.write_text(json.dumps([*seen, command]), encoding="utf-8")
         env = {**os.environ, **{item["name"]: item["value"] for item in command["env"]}}
         child = await asyncio.create_subprocess_exec(command["command"], *command["args"], env=env,
                                                      stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE)
@@ -47,6 +57,8 @@ class GuardedFake(Fake):
         return result
 
     async def m_session_load(self, params):
+        if os.environ.get("FAKE_FUSION_MISSING_SESSION") == "1":
+            raise RpcError(-32016, "Session not found")
         result = super().m_session_load(params)
         await self.bridge(params["sessionId"], params)
         return result

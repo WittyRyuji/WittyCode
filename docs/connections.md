@@ -4,7 +4,7 @@
 
 WittyHarness 是 WittyCode 自己的循环，运行 ChatGPT Plan 与 API Provider；Devin 和 Factory 是可选的外部引擎。不安装它们，应用仍能启动、登录 ChatGPT 或使用 API。共享记忆页面按 **WittyHarness、Devin、Factory** 显示，内部已有的 `chatgpt` 标识不改名，也不迁移用户的数据。
 
-本批兼容 OpenAI / Codex 生态的**本地格式子集**，不是插件商店或远程账号接入。外部配置只读，导入和编辑写在所选 WittyCode 设置目录旁的 `connections.json`，不覆盖 Codex、Factory 或其他客户端的文件。
+本地导入兼容 OpenAI / Codex 生态的**本地格式子集**，不读取其他产品账号内的专属商店。外部配置只读，导入和编辑写在所选 WittyCode 设置目录旁的 `connections.json`，不覆盖 Codex、Factory 或其他客户端的文件。另有内置公开技能目录及 GitHub / Google 连接器，分别见[技能来源与兼容边界](skill-sources.md)和[发布者 OAuth 注册](connector-registration.md)。
 
 ## 设置 → Connections
 
@@ -30,7 +30,7 @@ WittyHarness 是 WittyCode 自己的循环，运行 ChatGPT Plan 与 API Provide
 3. 停用再启用未改变的导入项会保留信任。命令编辑需要再次确认；来源配置或插件文件变化后会停用执行，要求重新预览导入。
 4. MCP 在新开／重新连接的会话中加载；「测试连接」会立即启动所选服务器、握手并读取工具列表，随后关闭。Hooks 在下一次对应事件生效。
 
-导入是允许执行外部程序，不是沙箱。仅导入信任的来源；本地指纹检查不保证系统里安装的命令或其依赖永远不变。插件商店、远程 MCP / OAuth 和非 command Hook 不在本批范围。
+导入是允许执行外部程序，不是沙箱。仅导入信任的来源；本地指纹检查不保证系统里安装的命令或其依赖永远不变。非 command Hook 不受支持；内置连接器的 OAuth 授权与其他产品的商店账号是不同的接入，不可互相替代。
 
 ### MCP 测试与失败提示
 

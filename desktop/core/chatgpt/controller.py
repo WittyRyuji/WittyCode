@@ -185,6 +185,7 @@ class ChatGPTController:
     _save_failed: bool = False
     _checkpoint_written: bool = False
     _fusion: Any = None
+    _paused_fusion: Any = None
     _fusion_parent: Any = None
     _acp: Any = None
 
@@ -221,27 +222,76 @@ class ChatGPTController:
         task.add_done_callback(self._background.discard)
         return task
 
-    def enable_fusion(self, policy: Any) -> None:
+    def _check_fusion_switch(self) -> None:
+        from desktop.core.fusion.registry import FusionError
+        if self._fusion_parent is not None or self.state is not SessionState.READY or self._turn is not None:
+            raise FusionError("The conversation must be idle before switching Fusion mode.")
+        if self.saved.plan.get("status") == "pending":
+            raise FusionError("Decide or revise the pending plan before switching Fusion mode.")
+
+    def enable_fusion(self, policy: Any, *, reasoning: str | None = None, retained: Any = None) -> None:
         from desktop.core.fusion.registry import FusionError, FusionRegistry, Policy
         from desktop.core.fusion.runtime import FusionRuntime, native_model
-        if (not isinstance(policy, Policy) or self._fusion_parent is not None or self._fusion is not None
-                or self.state is not SessionState.READY or self.saved.turns or native_model(policy.main) != self.model):
-            raise FusionError("Fusion must start in a new own-harness conversation with its configured main model.")
-        self._fusion = FusionRuntime(self, FusionRegistry(self.project, policy))
-        self.saved.fusion = self._fusion.registry.to_json()
+        self._check_fusion_switch()
+        if not isinstance(policy, Policy) or self._fusion is not None or self.manager.model_info(native_model(policy.main)) is None:
+            raise FusionError("The Fusion main model must be available; no fallback was selected.")
+        runtime = self._paused_fusion
+        if runtime is None:
+            if retained is not None:
+                if (not isinstance(retained, dict) or not isinstance(retained.get("owner"), str)
+                        or type(retained.get("mainTokens", 0)) is not int):
+                    raise FusionError("The retained Fusion owner is invalid.")
+                registry = FusionRegistry.from_json(self.project, retained.get("registry"))
+                runtime = FusionRuntime(self, registry, owner=retained["owner"], main_tokens=retained.get("mainTokens", 0))
+            else:
+                runtime = FusionRuntime(self, FusionRegistry(self.project, policy))
+        if runtime.registry.policy != policy:
+            raise FusionError("The retained Fusion configuration does not match this conversation.")
+        configured = runtime.reasoning_for(policy.main)
+        self._set_fusion_mode(runtime, None, native_model(policy.main), configured if configured is not None else reasoning)
+
+    def disable_fusion(self, model: str, reasoning: str) -> None:
+        from desktop.core.fusion.registry import FusionError
+        self._check_fusion_switch()
+        if self._fusion is None or model.startswith("devin:") or self.manager.model_info(model) is None:
+            raise FusionError("Choose an available single-agent model before leaving Fusion.")
+        self._set_fusion_mode(None, self._fusion, model, reasoning)
+
+    async def release_inactive_acp(self) -> None:
+        """Keep durable contexts, not unused Devin processes, when switching back to the own loop."""
+        if self._acp is not None and not self.model.startswith("devin:"):
+            await self._acp.close()
+        if self._paused_fusion is not None:
+            await self._paused_fusion.close()
+
+    def _set_fusion_mode(self, active: Any, paused: Any, model: str, reasoning: str | None) -> None:
+        before = (self._fusion, self._paused_fusion, self.requested_model, self.transcript.model, self.reasoning,
+                  self.saved.model, self.saved.reasoning, self.saved.fusion, self.saved.origin)
+        runtime = active or paused
+        self._fusion, self._paused_fusion = active, paused
+        self.requested_model = self.transcript.model = model
+        if reasoning is not None:
+            self.reasoning = reasoning
+        self.saved.fusion = runtime.registry.to_json()
+        if active is None:
+            self.saved.fusion["enabled"] = False
+        self.saved.origin = {**self.saved.origin, "fusionOwner": runtime.owner, "fusionMainTokens": runtime.main_tokens}
         try:
             self._save_now(required=True)
         except BaseException:
-            self._fusion = None
-            self.saved.fusion = {}
+            (self._fusion, self._paused_fusion, self.requested_model, self.transcript.model, self.reasoning,
+             self.saved.model, self.saved.reasoning, self.saved.fusion, self.saved.origin) = before
             raise
         if self._tools is not None:
-            self._tools.fusion_runner = self._fusion.delegate
+            self._tools.fusion_runner = active.delegate if active is not None else None
+        self.refresh_context()
+        self._notify("settings")
         self._changed()
 
     @property
     def agents(self) -> dict[str, Any]:
-        return self._fusion.agents if self._fusion is not None else {}
+        runtime = self._fusion or self._paused_fusion
+        return runtime.agents if runtime is not None else {}
 
     def agent_prompts(self) -> list[Any]:
         return [prompt for view in self.agents.values() if view.controller is not None
@@ -295,14 +345,16 @@ class ChatGPTController:
         """One cumulative series for the whole conversation: a figure never goes down, and the file keeps it, so a reopened
         conversation reports where it was and adds nothing twice."""
         series = {"self": self._usage_total} if self._usage_total is not None else {}
-        if self._fusion is not None:
-            series.update(self._fusion.usage_series())
+        runtime = self._fusion or self._paused_fusion
+        if runtime is not None:
+            series.update(runtime.usage_series())
         return series
 
     def usage_model_series(self) -> dict[str, tuple[str, Tokens]]:
         series = {f"model:{model}": (model, tokens) for model, tokens in self._usage_models.items()}
-        if self._fusion is not None:
-            series.update(self._fusion.usage_model_series())
+        runtime = self._fusion or self._paused_fusion
+        if runtime is not None:
+            series.update(runtime.usage_model_series())
         return series
 
     def _output_so_far(self) -> int:
@@ -374,11 +426,13 @@ class ChatGPTController:
             from desktop.core.fusion.runtime import FusionRuntime, native_model
             try:
                 registry = FusionRegistry.from_json(self.project, saved.fusion)
-                if self._fusion_parent is not None or native_model(registry.policy.main) != self.model:
-                    raise FusionError("The fixed main model does not match the saved session.")
-                self._fusion = FusionRuntime(self, registry)
-                saved.fusion = registry.to_json()
-                self._save_now(required=True)
+                enabled = saved.fusion.get("enabled", True)
+                if (not isinstance(enabled, bool) or self._fusion_parent is not None
+                        or enabled and native_model(registry.policy.main) != self.model):
+                    raise FusionError("The Fusion mode or fixed main model does not match the saved session.")
+                runtime = FusionRuntime(self, registry)
+                self._fusion, self._paused_fusion = (runtime, None) if enabled else (None, runtime)
+                runtime._checkpoint()
             except FusionError as error:
                 raise ChatGPTError("Fusion 状态损坏或主模型不一致，已暂停恢复，原始存档未被覆盖。", code="fusion") from error
         if recovered_plan:
@@ -535,8 +589,9 @@ class ChatGPTController:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await asyncio.wait_for(asyncio.shield(task), INTERRUPT_GRACE_SECONDS)
-        if self._fusion is not None:
-            await self._fusion.close()
+        runtime = self._fusion or self._paused_fusion
+        if runtime is not None:
+            await runtime.close()
         if self._acp is not None:
             await self._acp.close()
         if self._mcp_task is not None and not self._mcp_task.done():
