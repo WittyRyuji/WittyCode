@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -94,10 +95,12 @@ def test_the_plan_is_live_on_the_right_and_follows_only_its_conversation(qapp, l
     run(loop, scenario())
 
 
-def test_own_loop_plan_updates_the_open_panel_through_every_step_before_the_turn_finishes(qapp, loop, tmp_path):
+def test_own_loop_plan_updates_the_open_panel_through_every_step_before_the_turn_finishes(qapp, loop, tmp_path, monkeypatch):
     async def scenario():
         rig = await open_rig(tmp_path)
         try:
+            played = []
+            monkeypatch.setattr(rig.core.platform, "play_sound", lambda path: played.append(Path(path).stem))
             model = await new_conversation(rig)
             for done in range(4):
                 todos = [{"content": text, "status": "completed" if i < done else "in_progress" if i == done else "pending"} for i, text in enumerate(("检查", "修改", "验证"))]
@@ -110,8 +113,13 @@ def test_own_loop_plan_updates_the_open_panel_through_every_step_before_the_turn
                 await rig.wait_text(".plan-count", f"{done}/3")
                 assert await rig.count(".plan-step.st-completed") == done
                 assert await rig.exists(".send.stop"), "plan progress updates without ending the running turn"
+                assert await rig.exists(".tab.current .dot-running")
+                assert played == [], "completed plan substeps must not sound while the session dot is running"
             model.go()
             await rig.wait_for(".send.stop", 0)
+            await rig.wait_for(".tab.current .dot-ready")
+            await wait_for(lambda: played)
+            assert played == ["complete"]
             assert await rig.count(".plan-step.st-completed") == 3
         finally:
             await rig.finish()

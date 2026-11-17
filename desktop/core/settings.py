@@ -18,6 +18,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from desktop.core.fusion.reasoning import reasoning_map
+
 log = logging.getLogger("desktop.settings")
 
 SETTINGS_ENV = "WITTYCODE_SETTINGS"
@@ -34,6 +36,7 @@ CHATGPT_PERMISSIONS = ("ask", "code", "full")
 MODES = ("auto", "spec")
 THEMES = ("system", "light", "dark")
 FONT_SCALES = ("sm", "md", "lg")
+LANGUAGES = ("auto", "zh-CN", "en")
 FOLLOW_UPS = ("queue", "steer")
 """What Enter does with a message typed while a turn runs: ``queue`` holds it until the turn is over, ``steer`` gives it
 to the running turn now. Ctrl+Enter does the other one."""
@@ -98,8 +101,24 @@ class AppSettings:
     """The percent of the window at which that happens (``COMPACT_AT_RANGE``)."""
     max_steps: int = DEFAULT_MAX_STEPS
     """Model decision steps allowed in one turn of the own loop; read again between steps."""
+    fusion_main: str = ""
+    fusion_workers: list[str] = field(default_factory=list)
+    fusion_light: str = ""
+    fusion_reasoning: dict[str, str] = field(default_factory=dict)
+    """Page model id -> explicit effort for new Fusion sessions; missing keeps the existing default."""
+    fusion_preference: int = 50
+    fusion_max_calls: int = 8  # Legacy defaults are kept for settings compatibility, not applied to new sessions.
+    fusion_max_tokens: int = 500_000
+    fusion_max_seconds: int = 900
     think_chinese: bool = True
-    """Ask every model to write its thinking in Chinese (``core/language``)."""
+    """Legacy fallback for thinking_language when no explicit language has been saved."""
+    answer_language: str = "auto"
+    thinking_language: str = ""
+    sound_enabled: bool = True
+    sound_question: str = ""
+    sound_complete: str = ""
+    sound_error: str = ""
+    """Local WAV paths; empty means the corresponding bundled sound (resolved for display by ``core/sounds``)."""
     mode: str = "auto"
     projects: list[str] = field(default_factory=list)
     max_open_sessions: int = DEFAULT_MAX_OPEN_SESSIONS
@@ -118,7 +137,7 @@ class AppSettings:
     session_links: dict[str, str] = field(default_factory=dict)
     """Earlier native row ids -> the current native segment of the same WittyCode conversation."""
     session_order: list[str] = field(default_factory=list)
-    """Sidebar row ids in the order the user dragged them; newly discovered sessions precede these."""
+    """Sidebar row ids after dragging or promoting a sent/finished conversation; newly discovered sessions precede these."""
     session_created: dict[str, float] = field(default_factory=dict)
     """Stable creation times, including old rows without one and conversations that changed engine."""
 
@@ -273,6 +292,10 @@ def settings_from_dict(raw: object) -> AppSettings:
     think_chinese = raw.get("think_chinese")
     if not isinstance(think_chinese, bool):
         think_chinese = defaults.think_chinese
+    try:
+        fusion_reasoning = reasoning_map(raw.get("fusion_reasoning", {}))
+    except ValueError:
+        fusion_reasoning = {}
 
     splitter = raw.get("splitter_sizes")
     if not (
@@ -349,7 +372,21 @@ def settings_from_dict(raw: object) -> AppSettings:
         chatgpt_compact=chatgpt_compact,
         chatgpt_compact_at=compact_at,
         max_steps=max_steps,
+        fusion_main=text("fusion_main"),
+        fusion_workers=list(dict.fromkeys(item for item in raw.get("fusion_workers", []) if isinstance(item, str) and item.strip()))[:32] if isinstance(raw.get("fusion_workers"), list) else [],
+        fusion_light=text("fusion_light"),
+        fusion_reasoning=fusion_reasoning,
+        fusion_preference=raw.get("fusion_preference") if isinstance(raw.get("fusion_preference"), int) and not isinstance(raw.get("fusion_preference"), bool) and 0 <= raw["fusion_preference"] <= 100 else defaults.fusion_preference,
+        fusion_max_calls=raw.get("fusion_max_calls") if isinstance(raw.get("fusion_max_calls"), int) and not isinstance(raw.get("fusion_max_calls"), bool) and 1 <= raw["fusion_max_calls"] <= 1000 else defaults.fusion_max_calls,
+        fusion_max_tokens=raw.get("fusion_max_tokens") if isinstance(raw.get("fusion_max_tokens"), int) and not isinstance(raw.get("fusion_max_tokens"), bool) and 1 <= raw["fusion_max_tokens"] <= 2**53 - 1 else defaults.fusion_max_tokens,
+        fusion_max_seconds=raw.get("fusion_max_seconds") if isinstance(raw.get("fusion_max_seconds"), int) and not isinstance(raw.get("fusion_max_seconds"), bool) and 1 <= raw["fusion_max_seconds"] <= 86_400 else defaults.fusion_max_seconds,
         think_chinese=think_chinese,
+        answer_language=text("answer_language", LANGUAGES),
+        thinking_language=text("thinking_language", ("", *LANGUAGES)),
+        sound_enabled=raw.get("sound_enabled") if isinstance(raw.get("sound_enabled"), bool) else defaults.sound_enabled,
+        sound_question=text("sound_question").strip(),
+        sound_complete=text("sound_complete").strip(),
+        sound_error=text("sound_error").strip(),
         mode=text("mode", MODES),
         projects=projects,
         max_open_sessions=max_open,

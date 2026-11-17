@@ -22,10 +22,25 @@ for (const live of [false, true]) for (const theme of ["light", "dark"]) {
     if (live) {
       await page.waitFor("!!document.querySelector('.sidebar')", 6000);
       await page.key(",", { code: "Comma", vk: 188, modifiers: 2 });
-      await clickText(".snav", "Connections");
+      await clickText(".snav", "插件");
     }
-    await page.waitFor("document.querySelectorAll('.connection-tabs [role=tab]').length === 4 && !!document.querySelector('.connection-row')", 6000);
-    assert.deepEqual(await page.eval("[...document.querySelectorAll('.connection-tabs button')].map(e => e.textContent.replace(/[0-9]/g, '').trim())"), ["Skills", "Plugins", "Hooks", "MCP"]);
+    await page.waitFor("document.querySelectorAll('.connection-tabs [role=tab]').length === 6 && document.querySelectorAll('.connector-card').length === 2", 6000);
+    assert.deepEqual(await page.eval("[...document.querySelectorAll('.connection-tabs button')].map(e => e.textContent.replace(/[0-9]/g, '').trim())"), ["连接器", "Skills", "插件包", "Hooks", "MCP", "技能商店"]);
+    assert(await page.eval("[...document.querySelectorAll('.connector-card b')].map(e => e.textContent).join() === 'GitHub,Google Workspace'"));
+    assert(await page.eval("!document.querySelector('.connector-card input, .connector-card details')"), "users must not be asked for OAuth client configuration");
+    if (live) {
+      await page.click('.connector-card[data-connector=github] .btn');
+      await page.waitFor("document.querySelector('.connector-card[data-connector=github]').textContent.includes('已连接') && !document.querySelector('.connector-card[data-connector=github] .btn').disabled", 3000);
+      assert.deepEqual(await page.eval("__fake.callsOf('connectors.login').at(-1)"), { provider: "github" });
+      await clickText('.connector-card[data-connector=github] .btn', '断开连接');
+      await page.waitFor("!!document.querySelector('.dialog .danger-solid')", 3000);
+      await page.click('.dialog .danger-solid');
+      await page.waitFor("document.querySelector('.connector-card[data-connector=github]').textContent.includes('未连接')", 3000);
+      assert.deepEqual(await page.eval("__fake.callsOf('connectors.disconnect').at(-1)"), { provider: "github" });
+    }
+    await page.shot(resolve(`shots/builtin-connectors-${live ? "live" : "design"}-${theme}.png`));
+    await page.click('.connection-tabs [data-kind=skill]');
+    await page.waitFor("!!document.querySelector('.connection-row')", 3000);
     assert.equal(await page.eval("[...document.querySelectorAll('.snav')].at(-1).textContent.trim()"), "关于", "About must remain the final settings page");
     if (live) {
       assert(await page.eval("document.querySelector('.connection-issues summary').textContent.includes('2') && !document.querySelector('.connection-issues').open && !document.querySelector('.connection-error')"), "compatibility notes are visible as a collapsed summary, not a wall of operation errors");
@@ -90,6 +105,39 @@ for (const live of [false, true]) for (const theme of ["light", "dark"]) {
   } finally { await page.close(); }
 }
 
+{
+  const { scripts } = fakeBackendScripts({ initDelay: 0, accountDelay: 0, connectorLoginDelay: 1800 });
+  const page = await openPage(`${index}?live=1&theme=light`, { init: scripts, width: 1500, height: 950 });
+  try {
+    await page.waitFor("!!document.querySelector('.sidebar')", 6000);
+    await page.key(",", { code: "Comma", vk: 188, modifiers: 2 });
+    const tab = await page.eval("[...document.querySelectorAll('.snav')].findIndex(e => e.textContent.includes('插件'))");
+    await page.click('.snav', tab);
+    await page.waitFor("!!document.querySelector('.connector-card[data-connector=github] .btn')", 6000);
+    await page.click('.connector-card[data-connector=github] .btn');
+    await page.waitFor("document.querySelector('.connector-card[data-connector=github]').textContent.includes('DEMO-1234')", 3000);
+    await page.eval("__fake.delayReply('connectors.list', 1800)");
+    await page.waitFor("document.querySelector('.connector-card[data-connector=github]').textContent.includes('已连接')", 4000);
+    await page.eval("window.__connectorRegressed = false; window.__connectorWatch = new MutationObserver(() => { if (document.querySelector('.connector-card[data-connector=github]')?.textContent.includes('等待浏览器授权')) window.__connectorRegressed = true; }); __connectorWatch.observe(document.querySelector('.connector-card[data-connector=github]'), { subtree: true, childList: true, characterData: true }); true");
+    await new Promise((resolve) => setTimeout(resolve, 2200));
+    assert(!(await page.eval("__connectorRegressed")), "a slow, stale poll must not overwrite successful authorization");
+    assert(await page.eval("document.querySelector('.connector-card[data-connector=github]').textContent.includes('已连接') && !document.querySelector('.connector-card[data-connector=github]').textContent.includes('DEMO-1234')"));
+    await page.click('.connector-card[data-connector=github] .btn', 1);
+    await page.waitFor("!!document.querySelector('.dialog .danger-solid')", 3000);
+    await page.click('.dialog .danger-solid');
+    await page.waitFor("document.querySelector('.connector-card[data-connector=github]').textContent.includes('未连接')", 3000);
+    await page.click('.connector-card[data-connector=github] .btn');
+    await page.waitFor("document.querySelector('.connector-card[data-connector=github]').textContent.includes('DEMO-1234')", 3000);
+    await page.click('.connector-card[data-connector=github] .btn');
+    await page.waitFor("document.querySelector('.connector-card[data-connector=github]').textContent.includes('未连接')", 3000);
+    await new Promise((resolve) => setTimeout(resolve, 1900));
+    assert(await page.eval("document.querySelector('.connector-card[data-connector=github]').textContent.includes('未连接') && !document.querySelector('.connector-card[data-connector=github]').textContent.includes('DEMO-1234')"));
+    assert.deepEqual(await page.eval("__fake.callsOf('connectors.cancel').at(-1)"), { provider: "github" });
+    assert.equal(page.consoleErrors().length, 0);
+    console.log("PASS connector device code, cancellation and stale polling response");
+  } finally { await page.close(); }
+}
+
 for (const theme of ["light", "dark"]) {
   const connectionItems = ["Zeta", "alpha", "Beta"].map((name) => ({ id: `order-${name}`, kind: "skill", name, source: `C:/Users/me/.agents/skills/${name}/SKILL.md`, project: "", config: { path: `C:/Users/me/.agents/skills/${name}/SKILL.md` }, enabled: true, imported: false }));
   const { scripts } = fakeBackendScripts({ initDelay: 0, accountDelay: 0, connectionItems });
@@ -101,7 +149,8 @@ for (const theme of ["light", "dark"]) {
     await clickText(".snav", "外观");
     await clickText(".segc button", theme === "light" ? "浅色" : "深色");
     await page.waitFor(`document.documentElement.dataset.theme === '${theme}'`, 3000);
-    await clickText(".snav", "Connections");
+    await clickText(".snav", "插件");
+    await page.click('.connection-tabs [data-kind=skill]');
     await page.waitFor("document.querySelectorAll('.connection-row').length === 3", 6000);
     assert.deepEqual(await page.eval("[...document.querySelectorAll('.connection-info b')].map(e => e.textContent)"), ["alpha", "Beta", "Zeta"], "sorting must not depend on discovery order or case");
     await page.eval("window.__orderRows = [...document.querySelectorAll('.connection-row')]; true");
@@ -109,7 +158,7 @@ for (const theme of ["light", "dark"]) {
       await page.click('.connection-row .switch', 1);
       await page.waitFor(`!document.querySelector('.connection-row .switch').disabled && document.querySelectorAll('.connection-row .switch')[1].getAttribute('aria-checked') === '${enabled}'`, 3000);
       assert(await page.eval("document.querySelectorAll('.connection-row').length === 3 && __orderRows.every((e, i) => e === document.querySelectorAll('.connection-row')[i])"), "switches keep the same DOM rows in the same order");
-      assert.equal(await page.eval("document.querySelector('.connection-tabs .num').textContent"), "3");
+      assert.equal(await page.eval("document.querySelector('.connection-tabs [aria-selected=true] .num').textContent"), "3");
     }
     await clickText(".snav", "外观");
     assert.deepEqual(await page.eval("[...document.querySelectorAll('.settings-scroll .field-label')].map(e => e.textContent)"), ["主题", "文字大小"]);

@@ -1,0 +1,376 @@
+"""Devin ACP as a guarded model runner inside the persistent WittyCode session.
+
+Native I/O is disabled in an app-owned scratch workspace. Every useful tool runs through the private MCP bridge and
+therefore the existing HarnessTools/Observer permission, Plan, evidence and checkpoint machinery. This is not an OS sandbox.
+"""
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import hashlib
+import hmac
+import json
+import os
+import re
+import secrets
+import subprocess
+import uuid
+from dataclasses import replace
+from typing import Any
+
+from desktop.core.chatgpt.errors import ChatGPTError
+from desktop.core.devin.models import current_value
+from desktop.core.devin.policy import CANCELLED
+from desktop.core.fusion.acp_server import ADDRESS, AUTH, PREFIX, SERVER
+from desktop.core.harness.loop import AgentLoop, Call, TurnEnd
+from desktop.core.memory.launch import PACKAGE_ROOT, console_python
+
+GUARD_SECONDS = 15.0
+NATIVE_IO = ("read", "write", "edit", "apply_patch", "notebook_read", "notebook_edit", "grep", "glob", "exec", "get_output",
+             "write_to_process", "kill_shell", "webfetch", "fetch", "web_search", "ask_user_question", "todo_write", "exit_plan_mode",
+             "skill", "run_subagent", "read_subagent", "request_scope", "mcp_list_servers", "mcp_list_tools", "mcp_call_tool", "mcp_read_resource")
+IMPORTS = ("agents_standard", "cursor", "windsurf", "claude", "copilot", "codex", "kiro", "opencode", "zed")
+
+
+def guard_config() -> dict[str, Any]:
+    command = subprocess.list2cmdline([console_python(), "-m", "desktop.core.fusion.acp_server", "--hook"])
+    return {"permission_mode": "accept-edits", "subagents_enabled": False,
+            "permissions": {"deny": list(NATIVE_IO), "allow": [PREFIX + "*"], "ask": ["mcp__*"]},
+            "read_config_from": dict.fromkeys(IMPORTS, False),
+            "hooks": {event: [{"matcher": "", "hooks": [{"type": "command", "command": command, "timeout": 10}]}]
+                      for event in ("SessionStart", "PreToolUse")}}
+
+
+class AcpRun:
+    def __init__(self, host: Any) -> None:
+        self.host = host
+        self.client: Any = None
+        self.server: asyncio.Server | None = None
+        self.credential = secrets.token_urlsafe(32)
+        self.guard_seen = asyncio.Event()
+        self.session = ""
+        self.watcher: Any = None
+        self.tools: Any = None
+        self.loop: Any = None
+        self.history: list[dict[str, Any]] = []
+        self.lock = asyncio.Lock()
+        self.steps = 0
+        self.boundary = ""
+        self.violation = ""
+        self.active = False
+        self.reported = False
+        self._block = ""
+        self._text = ""
+        self._item = ""
+        self._connections: set[asyncio.Task[Any]] = set()
+        self._cancel: asyncio.Task[Any] | None = None
+        self._usage: dict[str, Any] = {}
+        self._replies: dict[str, tuple[str, Any]] = {}
+
+    async def _http(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        task = asyncio.current_task()
+        self._connections.add(task)
+        try:
+            header = (await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 5)).decode("ascii")
+            lines = header.split("\r\n")
+            headers = {key.lower(): value.strip() for line in lines[1:] if ":" in line for key, value in [line.split(":", 1)]}
+            if lines[0] != "POST / HTTP/1.1" or not hmac.compare_digest(headers.get("authorization", ""), "Bearer " + self.credential):
+                raise ValueError("Unauthorised bridge request.")
+            length = int(headers.get("content-length", "0"))
+            if not 0 < length <= 2_000_000:
+                raise ValueError("Invalid bridge request size.")
+            body = json.loads(await asyncio.wait_for(reader.readexactly(length), 10))
+            result = await self.dispatch(body.get("method"), body.get("params", {}))
+            reply = {"result": result}
+        except asyncio.CancelledError:
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+            raise
+        except Exception:
+            reply = {"error": "The Fusion bridge refused the request."}
+        finally:
+            self._connections.discard(task)
+        try:
+            data = json.dumps(reply, ensure_ascii=False).encode("utf-8")
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + str(len(data)).encode() + b"\r\nConnection: close\r\n\r\n" + data)
+            await writer.drain()
+        finally:
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+
+    async def dispatch(self, method: str, params: Any) -> Any:
+        if method == "guard":
+            if params.get("event") != "SessionStart":
+                raise ValueError("Invalid guard event.")
+            self.guard_seen.set()
+            return {}
+        if method == "tools/list":
+            if self.tools is None:
+                raise ValueError("No active tool manifest.")
+            return {"tools": [{"name": item["name"], "description": item["description"], "inputSchema": item["parameters"]}
+                              for item in self.tools.declarations()]}
+        if method != "tools/call" or not isinstance(params, dict):
+            raise ValueError("Unsupported bridge request.")
+        async with self.lock:
+            if not self.active or self.watcher is None or not self.watcher.current or self.boundary:
+                raise ValueError("No active ACP turn.")
+            self._flush()
+            invocation = params.get("bridgeCallId")
+            signature = hashlib.sha256(json.dumps({key: value for key, value in params.items() if key != "bridgeCallId"}, sort_keys=True).encode()).hexdigest()
+            if not isinstance(invocation, str) or len(invocation) > 200:
+                raise ValueError("A bridge invocation id is required.")
+            if invocation in self._replies:
+                original, reply = self._replies[invocation]
+                if original != signature:
+                    raise ValueError("A bridge invocation id was reused with other arguments.")
+                return reply
+            name, args = params.get("name"), params.get("arguments", {})
+            if not isinstance(name, str) or not isinstance(args, dict) or not self.tools.known(name):
+                raise ValueError("Unknown Fusion tool.")
+            if self.steps >= self.host.manager.settings.max_steps:
+                self.boundary = "step_limit"
+                self._stop()
+                raise ValueError("The turn reached its step limit.")
+            self.steps += 1
+            if not await self.watcher.before_tools():
+                await self.watcher._refresh_fusion_context(self.history)
+                self.host._save_now(required=True)
+                return {"isError": True, "content": [{"type": "text", "text": "Not run: the session rules changed. Review the current instructions before retrying:\n" + self.host.saved.prompt.get("current", "")}]}
+            ident = uuid.uuid4().hex
+            call = Call(ident, ident, name, json.dumps(args), args)
+            self.watcher.call_begun(ident, ident, name)
+            self.watcher.call_ready(call)
+            item = {"type": "function_call", "id": ident, "call_id": ident, "name": name, "arguments": call.raw}
+            self.history.append(item)
+            self.watcher.history_grew([item])
+            try:
+                await self.loop._run_calls(self.history, [call])
+                self.host._save_now(required=True)  # Retain the result before it is returned to ACP.
+            except Exception:
+                self.violation = "The Fusion tool or evidence checkpoint failed; the ACP turn was stopped."
+                self._stop()
+                raise
+            result = next(item for item in reversed(self.history) if item.get("type") == "function_call_output" and item.get("call_id") == ident)
+            if self.watcher.finish_requested():
+                self.boundary = "plan"
+                self._stop()
+            reply = {"content": [{"type": "text", "text": result["output"]}]}
+            self._replies[invocation] = (signature, reply)
+            return reply
+
+    def _stop(self) -> None:
+        if self.client is not None and self.session and (self._cancel is None or self._cancel.done()):
+            self._cancel = asyncio.create_task(self.client.notify("session/cancel", {"sessionId": self.session}))
+
+    def _flush(self) -> None:
+        if not self._text or self.watcher is None:
+            self._block = self._text = ""
+            return
+        if self._block == "text":
+            self.watcher.text_done(self._item, self._text)
+            item = {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": self._text}]}
+        else:
+            self.watcher.thinking_done(self._item, self._text)
+            item = {"type": "reasoning", "summary": [{"type": "summary_text", "text": self._text}]}
+        self.history.append(item)
+        self.watcher.history_grew([item])
+        self._block = self._text = ""
+
+    def _notify(self, method: str, params: Any) -> None:
+        if not self.active or not isinstance(params, dict) or params.get("sessionId") != self.session:
+            return
+        if method == "_cognition.ai/turn_stats":
+            from desktop.core.devin.items import stats_tokens
+            key = params.get("turnClientMessageId")
+            if isinstance(key, str) and (tokens := stats_tokens(params)) is not None:
+                self._usage[key] = tokens
+            return
+        if method != "session/update":
+            return
+        update = params.get("update", {})
+        kind = update.get("sessionUpdate")
+        if kind in ("agent_message_chunk", "agent_thought_chunk"):
+            text = update.get("content", {}).get("text", "")
+            if not isinstance(text, str):
+                return
+            block = "text" if kind == "agent_message_chunk" else "thinking"
+            if block != self._block:
+                self._flush()
+                self._block, self._item = block, uuid.uuid4().hex
+            self._text += text
+            if block == "text":
+                self.reported = self.reported or bool(text.strip())
+                self.watcher.text_delta(self._item, text)
+            else:
+                self.watcher.thinking_delta(self._item, text)
+        elif kind == "tool_call":
+            native = str(update.get("_meta", {}).get("cognition.ai/inferenceToolName", ""))
+            if not native.startswith(PREFIX):
+                self.violation = "The ACP model attempted a native tool instead of the guarded bridge."
+                self._stop()
+        elif kind == "usage_update":
+            from desktop.core.context import ContextState
+            used, size = update.get("used"), update.get("size")
+            if isinstance(used, int) and isinstance(size, int):
+                self.host.context = ContextState(used=used, window=size, model=self.host.model)
+                self.host._notify("context")
+
+    async def _request(self, method: str, params: Any, request_id: Any) -> Any:
+        if method == "session/request_permission" and isinstance(params, dict) and params.get("sessionId") == self.session:
+            native = str(params.get("toolCall", {}).get("_meta", {}).get("cognition.ai/inferenceToolName", ""))
+            if native.startswith(PREFIX):
+                once = next((option.get("optionId") for option in params.get("options", []) if option.get("kind") == "allow_once"), None)
+                if once is not None:
+                    return {"outcome": {"outcome": "selected", "optionId": once}}
+        return CANCELLED  # No persistent, project-wide or bypass grants may escape the WittyCode policy.
+
+    async def _open(self) -> None:
+        engine = getattr(self.host.manager, "devin", None)
+        if engine is None or not engine.settings.devin_enabled:
+            raise ChatGPTError("Devin ACP 当前不可用；未选择替代模型。", code="fusion_acp")
+        if self.client is not None and self.client.running:
+            return
+        await engine.ensure_signed_in()
+        binary = await engine.binary()
+        if binary is None:
+            raise ChatGPTError("找不到 Devin CLI；未选择替代模型。", code="fusion_acp")
+        root = self.host.manager.root.resolve() / "fusion-acp" / self.host.session_id
+        local = root / ".devin"
+        config_path = root / "config.json"
+        targets = (root, local, config_path, local / "config.local.json")
+        if any(path.resolve(strict=False) != path for path in targets):
+            raise ChatGPTError("ACP 受控配置路径包含链接，已拒绝启动。", code="fusion_acp_guard")
+        local.mkdir(parents=True, exist_ok=True)
+        config = guard_config()
+        config_path.write_text(json.dumps(config), encoding="utf-8")
+        (local / "config.local.json").write_text(json.dumps(config), encoding="utf-8")
+        if self.server is None:
+            self.credential = secrets.token_urlsafe(32)
+            self.server = await asyncio.start_server(self._http, "127.0.0.1", 0, limit=16_384)
+        port = self.server.sockets[0].getsockname()[1]
+        env = dict(getattr(engine, "_cli_env", None) or os.environ)
+        env.update({ADDRESS: f"http://127.0.0.1:{port}/", AUTH: self.credential,
+                    "PYTHONPATH": str(PACKAGE_ROOT), "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"})
+        binary = replace(binary, command=tuple(binary.argv("--config", str(config_path))))
+        self.guard_seen.clear()
+        self.client = engine._client_factory(binary, env=env, cwd=root, on_notification=self._notify, on_request=self._request, on_exit=lambda error: None)
+        await self.client.start()
+        await self.client.request("initialize", {"protocolVersion": 1, "clientCapabilities": {"fs": {"readTextFile": False, "writeTextFile": False}, "terminal": False},
+                                                  "clientInfo": {"name": "wittycode-fusion", "version": "1"}}, timeout=30)
+        # The private address/credential are inherited from the ACP process, never sent in persistable MCP config.
+        bridge_env = {key: env[key] for key in ("PYTHONPATH", "PYTHONUTF8", "PYTHONIOENCODING")}
+        mcp = [{"name": SERVER, "command": console_python(), "args": ["-m", "desktop.core.fusion.acp_server"],
+                "env": [{"name": key, "value": value} for key, value in bridge_env.items()]}]
+        saved = self.host.saved.origin.get("fusionAcp", {})
+        ident = saved.get("session", "") if isinstance(saved, dict) else ""
+        if ident and (not isinstance(ident, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", ident)):
+            raise ChatGPTError("ACP 原生会话记录损坏，未重新创建。", code="fusion_acp")
+        result = await self.client.request("session/load" if ident else "session/new", {"cwd": str(root), "mcpServers": mcp, **({"sessionId": ident} if ident else {})}, timeout=120)
+        self.session = ident or result.get("sessionId", "")
+        if not self.session:
+            raise ChatGPTError("ACP 没有返回原生会话，未自动重试。", code="fusion_acp")
+        self.host.saved.origin["fusionAcp"] = {"session": self.session, "upto": saved.get("upto", 0) if isinstance(saved, dict) else 0}
+        self.host._save_now(required=True)
+        try:
+            await asyncio.wait_for(self.guard_seen.wait(), GUARD_SECONDS)
+        except asyncio.TimeoutError:
+            raise ChatGPTError("Devin 未确认加载 Fusion 执行前保护；未发送模型请求。请更新兼容的 CLI。", code="fusion_acp_guard") from None
+
+    async def run(self, tools: Any, watcher: Any, history: list[dict[str, Any]], sent: str, attachments: Any, instructions: str) -> TurnEnd:
+        from desktop.core.devin.items import prompt_blocks
+        from desktop.core.usage import Tokens
+        from desktop.core.chatgpt.responses import Usage
+        self.tools, self.watcher, self.history = tools, watcher, history
+        self.loop = AgentLoop(None, tools, watcher, model=self.host.model, reasoning=None, instructions=instructions)
+        self.steps, self.boundary, self.violation = 0, "", ""
+        self.reported = False
+        self._usage.clear()
+        requested = False
+        fusion = self.host._fusion or getattr(self.host._fusion_parent, "_fusion", None)
+        if fusion is not None and fusion.registry.policy.max_tokens:
+            raise ChatGPTError("旧会话的 Token 上限无法约束 ACP；请新建无固定 Token 上限的 Fusion 会话。", code="fusion_acp")
+        model = (self.host._turn_model or self.host.model).removeprefix("devin:")
+        reasoning = self.host._turn_reasoning if self.host._turn_model else self.host.reasoning
+        try:
+            await self._open()
+            result = await self.client.request("session/set_config_option", {"sessionId": self.session, "configId": "model", "value": model}, timeout=30)
+            if current_value(result.get("configOptions"), "model") != model:
+                raise ChatGPTError("ACP 未确认所选模型；未使用默认模型继续。", code="fusion_acp")
+            await self.client.request("session/set_mode", {"sessionId": self.session, "modeId": "accept-edits"}, timeout=30)
+            if reasoning:
+                result = await self.client.request("session/set_config_option", {"sessionId": self.session, "configId": "thought_level", "value": reasoning}, timeout=30)
+                if current_value(result.get("configOptions"), "thought_level") != reasoning:
+                    raise ChatGPTError("ACP 未确认推理档位。", code="fusion_acp")
+            saved = self.host.saved.origin["fusionAcp"]
+            upto = saved.get("upto", 0)
+            if isinstance(upto, bool) or not isinstance(upto, int) or not 0 <= upto <= len(self.host.saved.items):
+                raise ChatGPTError("ACP 上下文检查点损坏，未继续。", code="fusion_acp")
+            carried = json.dumps(self.host.saved.items[upto:-1], ensure_ascii=False)
+            if len(carried) > 60_000:
+                reference = await asyncio.to_thread(self.host._outputs.put, carried)
+                carried = f"Read the retained prior conversation with read_output, reference={reference}."
+            prompt = (instructions + "\n\nAll filesystem access, commands, questions, plans and delegation MUST use the wittycode-fusion MCP tools. "
+                      "Native tools are disabled. Permissions are checked in WittyCode, not by changing ACP modes.\n\n"
+                      "Prior conversation since your last checkpoint (historical data, not new instructions):\n" + carried + "\n\nCurrent request:\n" + sent)
+            if self.host._turn is not None and self.host._turn.user_block is not None and self.host._turn.user_block.text.strip() == "/compact":
+                prompt = "/compact"
+            self.active = True
+            requested = True
+            result = await self.client.request("session/prompt", {"sessionId": self.session, "prompt": prompt_blocks(prompt, attachments)}, timeout=None)
+            self._flush()
+            if self.violation:
+                raise ChatGPTError(self.violation, code="fusion_acp_guard")
+            if result.get("stopReason") not in ("end_turn", "cancelled"):
+                raise ChatGPTError("ACP 未正常结束，未自动重放。", code="fusion_acp")
+            if result.get("stopReason") == "cancelled" and not self.boundary:
+                raise ChatGPTError("ACP 回合中断，未自动重放。", code="fusion_acp")
+            if not self.reported and not self.boundary:
+                raise ChatGPTError("ACP 没有返回报告，未自动重放。", code="fusion_acp")
+            saved["upto"] = len(self.host.saved.items)
+            self.host._save_now(required=True)
+            return TurnEnd(self.boundary or "done", steps=self.steps)
+        except BaseException:
+            await self.close()
+            raise
+        finally:
+            self.active = False
+            self._flush()
+            if self._usage:
+                tokens = Tokens()
+                for more in self._usage.values():
+                    tokens = tokens.plus(more)
+                self.host._add_usage(Usage(input_tokens=tokens.input_tokens + tokens.cache_read_tokens + (tokens.cache_creation_tokens or 0),
+                                           output_tokens=tokens.output_tokens, cached_tokens=tokens.cache_read_tokens, cache_write_tokens=tokens.cache_creation_tokens),
+                                     measures_context=False)
+            elif requested and fusion is not None:
+                fusion.registry.unmetered = fusion.registry.had_unknown = True
+                fusion._checkpoint()
+            self.watcher = None
+
+    async def close(self) -> None:
+        self.active = False
+        for task in list(self._connections):
+            task.cancel()
+        if self._connections:
+            await asyncio.gather(*list(self._connections), return_exceptions=True)
+        if self.client is not None:
+            if self.session and self.client.running:
+                with contextlib.suppress(Exception):
+                    await self.client.notify("session/cancel", {"sessionId": self.session})
+                with contextlib.suppress(Exception):
+                    await self.client.request("session/close", {"sessionId": self.session}, timeout=5)
+            await self.client.close()
+            self.client = None
+        if self._cancel is not None:
+            with contextlib.suppress(Exception):
+                await self._cancel
+        if self.server is not None:
+            self.server.close()
+            await self.server.wait_closed()
+            self.server = None
+        for task in list(self._connections):
+            task.cancel()
+        if self._connections:
+            await asyncio.gather(*list(self._connections), return_exceptions=True)

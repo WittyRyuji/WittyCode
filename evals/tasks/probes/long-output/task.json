@@ -1,0 +1,11 @@
+{
+  "id": "probe-long-output",
+  "title": "Find the one failure in 4,000 lines of command output",
+  "prompt": [
+    "python tools/run_checks.py exits with an error. Find out which check fails and fix the cause.",
+    "",
+    "Do not change anything in tools/. You are done when the command exits with code 0."
+  ],
+  "check": ["python", "tools/run_checks.py"],
+  "protect": ["tools"]
+}

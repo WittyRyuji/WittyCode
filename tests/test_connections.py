@@ -152,9 +152,9 @@ def test_codex_skill_can_be_disabled_without_editing_it(rig):
     assert file.read_bytes() == before
 
 
-def test_invalid_or_remote_configs_are_explicitly_rejected(rig):
+def test_invalid_and_insecure_remote_configs_are_explicitly_rejected(rig):
     store, _, project = rig
-    for config in ({"url": "https://example.com/mcp"}, {"command": "python", "args": "bad"}, {"command": "python", "env": {"VALUE": "plaintext"}}):
+    for config in ({"url": "http://example.com/mcp"}, {"command": "python", "args": "bad"}, {"command": "python", "env": {"VALUE": "plaintext"}}):
         file = write_json(project / ".mcp.json", {"mcpServers": {"demo": config}})
         with pytest.raises(ConnectionError):
             store.preview(str(file))
@@ -216,6 +216,9 @@ def test_real_own_loop_uses_imported_mcp_and_prompt_lifecycle_hooks(tmp_path, ri
             controller = core._by_cid[cid].controller
             plan.script(call("mcp__demo__echo", {}, call_id="local-call"), say("done", used=usage(100, 10)))
             await core.call("session.send", {"id": cid, "text": "use the local tool"})
+            await until(lambda: controller.transcript.pending_prompts(), timeout=15)
+            permission = controller.transcript.pending_prompts()[0]
+            assert controller.answer_permission(permission.id, "proceed_once")
             await until(lambda: controller.state is SessionState.READY, timeout=15)
             assert len(plan.requests) == 2
             assert "local hook context" in json.dumps(plan.requests[0]["input"])

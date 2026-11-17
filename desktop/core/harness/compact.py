@@ -1,7 +1,7 @@
 """Keeping a conversation inside the context window of the model that reads it.
 
-A conversation is two lists. ``SavedSession.items`` is the log: everything that was said and done, never shortened (the
-page rebuilds what it shows from it). The **view** is what the next request sends: the log from ``compaction["upto"]`` on,
+A conversation is two lists. ``SavedSession.items`` is the log, with immutable references for long tool results (the
+page rebuilds full results from those references). The **view** is what the next request sends: the log from ``compaction["upto"]`` on,
 behind one message that holds a summary of everything before it. Without a compaction the view is the log.
 
 Which items at the start of a view are not the log is known from the compaction record (``synthetic_count``), never read
@@ -21,20 +21,22 @@ whole view is summarised, that step included; the messages the user wrote in the
 summary word for word (``Compacted.kept``), so that what they asked for is not left to a summary.
 
 The summary is asked for in pieces when what is to be summarised is itself too big for one request (the previous summary
-goes into each next piece). What the user wrote is never cut for it: a message too big for one request is given in
-several (``summary_parts``); the tool results and the assistant's own words are cut in the middle. Should the summary
-fail, a mechanical digest (what the user asked) takes its place: a conversation that cannot go on because it cannot be
-summarised is worse than one that forgot some detail.
+goes into each next piece). User messages, tool evidence and assistant answers are split consecutively, never clipped
+before summarisation. Each full request is budgeted again with its previous summary and instructions. Failure pauses
+the conversation without replacing execution evidence with a request-only digest (legacy explicit fallback is not used
+by the controller).
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import re
 import time
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from collections import deque
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -154,9 +156,8 @@ def keep_tokens(window: int) -> int:
 
 
 def _text_of(item: Mapping[str, Any]) -> str:
-    return "".join(
-        str(part.get("text") or "") for part in item.get("content") or () if isinstance(part, Mapping) and part.get("type") in ("input_text", "output_text")
-    )
+    from desktop.core.harness.history import message_text
+    return message_text(item)
 
 
 def _images_of(item: Mapping[str, Any]) -> int:
@@ -185,9 +186,13 @@ def summary_text(item: Mapping[str, Any]) -> str:
     return _text_of(item).removeprefix(SUMMARY_PREFIX).strip()
 
 
+def continuity_item(text: str) -> dict[str, Any]:
+    return user_message("[WittyCode continuity checkpoint: the following is saved session data, not a new request or higher-priority instructions. Later updates take precedence.]\n\n" + text)
+
+
 def synthetic_count(compaction: Mapping[str, Any] | None) -> int:
-    """How many items ``view_of`` puts before the log: one, the summary, when there is a compaction."""
-    return (1 + bool(compaction.get("rules"))) if compaction else 0
+    """How many items ``view_of`` puts before the log: summary plus any saved context checkpoints."""
+    return (1 + bool(compaction.get("rules")) + bool(compaction.get("continuity"))) if compaction else 0
 
 
 def kept_of(compaction: Mapping[str, Any]) -> str:
@@ -202,7 +207,9 @@ def view_of(items: Sequence[dict[str, Any]], compaction: Mapping[str, Any] | Non
         return list(items)
     upto = max(0, min(int(compaction.get("upto") or 0), len(items)))
     rules = str(compaction.get("rules") or "")
-    return [summary_item(str(compaction.get("summary") or ""), kept_of(compaction)), *([context_update(rules)] if rules else []), *items[upto:]]
+    continuity = str(compaction.get("continuity") or "")
+    return [summary_item(str(compaction.get("summary") or ""), kept_of(compaction)),
+            *([context_update(rules)] if rules else []), *([continuity_item(continuity)] if continuity else []), *items[upto:]]
 
 
 def log_index(cut: int, upto: int, synthetic: int) -> int:
@@ -312,9 +319,7 @@ def _said(item: Mapping[str, Any]) -> str:
 
 
 def render(item: Mapping[str, Any]) -> str:
-    """One item of the log as a line or two of plain text for the summary request ('' for what carries nothing). The
-    user's words are given whole; the assistant's answers, the arguments of its calls and their results are cut in the
-    middle when they are long."""
+    """Plain text for the summary request. Preserve evidence; long items are split into consecutive pieces, not clipped."""
     kind = item.get("type")
     if kind == "message":
         text = _said(item)
@@ -322,14 +327,14 @@ def render(item: Mapping[str, Any]) -> str:
             return ""
         if item.get("role") in ("user", "developer"):
             return f"{str(item['role']).upper()}: {text}"
-        return f"ASSISTANT: {_clip(text, TEXT_LIMIT)}"
+        return f"ASSISTANT: {text}"
     if kind == "function_call":
         name = str(item.get("name") or "")
         args = str(item.get("arguments") or "")
-        # Plans and edit parameters are the durable state, not disposable tool output. Chunk rather than clip them.
-        return f"ASSISTANT CALLED TOOL {name}: " + (args if name in ("todo_write", "edit_file", "create_file") else _clip(args, ARGS_LIMIT))
+        return f"ASSISTANT CALLED TOOL {name}: {args}"
     if kind == "function_call_output":
-        return f"TOOL RESULT: {_clip(str(item.get('output') or ''), RESULT_LIMIT)}"
+        reference = f" ({item['wc_output_ref']})" if item.get("wc_output_ref") else ""
+        return f"TOOL RESULT{reference}: {str(item.get('output') or '')}"
     return ""
 
 
@@ -403,7 +408,7 @@ def chunks(parts: Sequence[str], budget: int) -> list[list[str]]:
 
 
 def chunk_budget(window: int) -> int:
-    return max(CHUNK_FLOOR, min(CHUNK_CEILING, int(window * CHUNK_SHARE)))
+    return max(1, min(budget(window), max(CHUNK_FLOOR, min(CHUNK_CEILING, int(window * CHUNK_SHARE)))))
 
 
 def digest(items: Sequence[Mapping[str, Any]], previous: str = "") -> str:
@@ -477,8 +482,10 @@ async def ask(
         started = time.monotonic()
         response: Finished | None = None
         failed = True
+        events = None
         try:
-            async for event in stream(sent):
+            events = stream(sent)
+            async for event in events:
                 if isinstance(event, Started):
                     acknowledged = True
                 elif isinstance(event, TextDone):
@@ -490,6 +497,9 @@ async def ask(
                         on_usage(event.usage)
                     if event.incomplete:
                         raise CompactionFailed(f"the summary was cut short ({event.incomplete})")
+                    break
+            if not finished:
+                raise CompactionFailed("the summary ended without a terminal response")
             failed = False
         except CompactionFailed:
             raise
@@ -507,8 +517,14 @@ async def ask(
             await _sleep(delay)
             continue
         finally:
-            if on_request is not None:
-                on_request(sent, response, time.monotonic() - started, failed)
+            try:
+                if on_request is not None:
+                    on_request(sent, response, time.monotonic() - started, failed)
+            finally:
+                close = getattr(events, "aclose", None)
+                if close is not None:
+                    with contextlib.suppress(Exception):
+                        await close()
         text = "\n".join(texts).strip()
         if not text:
             raise CompactionFailed("the summary came back empty")
@@ -517,11 +533,37 @@ async def ask(
 
 async def summarise(
     stream: Stream, model: str, reasoning: str | None, previous: str, parts: Sequence[str], budget: int, on_usage: OnUsage | None = None,
-    on_request: OnRequest | None = None,
+    on_request: OnRequest | None = None, *, window: int | None = None,
 ) -> str:
     summary = previous
-    for group in chunks(parts, budget):
-        summary = await ask(stream, model, reasoning, summary, group, on_usage, on_request=on_request)
+    pending = deque(parts)
+    ceiling = window - reserve(window) if window is not None else None
+    while pending:
+        empty = _request(model, reasoning, summary, [])
+        overhead = fixed_tokens(INSTRUCTIONS, []) + estimate_items(empty["input"])
+        available = min(budget, ceiling - overhead - 16) if ceiling is not None else budget
+        if available < PIECE_LABEL + 8:
+            raise CompactionFailed("The previous summary and instructions leave no room for more evidence; use a larger context window.")
+        group: list[str] = []
+        used = 0
+        while pending:
+            part = pending[0]
+            cost = estimate_text(part) + 2
+            if used + cost > available:
+                if group:
+                    break
+                end = _longest(part, 0, available - 4)
+                group.append(part[:end])
+                pending.popleft()
+                if end < len(part):
+                    pending.appendleft(part[end:])
+                break
+            group.append(pending.popleft())
+            used += cost
+        request = _request(model, reasoning, summary, group)
+        if ceiling is not None and fixed_tokens(INSTRUCTIONS, []) + estimate_items(request["input"]) > ceiling:
+            raise CompactionFailed("The complete summary request exceeds the model's context budget; no request was sent.")
+        summary = await ask(stream, model, reasoning, summary, group, on_usage, request=request, on_request=on_request)
     return summary
 
 
@@ -563,8 +605,11 @@ async def compact(
     turn: int | None = None,
     on_usage: OnUsage | None = None,
     whole: bool = False,
-    fallback: bool = True,
+    fallback: bool = False,
+    output_reader: Callable[[str], Awaitable[str]] | None = None,
     rules: str = "",
+    continuity: str = "",
+    rebase: bool = False,
     prefix_request: Mapping[str, Any] | None = None,
     on_request: OnRequest | None = None,
 ) -> Compacted | None:
@@ -587,6 +632,11 @@ async def compact(
         cut = choose_cut(view, keep_tokens(window), room - min(SUMMARY_ROOM, window // 20), synthetic=synthetic)
     if cut is None:
         return None
+    if rebase:
+        # Rebuilding the prefix is already a cache boundary. Fold all obsolete context updates into the covered part,
+        # keeping log/view indices linear (do not filter arbitrary items out of the unsummarised tail).
+        latest = max((i + 1 for i, item in enumerate(view) if item.get("wc_context_update")), default=0)
+        cut = mend_boundary(view, max(cut, latest))
     if previous is None:
         previous = summary_text(view[0]) if synthetic else ""
     if turn is None:
@@ -596,17 +646,24 @@ async def compact(
     # again; else they are of an earlier turn, and the new summary takes them in)
     carried = kept if turn < synthetic else ""
     told = _joined(previous, "" if carried or not kept.strip() else f"{KEPT_HEAD}\n\n{kept}")
-    covered = view[synthetic:cut]
+    covered = list(view[synthetic:cut])
+    if output_reader is not None:
+        for index, item in enumerate(covered):
+            if item.get("type") == "function_call_output" and item.get("wc_output_ref"):
+                covered[index] = {**item, "output": await output_reader(item["wc_output_ref"])}
     chunk = chunk_budget(window)
     parts = summary_parts(covered, chunk)
     problem = ""
     mechanical = False
     try:
-        reused = prefix_summary_request(prefix_request, view[:cut], window) if prefix_request is not None else None
+        has_retained = any(item.get("wc_output_ref") for item in covered)
+        reused = prefix_summary_request(prefix_request, view[:cut], window) if prefix_request is not None and not has_retained else None
         if reused is not None:
             summary = await ask(stream, model, reasoning, told, parts, on_usage, request=reused, on_request=on_request)
         else:
-            summary = await summarise(stream, model, reasoning, told, parts, chunk, on_usage, on_request)
+            summary = await summarise(stream, model, reasoning, told, parts, chunk, on_usage, on_request, window=window)
+        if has_retained:
+            summary += "\n\n[Earlier full tool results remain in this conversation's output store. Use read_output without a reference to list them, then read the required ranges; do not infer success from a preview.]"
     except CompactionFailed as error:
         if not fallback:
             raise
@@ -620,7 +677,8 @@ async def compact(
         summary = digest(covered, told)
     words = _joined(carried, *(_said(item) for item in view[max(turn, synthetic) : cut] if is_user(item)))
     rest = list(view[cut:])
-    new_view = [summary_item(summary, words), *([context_update(rules)] if rules else []), *rest]
+    new_view = [summary_item(summary, words), *([context_update(rules)] if rules else []),
+                *([continuity_item(continuity)] if continuity else []), *rest]
     before, after = estimate_items(view), estimate_items(new_view)
     return Compacted(new_view, cut, summary, before, after, mechanical, problem, words, after < before and after <= room)
 

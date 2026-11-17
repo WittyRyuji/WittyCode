@@ -202,15 +202,15 @@ ok("the TPS tooltip says in its first line that the figure is an estimate", awai
 // settings: the button, the pages, and a change that takes effect at once
 await page.click(".foot-btn", 1);
 ok("the settings button opens the settings", await page.eval("!!document.querySelector('.settings')"));
-ok("the settings pages also include Connections", await page.eval("[...document.querySelectorAll('.snav')].map(e => e.textContent.trim()).join(',') === '外观,账号与模型,新会话默认值,会话,共享记忆5,外部程序,项目,快捷键,Connections,关于'"));
+ok("settings include Fusion, customization and plugins, and keep About last", await page.eval("[...document.querySelectorAll('.snav')].map(e => e.textContent.trim()).join(',') === '外观,账号与模型,会话,Fusion,自定义,共享记忆5,外部程序,项目,插件,关于'"));
 await page.click(".snav", 2);
-ok("defaults page lists model / reasoning / permission / mode", await page.eval("document.querySelectorAll('.settings-scroll .field').length === 4"));
+ok("the session page includes model / reasoning / permission / mode defaults", await page.eval("document.querySelectorAll('.sessions-columns > section:first-child .field').length === 4"));
 await page.click(".snav", 0);
 await page.click(".segc button", 1); // light
 ok("theme can be changed in the settings", await page.eval("document.documentElement.dataset.theme === 'light'"));
 await page.click(".segc button", 5); // font size: large (the theme has buttons 0-2, the size 3-5)
 ok("font size can be changed", await page.eval("document.documentElement.dataset.fs === 'lg'"));
-await page.click(".snav", 3);
+await page.click(".snav", 2);
 ok("the sessions page: the compaction switch is on and says 85% (the default), the session limit says 4", await page.eval("(() => { const sw = document.querySelector('.settings-body .field .switch'); const n = [...document.querySelectorAll('.stepper span')].map(e => e.textContent); return sw.getAttribute('aria-checked') === 'true' && n.join() === '85%,4'; })()"));
 await page.click(".stepper button", 1);
 ok("the compaction stepper moves by 5 points", await page.eval("document.querySelector('.stepper span').textContent === '90%'"));
@@ -224,7 +224,7 @@ ok("the session limit stepper works", await page.eval("[...document.querySelecto
 await page.click(".settings-body .field .switch", 0);
 ok("with the compaction switched off the percent is not offered, only the session limit", await page.eval("document.querySelector('.settings-body .field .switch').getAttribute('aria-checked') === 'false' && [...document.querySelectorAll('.stepper span')].map(e => e.textContent).join() === '5'"));
 await page.click(".settings-body .field .switch", 0);
-await page.click(".snav", 5);
+await clickText(".snav", "外部程序");
 ok("the 外部程序 page has only the Devin CLI, found automatically", await page.eval("[...document.querySelectorAll('.settings-body .field-label')].map(e => e.textContent).join() === 'Devin 命令行' && [...document.querySelectorAll('.settings-body .pathbox')].some(p => p.textContent.toLowerCase().endsWith('devin.exe'))"));
 await page.click(".settings-body .segc button", 1);
 const devinPath = 'input[aria-label="Devin 命令行 路径"]';
@@ -391,6 +391,7 @@ await page.close();
 // accounts and models: WittyCode's own engine, Devin and the API providers, no other program's
 page = await openPage(`${index}?scene=done&settings=providers&theme=dark&review=0`);
 ok("the page has the own-loop providers, Devin and an optional Factory CLI card", await page.eval("document.querySelectorAll('.providers .pcard').length === 4 && document.querySelector('.factory-card').textContent.includes('Factory CLI（可选）')"));
+ok("API Provider is the last account/model card", await page.eval("document.querySelector('.providers > .pcard:last-child h4')?.textContent === 'API Provider'"));
 ok("no console errors (accounts page)", page.consoleErrors().length === 0);
 await page.close();
 
@@ -591,6 +592,7 @@ await page.close();
 
 page = await openPage(`${index}?scene=done&settings=programs&theme=light&review=0`);
 ok("the 外部程序 page holds the Devin program path", await page.eval("document.querySelector('.settings-body').textContent.includes('Devin 命令行')"));
+ok("external program cards and their title/input edges align without inherited page-header padding", await page.eval("(() => { const f = document.querySelector('.factory-program'), d = document.querySelector('.program-path'); const fr = f.getBoundingClientRect(), dr = d.getBoundingClientRect(); const title = f.querySelector('h4').getBoundingClientRect(), input = f.querySelector('input').getBoundingClientRect(), label = d.querySelector('.field-label').getBoundingClientRect(), path = d.querySelector('.pathbox').getBoundingClientRect(); return Math.abs(fr.left-dr.left)<1 && Math.abs(fr.width-dr.width)<1 && Math.abs(title.left-input.left)<1 && Math.abs(title.left-label.left)<1 && Math.abs(label.left-path.left)<1 && Math.abs(dr.top-fr.bottom-14)<1 && getComputedStyle(f.querySelector('header')).paddingLeft==='0px'; })()"));
 await page.close();
 
 // accounts and models: which models the conversation's model menu offers

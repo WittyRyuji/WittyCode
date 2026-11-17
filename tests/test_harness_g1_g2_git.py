@@ -151,7 +151,8 @@ def test_a_default_hook_is_asked_about_although_no_setting_names_it(repo):
     assert not marker.exists(), "taking the decision must not run anything of the repository's"
     assert verdict("code", {"command": "cat a.txt"}, ctx) == "allow", "only Git runs what lies in .git"
     assert verdict("full", {"command": "git status --short"}, ctx) == "allow", "full access still allows it"
-    assert verdict("code", {"command": "git status --short"}, ctx, remembered={"exec:git"}) == "allow", (
+    approved = {permissions.remember_key(SHELL, {"command": "git status --short"}, ctx)}
+    assert verdict("code", {"command": "git status --short"}, ctx, remembered=approved) == "allow", (
         "the approval of this session still covers it"
     )
 

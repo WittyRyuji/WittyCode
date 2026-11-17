@@ -11,7 +11,8 @@ Windows 上的编程代理桌面应用，自带代理循环：回答放在第一
 ![一轮结束后：工具调用折叠成一行摘要，回答醒目](docs/screenshots/readme-conversation.png)
 
 - **自带代理循环**：WittyCode 自己调用模型——用你的 ChatGPT 套餐（Sign in with ChatGPT）或你自己的 API Provider——带文件、搜索、命令工具和三档权限；长对话自动压缩，请求失败自动重试。
-- **所有模型一个界面**：ChatGPT Plan、API Provider（OpenAI、Anthropic、DeepSeek / OpenRouter / Ollama 等兼容接口，以及 AWS Bedrock），可选 Devin 和 Factory CLI。对话中途可以换模型，之前的文字会交接过去。
+- **所有模型一个界面**：ChatGPT Plan、API Provider（OpenAI、Anthropic、DeepSeek / OpenRouter / Ollama 等兼容接口，以及 AWS Bedrock），可选 Devin 和 Factory CLI。普通对话中途可以换模型，之前的文字会交接过去。
+- **Fusion 与 Plan**：自有主代理可按模块委派并复用专家；Plan 在明确批准当前方案后才执行。配置、预算和限制见 [Fusion 指南](docs/fusion.md)。
 - **运行中也能问答**：审批和提问显示成卡片，选项一行一个；运行中打的字可以排队，也可以立即引导本轮。
 - **斜杠命令和技能**：`/compact`、`/plan`、`/goal <目标>`；技能和自定义命令放在 `.wittycode/`（也读其他代理应用常用的目录）。
 - **共享记忆**：所有引擎读写同一份本地笔记，可以从别的应用导入笔记和会话。

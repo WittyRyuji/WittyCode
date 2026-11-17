@@ -391,7 +391,7 @@ def test_a_pasted_picture_becomes_an_attachment_and_goes_out_with_the_message(qa
     run(loop, scenario())
 
 
-def test_the_settings_under_the_message_box_change_the_session_and_the_defaults(qapp, loop, tmp_path):
+def test_the_message_box_changes_only_the_session_not_the_saved_defaults(qapp, loop, tmp_path):
     async def scenario():
         rig = await open_rig(tmp_path)
         await new_conversation(rig)
@@ -403,7 +403,7 @@ def test_the_settings_under_the_message_box_change_the_session_and_the_defaults(
         await rig.wait_for(".menu-item")
         await rig.click_text(".menu-item", "High")
         await until(lambda: controller.live_settings().reasoning == "high")
-        assert rig.core.settings.reasoning_effort == "high"
+        assert rig.core.settings.reasoning_effort == "medium", "the saved new-session default is independent"
         await rig.wait_text(".controls .chip-v", "High")
         await rig.click(".controls .chip", 3)  # mode
         await rig.click_text(".menu-item", "Plan")
@@ -506,7 +506,7 @@ def test_a_saved_session_opens_with_its_history_and_is_resumed(qapp, loop, tmp_p
     run(loop, scenario())
 
 
-def test_the_sidebar_keeps_creation_order_while_clicks_and_messages_update_status(qapp, loop, tmp_path):
+def test_sidebar_clicks_keep_order_but_messages_and_answers_promote_the_session(qapp, loop, tmp_path):
     async def scenario():
         rig = await open_rig(tmp_path, saved=SAVED)
         model = Model(rig)
@@ -539,15 +539,19 @@ def test_the_sidebar_keeps_creation_order_while_clicks_and_messages_update_statu
             await rig.send("继续 go on")
             await model.asked()
 
-            async def older_row_has_new_activity() -> bool:
-                return "刚刚" in (await rig.texts(".srow .ssub"))[1]
+            active_order = list(reversed(order))
 
-            await wait_for(older_row_has_new_activity, 10, "the older row's activity time to update in place")
+            async def older_row_has_new_activity() -> bool:
+                titles, subs = await where()
+                return titles == active_order and "刚刚" in subs[0]
+
+            await wait_for(older_row_has_new_activity, 10, "the sent message to promote the older row and update its activity time")
             titles, subs = await where()
-            assert titles == order and "刚刚" not in subs[0], "the older session stays second while running"
+            assert titles == active_order and "刚刚" not in subs[1], "sending promotes only the active session"
             model.go()
             await rig.wait_text(".statusbar .st-left", "就绪")
-            assert await rig.texts(".srow .stitle") == order, "finishing the answer does not reorder the rows either"
+            await rig.wait_text(".srow:first-child .stitle", active_order[0])
+            assert await rig.texts(".srow .stitle") == active_order, "the final answer keeps the active session at the top"
         finally:
             await finish(rig, model)
 
@@ -741,7 +745,7 @@ def test_a_waiting_message_can_be_taken_back_and_the_setting_swaps_the_two_keys(
         # the setting: Enter steers, Ctrl+Enter queues
         await rig.press(",", Qt.KeyboardModifier.ControlModifier)
         await rig.wait_for(".settings")
-        await rig.click(".snav", 3)  # 外观 / 账号与模型 / 新会话默认值 / 会话
+        await rig.click_text(".snav", "会话")
         await rig.click_text(".segc button", "立即引导")
         await wait_for(lambda: rig.core.settings.follow_up == "steer", message="the setting to reach the core")
         await rig.press("Escape")

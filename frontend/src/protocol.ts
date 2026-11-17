@@ -15,6 +15,7 @@ import type {
   EnvState,
   FileView,
   FontScale,
+  FusionSessionPolicy,
   MemoryChange,
   MemoryEntry,
   MemoryKind,
@@ -39,6 +40,7 @@ import type {
   Speed,
   ThemeChoice,
   Turn,
+  TurnUpdate,
   Usage,
 } from "./types";
 import type { TestResult } from "./bridge";
@@ -48,6 +50,14 @@ export interface SettingsView {
   maxOpen: number;
   /** own-loop steps per turn; missing on an older sender: 80 */
   maxSteps?: number;
+  fusionMain?: string;
+  fusionWorkers?: string[];
+  fusionLight?: string;
+  fusionReasoning?: Record<string, string>;
+  fusionPreference?: number;
+  fusionMaxCalls?: number;
+  fusionMaxTokens?: number;
+  fusionMaxSeconds?: number;
   devinPath: string;
   /** page model ids the user left out of the conversation's model menu */
   hiddenModels: string[];
@@ -71,12 +81,23 @@ export interface SettingsView {
   compactAt: number;
   /** every model is asked to write its thinking in Chinese */
   thinkChinese?: boolean;
+  answerLanguage?: Language;
+  thinkingLanguage?: Language;
+  soundEnabled?: boolean;
+  /** Resolved paths, including bundled defaults (never an ambiguous empty selection). */
+  soundQuestion?: string;
+  soundComplete?: string;
+  soundError?: string;
   /** the folder of the conversation started last ("" before the first): the first message box starts there */
   lastProject?: string;
 }
 export type FollowUp = "queue" | "steer";
-export type SettingKey = "theme" | "fontScale" | "followUp" | "maxOpen" | "maxSteps" | "sidebarWidth" | "devinPath" | "memoryEnabled" | "memoryRecall" | "memoryCapture" | "memoryCurate" | "memoryEngines" | "compactAuto" | "compactAt" | "thinkChinese";
-export type SettingValue = string | number | boolean | string[];
+export type Language = "auto" | "zh-CN" | "en";
+export type FusionSettingKey = "fusionMain" | "fusionWorkers" | "fusionLight" | "fusionReasoning" | "fusionPreference" | "fusionMaxSeconds";
+export type SettingKey = "theme" | "fontScale" | "followUp" | "maxOpen" | "maxSteps" | "sidebarWidth" | "devinPath" | "memoryEnabled" | "memoryRecall" | "memoryCapture" | "memoryCurate" | "memoryEngines" | "compactAuto" | "compactAt" | "thinkChinese" | "answerLanguage" | "thinkingLanguage" | "soundEnabled" | SoundKey | FusionSettingKey;
+export type SoundKind = "question" | "complete" | "error";
+export type SoundKey = "soundQuestion" | "soundComplete" | "soundError";
+export type SettingValue = string | number | boolean | string[] | Record<string, string>;
 
 /** What `memory.list` can be narrowed by (all optional). `query`: words to look for; `status` "all" lists forgotten notes too. */
 export interface MemoryFilter {
@@ -146,6 +167,9 @@ export interface ConversationMeta {
   handoff: PendingHandoff | null;
   queued: QueuedMessage[];
   agents: AgentInfo[];
+  fusion?: boolean;
+  fusionPolicy?: FusionSessionPolicy | null;
+  pendingPlan?: { id: string; text: string; warning?: string } | null;
   /** the goal (`/goal`) the conversation is working toward; "" when none */
   goal?: string;
 }
@@ -239,9 +263,27 @@ export interface ConnectionEntry {
 export interface ConnectionScan { items: ConnectionEntry[]; errors: { source: string; text: string }[]; hookEvents: string[] }
 export interface ConnectionPreview { preview: string; items: ConnectionEntry[]; commands: { name: string; kind: string; command: string; args: string[] }[] }
 
+export type ConnectorId = "github" | "google-workspace";
+export interface ConnectorConfig { clientId: string; clientSecretEnv: string; port: number; enabled: boolean }
+export interface ConnectorView extends ConnectorConfig { id: ConnectorId; name: string; connected: boolean; signingIn: boolean; available: boolean; userCode: string; scopes: string; helpUrl: string; callbackUrl: string }
+export type SkillSource = "openai" | "anthropic";
+export interface MarketSkill { source: SkillSource; name: string; commit: string; url: string; installed: boolean; active?: boolean }
+export interface SkillInstallPreview { preview: string; source: SkillSource; name: string; skillName?: string; userInvocable?: boolean; modelInvocable?: boolean; existing?: boolean; commit: string; url: string; description: string; license: string; licenseText: string; files: number }
+export interface RulesDocument { path: string; text: string; revision: string; exists: boolean }
+
 export interface FactoryState { cli: "found" | "missing"; cliPath: string; path: string; enabled: boolean }
 
 export interface Calls {
+  "connectors.list": { params: None; result: ConnectorView[] };
+  "connectors.configure": { params: { provider: ConnectorId; config: Partial<ConnectorConfig> }; result: ConnectorView[] };
+  "connectors.login": { params: { provider: ConnectorId }; result: ConnectorView[] };
+  "connectors.cancel": { params: { provider: ConnectorId }; result: ConnectorView[] };
+  "connectors.disconnect": { params: { provider: ConnectorId }; result: ConnectorView[] };
+  "marketplace.list": { params: { source: SkillSource; refresh?: boolean }; result: { items: MarketSkill[]; warning: string } };
+  "marketplace.preview": { params: { source: SkillSource; name: string }; result: SkillInstallPreview };
+  "marketplace.install": { params: { preview: string; confirmed: boolean }; result: { ok: boolean; path: string; source: string } };
+  "marketplace.cancel": { params: { preview: string }; result: { ok: boolean } };
+  "connections.addMcp": { params: { projectId: string; name: string; configText: string; confirmed: boolean }; result: { ok: boolean; id: string } };
   "connections.list": { params: { projectId?: string }; result: ConnectionScan };
   "connections.preview": { params: { projectId?: string; path: string }; result: ConnectionPreview };
   "connections.import": { params: { preview: string; confirmed: boolean }; result: { ok: boolean; count: number } };
@@ -257,7 +299,7 @@ export interface Calls {
   "project.refresh": { params: { id?: string }; result: null };
   "project.reveal": { params: { id: string }; result: null };
   /** `fromId`: the conversation whose project to use when there is no `projectId` */
-  "session.new": { params: { projectId?: string; modelId?: string; fromId?: string }; result: { id: string | null } };
+  "session.new": { params: { projectId?: string; modelId?: string; fromId?: string; settings?: SessionSettings; fusion?: boolean }; result: { id: string | null } };
   "session.openSaved": { params: { id: string; projectId: string; title?: string }; result: { id: string | null } };
   "session.reorder": { params: { projectId: string; id: string; targetId: string; after: boolean }; result: { ok: boolean } };
   "session.close": { params: { id: string }; result: null };
@@ -289,6 +331,12 @@ export interface Calls {
   /** `agentId`: the approval is a sub-agent's (asked in its side panel) */
   "session.answerPermission": { params: { id: string; promptId: string; value: string; agentId?: string }; result: { ok: boolean } };
   "session.answerQuestion": { params: { id: string; promptId: string; answers: QuestionAnswer[] | null; agentId?: string }; result: { ok: boolean } };
+  "session.approvePlan": { params: { id: string; planId: string }; result: { ok: boolean } };
+  "fusion.transferExpert": { params: { id: string; agentId: string; model: string; role: "worker" | "light" }; result: { ok: boolean; agentId: string } };
+  "fusion.resumeExpert": { params: { id: string; agentId: string }; result: { ok: boolean } };
+  "fusion.updateBudget": { params: { id: string; maxCalls: number; maxTokens: number; acceptUnknown: boolean }; result: { ok: boolean } };
+  "fusion.authorizeModel": { params: { id: string; model: string }; result: { ok: boolean } };
+  "fusion.changeMain": { params: { id: string; model: string }; result: { ok: boolean } };
   /** a text file the conversation named, for the side panel; `path` as the model wrote it (relative to the project, an optional
    *  `:line` or `:line-line` at the end). An error is one sentence for the user (no such file, not text, a folder). */
   "files.read": { params: { id: string; path: string }; result: FileView };
@@ -315,6 +363,10 @@ export interface Calls {
   /** the whole picture as a data: URI, for the big view; null when Python no longer has it */
   "attachments.full": { params: { id?: string; attachmentId: string }; result: { url: string | null } };
   "settings.set": { params: { key: SettingKey; value: SettingValue }; result: SettingsView };
+  "customization.read": { params: { projectId: string }; result: RulesDocument };
+  "customization.save": { params: { projectId: string; text: string; revision: string }; result: RulesDocument };
+  "sounds.pick": { params: { kind: SoundKind }; result: SettingsView };
+  "sounds.preview": { params: { kind: SoundKind }; result: { ok: boolean } };
   /** the shared memory (desktop/core/memory): notes that the own loop and Devin read and write, and the user too.
    *  Nothing is ever deleted: forgetting marks a note, every change is in a journal and `memory.undo` takes one back. */
   "memory.list": { params: MemoryFilter; result: { entries: MemoryEntry[]; counts: Record<string, number> } & MemoryState };
@@ -397,7 +449,7 @@ export interface Events {
   /** the run of the sub-agent that is open in the side panel: all of it (`all`), or the turns that changed */
   agentTurns: { id: string; agentId: string; turns: Turn[]; all: boolean };
   /** `all`: these are all of its turns; otherwise the ones that changed (new ones come last) */
-  turns: { id: string; turns: Turn[]; all: boolean };
+  turns: { id: string; turns: TurnUpdate[]; all: boolean };
   /** a message with attachments whose turn failed goes back into the composer */
   restore: { id: string; text: string; attachments: AttachmentView[] };
   settings: { settings: SettingsView };

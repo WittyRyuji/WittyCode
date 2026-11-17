@@ -21,6 +21,29 @@ try {
   assert.equal(await second.eval("document.title"), "isolated");
   assert.equal(await first.eval("document.querySelector('.newbtn').textContent"), "New");
   console.log("PASS slow first render and isolated CDP endpoints");
+  assert.equal(await first.eval("document.visibilityState"), "visible", "background test pages must still render lazy content");
+  assert.equal(await first.eval("document.hasFocus()"), true, "headless keyboard checks need an active page");
+  const resting = await first.eval(`(() => {
+    const button = document.querySelector('.newbtn');
+    const top = button.getBoundingClientRect().top;
+    button.animate([{ transform: 'translateY(160px)' }, { transform: 'translateY(0)' }], { duration: 400 });
+    window.clicked = false;
+    button.onclick = () => window.clicked = true;
+    return top;
+  })()`);
+  const settled = await first.rect(".newbtn");
+  assert(Math.abs(settled.y - resting) < 0.1, "coordinates must be measured after the opening animation settles");
+  await first.click(".newbtn");
+  assert.equal(await first.eval("window.clicked"), true, "the real mouse click must hit the animated button");
+  await first.eval(`(() => {
+    const button = document.querySelector('.newbtn');
+    button.style.position = 'fixed'; button.style.left = '300px'; button.style.top = '100px';
+    window.clicked = false;
+    button.onmousemove = () => { button.onmousemove = null; button.style.top = '180px'; };
+  })()`);
+  await first.click(".newbtn");
+  assert.equal(await first.eval("window.clicked"), true, "hover-induced layout changes must not redirect the click");
+  console.log("PASS background pages stay active and animated/hovered targets settle before clicks");
   const worker = spawnSync(process.execPath, ["--input-type=module", "-e", `import { openPage } from ${JSON.stringify(new URL("./cdp.mjs", import.meta.url).href)}; const page = await openPage('data:text/html,<title>cleanup</title>'); console.log('owned-browser:' + page.browserPid); throw new Error('expected check failure');`], { encoding: "utf8", timeout: 20000, windowsHide: true });
   assert.equal(worker.status, 1, worker.stderr);
   const pid = Number(worker.stdout.match(/owned-browser:([0-9]+)/)?.[1]);

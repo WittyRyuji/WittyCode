@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Any
 
 from desktop.core.chatgpt.accounts import AccountStore, TokenProvider
 from desktop.core.chatgpt.errors import AuthError, ChatGPTError, PlanNotEnabled
-from desktop.core.chatgpt.http import HttpClient
+from desktop.core.chatgpt.http import HttpClient, stream_idle_timeout
 from desktop.core.chatgpt.models import FALLBACK_MODELS, ChatGPTModel, models_from_result
 from desktop.core.chatgpt.oauth import Endpoints, SignIn
 from desktop.core.chatgpt.responses import BASE_URL, Event, Shape, for_responses, read_events
@@ -93,6 +93,7 @@ class ChatGPTEngine:
     ) -> None:
         self.settings = settings
         self.api = api
+        self.devin: Any = None  # Optional guarded ACP runner used only by Fusion sessions.
         """The API providers' models (``core/llm``): a request for one of them goes there, to the provider itself, and needs no sign-in."""
         self.root = Path(root)
         self.http = http or HttpClient()
@@ -119,6 +120,22 @@ class ChatGPTEngine:
         self._windows: dict[str, int] = {}
         self._signin: SignIn | None = None
         self._tasks: set[asyncio.Task[Any]] = set()
+
+    def record_side_usage(self, usage: Any, model: str) -> None:
+        """Unowned side requests have a separate durable ledger, never a fake context-window measurement."""
+        from desktop.core.harness.store import _write
+        from desktop.core.usage import Tokens
+        path = self.root / "side-usage.json"
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            ledger = raw if isinstance(raw, dict) else {}
+        except (OSError, ValueError):
+            ledger = {}
+        ledger[model] = (Tokens.of(ledger.get(model)) or Tokens()).plus(usage.tokens()).to_json()
+        try:
+            _write(path, ledger)
+        except OSError:
+            log.warning("could not persist side-request usage", exc_info=True)
 
     # ------------------------------------------------------------------ listeners
 
@@ -252,15 +269,16 @@ class ChatGPTEngine:
         """Ask the model: a fresh access token, the request, the events of the answer. A model of an API provider is asked at the
         provider, with its own key."""
         if self.api is not None and is_api_model(str(request.get("model") or "")):
-            async for event in self.api.stream(request):
-                yield event
+            async with contextlib.aclosing(self.api.stream(request)) as events:
+                async for event in events:
+                    yield event
             return
         client_id = self.accounts.active_id()
         token = await self.tokens.access_token(client_id)
         body = {**request, "input": for_responses(request.get("input") or ())}
         for attempt in range(2):
             headers = {"Authorization": f"Bearer {token}", "Accept": "text/event-stream", "originator": APP_NAME.lower()}
-            lines = self.http.stream_lines("POST", f"{self.base_url}/responses", headers=headers, json_body=body)
+            lines = self.http.stream_lines("POST", f"{self.base_url}/responses", headers=headers, json_body=body, timeout=stream_idle_timeout(request))
             begun = False
             retry = False
             try:
@@ -310,12 +328,16 @@ class ChatGPTEngine:
         return models or list(FALLBACK_MODELS)
 
     def model_info(self, model_id: str) -> ChatGPTModel | None:
+        if model_id.startswith("devin:"):
+            return self.devin.model_info(model_id[6:]) if self.devin is not None and self.settings.devin_enabled else None
         if self.api is not None and is_api_model(model_id):
             spec = self.api.spec(model_id)
             return None if spec is None else model_of(spec)
         return next((m for m in self._models or FALLBACK_MODELS if m.id == model_id), None)
 
     def model_window(self, model_id: str) -> int | None:
+        if model_id.startswith("devin:"):
+            return self.devin.model_window(model_id[6:]) if self.devin is not None else None
         if self.api is not None and is_api_model(model_id):
             spec = self.api.spec(model_id)
             return None if spec is None else spec.window
@@ -353,7 +375,10 @@ class ChatGPTEngine:
     ) -> ChatGPTController:
         from desktop.core.chatgpt.controller import DEFAULT_LEVEL, PLAN, ChatGPTController, normalize_level
 
-        if not is_api_model(str(model or "")):  # (an API provider's model needs its key, not a ChatGPT sign-in)
+        if str(model or "").startswith("devin:"):
+            if self.model_info(str(model)) is None:
+                raise ChatGPTError("Devin 模型当前不可用；未选择替代模型。", code="fusion_acp")
+        elif not is_api_model(str(model or "")):  # (an API provider's model needs its key, not a ChatGPT sign-in)
             await self.ensure_ready()
         controller = ChatGPTController(
             manager=self,

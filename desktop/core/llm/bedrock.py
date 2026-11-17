@@ -119,7 +119,9 @@ def converse_messages(items: Sequence[Mapping[str, Any]], origin: str) -> list[d
         else:
             messages.append({"role": role, "content": list(blocks)})
 
-    for item in items:
+    from desktop.core.harness.history import replayable
+
+    for item in replayable(items):
         kind = item.get("type")
         if kind == "reasoning":
             if item.get("wc_origin") != origin:

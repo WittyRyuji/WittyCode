@@ -243,9 +243,13 @@ function fakeBackend(config) {
     models: [...GW_MODELS],
     providers: [clone(GATEWAY)],
     defaults: { model: "", reasoning: "", autonomy: "code", mode: "auto" },
-    settings: { maxOpen: 4, maxSteps: 80, devinPath: "", hiddenModels: [], theme: "dark", fontScale: "md", sidebarWidth: 300, memoryEnabled: true, memoryRecall: true, memoryCapture: true, memoryCurate: true, memoryEngines: ["devin", "chatgpt", "factory"], compactAuto: true, compactAt: 85, lastProject: "" },
+    settings: { maxOpen: 4, maxSteps: 80, devinPath: "", hiddenModels: [], theme: "dark", fontScale: "md", sidebarWidth: 300, memoryEnabled: true, memoryRecall: true, memoryCapture: true, memoryCurate: true, memoryEngines: ["devin", "chatgpt", "factory"], compactAuto: true, compactAt: 85, answerLanguage: "auto", thinkingLanguage: "zh-CN", thinkChinese: true, lastProject: "" },
     devin: { cli: "found", auth: "checking", enabled: true },
     chatgpt: clone(CHATGPT_OUT),
+    rules: {},
+    connectors: ["github", "google-workspace"].map((id, i) => ({ id, name: i ? "Google Workspace" : "GitHub", clientId: "", clientSecretEnv: "", port: 8766 + i, available: true, userCode: "", enabled: false, connected: false, signingIn: false, scopes: i ? "Drive, Gmail, Calendar read-only" : "repo read:user", helpUrl: i ? "https://developers.google.com/identity/protocols/oauth2/native-app" : "https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps", callbackUrl: `http://127.0.0.1:${8766 + i}${i ? "/" : "/oauth/callback"}` })),
+    marketInstalled: {},
+    marketPreview: null,
   };
   const nid = (prefix) => `${prefix}${++S.id}`;
   const reply = (callId, ok, payload) => signal(REPLY, [callId, ok, JSON.stringify(payload === undefined ? null : payload)]);
@@ -644,7 +648,8 @@ function fakeBackend(config) {
     "session.new": (p) => {
       const project = p.projectId || (p.fromId && S.convs[p.fromId]?.project) || S.projects[0];
       if (!project) throw new Error("请先添加一个项目文件夹。");
-      return { id: open(project, p.modelId || S.defaults.model).cid };
+      const model = p.modelId || p.settings?.model || S.defaults.model;
+      return { id: open(project, model, { ...S.defaults, ...p.settings, model }).cid };
     },
     "session.openSaved": (p) => {
       const already = S.order.find((cid) => S.convs[cid].savedId === p.id);
@@ -785,14 +790,12 @@ function fakeBackend(config) {
       if (p.field !== "model") {
         c[p.field] = p.value;
         later(40, () => flush(c));
-        setDefault(p.field, p.value);
         return { ok: true };
       }
       const engine = engineOf(p.value);
       if (engine === c.engine) {
         c.model = p.value;
         later(40, () => flush(c));
-        setDefault("model", p.value);
         return { ok: true };
       }
       if (c.mark === "running" || c.mark === "attention") throw new Error("本轮还在运行：结束后才能换引擎。");
@@ -831,7 +834,6 @@ function fakeBackend(config) {
       const names = { devin: "Devin", chatgpt: "ChatGPT Plan" };
       const shownEngine = (m) => (m.source.startsWith("api:") ? "API" : names[engineOf(m.id)]);
       Object.assign(c, { engine, model: p.value, reasoning: to.defaultEffort, autonomy: START[engine], usage: null, speed: null, context: { used: null, window: to.window, model: "", compacted: false }, handoff: carried || chosen.length ? { carried, truncated: false, attachments: chosen.length, to: to.label } : null, sent: {} });
-      setDefault("model", p.value);
       emitSidebar();
       if (carried) {
         const turn = { id: nid("t"), status: "done", blocks: [{ kind: "switch", id: nid("b"), from: { model: from.label, engine: shownEngine(from) }, to: { model: to.label, engine: shownEngine(to) }, carried, total: carried, bytes: 180, truncated: false }], prompts: [] };
@@ -915,6 +917,8 @@ function fakeBackend(config) {
       else if (p.key === "memoryEngines" && Array.isArray(v) && v.every((e) => ["devin", "chatgpt", "factory"].includes(e))) s.memoryEngines = [...new Set(v)];
       else if (p.key === "compactAuto" && typeof v === "boolean") s.compactAuto = v;
       else if (p.key === "compactAt" && Number.isInteger(v) && v >= 50 && v <= 95) s.compactAt = v;
+      else if (["answerLanguage", "thinkingLanguage"].includes(p.key) && ["auto", "zh-CN", "en"].includes(v)) { s[p.key] = v; if (p.key === "thinkingLanguage") s.thinkChinese = v === "zh-CN"; }
+      else if (p.key === "thinkChinese" && typeof v === "boolean") { s.thinkChinese = v; s.thinkingLanguage = v ? "zh-CN" : "auto"; }
       else throw new Error("这个设置的值不合法。");
       emit("settings", { settings: { ...s } });
       return { ...s };
@@ -926,6 +930,55 @@ function fakeBackend(config) {
       s.hiddenModels = p.visible ? s.hiddenModels.filter((i) => !ids.includes(i)) : [...s.hiddenModels, ...new Set(ids.filter((i) => !s.hiddenModels.includes(i)))];
       emit("settings", { settings: { ...s } });
       return { ...s };
+    },
+    "customization.read": (p) => clone(S.rules[p.projectId] ?? { path: (p.projectId || "C:\\Users\\me\\AppData\\Roaming\\WittyCode\\customization") + "\\AGENTS.md", text: "", revision: "0", exists: false }),
+    "customization.save": (p) => {
+      const before = H["customization.read"](p);
+      if (p.revision !== before.revision) throw new Error("文件已被其他程序修改，请重新加载。");
+      return S.rules[p.projectId] = { ...before, text: p.text, revision: String(Number(before.revision) + 1), exists: true };
+    },
+    "connectors.list": () => clone(S.connectors),
+    "connectors.configure": (p) => { Object.assign(S.connectors.find((r) => r.id === p.provider), p.config); return clone(S.connectors); },
+    "connectors.login": async (p) => {
+      const row = S.connectors.find((r) => r.id === p.provider);
+      if (config.connectorLoginDelay) {
+        Object.assign(row, { signingIn: true, userCode: p.provider === "github" ? "DEMO-1234" : "" });
+        await sleep(config.connectorLoginDelay);
+        if (!row.signingIn) throw new Error("授权已取消。");
+      }
+      Object.assign(row, { connected: true, enabled: true, signingIn: false, userCode: "" });
+      return clone(S.connectors);
+    },
+    "connectors.cancel": (p) => { Object.assign(S.connectors.find((r) => r.id === p.provider), { signingIn: false, userCode: "" }); return clone(S.connectors); },
+    "connectors.disconnect": (p) => { S.connectors.find((r) => r.id === p.provider).connected = false; return clone(S.connectors); },
+    "marketplace.list": (p) => ({ items: ["demo-skill", "pdf"].map((name) => ({ source: p.source, name, commit: "a".repeat(40), url: `https://github.com/${p.source === "openai" ? "openai" : "anthropics"}/skills`, installed: !!S.marketInstalled[`${p.source}/${name}`] })), warning: "" }),
+    "marketplace.preview": (p) => (S.marketPreview = { preview: "market-preview", source: p.source, name: p.name, commit: "a".repeat(40), url: `https://github.com/${p.source === "openai" ? "openai" : "anthropics"}/skills`, description: "Review local changes", license: "MIT", licenseText: "Synthetic test license.", files: 3 }),
+    "marketplace.install": (p) => {
+      if (!p.confirmed || p.preview !== S.marketPreview?.preview) throw new Error("请先确认安装。");
+      const item = S.marketPreview;
+      const path = `C:/Users/me/AppData/Roaming/WittyCode/installed-skills/${item.source}/${item.name}/SKILL.md`;
+      S.marketInstalled[`${item.source}/${item.name}`] = true;
+      S.connections.push({ id: `market-${item.source}-${item.name}`, kind: "skill", name: item.name, source: path, project: "", config: { path }, enabled: true, imported: true });
+      S.marketPreview = null;
+      return { ok: true, path, source: item.url };
+    },
+    "marketplace.cancel": () => { S.marketPreview = null; return { ok: true }; },
+    "connections.addMcp": (p) => {
+      if (!p.confirmed) throw new Error("请先确认 MCP 配置。");
+      let raw;
+      if (p.configText.trim().startsWith("{")) raw = JSON.parse(p.configText);
+      else {
+        const name = p.configText.match(/\[mcp_servers\.([\w.-]+)\]/)?.[1];
+        const command = p.configText.match(/^command\s*=\s*"([^"]+)"/m)?.[1], url = p.configText.match(/^url\s*=\s*"([^"]+)"/m)?.[1];
+        if (!name || !(command || url)) throw new Error("配置不合法。");
+        raw = { mcp_servers: { [name]: command ? { command, args: JSON.parse(p.configText.match(/^args\s*=\s*(\[[^\n]*\])/m)?.[1] || "[]") } : { url } } };
+      }
+      const servers = raw.mcp_servers || raw.mcpServers;
+      const name = p.name || (servers && Object.keys(servers)[0]);
+      if (!name) throw new Error("请填写名称。");
+      const id = `custom-${name}`;
+      S.connections.push({ id, name, kind: "mcp", source: `C:/Users/me/AppData/Roaming/WittyCode/custom-mcp/${name}.json`, project: p.projectId, config: servers ? servers[name] : raw, enabled: true, imported: true });
+      return { ok: true, id };
     },
     "connections.list": () => ({ items: clone(S.connections), errors: clone(config.connectionErrors || []), hookEvents: ["UserPromptSubmit", "PreToolUse", "PostToolUse"] }),
     "connections.preview": (p) => {

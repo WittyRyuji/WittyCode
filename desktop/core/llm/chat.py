@@ -16,6 +16,7 @@ that the code below allows for:
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
@@ -34,7 +35,7 @@ from desktop.core.chatgpt.responses import (
     TextDone,
     Usage,
 )
-from desktop.core.llm.wire import Route, declared_functions, images_of, load_json, sse_data, text_of, usage_of
+from desktop.core.llm.wire import Route, apply_reasoning_args, declared_functions, images_of, load_json, sse_data, text_of, usage_of
 
 log = logging.getLogger("desktop.llm")
 
@@ -43,6 +44,14 @@ THINK_CLOSE = "</think>"
 
 
 # ---------------------------------------------------------------------- the request
+
+
+def _replay_arguments(raw: Any) -> str:
+    try:
+        value = json.loads(raw) if isinstance(raw, str) else None
+    except ValueError:
+        value = None
+    return raw if isinstance(value, dict) else "{}"
 
 
 def chat_messages(instructions: str, items: Sequence[Mapping[str, Any]], origin: str) -> list[dict[str, Any]]:
@@ -72,7 +81,7 @@ def chat_messages(instructions: str, items: Sequence[Mapping[str, Any]], origin:
         elif kind == "function_call":
             message = assistant()
             message.setdefault("tool_calls", []).append(
-                {"id": item.get("call_id", ""), "type": "function", "function": {"name": item.get("name", ""), "arguments": item.get("arguments", "") or "{}"}}
+                {"id": item.get("call_id", ""), "type": "function", "function": {"name": item.get("name", ""), "arguments": _replay_arguments(item.get("arguments"))}}
             )
         elif kind == "function_call_output":
             open_assistant = None
@@ -82,12 +91,15 @@ def chat_messages(instructions: str, items: Sequence[Mapping[str, Any]], origin:
             thoughts = ""
             pictures = images_of(item)
             text = text_of(item)
+            role = str(item.get("role", "user"))
+            if role == "developer" and origin not in ("api.openai.com", "api.openai.com:443"):
+                role = "system"
             if pictures:
                 parts: list[dict[str, Any]] = [{"type": "text", "text": text}] if text else []
                 parts += [{"type": "image_url", "image_url": {"url": url}} for url in pictures]
-                messages.append({"role": str(item.get("role", "user")), "content": parts})
+                messages.append({"role": role, "content": parts})
             else:
-                messages.append({"role": str(item.get("role", "user")), "content": text})
+                messages.append({"role": role, "content": text})
     return messages
 
 
@@ -112,6 +124,7 @@ def chat_body(request: Mapping[str, Any], route: Route) -> dict[str, Any]:
         body["reasoning_effort"] = effort
     if route.max_output:
         body["max_completion_tokens" if "api.openai.com" in route.base_url else "max_tokens"] = route.max_output
+    apply_reasoning_args(body, request, route)
     body.update(route.extra_args)
     return body
 

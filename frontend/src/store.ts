@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import type { ApiProvider, AttachmentView, Engine, FileView, MemoryState, ModelChoice, ProviderDraft, Session, SessionSettings, SkillItem, SwitchBlock, Turn } from "./types";
-import type { FollowUp, HandoffChoice, QuestionAnswer, SavedRow } from "./protocol";
+import type { FollowUp, FusionSettingKey, HandoffChoice, QuestionAnswer, SavedRow, SettingValue, SoundKey, SoundKind } from "./protocol";
 import {
   API_PROVIDERS,
   CHATGPT_ACCOUNT,
@@ -81,6 +81,10 @@ export interface Landing {
   projectId: string | null;
   /** the conversation is being opened for the message just sent */
   starting: boolean;
+  /** This unsent conversation only; never written back to the saved defaults. */
+  settings?: SessionSettings;
+  /** An explicit choice for this new conversation only. */
+  fusion?: boolean;
 }
 
 /** The data (owned by Python in the live app, mock data in the design review), what only the page knows, and the
@@ -92,6 +96,10 @@ export interface Store extends LiveData {
   /** live app: why it could not connect to Python */
   bootError: string | null;
   settingsPage: string | null; // which page of the settings dialog is open; null: closed
+  settingsDirty: boolean;
+  setSettingsDirty: (dirty: boolean) => void;
+  settingsSaving: boolean;
+  setSettingsSaving: (saving: boolean) => void;
   providerEdit: string | null; // the provider being edited in the settings: its id, "new", or null
   sidebarOpen: boolean;
   openGroups: Record<string, boolean>;
@@ -118,6 +126,7 @@ export interface Store extends LiveData {
   newSession: (projectId?: string) => void;
   setLandingDraft: (draft: string) => void;
   setLandingProject: (projectId: string | null) => void;
+  setLandingFusion: (enabled: boolean) => void;
   /** open a conversation in `projectId`; its id, or null when it could not be opened (the user was told why) */
   createSession: (projectId: string) => Promise<string | null>;
   /** send the first message box: the conversation is opened for it, then the message goes */
@@ -141,6 +150,11 @@ export interface Store extends LiveData {
   /** open a sub-agent's run in the side panel / close the panel */
   openAgent: (sessionId: string, agentId: string) => void;
   closeAgent: () => void;
+  transferFusionExpert: (sessionId: string, agentId: string, model: string, role: "worker" | "light") => void;
+  resumeFusionExpert: (sessionId: string, agentId: string) => void;
+  updateFusionBudget: (sessionId: string, maxCalls: number, maxTokens: number, acceptUnknown: boolean) => void;
+  authorizeFusionModel: (sessionId: string, model: string) => void;
+  changeFusionMain: (sessionId: string, model: string) => void;
   /** open a file the conversation named (`ref` as the model wrote it): in the side panel, or outside the window with the
    *  default program / the system's "open with" / its folder */
   openFile: (ref: string, how?: "panel" | "default" | "choose" | "reveal") => void;
@@ -176,7 +190,9 @@ export interface Store extends LiveData {
   /** read the skills and custom commands again, for the project of a conversation (or the first message box's) */
   refreshSkills: (id?: string) => void;
   choose: (field: keyof SessionSettings, value: string) => void;
+  chooseLanding: (field: keyof SessionSettings, value: string) => void;
   answerPermission: (sessionId: string, promptId: string, value: string) => void;
+  approvePlan: (sessionId: string, planId: string) => Promise<void>;
   /** answers: one per question (the chosen options of a multi-select one), or null when the user skips the questions */
   answerQuestion: (sessionId: string, promptId: string, answers: QuestionAnswer[] | null) => void;
 
@@ -219,8 +235,14 @@ export interface Store extends LiveData {
   /** ChatGPT Plan: summarise a long conversation before it outgrows the model's window (switch), at this percent of it (50 to 95) */
   setCompactAuto: (on: boolean) => void;
   setCompactAt: (percent: number) => void;
+  setFusionSetting: (key: FusionSettingKey, value: SettingValue) => void;
   /** ask every model to write its thinking in Chinese */
   setThinkChinese: (on: boolean) => void;
+  setLanguage: (key: "answerLanguage" | "thinkingLanguage", value: LiveData["answerLanguage"]) => void;
+  setSoundEnabled: (on: boolean) => void;
+  setSoundPath: (key: SoundKey, path: string) => void;
+  pickSound: (kind: SoundKind) => void;
+  previewSound: (kind: SoundKind) => void;
   setMemoryState: (state: MemoryState) => void;
   setDevinPath: (p: string) => void;
   /** while the splitter is dragged; `commit` once it is let go (the live app then saves it) */
@@ -288,7 +310,21 @@ function mockData(): LiveData {
     memoryEngines: ["devin", "chatgpt", "factory"],
     compactAuto: true,
     compactAt: COMPACT_AT_DEFAULT,
+    fusionMain: "",
+    fusionWorkers: [],
+    fusionLight: "",
+    fusionReasoning: {},
+    fusionPreference: 50,
+    fusionMaxCalls: 8,
+    fusionMaxTokens: 500000,
+    fusionMaxSeconds: 900,
     thinkChinese: true,
+    answerLanguage: "auto",
+    thinkingLanguage: "zh-CN",
+    soundEnabled: true,
+    soundQuestion: "C:\\Apps\\WittyCode\\app\\desktop\\assets\\sounds\\question.wav",
+    soundComplete: "C:\\Apps\\WittyCode\\app\\desktop\\assets\\sounds\\complete.wav",
+    soundError: "C:\\Apps\\WittyCode\\app\\desktop\\assets\\sounds\\error.wav",
     lastProject: "",
     memory: { latest: MOCK_MEMORY_LATEST, unseen: 2, seen: MOCK_MEMORY_LATEST - 2, pending: MOCK_PENDING },
     maximized: false,
@@ -311,6 +347,10 @@ export const useStore = create<Store>((set, get) => ({
   ready: !LIVE,
   bootError: null,
   settingsPage: null,
+  settingsDirty: false,
+  setSettingsDirty: (settingsDirty) => set({ settingsDirty }),
+  settingsSaving: false,
+  setSettingsSaving: (settingsSaving) => set({ settingsSaving }),
   providerEdit: null,
   sidebarOpen: true,
   openGroups: {},
@@ -356,22 +396,26 @@ export const useStore = create<Store>((set, get) => ({
 
   newSession: (projectId) => {
     // (from a conversation: its project is where the next one starts, as it always was)
-    set((s) => ({ currentId: null, pendingSelect: null, landing: { ...s.landing, projectId: projectId ?? s.sessions[s.currentId ?? ""]?.projectId ?? s.landing.projectId } }));
+    set((s) => ({ currentId: null, pendingSelect: null, landing: { ...s.landing, settings: undefined, fusion: false, projectId: projectId ?? s.sessions[s.currentId ?? ""]?.projectId ?? s.landing.projectId } }));
     window.dispatchEvent(new Event("wc:focus-composer"));
   },
 
   setLandingDraft: (draft) => set((s) => ({ landing: { ...s.landing, draft } })),
   setLandingProject: (projectId) => set((s) => ({ landing: { ...s.landing, projectId } })),
+  setLandingFusion: (fusion) => set((s) => ({ landing: { ...s.landing, fusion } })),
 
   createSession: async (pid) => {
     const st = get();
     const id = `s-new-${++sessionCounter}`;
-    const settings = { ...st.defaults };
+    const base = st.landing.settings ?? st.defaults;
+    const settings = st.landing.fusion ? settingsForModel(st.models, base, st.fusionMain).settings : { ...base };
+    if (st.landing.fusion && st.fusionReasoning[st.fusionMain]) settings.reasoning = st.fusionReasoning[st.fusionMain]!;
     const m = findModel(st.models, settings.model);
     const session: Session = {
       id,
       projectId: pid,
       title: "新会话",
+      fusion: !!st.landing.fusion,
       mark: "opening",
       modified: "刚刚",
       turns: [],
@@ -519,6 +563,11 @@ export const useStore = create<Store>((set, get) => ({
   },
   openAgent: () => undefined, // ... and have no sub-agents
   closeAgent: () => set({ agentPanel: null, agentTurns: [] }),
+  transferFusionExpert: () => get().say("（演示）已确认转交。"),
+  resumeFusionExpert: () => get().say("（演示）已允许继续。"),
+  updateFusionBudget: () => get().say("（演示）已调整会话预算。"),
+  authorizeFusionModel: () => get().say("（演示）已授权工作模型。"),
+  changeFusionMain: () => get().say("（演示）已更换主模型。"),
   openFile: (ref, how = "panel") => {
     const sessionId = get().currentId;
     if (!sessionId) return;
@@ -602,12 +651,12 @@ export const useStore = create<Store>((set, get) => ({
 
   choose: (field, value) => {
     const id = get().currentId;
-    if (!id) return get().setDefault(field, value);
+    if (!id) return get().chooseLanding(field, value);
     const st = get();
     const session = st.sessions[id]!;
     if (field !== "model") {
       get().patchSession(id, (s) => ({ ...s, settings: { ...s.settings, [field]: value } }));
-      return get().setDefault(field, value);
+      return;
     }
     const model = findModel(st.models, value);
     if (!model) return;
@@ -622,10 +671,14 @@ export const useStore = create<Store>((set, get) => ({
           : `${model.label} 不支持「${effortLabel(session.settings.reasoning)}」推理，已改为「${effortLabel(settings.reasoning)}」。`,
       );
     }
-    get().setDefault("model", value);
   },
 
   answerPermission: (sessionId, promptId, value) => settlePrompt(sessionId, promptId, value),
+  approvePlan: async (id, planId) => {
+    if (get().sessions[id]?.pendingPlan?.id !== planId) return;
+    get().patchSession(id, (session) => ({ ...session, pendingPlan: null, settings: { ...session.settings, mode: "auto" } }));
+    get().say("（演示）已批准计划。");
+  },
   answerQuestion: (sessionId, promptId, answers) => {
     const joined = (a: QuestionAnswer | undefined) => (Array.isArray(a) ? a.join("、") : (a ?? ""));
     const turn = get().sessions[sessionId]?.turns.find((t) => t.prompts.some((p) => p.id === promptId));
@@ -645,7 +698,14 @@ export const useStore = create<Store>((set, get) => ({
   setTheme: (themeChoice) => set({ themeChoice }),
   setFontScale: (fontScale) => set({ fontScale }),
   setFollowUp: (followUp) => set({ followUp }),
-  openSettings: (settingsPage, providerEdit = null) => set({ settingsPage, providerEdit }),
+  openSettings: (settingsPage, providerEdit = null) => {
+    if (settingsPage === get().settingsPage) return set({ providerEdit });
+    if (get().settingsSaving) return get().say("规则正在保存，请稍候。");
+    const leave = () => set({ settingsPage, providerEdit, settingsDirty: false });
+    if (get().settingsDirty && settingsPage !== get().settingsPage) {
+      get().openDialog({ title: "放弃未保存的规则？", body: "AGENTS.md 的更改尚未保存。", confirmLabel: "放弃更改", danger: true, onConfirm: leave });
+    } else leave();
+  },
   setProviderEdit: (providerEdit) => set({ providerEdit }),
 
   saveProvider: async (draft) => {
@@ -711,6 +771,11 @@ export const useStore = create<Store>((set, get) => ({
   chatgptWelcome: async () => set({ chatgpt: await bridge.chatgpt.welcomed() }),
   recheckDevin: async () => get().say("已重新检测：仍然没有找到 devin。"),
 
+  chooseLanding: (field, value) => set((s) => {
+    const base = s.landing.settings ?? s.defaults;
+    const settings = field === "model" ? settingsForModel(s.models, base, value).settings : { ...base, [field]: value };
+    return { landing: { ...s.landing, settings } };
+  }),
   setDefault: (field, value) =>
     set((s) => {
       if (field !== "model") return { defaults: { ...s.defaults, [field]: value } };
@@ -726,7 +791,13 @@ export const useStore = create<Store>((set, get) => ({
   setMemoryCurate: (memoryCurate) => set({ memoryCurate }),
   setMemoryEngines: (memoryEngines) => set({ memoryEngines }),
   setCompactAuto: (compactAuto) => set({ compactAuto }),
-  setThinkChinese: (thinkChinese) => set({ thinkChinese }),
+  setFusionSetting: (key, value) => set({ [key]: value } as Partial<LiveData>),
+  setThinkChinese: (thinkChinese) => set({ thinkChinese, thinkingLanguage: thinkChinese ? "zh-CN" : "auto" }),
+  setLanguage: (key, value) => set({ [key]: value, ...(key === "thinkingLanguage" ? { thinkChinese: value === "zh-CN" } : {}) }),
+  setSoundEnabled: (soundEnabled) => set({ soundEnabled }),
+  setSoundPath: (key, path) => set({ [key]: path || mockData()[key] }),
+  pickSound: () => get().say("演示界面不选择本机声音文件。"),
+  previewSound: () => get().say("演示界面不播放声音。"),
   setCompactAt: (percent) => set({ compactAt: clampCompactAt(percent) }),
   setMemoryState: (memory) => set({ memory: { latest: memory.latest, unseen: memory.unseen, seen: memory.seen, pending: memory.pending ?? 0 } }),
   setDevinPath: (devinPath) => set({ devinPath }),
@@ -836,7 +907,6 @@ function switchEngine(id: string, model: ModelChoice, was: ModelChoice | undefin
   st.say(
     `已换到 ${model.label}（${engineLabel(model.source)}）。${h.carried > 0 ? `之前 ${h.carried} 条对话的文字会随下一条消息交给它。` : ""}${changed.includes("autonomy") ? `权限回到「${level}」。` : ""}`,
   );
-  st.setDefault("model", model.id);
 }
 
 export const currentSession = (s: Store): Session | null => (s.currentId ? (s.sessions[s.currentId] ?? null) : null);

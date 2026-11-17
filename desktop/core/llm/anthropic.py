@@ -36,7 +36,7 @@ from desktop.core.chatgpt.responses import (
     TextDone,
     Usage,
 )
-from desktop.core.llm.wire import DEFAULT_MAX_OUTPUT, Route, count, declared_functions, images_of, load_json, split_data_url, sse_data, text_of, usage_of
+from desktop.core.llm.wire import DEFAULT_MAX_OUTPUT, Route, apply_reasoning_args, count, declared_functions, images_of, load_json, split_data_url, sse_data, text_of, usage_of
 
 log = logging.getLogger("desktop.llm")
 
@@ -81,7 +81,9 @@ def anthropic_messages(items: Sequence[Mapping[str, Any]], origin: str) -> list[
         else:
             messages.append({"role": role, "content": list(blocks)})
 
-    for item in items:
+    from desktop.core.harness.history import replayable
+
+    for item in replayable(items):
         kind = item.get("type")
         if kind == "reasoning":
             if item.get("wc_origin") != origin:
@@ -162,6 +164,7 @@ def anthropic_body(request: Mapping[str, Any], route: Route) -> dict[str, Any]:
         body["tools"] = [{"name": f["name"], "description": f.get("description", ""), "input_schema": f.get("parameters") or {"type": "object", "properties": {}}} for f in functions]
         body["tool_choice"] = {"type": "auto"}
     body.update(thinking_fields(route.model, thinking_effort(request), max_tokens, route.thinking))
+    apply_reasoning_args(body, request, route)
     body.update(route.extra_args)
     return body
 

@@ -74,7 +74,7 @@ def test_dead_memory_restarts_once_without_disappearing_from_the_prompt(tmp_path
 def test_compaction_carries_current_developer_rules_as_instructions_not_a_summary_guess():
     async def go():
         view = [user_message("old " * 10000), {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "done " * 10000}]}]
-        script = Script(say("short summary"))
+        script = Script(*[say("short summary") for _ in range(4)])
         result = await compact.compact(view, stream=script, model="m", reasoning=None, window=20000, whole=True, rules="Current rules: never remove tests.")
         assert result.fits
         assert result.view[1] == context_update("Current rules: never remove tests.")

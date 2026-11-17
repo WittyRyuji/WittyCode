@@ -30,7 +30,7 @@ export function FactorySettings({ program = false }: { program?: boolean }) {
     finally { setBusy(false); }
   };
   return (
-    <section className={program ? "factory-program" : "pcard factory-card"}>
+    <section className={program ? "pcard factory-program" : "pcard factory-card"}>
       <header className="pcard-head"><div><h4>Factory CLI（可选）</h4><div className={`pstate ${state.cli === "found" ? "ok" : "off"}`}>{state.cli === "found" ? "已检测到 CLI · 使用 Factory 自己的登录" : "尚未检测到 droid · 不影响 WittyHarness 使用"}</div></div><button type="button" className="btn small" onClick={load} disabled={busy}>重新检测</button></header>
       <p className="pcard-note">使用你在 Factory CLI 中已登录的账号，通过 <code>stream-jsonrpc</code> 连接，不依赖 Factory SDK。未登录时先在终端运行 <code>droid</code> 完成登录；WittyCode 不读取或复制其令牌和 API 模型配置。</p>
       <div className="pcard-row"><label htmlFor="factory-path">droid 程序路径（留空则从 PATH 检测）</label></div>

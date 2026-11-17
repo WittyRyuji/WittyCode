@@ -87,8 +87,8 @@ await page.key("Escape");
 // reasoning levels come from the model's efforts, with words for none and dynamic
 await page.click(".controls .chip", 0);
 await clickText(".menu-item", "GPT-5.4");
-await waitCalls("session.choose");
-ok("without a session the model menu changes the defaults (session.choose without id)", isDeepStrictEqual(await lastCall("session.choose"), { field: "model", value: "api:gw:gpt-5.4" }), await lastCall("session.choose"));
+await page.waitFor("document.querySelectorAll('.controls .chip-v')[0].textContent === 'GPT-5.4'", 3000);
+ok("an unsent conversation changes only its temporary settings, with no default-saving RPC", (await calls("session.choose")).length === 0);
 await page.waitFor("document.querySelectorAll('.controls .chip-v')[0].textContent === 'GPT-5.4'", 3000);
 await page.click(".controls .chip", 1);
 ok("GPT-5.4 offers 无 / Low / Medium / High", (await js("[...document.querySelectorAll('.menu-label')].map(e => e.textContent).join()")) === "无,Low,Medium,High", await js("[...document.querySelectorAll('.menu-label')].map(e => e.textContent).join()"));
@@ -379,7 +379,7 @@ const tick = async (name) => {
 await page.click(".controls .chip", 0);
 ok("Devin is signed in now: its models are in the menu, under their makers", await js("[...document.querySelectorAll('.menu-item')].some(e => e.textContent.includes('SWE-2')) && [...document.querySelectorAll('.menu .menu-sub')].map(e => e.textContent).join() === 'Cognition,Anthropic,OpenAI'"), await js("[...document.querySelectorAll('.menu .menu-sub')].map(e => e.textContent)"));
 await clickText(".menu-item", "SWE-2");
-await waitCalls("session.choose", 7);
+await waitCalls("session.choose", chooses + 3);
 ok("picking a Devin model asks Python to move the conversation", isDeepStrictEqual(await lastCall("session.choose"), { id: "c1", field: "model", value: "devin:swe-2-high" }), await lastCall("session.choose"));
 // the conversation has attachments: Python asks which go along before it changes anything
 await page.waitFor("!!document.querySelector('.dialog')", 3000);
@@ -392,16 +392,16 @@ ok("what Devin cannot take is listed with the reason and cannot be ticked", firs
 ok("with nothing ticked the button says so", (await confirmLabel()) === "都不带，换过去" && (await js("[...document.querySelectorAll('.dialog .dialog-btns .btn')].map(b => b.textContent.trim()).join('|')")) === "取消|都不带，换过去");
 await shot("carry-list");
 await page.key("Enter");
-ok("Enter does not decide for the user: no second call, same engine", (await calls("session.choose")).length === 7 && (await js("!document.querySelector('.block.engine-switch')")));
+ok("Enter does not decide for the user: no second call, same engine", (await calls("session.choose")).length === chooses + 3 && (await js("!document.querySelector('.block.engine-switch')")));
 await menuTo("SWE-2");
-await waitCalls("session.choose", 8);
+await waitCalls("session.choose", chooses + 4);
 await page.waitFor("!!document.querySelector('.dialog')", 3000);
 await page.key("Escape");
-ok("Esc is a cancel: no answer, same engine", (await calls("session.choose")).length === 8 && (await js("!document.querySelector('.dialog') && !document.querySelector('.block.engine-switch')")));
+ok("Esc is a cancel: no answer, same engine", (await calls("session.choose")).length === chooses + 4 && (await js("!document.querySelector('.dialog') && !document.querySelector('.block.engine-switch')")));
 
 // the picture and the text file go, the scan stays behind
 await menuTo("SWE-2");
-await waitCalls("session.choose", 9);
+await waitCalls("session.choose", chooses + 5);
 await page.waitFor("!!document.querySelector('.dialog')", 3000);
 await tick("shot.png");
 await tick("notes.txt");
@@ -409,7 +409,7 @@ ok("ticking is by attachment, and the button counts them", isDeepStrictEqual((aw
 await page.click(".dialog .carry-list li input", 2);
 ok("what cannot go cannot be ticked", isDeepStrictEqual((await rows()).map((r) => r.checked), [true, true, false]));
 await clickText(".dialog .btn", "带上选中的 2 个");
-await waitCalls("session.choose", 10);
+await waitCalls("session.choose", chooses + 6);
 ok("the ids ticked go back to Python, in the order of the list", isDeepStrictEqual(await lastCall("session.choose"), { id: "c1", field: "model", value: "devin:swe-2-high", attachments: ["d1", "d2"] }), await lastCall("session.choose"));
 await page.waitFor("!!document.querySelector('.block.engine-switch')", 3000);
 ok("the status bar says what went along", (await notice()).includes("1 个文本附件的内容、1 张图片一起带过去"), await notice());
@@ -422,7 +422,7 @@ await shot("switched");
 
 // back to the own loop: the scan cannot go there either
 await menuTo("Claude Haiku 5.5");
-await waitCalls("session.choose", 11);
+await waitCalls("session.choose", chooses + 7);
 await page.waitFor("!!document.querySelector('.dialog')", 3000);
 const back = await rows();
 ok("asked again each time, and the scan cannot go to the own loop either", isDeepStrictEqual(back.map((r) => [r.name, r.disabled]), [["shot.png", false], ["notes.txt", false], ["scan.pdf", true]]) && back[2].reason.includes("只能读 PDF 里的文字"), back);
@@ -430,19 +430,19 @@ const overText = () => js("document.querySelector('.dialog .carry-over')?.textCo
 await tick("shot.png");
 ok("one picture is the usual amount here: no warning, the plain button", (await overText()) === "" && (await confirmLabel()) === "带上选中的 1 个，换过去", await confirmLabel());
 await clickText(".dialog .btn", "带上选中的 1 个");
-await waitCalls("session.choose", 12);
+await waitCalls("session.choose", chooses + 8);
 ok("confirming sends the id ticked", isDeepStrictEqual(await lastCall("session.choose"), { id: "c1", field: "model", value: "api:gw:claude-haiku-5-5", attachments: ["d1"] }), await lastCall("session.choose"));
 await page.waitFor("document.querySelectorAll('.block.engine-switch').length === 2", 3000);
 ok("the status bar says the picture went along", (await notice()).includes("1 张图片一起带过去"), await notice());
 
 // and to Devin with none: an empty list is an answer too
 await menuTo("SWE-2");
-await waitCalls("session.choose", 13);
+await waitCalls("session.choose", chooses + 9);
 await page.waitFor("!!document.querySelector('.dialog')", 3000);
 await tick("notes.txt");
 await tick("notes.txt");
 await clickText(".dialog .btn", "都不带");
-await waitCalls("session.choose", 14);
+await waitCalls("session.choose", chooses + 10);
 ok("none picked is an empty list, not a missing one", isDeepStrictEqual(await lastCall("session.choose"), { id: "c1", field: "model", value: "devin:swe-2-high", attachments: [] }), await lastCall("session.choose"));
 await page.waitFor("document.querySelectorAll('.block.engine-switch').length === 3", 3000);
 ok("no files note in the status bar", !(await notice()).includes("一起带过去"), await notice());
@@ -452,7 +452,7 @@ await page.click(".input");
 await paste(PNG);
 await page.waitFor("document.querySelectorAll('.att-row .att').length === 1", 3000);
 await menuTo("Claude Haiku 5.5");
-await waitCalls("session.choose", 15);
+await waitCalls("session.choose", chooses + 11);
 await page.waitFor("!!document.querySelector('.dialog')", 3000);
 ok("the question says the box holds an attachment already", await js("document.querySelector('.dialog').textContent.includes('输入框里已有 1 个附件')"));
 await tick("notes.txt");
@@ -463,7 +463,7 @@ const inBoxOver = await overText();
 ok("a picture on top of it is one file more than a message usually holds: the page says by how much, the user may go on", inBoxOver.includes("这条消息有 2 个附件") && inBoxOver.includes("多 1 个文件") && (await js("document.querySelector('.dialog .dialog-btns .btn:last-child').disabled")) === false, inBoxOver);
 ok("…it is the user's call: the button says it is over", (await confirmLabel()) === "超出了，仍然带上选中的 1 个，换过去", await confirmLabel());
 await clickText(".dialog .btn", "超出了，仍然带上选中的 1 个");
-await waitCalls("session.choose", 16);
+await waitCalls("session.choose", chooses + 12);
 ok("going on anyway sends the id and that the user accepted being over (overLimit)", isDeepStrictEqual(await lastCall("session.choose"), { id: "c1", field: "model", value: "api:gw:claude-haiku-5-5", attachments: ["d1"], overLimit: true }), await lastCall("session.choose"));
 await page.waitFor("document.querySelectorAll('.block.engine-switch').length === 4", 3000);
 await page.click(".att-row .att-x", 0);
@@ -659,7 +659,7 @@ ok("and comes back as Python's settings", true);
 await page.click(".segc button", 5);
 await waitCalls("settings.set", 2);
 ok("the text size too", isDeepStrictEqual(await lastCall("settings.set"), { key: "fontScale", value: "lg" }) && (await js("document.documentElement.dataset.fs")) === "lg");
-await page.click(".snav", 3);
+await page.click(".snav", 2);
 await page.click(".stepper button", 1);
 await waitCalls("settings.set", 3);
 ok("the compaction percent goes to Python in whole points (compactAt)", isDeepStrictEqual(await lastCall("settings.set"), { key: "compactAt", value: 90 }));
@@ -683,7 +683,7 @@ await page.click(".stepper button", 3);
 await waitCalls("settings.set", 7);
 ok("the session limit too", isDeepStrictEqual(await lastCall("settings.set"), { key: "maxOpen", value: 5 }));
 await page.waitFor("document.querySelectorAll('.stepper span')[1].textContent === '5'", 2000);
-await page.click(".snav", 5);
+await clickText(".snav", "外部程序");
 ok("the 外部程序 page has only the Devin CLI, and no 浏览… (there is no such call)", await js("[...document.querySelectorAll('.settings-body .field-label')].map(e => e.textContent).join() === 'Devin 命令行' && ![...document.querySelectorAll('.settings-body .btn')].some(b => b.textContent.includes('浏览'))"));
 await page.click(".settings-body .segc button", 1); // Devin 命令行: 指定路径 starts from the one that was found
 await waitCalls("settings.set", 8);
@@ -696,7 +696,7 @@ await page.key("Enter");
 await waitCalls("settings.set", 9);
 const devinPaths = (await calls("settings.set")).filter((c) => c.key === "devinPath").map((c) => c.value);
 ok("the Devin CLI path is saved when it is entered, not on every key", isDeepStrictEqual(devinPaths, ["C:\\Users\\dev\\AppData\\Local\\Programs\\devin\\devin.exe", "D:\\tools\\devin.exe"]), devinPaths);
-await page.click(".snav", 9);
+await clickText(".snav", "关于");
 ok("the About page is last and offers no log folder button (there is no such call)", await js("!!document.querySelector('.settings-body .about') && !document.querySelector('.settings-body .about .btn')"));
 await page.key("Escape");
 const sp = await page.rect(".splitter");

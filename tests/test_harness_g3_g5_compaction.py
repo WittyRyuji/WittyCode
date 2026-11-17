@@ -224,14 +224,14 @@ def test_a_step_too_big_to_keep_word_for_word_is_summarised_whole_and_the_users_
     view += [call_output(f"c{number}", CJK * 60_000) for number in range(6)]
     fixed = 15_000
     assert compact.estimate_items(view[1:]) + fixed > budget_of(WINDOW), "keeping the step word for word cannot fit"
-    script = Script(say("The six files were read; each repeats one character."))
+    script = Script(*[say("The six files were read; each repeats one character.") for _ in range(8)])
     result = asyncio.run(compact.compact(view, stream=script, model="m", reasoning=None, window=WINDOW, fixed=fixed))
     assert result is not None and result.fits
     assert result.cut == len(view) and len(result.view) == 1, "the whole step went into the summary"
     assert result.kept == REQUEST and result.view[0] == compact.summary_item(result.summary, REQUEST)
     assert REQUEST in compact.summary_text(result.view[0]), "the user's request goes on word for word"
     assert result.after < result.before and result.after + fixed <= budget_of(WINDOW)
-    body = body_of(script.requests[0])
+    body = "\n".join(body_of(request) for request in script.requests)
     assert body.count("TOOL RESULT:") == 6 and f"USER: {REQUEST}" in body
 
 
@@ -241,7 +241,7 @@ def test_a_compaction_reports_success_only_when_the_view_shrank_and_the_whole_re
         view += [user_message(f"question {number} " + "word " * 300), assistant(f"answer {number} " + "word " * 300)]
 
     def compacted(window: int, fixed: int, items: list[dict[str, Any]] = view) -> compact.Compacted:
-        result = asyncio.run(compact.compact(items, stream=Script(say("S")), model="m", reasoning=None, window=window, fixed=fixed))
+        result = asyncio.run(compact.compact(items, stream=Script(*[say("S") for _ in range(20)]), model="m", reasoning=None, window=window, fixed=fixed))
         assert result is not None
         return result
 
@@ -254,7 +254,7 @@ def test_a_compaction_reports_success_only_when_the_view_shrank_and_the_whole_re
 
 def test_a_step_that_fits_the_window_is_kept_word_for_word_though_it_is_more_than_the_tail_share():
     view = [user_message("first " + "word " * 2000), assistant("ok"), user_message("read it"), function_call("c1"), call_output("c1", CJK * 8_000)]
-    result = asyncio.run(compact.compact(view, stream=Script(say("S")), model="m", reasoning=None, window=20_000))
+    result = asyncio.run(compact.compact(view, stream=Script(*[say("S") for _ in range(20)]), model="m", reasoning=None, window=20_000))
     assert result is not None and result.fits
     assert result.cut == 3 and result.view[1:] == view[3:], "only what is before the step is summarised"
     assert result.kept == "read it", "the request of the turn that is running goes on word for word"
@@ -264,13 +264,13 @@ def test_the_words_kept_with_a_summary_go_on_while_their_turn_does_and_are_summa
     words = "the user's request: 不要改 billing"
     earlier = compact.summary_item("S1", words)
     step = [function_call("c1"), call_output("c1", CJK * 30_000)]
-    script = Script(say("S2"))
+    script = Script(*[say("S2") for _ in range(4)])
     same = asyncio.run(compact.compact(
         [earlier, *step], stream=script, model="m", reasoning=None, window=40_000, synthetic=1, previous="S1", kept=words, turn=0,
     ))
     assert same is not None and same.fits and same.cut == 3 and same.kept == words, "the turn began in what S1 covers"
     assert compact.KEPT_HEAD not in body_of(script.requests[0])
-    script = Script(say("S3"))
+    script = Script(*[say("S3") for _ in range(4)])
     later = asyncio.run(compact.compact(
         [earlier, user_message("now this"), *step], stream=script, model="m", reasoning=None, window=40_000, synthetic=1,
         previous="S1", kept=words, turn=1,
@@ -292,13 +292,13 @@ def test_a_step_refused_as_too_big_is_summarised_whole_and_asked_once_more(tmp_p
         assert [reason for reason, _ in service.refused] == ["too long"], "refused once; what was refused is not sent again"
         first, refused, retry = service.mains
         assert request_size(refused) <= budget_of(WINDOW), "the results were shared out to the window"
-        assert request_size(retry) <= 200_000 and len(service.summaries) == 1
+        assert request_size(retry) <= 200_000 and len(service.summaries) >= 2, "full evidence is summarised across bounded requests"
         items, record = controller.saved.items, controller.saved.compaction
         assert len(items) == 14 and record["upto"] == 13, "the summary covers the whole step; the log keeps it all"
         assert REQUEST in record["kept"] and retry["input"] == [compact.summary_item(record["summary"], record["kept"])]
         assert REQUEST in text_of(retry["input"][0]), "the user's request goes on word for word"
-        body = body_of(service.summaries[0])
-        assert body.count("TOOL RESULT:") == 6 and REQUEST in body
+        body = "\n".join(body_of(request) for request in service.summaries)
+        assert body.count("TOOL RESULT") == 6 and REQUEST in body
         assert any("刚完成的这一步也在内" in text for text in notices(controller))
         await engine.close_all()
 
@@ -317,12 +317,13 @@ def test_a_long_turn_compacted_twice_keeps_the_users_request_word_for_word(tmp_p
         controller.send_prompt(REQUEST)
         await finish_turn(controller)
         assert controller.transcript.turns[-1].status is TurnStatus.DONE
-        assert [reason for reason, _ in service.refused] == ["too long", "too long"] and len(service.summaries) == 2
+        assert [reason for reason, _ in service.refused] == ["too long", "too long"] and len(service.summaries) >= 4
         items, record = controller.saved.items, controller.saved.compaction
         assert len(items) == 26 and record["upto"] == 25 and REQUEST in record["kept"]
         assert REQUEST in text_of(service.mains[-1]["input"][0]), "still word for word after the second summary"
-        second = body_of(service.summaries[1])
-        assert "<previous_summary>\nSUMMARY of what was done.\n" in second and second.count("TOOL RESULT:") == 6
+        second_batch = service.requests[service.requests.index(service.mains[-2]) + 1:]
+        second = "\n".join(body_of(request) for request in second_batch if is_summary_request(request))
+        assert "<previous_summary>\nSUMMARY of what was done.\n" in second and second.count("TOOL RESULT") == 6
         assert REQUEST not in second, "the words of the running turn go along with the summary, not into it"
         await engine.close_all()
 
@@ -382,6 +383,17 @@ class Room(Recorder):
         return self.room
 
 
+def test_line_rounding_does_not_give_later_long_reads_a_larger_share():
+    tools = FakeTools()
+    page = "\n".join(f"{number:6}\t" + CJK * 600 for number in range(1, 101))
+    tools.handlers["read_file"] = lambda call: Outcome(page)
+    script = Script(calls([("read_file", "{}", f"c{n}", f"i{n}") for n in range(6)]), say("done"))
+    history = [user_message("go")]
+    asyncio.run(AgentLoop(script, tools, Room(230_000), model="m", reasoning=None, instructions="x").run(history))
+    sizes = [compact.estimate_item(item) for item in history if item["type"] == "function_call_output"]
+    assert len(sizes) == 6 and max(sizes) - min(sizes) < 10
+
+
 def test_the_results_of_one_step_share_the_room_in_turn_and_a_short_one_is_left_whole():
     tools = FakeTools()
     tools.handlers["big"] = lambda call: Outcome("x" * 35_000)  # (about 10,000 tokens)
@@ -417,12 +429,13 @@ def constrained() -> str:
 def test_a_constraint_in_the_middle_of_a_long_message_reaches_the_summary_request():
     message = constrained()
     view = [user_message(message), assistant("old answer " * 2000), user_message("continue")]
-    script = Script(say("Summary."))
+    script = Script(*[say("Summary.") for _ in range(8)])
     result = asyncio.run(compact.compact(view, stream=script, model="m", reasoning=None, window=4000))
     assert result is not None and result.cut == 2
     body = body_of(script.requests[0])
     assert "不要改 billing" in body and f"USER: {message.strip()}" in body, "the whole message: head, middle and tail"
-    assert "ASSISTANT: old answer" in body and "characters left out" in body, "the assistant's own words are still cut"
+    read = "\n".join(body_of(request) for request in script.requests)
+    assert "ASSISTANT: old answer" in read and "characters left out" not in read, "assistant evidence is split, not cut"
 
 
 def test_a_message_bigger_than_one_summary_request_is_given_whole_in_pieces():
@@ -438,7 +451,7 @@ def test_a_message_bigger_than_one_summary_request_is_given_whole_in_pieces():
     assert "".join(pieces) == message, "nothing of what the user wrote is left out"
 
     view = [user_message(message), assistant("ok"), user_message("next")]
-    script = Script(*[say(f"S{number}") for number in range(1, 12)])
+    script = Script(*[say(f"S{number}") for number in range(1, 32)])
     result = asyncio.run(compact.compact(view, stream=script, model="m", reasoning=None, window=4000))
     assert result is not None and len(script.requests) >= 3
     read = "\n".join(body_of(request) for request in script.requests)
@@ -476,7 +489,7 @@ def test_whether_a_view_begins_with_a_summary_is_told_and_never_read_from_what_a
     assert compact.choose_cut(view, 10_000) == 3 and compact.log_index(3, 0, 0) == 3
     assert compact.log_index(3, 7, 1) == 9, "behind a summary of ours, one place less"
     assert compact.render_parts(view[:1])[0].startswith("USER: " + compact.SUMMARY_PREFIX), "what the user pasted is what the user said"
-    script = Script(say("S"))
+    script = Script(*[say("S") for _ in range(20)])
     result = asyncio.run(compact.compact(view, stream=script, model="m", reasoning=None, window=4000))
     assert result is not None and result.cut == 3
     body = body_of(script.requests[0])

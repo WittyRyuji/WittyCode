@@ -17,7 +17,7 @@ from desktop.core.memory.launch import MemoryLaunch
 from desktop.core.memory.proposals import ProposalStore, make
 from desktop.core.memory.store import APP, MemoryStore
 from tests.app_support import ready_core
-from tests.chatgpt_support import ACCESS_TOKEN, make_engine
+from tests.chatgpt_support import ACCESS_TOKEN, finish_turn, make_engine
 from tests.fake_responses import FakeResponses, say
 from tests.fakes import until
 
@@ -55,7 +55,9 @@ async def started(tmp_path, fake, memory=None):
 async def talk(core, events, cid, text=ASK):
     before = len([p for p in events.of("turns") if p["id"] == cid])
     await core.call("session.send", {"id": cid, "text": text})
-    await until(lambda: any(p["id"] == cid and p["patch"].get("mark") == "ready" for p in events.of("session")[-3:]) and len([p for p in events.of("turns") if p["id"] == cid]) > before)
+    # A turn update can precede HTTP, and ready patches may be old or coalesced: await the controller itself.
+    await finish_turn(core._by_cid[cid].controller)
+    await until(lambda: len([p for p in events.of("turns") if p["id"] == cid]) > before)
 
 
 def notes_of(memory):
@@ -224,15 +226,27 @@ def test_a_note_the_user_asks_for_in_so_many_words_is_a_lesson_while_the_switch_
     run(scenario())
 
 
-def test_a_turn_that_failed_or_was_restored_is_not_asked_about(tmp_path):
+@pytest.mark.parametrize("startup_delay", [0, 0.8], ids=["normal", "slow-startup"])
+def test_a_turn_that_failed_or_was_restored_is_not_asked_about(tmp_path, monkeypatch, startup_delay):
     async def scenario():
         with FakeResponses(token=ACCESS_TOKEN) as fake:
             fake.script(say("好"), say(reply(FOUND)))
             core, events, cid, _ = await started(tmp_path, fake)
-            await talk(core, events, cid, "好")
-            await asyncio.sleep(0.3)
-            assert len(fake.requests) == 1, "a short exchange is not worth a request"
-            await core.shutdown()
+            if startup_delay:
+                controller = core._by_cid[cid].controller
+                ensure_tools = controller._ensure_tools
+
+                async def slow_tools():
+                    await asyncio.sleep(startup_delay)
+                    return await ensure_tools()
+
+                monkeypatch.setattr(controller, "_ensure_tools", slow_tools)
+            try:
+                await talk(core, events, cid, "好")
+                await asyncio.sleep(0.3)
+                assert len(fake.requests) == 1, "a short exchange is not worth a request"
+            finally:
+                await core.shutdown()
 
     run(scenario())
 

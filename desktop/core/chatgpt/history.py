@@ -48,7 +48,8 @@ def user_parts(item: Mapping[str, Any]) -> tuple[str, list[Any], tuple[int, bool
 
 
 def _assistant_text(item: Mapping[str, Any]) -> str:
-    return "".join(str(part.get("text") or "") for part in item.get("content") or () if isinstance(part, Mapping) and part.get("type") == "output_text")
+    from desktop.core.harness.history import message_text
+    return message_text(item)
 
 
 def _summary(item: Mapping[str, Any]) -> str:

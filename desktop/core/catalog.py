@@ -84,7 +84,7 @@ class Catalog:
         found = self._page_ids.get((engine, model))
         if found is not None:
             return found
-        if model.startswith(API_PREFIX):
+        if model.startswith(API_PREFIX) or (engine == OWN_ENGINE and model.startswith(DEVIN_PREFIX)):
             return model
         return ENGINE_PREFIXES.get(engine, "") + model
 

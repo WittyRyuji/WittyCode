@@ -15,6 +15,7 @@ const CATEGORY_ORDER: Category[] = ["read", "edit", "command", "plan", "ask", "m
 
 export const TOOL_LABELS: Record<string, string> = {
   Read: "读取",
+  ReadOutput: "读取完整输出",
   LS: "列目录",
   Glob: "找文件",
   Grep: "搜索",

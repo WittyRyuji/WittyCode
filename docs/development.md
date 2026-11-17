@@ -15,6 +15,12 @@
 - README 截图重拍（演示数据，不含真实对话）：`cd frontend; npm run build; node scripts/readme-shots.mjs`
 - 发布包：先 `cd frontend; npm run build:app`，再 `.\.venv\Scripts\python.exe scripts\build_release.py`（`--no-smoke` / `--no-zip` / `--keep-work`），产物在 `dist/`。包的结构和验证见 `docs/project.md`「发布包」。
 - 实机探针用便宜的模型，轮数按任务给的上限。
+- **评测集**（`evals/`：衡量自有循环的任务通过率、Token 和用时；设计和读法见 `docs/knowledge.md`「Harness 评测集」）：
+  - 不调用模型：`.\.venv\Scripts\python.exe -m evals list`（任务和套件）、`-m evals verify`（每个任务原样必须不通过、套上参考解必须通过）、`-m evals compare <运行 A> <运行 B>`（两次运行逐任务对比）。
+  - **调用真实模型**：`.\.venv\Scripts\python.exe -m evals run --model <模型> [--reasoning low] [--suite smoke|core|full]`。默认套件 `core`（10 个任务）；默认预算 100 万 token（`--budget 1m`，最多 `5m`，再大直接拒绝），单任务默认 20 万（`--task-budget`）、30 步、900 秒。结果在 `sandbox/eval/runs/<时间>-<模型>/`：`result.json`、`summary.md`、`transcripts/`（每个任务的对话）、`work/`（任务文件夹）。第一次先用 `--suite smoke`（3 个任务）。
+  - 套餐模型需要一份登录。默认用评测自己的资料夹：先运行 `.\.venv\Scripts\python.exe -m desktop --settings sandbox/eval/profile/settings.json`，在窗口里登录一次再关掉；也可以用 `--account <含登录的 chatgpt 文件夹>` 指到别处。API 模型用 `--model api:<provider>:<id> --models <models.json>`，密钥按该文件里的 `${变量名}` 从环境读。
+  - 评测没有沙箱：批准的命令以当前用户在本机运行，所以只放不需要外部东西的小任务；任务文件夹之外的读写请求一律拒绝。
+  - 改了 `evals/` 之后跑变异检查：`.\.venv\Scripts\python.exe sandbox\mutate_evals.py`（在临时副本里跑，约 25 分钟；`--check` 只查模式串）。
 
 ## 测试的坑
 
@@ -29,6 +35,16 @@
 - **不要用 `Get-Content` / `Set-Content` 改带中文的文件**：它们按系统代码页读无 BOM 的 UTF-8，再按 UTF-8 写回，中文全变成乱码。改文件用编辑工具或 Python；`sandbox/scan_mojibake.py` 扫整个仓库，`sandbox/repair_mojibake.py <文件> --write` 能把「UTF-8 被当 Windows-1252 读」的错位还原（可逆）。
 - `docs/knowledge.md` 和 `docs/handoff.md` 里有几千字的长行：搜索时只列文件名或限制输出长度。
 - 有的代理的 shell 里设置了环境变量 `GIT_SSH_COMMAND`，它会盖过仓库的 `core.sshCommand`：推送前在同一条命令里先重设它（见 `docs/knowledge.md`「斜杠菜单去掉 `/new`…」一条的 (d)）。
+
+## 项目规则
+
+本项目自己的规则，以及 `AGENTS.md` 的规则在这里具体指什么。改代码、开窗口、调用真实模型或提交之前看一遍。
+
+- **语言**：代码只用 Python 和 React（TypeScript）。任何用途都不许引入 C#、C++、Rust 等其他语言，小工具、启动器、安装器也不行；需要的东西用 Python 或前端工具链做。
+- **不许改的文件**：`spikes/ctx_long_session.py`、`fixtures/long_session/` 和 `LICENSE`。
+- **用户的数据和设置**在 `%APPDATA%\WittyCode\` 和旧位置 `%APPDATA%\droid-desk\`。自己开的窗口用 `--settings` 指到 `sandbox/` 里，并尽快关掉；真实模型调用的工作目录放在 `sandbox/` 下。
+- **公开仓库**：下面这些不许进库，截图、录像、测试数据、代码注释、提交说明和文档里都不行——真实路径和用户名、机器信息、令牌和密钥、SSH 密钥文件名、邮箱、账号和会话 id、套餐等级、用户的其他项目和个人内容。演示和测试用中性名字（`demo@example.com`、`C:\Users\me\…`、项目 `wittycode` / `inventory-api`）。测试里的假密钥拆开写（`"sk-" + "…"`），不要绕过密钥扫描。进库前用 `git grep` 自查；更细的清单在 `docs/project.md`「仓库与许可证」。
+- **提交格式**：见下面「Git」一节。
 
 ## Git
 

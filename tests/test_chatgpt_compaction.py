@@ -250,7 +250,7 @@ def test_an_error_that_is_not_about_size_does_not_start_a_compaction(tmp_path):
 # ----------------------------------------------------------------------------------------------- when the summary cannot be written
 
 
-def test_a_summary_that_cannot_be_written_is_a_list_of_what_the_user_asked_and_the_conversation_goes_on(tmp_path):
+def test_a_summary_that_cannot_be_written_pauses_and_keeps_the_execution_record(tmp_path):
     async def go() -> None:
         with FakeResponses(token=ACCESS_TOKEN) as fake:
             fake.script(http_error(400, {"error": {"code": "invalid_request_error", "message": "overloaded"}}), say("answer anyway"))
@@ -259,10 +259,10 @@ def test_a_summary_that_cannot_be_written_is_a_list_of_what_the_user_asked_and_t
             engine._windows[SOL] = await roomy(controller)  # (the digest, with the instructions and the tools, has to fit the window too)
             controller.send_prompt("go")
             await finish_turn(controller)
-            record = controller.saved.compaction
-            assert record["mechanical"] is True and "question 0" in record["summary"] and "could not be summarised" in record["summary"]
-            assert controller.transcript.turns[-1].status is TurnStatus.DONE
-            assert any("摘要没写成" in text and "overloaded" in text for text in notices(controller))
+            assert controller.saved.compaction == {} and len(fake.requests) == 1
+            assert controller.transcript.turns[-1].status is TurnStatus.FAILED
+            assert len(controller.saved.items) == 12 and "question 0" in str(controller.saved.items[0])
+            assert any("overloaded" in getattr(block, "message", "") for block in controller.transcript.turns[-1].blocks)
             await engine.close_all()
 
     run(go())
@@ -349,7 +349,7 @@ def test_a_reopened_conversation_reads_the_summary_and_shows_all_it_ever_said(tm
 def test_a_second_compaction_carries_the_first_summary_and_the_places_stay_in_order(tmp_path):
     async def go() -> None:
         with FakeResponses(token=ACCESS_TOKEN) as fake:
-            fake.script(say("FIRST SUMMARY"), say("answer one"), say("SECOND SUMMARY"), say("answer two"))
+            fake.script(say("FIRST SUMMARY"), say("answer one"), say("SECOND SUMMARY"), say("SECOND SUMMARY"), say("answer two"))
             engine, controller = await opened(tmp_path, fake)
             fill(controller)
             engine._windows[SOL] = await roomy(controller)
@@ -365,7 +365,7 @@ def test_a_second_compaction_carries_the_first_summary_and_the_places_stay_in_or
             assert is_summary_request(fake.requests[2]) and "<previous_summary>\nFIRST SUMMARY\n" in body
             assert compact.view_of(controller.saved.items, second)[1:] == controller.saved.items[second["upto"] :]
             # and the place is where the model's own request began, not just where the file says it did
-            sent = inputs(fake.requests[3])
+            sent = inputs(fake.requests[-1])
             assert compact.is_summary(sent[0]) and "SECOND SUMMARY" in compact.summary_text(sent[0])
             assert sent[1:] == controller.saved.items[second["upto"] : second["upto"] + len(sent) - 1]
             await engine.close_all()

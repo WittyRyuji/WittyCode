@@ -1,16 +1,18 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowUp, ChevronDown, Paperclip, Square } from "lucide-react";
 import type { FollowUp } from "../protocol";
-import { currentSession, landingProjectId, useStore } from "../store";
+import { currentSession, landingProjectId, settingsForModel, useStore } from "../store";
 import { MODES, effortLabel, permissionsFor, reasoningChoices } from "../lib/vocab";
 import { engineOfSource, sourceLabel, sourceTag } from "../lib/models";
 import { CHATGPT_USAGE_URL, chatgptReady } from "../lib/chatgpt";
 import { LIVE } from "../mode";
 import { commandNamed, fromSkills, parseSlash, suggestions, unavailable, type Scene, type SlashCommand } from "../lib/commands";
-import type { Engine, SessionSettings } from "../types";
+import type { Engine, Session, SessionSettings } from "../types";
 import { AttachmentCard } from "./Attachments";
-import { buildModelMenu } from "./modelMenu";
+import { buildModelMenu, type ModelMenuInput } from "./modelMenu";
+import { fusionChoices, fusionDisabledReason } from "./fusionModels";
 import { QueueStrip } from "./QueueStrip";
+import { PlanApproval } from "./PlanApproval";
 import { MenuButton, Tip, type MenuItem } from "./ui";
 
 /** What a message typed while a turn runs can become: held until the turn is over, or given to the turn now. */
@@ -36,13 +38,13 @@ function Chip({ label, value, items, disabled, tag, title, extra, bare }: { labe
 }
 
 /** `live`: the open session's state, or null when the controls edit the defaults for new sessions. */
-function Controls({ values, disabled, live, onChoose }: { values: SessionSettings; disabled: boolean; live: { running: boolean; fresh: boolean; engine?: Engine } | null; onChoose: (f: keyof SessionSettings, v: string) => void }) {
+function Controls({ values, disabled, fixedModel, fusion, live, onChoose }: { values: SessionSettings; disabled: boolean; fixedModel: boolean; fusion: ModelMenuInput["fusion"]; live: { running: boolean; fresh: boolean; engine?: Engine } | null; onChoose: (f: keyof SessionSettings, v: string) => void }) {
   const { models, providers, devin, chatgpt, hiddenModels } = useStore();
   const openSettings = useStore((s) => s.openSettings);
   const chatgptLogin = useStore((s) => s.chatgptLogin);
   const model = models.find((m) => m.id === values.model);
   // An open session knows its engine even before the model list has arrived.
-  const engine = live?.engine ?? engineOfSource(model?.source ?? "chatgpt");
+  const engine = fusion?.selected ? "chatgpt" : live?.engine ?? engineOfSource(model?.source ?? "chatgpt");
   const levels = permissionsFor(engine);
   // No level chosen: the model's own default is what runs.
   const reasoning = values.reasoning || model?.defaultEffort || "";
@@ -56,10 +58,10 @@ function Controls({ values, disabled, live, onChoose }: { values: SessionSetting
         label="模型"
         bare
         extra="chip-model"
-        value={model?.label ?? shown(values.model)}
-        tag={model ? sourceTag(model.source) : undefined}
-        title={model ? `${model.label}${sourceLabel(model.source, providers) ? ` · ${sourceLabel(model.source, providers)}` : ""}` : undefined}
-        disabled={disabled}
+        value={fusion?.selected ? "Fusion" : model?.label ?? shown(values.model)}
+        tag={!fusion?.selected && model ? sourceTag(model.source) : undefined}
+        title={fusion?.selected ? `Fusion · 主模型：${model?.label ?? shown(values.model)}` : model ? `${model.label}${sourceLabel(model.source, providers) ? ` · ${sourceLabel(model.source, providers)}` : ""}` : undefined}
+        disabled={disabled || fixedModel}
         items={buildModelMenu({
           models,
           providers,
@@ -70,6 +72,7 @@ function Controls({ values, disabled, live, onChoose }: { values: SessionSetting
           engine: live ? engine : undefined,
           running: live?.running,
           fresh: live?.fresh,
+          fusion,
           onPick: (id) => onChoose("model", id),
           onManage: (edit) => openSettings("providers", edit),
           onChatGPTLogin: (forceConsent) => void chatgptLogin({ forceConsent }),
@@ -80,14 +83,73 @@ function Controls({ values, disabled, live, onChoose }: { values: SessionSetting
         bare
         extra="chip-reasoning"
         value={noReasoning ? "—" : shown(effortLabel(reasoning))}
-        disabled={disabled || noReasoning}
-        title={noReasoning ? "这个模型没有推理档位" : "推理强度"}
+        disabled={disabled || noReasoning || (!!fusion?.selected && !live)}
+        title={fusion?.selected && !live ? "在 Fusion 设置中调整各模型的思考等级" : noReasoning ? "这个模型没有推理档位" : "推理强度"}
         items={pick("reasoning", reasoningChoices(model), reasoning)}
       />
       <Chip label="权限" bare extra="chip-permission" title="权限：不经询问能做多少事" value={shown(levels.find((r) => r.value === values.autonomy)?.label ?? values.autonomy)} disabled={disabled} items={pick("autonomy", levels)} />
       <Chip label="模式" extra="chip-mode" value={shown(MODES.find((r) => r.value === values.mode)?.label ?? values.mode)} disabled={disabled} items={pick("mode", MODES)} />
     </div>
   );
+}
+
+function FusionMain({ session }: { session: Session }) {
+  const models = useStore((s) => s.models);
+  const hidden = useStore((s) => s.hiddenModels);
+  const open = useStore((s) => s.openDialog);
+  const change = useStore((s) => s.changeFusionMain);
+  const current = session.settings.model;
+  const items: MenuItem[] = fusionChoices(models, hidden, true).filter((model) => model.id !== current)
+    .map((model) => ({ id: model.id, label: model.label, description: fusionDisabledReason(model, true), disabled: model.disabled, onSelect: () => open({
+      title: `更换主模型为 ${model.label}？`, body: "确认后保留同一主代理、上下文、专家与会话配置，后续消息使用新模型；不会自动启动任务，也不改变新会话默认设置。",
+      confirmLabel: "更换主模型", noEnter: true, onConfirm: () => change(session.id, model.id),
+    }) }));
+  if (!items.length) return null;
+  return <MenuButton className="linkbtn" disabled={session.mark !== "ready" || !!session.pendingPlan} items={items} up minWidth={240} title={session.pendingPlan ? "请先处理待审批计划" : "明确更换本会话的主模型"}>更换主模型…</MenuButton>;
+}
+
+function FusionAuthorize({ session }: { session: Session }) {
+  const models = useStore((s) => s.models);
+  const hidden = useStore((s) => s.hiddenModels);
+  const open = useStore((s) => s.openDialog);
+  const authorize = useStore((s) => s.authorizeFusionModel);
+  const workers = session.fusionPolicy?.workers ?? [];
+  const items: MenuItem[] = fusionChoices(models, hidden, true).filter((model) => !workers.includes(model.id))
+    .map((model) => ({ id: model.id, label: model.label, description: fusionDisabledReason(model), disabled: model.disabled, onSelect: () => open({
+      title: `授权 ${model.label}？`, body: "确认后，主代理可以在本会话的权限内自动把工作分配给此模型；不会启动任务，也不改变新会话默认设置。",
+      confirmLabel: "授权模型", noEnter: true, onConfirm: () => authorize(session.id, model.id),
+    }) }));
+  if (!items.length) return null;
+  return <MenuButton className="linkbtn" disabled={session.mark !== "ready"} items={items} up minWidth={240}>授权模型…</MenuButton>;
+}
+
+function FusionBudget({ session }: { session: Session }) {
+  const open = useStore((s) => s.openDialog);
+  const update = useStore((s) => s.updateFusionBudget);
+  const say = useStore((s) => s.say);
+  const policy = session.fusionPolicy;
+  if (!policy || (!policy.maxCalls && !policy.maxTokens)) return null;
+  const change = () => open({
+    title: "专家调用总上限", body: `目前已调用 ${policy.calls} 次，当前上限 ${policy.maxCalls} 次；只能提高或保持原上限。`,
+    confirmLabel: "下一步", onConfirm: () => undefined,
+    input: { value: String(policy.maxCalls), onSubmit: (rawCalls) => {
+      const calls = Number(rawCalls);
+      if (!Number.isSafeInteger(calls) || calls < policy.maxCalls || calls > 1000) return say("调用上限必须是不低于原值的整数，最多 1000 次。");
+      open({ title: "已知 Token 总上限", body: `已知用量 ${policy.knownTokens.toLocaleString()}，当前上限 ${policy.maxTokens.toLocaleString()}；未知用量不包含在内。`,
+        confirmLabel: "下一步", onConfirm: () => undefined,
+        input: { value: String(policy.maxTokens), onSubmit: (rawTokens) => {
+          const tokens = Number(rawTokens);
+          if (!Number.isSafeInteger(tokens) || tokens < Math.max(1, policy.maxTokens, policy.knownTokens)) return say("Token 上限不能低于原上限或已知用量。");
+          open({ title: "确认本会话预算？", noEnter: true, confirmLabel: "确认预算", onConfirm: () => update(session.id, calls, tokens, policy.unknown),
+            body: `专家调用上限 ${calls} 次，已知 Token 上限 ${tokens.toLocaleString()}。${policy.unknown || policy.hadUnknown ? "此前有未知用量，无法保证历史总额；确认表示你接受这一不确定性。" : "单次请求实际用量可能超过估算。"}确认不会自动启动任务。` });
+        } },
+      });
+    } },
+  });
+  return <button type="button" className="linkbtn fusion-budget" disabled={session.mark !== "ready"} onClick={change}
+    title={`专家调用 ${policy.calls}/${policy.maxCalls} · 已知 Token ${policy.knownTokens}/${policy.maxTokens}${policy.unknown || policy.hadUnknown ? " · 存在未知用量" : ""}`}>
+    {policy.unknown ? "用量未知 · 预算…" : "预算…"}
+  </button>;
 }
 
 /** OpenAI's guideline: say that the plan is in use, near the composer, with the way to manage it. It sits at the right end of
@@ -163,7 +225,11 @@ export function Composer() {
   const session = useStore(currentSession);
   const defaults = useStore((s) => s.defaults);
   const landing = useStore((s) => s.landing);
-  const { setDraft, setLandingDraft, startSession, adoptLanding, send, stop, choose, attachFiles, pickAttachments, removeAttachment, say, reconnect, compact, startGoal } = useStore.getState();
+  const fusionMain = useStore((s) => s.fusionMain);
+  const fusionReasoning = useStore((s) => s.fusionReasoning);
+  const fusionReady = useStore((s) => !!s.fusionMain && !!s.fusionLight && s.fusionWorkers.length > 0);
+  const models = useStore((s) => s.models);
+  const { setDraft, setLandingDraft, setLandingFusion, openSettings, startSession, adoptLanding, send, stop, choose, attachFiles, pickAttachments, removeAttachment, say, reconnect, compact, startGoal } = useStore.getState();
   const area = useRef<HTMLTextAreaElement>(null);
   // The command menu: which entry is lit, and the draft for which the user closed it with Esc.
   const [pick, setPick] = useState(0);
@@ -273,7 +339,12 @@ export function Composer() {
     }
   };
 
-  const values = session?.settings ?? defaults;
+  const baseValues = session?.settings ?? landing.settings ?? defaults;
+  const values = !session && landing.fusion ? {
+    ...settingsForModel(models, baseValues, fusionMain).settings,
+    ...(fusionReasoning[fusionMain] ? { reasoning: fusionReasoning[fusionMain] } : {}),
+  } : baseValues;
+  const fusionSelected = session ? !!session.fusion : !!landing.fusion;
   const chipsDisabled = !!session && dead;
   // An open session knows its engine even before the model list has arrived (the demo's sessions do not say: their model does).
   const modelSource = useStore((s) => s.models.find((m) => m.id === values.model)?.source);
@@ -299,7 +370,7 @@ export function Composer() {
       const on = values.mode !== "spec";
       choose("mode", on ? "spec" : "auto");
       const own = scene.engine === "chatgpt";
-      return say(on ? (own ? "已切到 Plan：模型只读不改，先出方案；满意了再发 /plan 回到 Auto，让它动手。" : "已切到 Plan：模型先出方案，批准后再动手。") : "已回到 Auto：模型直接动手。");
+      return say(on ? (own ? "已切到 Plan：模型只读不改，提出完整方案后可选择执行或继续修改。" : "已切到 Plan：模型先出方案，批准后再动手。") : "已回到 Auto：模型直接动手。");
     }
     if (session && command.name === "compact") return void compact(session.id);
     if (session && command.name === "goal") return void startGoal(session.id, args);
@@ -323,6 +394,7 @@ export function Composer() {
 
   return (
     <div className="composer-wrap">
+      {session && <PlanApproval session={session} onRevise={() => area.current?.focus()} />}
       {session && <QueueStrip session={session} />}
       <div className={`composer${!editable ? " off" : ""}`}>
         {menu.length > 0 && <SlashMenu items={menu} active={active} scene={scene} onPick={pickCommand} onHover={setPick} />}
@@ -382,8 +454,16 @@ export function Composer() {
           <Controls
             values={values}
             disabled={chipsDisabled || (!session && landing.starting)}
+            fixedModel={!!session?.fusion}
+            fusion={{ selected: fusionSelected, disabled: !!session,
+              description: session ? "仅新会话可选择 Fusion" : fusionReady ? `主模型：${models.find((m) => m.id === fusionMain)?.label ?? fusionMain}` : "先配置主模型、工作模型和轻量模型",
+              onSelect: () => fusionReady ? setLandingFusion(true) : openSettings("fusion"),
+            }}
             live={session ? { running, fresh: session.turns.length === 0, engine: session.engine } : null}
-            onChoose={choose}
+            onChoose={(field, value) => {
+              if (!session && field === "model") setLandingFusion(false);
+              choose(field, value);
+            }}
           />
           <span className="spacer" />
           <div className="bar-actions">
@@ -411,9 +491,10 @@ export function Composer() {
       </div>
       {/* The line under the box exists only when it has something to hold: the project of a new conversation, a note about
           the next message, the way to reconnect, the plan in use. The key hints are in the box. */}
-      {(!session || (dead && session) || (session?.handoff && !running) || onPlan) && (
+      {(!session || session.fusion || (dead && session) || (session?.handoff && !running) || onPlan) && (
         <div className={`hint${session?.handoff && !running ? " handoff" : ""}`}>
           {!session && <ProjectChip disabled={landing.starting} />}
+          {session?.fusion && <><FusionMain session={session} /><FusionBudget session={session} /><FusionAuthorize session={session} /></>}
           {session && dead ? (
             <span className="hint-text">
               连接已断开 ·{" "}

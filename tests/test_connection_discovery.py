@@ -52,7 +52,7 @@ def test_codex_home_overrides_the_default_root_instead_of_merging_both(rig, monk
 def test_identical_roots_and_unsupported_rows_do_not_repeat_the_same_warning(rig, monkeypatch):
     store, home, project = rig
     root = home / ".codex"
-    write_json(root / ".mcp.json", {"mcpServers": {"first": {"url": "https://example.com/one"}, "second": {"url": "https://example.com/two"}}})
+    write_json(root / ".mcp.json", {"mcpServers": {"first": {"url": "http://example.com/one"}, "second": {"url": "http://example.com/two"}}})
     monkeypatch.setattr(Path, "home", lambda: home)
     monkeypatch.setenv("CODEX_HOME", str(root))
     scan = store.scan()

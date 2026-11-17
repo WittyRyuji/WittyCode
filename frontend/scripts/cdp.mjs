@@ -39,7 +39,7 @@ export async function openPage(url, { width = 1500, height = 960, port = 0, init
   const profile = mkdtempSync(join(tmpdir(), "wc-cdp-"));
   const proc = spawn(
     EDGE,
-    ["--headless=new", "--disable-gpu", ...(hideScrollbars ? ["--hide-scrollbars"] : []), "--no-first-run", `--user-data-dir=${profile}`, `--remote-debugging-port=${port}`, `--window-size=${width},${height}`, "about:blank"],
+    ["--headless=new", "--disable-gpu", "--disable-background-timer-throttling", "--disable-renderer-backgrounding", "--disable-backgrounding-occluded-windows", ...(hideScrollbars ? ["--hide-scrollbars"] : []), "--no-first-run", `--user-data-dir=${profile}`, `--remote-debugging-port=${port}`, `--window-size=${width},${height}`, "about:blank"],
     { stdio: "ignore" },
   );
   ownedBrowsers.add(proc);
@@ -85,6 +85,8 @@ export async function openPage(url, { width = 1500, height = 960, port = 0, init
   await send("Runtime.enable");
   for (const source of [CSP_WATCH, ...init]) await send("Page.addScriptToEvaluateOnNewDocument", { source });
   await send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
+  // A background headless target can otherwise become hidden and stop IntersectionObserver/keyboard updates.
+  await send("Emulation.setFocusEmulationEnabled", { enabled: true });
   await send("Page.navigate", { url });
 
   const evalJs = async (expression) => {
@@ -116,7 +118,18 @@ export async function openPage(url, { width = 1500, height = 960, port = 0, init
         `(() => { const e = document.querySelectorAll(${JSON.stringify(selector)})[${index}]; if (!e) return null; e.scrollIntoView({block: "center"}); const r = e.getBoundingClientRect(); return {x: r.left, y: r.top, w: r.width, h: r.height}; })()`,
       );
       if (!r) throw new Error(`no element for ${selector}[${index}]`);
-      return r;
+      let previous = r, stable = 0;
+      const end = Date.now() + 2500;
+      while (Date.now() < end) {
+        // Do not await renderer rAF here: an occluded headless window can stop emitting frames.
+        await sleep(25);
+        const current = await evalJs(`(() => { const e = document.querySelectorAll(${JSON.stringify(selector)})[${index}]; if (!e) return null; const r = e.getBoundingClientRect(); return {x: r.left, y: r.top, w: r.width, h: r.height}; })()`);
+        if (!current) throw new Error(`no element for ${selector}[${index}]`);
+        stable = Object.keys(current).every(k => Math.abs(current[k] - previous[k]) < 0.1) ? stable + 1 : 0;
+        if (stable >= 2 && current.w > 0 && current.h > 0) return current;
+        previous = current;
+      }
+      throw new Error(`the target did not settle: ${selector}[${index}]`);
     },
     async mouse(type, x, y, extra = {}) {
       await send("Input.dispatchMouseEvent", { type, x, y, button: "left", clickCount: 1, ...extra });
@@ -126,11 +139,19 @@ export async function openPage(url, { width = 1500, height = 960, port = 0, init
       await this.mouse("mouseMoved", r.x + r.w / 2, r.y + r.h / 2, { button: "none", clickCount: 0 });
     },
     async click(selector, index = 0, { right = false, ctrl = false } = {}) {
-      const r = await this.rect(selector, index);
+      let r = await this.rect(selector, index);
+      // Moving the real pointer can start a compositor frame or change a hovered target's layout.
+      for (let attempt = 0; attempt < 3; attempt++) {
+        await this.mouse("mouseMoved", r.x + r.w / 2, r.y + r.h / 2, { button: "none", clickCount: 0 });
+        const next = await this.rect(selector, index);
+        const settled = Object.keys(next).every(k => Math.abs(next[k] - r[k]) < 0.1);
+        r = next;
+        if (settled) break;
+        if (attempt === 2) throw new Error(`the hovered target did not settle: ${selector}[${index}]`);
+      }
       const x = r.x + r.w / 2;
       const y = r.y + r.h / 2;
       const extra = { ...(right ? { button: "right" } : {}), ...(ctrl ? { modifiers: 2 } : {}) };
-      await this.mouse("mouseMoved", x, y, { button: "none", clickCount: 0 });
       await this.mouse("mousePressed", x, y, extra);
       await this.mouse("mouseReleased", x, y, extra);
       await sleep(120);

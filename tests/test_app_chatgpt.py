@@ -234,11 +234,11 @@ def test_a_new_session_starts_with_the_default_permission_of_this_engine_and_rem
             cid = await new_chatgpt(core, events, tmp_path)
             assert await core.call("session.choose", {"id": cid, "field": "autonomy", "value": "full"}) == {"ok": True}
             await until(lambda: meta(events, cid)["settings"]["autonomy"] == "full")
-            assert core.settings.chatgpt_autonomy == "full" and core.settings.devin_autonomy == "code", "Devin's own level is not touched"
+            assert core.settings.chatgpt_autonomy == "code" and core.settings.devin_autonomy == "code", "session choices do not overwrite saved permissions"
             cid2 = await new_chatgpt(core, events, tmp_path)
-            assert meta(events, cid2)["settings"]["autonomy"] == "full"
+            assert meta(events, cid2)["settings"]["autonomy"] == "code"
             # a level of another engine's scale is not a level of this one
-            assert core._open_settings("chatgpt:gpt-6.1-sol", {"autonomy": "readonly", "reasoning": "high"})["autonomy"] == "full"
+            assert core._open_settings("chatgpt:gpt-6.1-sol", {"autonomy": "readonly", "reasoning": "high"})["autonomy"] == "code"
             await core.shutdown()
 
     run(scenario())

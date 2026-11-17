@@ -32,13 +32,14 @@ def test_typing_and_switching_sessions_keep_the_outline_and_each_reading_positio
                 await rig.wait_for(".send.stop", 0)
                 await rig.wait_for(".turn-marker", i + 1)
             await wait_for(lambda: rig.js(AT_END), 5, "latest messages")
-            top = await rig.js("document.querySelector('.turn-nav').getBoundingClientRect().top")
-            assert await rig.js("[...document.querySelectorAll('.turn-marker')].every(e => e.getBoundingClientRect().height <= 12)")
+            centered = "(() => { const n=document.querySelector('.turn-nav').getBoundingClientRect(), s=document.querySelector('.stage').getBoundingClientRect(); return Math.abs(n.top+n.height/2-s.top-s.height/2)<1; })()"
+            assert await rig.js(centered)
+            assert await rig.js("[...document.querySelectorAll('.turn-marker')].every(e => e.getBoundingClientRect().height <= 6 && parseFloat(getComputedStyle(e.firstElementChild).height) === (e.getAttribute('aria-current') === 'step' ? 3 : 1.5))")
             await rig.focus_composer()
             for _ in range(7):
                 await rig.type("输入多行草稿")
                 await rig.press(Qt.Key.Key_Return, Qt.KeyboardModifier.ShiftModifier)
-                assert abs(await rig.js("document.querySelector('.turn-nav').getBoundingClientRect().top") - top) < 1
+                assert await rig.js(centered), "the outline stays vertically centered as the input grows"
             await wait_for(lambda: rig.js(AT_END), 5, "typing keeps latest-follow mode")
             await new_conversation(rig, tab_count=2)
             await rig.click(".tab", 0)

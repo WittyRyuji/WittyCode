@@ -23,7 +23,10 @@ import "./usage.test.mjs";
 import "./plan.test.mjs";
 import "./turn-navigation.test.mjs";
 import "./factory.test.mjs";
+import "./fusion.test.mjs";
+import "./reasoning-args.test.mjs";
 import "./qwebchannel.test.mjs";
+import "./turn-delta.test.ts";
 import "./starmap.test.mjs";
 
 test("API windows use exact specifications, preserve overrides and require unknown limits", () => {
@@ -631,7 +634,7 @@ test("a call that waits for the user has no timeout; any other call gives up aft
     );
     return box;
   };
-  const kinds = ["chatgpt.login", "devin.login", "project.add", "attachments.pick", "providers.list", "devin.account"];
+  const kinds = ["chatgpt.login", "devin.login", "connectors.login", "project.add", "attachments.pick", "sounds.pick", "providers.list", "devin.account"];
   const boxes = kinds.map((method) => outcome(transport.call(method)));
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(calls, kinds, "all of them were sent");
@@ -639,9 +642,20 @@ test("a call that waits for the user has no timeout; any other call gives up aft
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(
     boxes.map((b) => b.state),
-    ["waiting", "waiting", "waiting", "waiting", "WittyCode 后台 120 秒没有回应（providers.list）。", "WittyCode 后台 120 秒没有回应（devin.account）。"],
+    ["waiting", "waiting", "waiting", "waiting", "waiting", "waiting", "WittyCode 后台 120 秒没有回应（providers.list）。", "WittyCode 后台 120 秒没有回应（devin.account）。"],
     "the sign-ins and the file dialogs wait for as long as the user takes",
   );
+});
+
+test("notification settings carry resolved default and custom paths at init and after changes", () => {
+  const sounds = { soundEnabled: false, soundQuestion: "C:\\Apps\\WittyCode\\sounds\\question.wav", soundComplete: "C:\\Sounds\\done.wav", soundError: "C:\\Apps\\WittyCode\\sounds\\error.wav" };
+  const init = { ...INIT, settings: { ...SETTINGS, ...sounds } };
+  const data = applyInit(emptyLiveData(), init);
+  for (const [key, value] of Object.entries(sounds)) assert.equal(data[key], value);
+  const { state } = play(started(), ["settings", { settings: { ...SETTINGS, ...sounds, soundEnabled: true } }]);
+  assert.equal(state.soundEnabled, true);
+  assert.equal(state.soundComplete, sounds.soundComplete);
+  assert.equal(applyInit(emptyLiveData(), INIT).soundEnabled, true, "legacy backend defaults safely");
 });
 
 test("Devin's program path is a setting like the others", () => {

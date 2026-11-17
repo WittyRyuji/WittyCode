@@ -89,7 +89,7 @@ def test_gb18030_read_search_edit_and_original_encoding_are_preserved(tmp_path):
     path = tmp_path / "legacy.txt"
     path.write_bytes("这是旧内容\r\n第二行\r\n".encode("gb18030"))
     registry, ctx = ToolRegistry.default(), ToolContext(tmp_path)
-    read = asyncio.run(registry.run("read_file", {"file_path": "legacy.txt"}, ctx))
+    read = asyncio.run(registry.run("read_file", {"file_path": "legacy.txt", "encoding": "gb18030"}, ctx))
     assert "这是旧内容" in read.output
     found = asyncio.run(registry.run("grep", {"pattern": "旧内容"}, ctx))
     assert "legacy.txt" in found.output

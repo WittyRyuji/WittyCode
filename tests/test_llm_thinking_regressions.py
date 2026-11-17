@@ -78,5 +78,7 @@ def test_signature_only_thinking_survives_parse_history_and_both_replay_formats(
     parsed = collect(read_anthropic(lines_of(events), route.origin))
     item = history_item(next(e.item for e in parsed if isinstance(e, ItemDone)))
     assert item["wc_signature"] == "demo-signature"
-    assert anthropic_messages([item], route.origin)[0]["content"] == [{"type": "thinking", "thinking": "", "signature": "demo-signature"}]
-    assert converse_messages([item], route.origin)[0]["content"] == [{"reasoningContent": {"reasoningText": {"text": "", "signature": "demo-signature"}}}]
+    message = {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "answer"}]}
+    assert anthropic_messages([item, message], route.origin)[0]["content"][0] == {"type": "thinking", "thinking": "", "signature": "demo-signature"}
+    assert converse_messages([item, message], route.origin)[0]["content"][0] == {"reasoningContent": {"reasoningText": {"text": "", "signature": "demo-signature"}}}
+    assert anthropic_messages([item], route.origin) == converse_messages([item], route.origin) == [], "orphan signatures are not valid assistant messages"

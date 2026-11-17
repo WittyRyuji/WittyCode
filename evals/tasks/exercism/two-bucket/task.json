@@ -1,0 +1,24 @@
+{
+  "id": "ex-two-bucket",
+  "title": "Exercism (Python): two-bucket",
+  "prompt": [
+    "Solve the programming exercise in this folder.",
+    "",
+    "- INSTRUCTIONS.md describes it.",
+    "- Write the solution in two_bucket.py. Keep the names the tests import.",
+    "- The tests are in two_bucket_test.py. Do not change them.",
+    "- Run them with: python -m unittest -q two_bucket_test.py",
+    "",
+    "You are done when every test passes."
+  ],
+  "check": [
+    "python",
+    "-m",
+    "unittest",
+    "-q",
+    "two_bucket_test.py"
+  ],
+  "protect": [
+    "two_bucket_test.py"
+  ]
+}

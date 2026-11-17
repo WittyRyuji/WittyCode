@@ -1,0 +1,5 @@
+{
+  "name": "inventory-api",
+  "retry_limit": "three",
+  "timeout_seconds": 30
+}

@@ -1,0 +1,10 @@
+{
+  "id": "probe-big-file",
+  "title": "Find and fix one wrong rule in a 1,400-line module",
+  "prompt": [
+    "The tests of this project fail: python -m unittest -q",
+    "",
+    "One pricing rule in pricing/rules.py is wrong. Find it and fix it. Change only what the fix needs: the rest of the file must stay exactly as it is. Do not change test_rules.py or cases.json."
+  ],
+  "protect": ["test_rules.py", "cases.json"]
+}

@@ -1,0 +1,24 @@
+{
+  "id": "ex-zebra-puzzle",
+  "title": "Exercism (Python): zebra-puzzle",
+  "prompt": [
+    "Solve the programming exercise in this folder.",
+    "",
+    "- INSTRUCTIONS.md describes it.",
+    "- Write the solution in zebra_puzzle.py. Keep the names the tests import.",
+    "- The tests are in zebra_puzzle_test.py. Do not change them.",
+    "- Run them with: python -m unittest -q zebra_puzzle_test.py",
+    "",
+    "You are done when every test passes."
+  ],
+  "check": [
+    "python",
+    "-m",
+    "unittest",
+    "-q",
+    "zebra_puzzle_test.py"
+  ],
+  "protect": [
+    "zebra_puzzle_test.py"
+  ]
+}

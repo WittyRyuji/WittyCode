@@ -16,7 +16,7 @@ from typing import Any, Protocol
 from urllib.parse import urlsplit
 
 from desktop.core.chatgpt.errors import ChatGPTError
-from desktop.core.chatgpt.http import HttpClient
+from desktop.core.chatgpt.http import HttpClient, stream_idle_timeout
 from desktop.core.chatgpt.models import ChatGPTModel
 from desktop.core.chatgpt.responses import Event, read_events
 from desktop.core.llm import aws, bedrock
@@ -69,7 +69,8 @@ def route_of(spec: ApiModelSpec, key: str | None, headers: Mapping[str, str]) ->
         for existing in [k for k in sent if k.lower() == name.lower()]:
             del sent[existing]
         sent[name] = value
-    return Route(kind, spec.base_url, spec.native, sent, spec.extra_args, spec.max_output, spec.thinking)
+    return Route(kind, spec.base_url, spec.native, sent, spec.extra_args, spec.max_output, spec.thinking,
+                 spec.reasoning_args if spec.bedrock is None else {})
 
 
 def api_failure(error: ChatGPTError, spec: ApiModelSpec) -> ChatGPTError:
@@ -172,7 +173,7 @@ class ApiBackend:
             body, read = anthropic_body(request, route), lambda lines: read_anthropic(lines, route.origin)
         else:
             body, read = responses_body(request, route), read_events
-        lines = self.http.stream_lines("POST", route.url, headers=route.headers, json_body=body)
+        lines = self.http.stream_lines("POST", route.url, headers=route.headers, json_body=body, timeout=stream_idle_timeout(request))
         try:
             async for event in read(lines):
                 yield event
@@ -204,7 +205,7 @@ class ApiBackend:
         else:
             url, body = base + "/responses", responses_body(request, route)
             headers["Accept"] = "text/event-stream"
-        data = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        data = await asyncio.to_thread(lambda: json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
         if plan.access.bearer:
             sent = {**headers, "Authorization": f"Bearer {plan.access.bearer}"}
         elif plan.access.credentials is not None:
@@ -214,11 +215,11 @@ class ApiBackend:
             raise ChatGPTError("没有可用的 AWS 凭据。", code="api")
         origin = urlsplit(base).netloc.lower()
         if kind == "openai":
-            lines = self.http.stream_lines("POST", url, headers=sent, body=data)
+            lines = self.http.stream_lines("POST", url, headers=sent, body=data, timeout=stream_idle_timeout(request))
             events = read_events(lines)
             closer = lines
         else:
-            chunks = self.http.stream_chunks("POST", url, headers=sent, body=data)
+            chunks = self.http.stream_chunks("POST", url, headers=sent, body=data, timeout=stream_idle_timeout(request))
             events = bedrock.read_converse(chunks, origin) if kind == BEDROCK else read_anthropic(bedrock.invoke_lines(chunks), origin)
             closer = chunks
         try:

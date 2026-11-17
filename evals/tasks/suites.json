@@ -1,0 +1,12 @@
+{
+  "smoke": ["probe-project-rules", "probe-big-file", "ex-two-bucket"],
+  "core": [
+    "probe-big-file", "probe-gbk-csv", "probe-rename", "probe-long-output", "probe-project-rules",
+    "ex-bowling", "ex-wordy", "ex-two-bucket", "ex-poker", "ex-react"
+  ],
+  "full": [
+    "probe-big-file", "probe-gbk-csv", "probe-rename", "probe-long-output", "probe-project-rules",
+    "ex-bowling", "ex-wordy", "ex-two-bucket", "ex-poker", "ex-react",
+    "ex-book-store", "ex-sgf-parsing", "ex-zebra-puzzle"
+  ]
+}

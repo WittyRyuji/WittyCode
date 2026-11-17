@@ -5,6 +5,7 @@ r"""Builds the Windows release: a folder (and a zip of it) that runs WittyCode w
 What goes into ``dist\WittyCode-<version>-win-x64\``:
 
     WittyCode.exe, launcher\   the launcher (scripts/launcher.py, frozen with PyInstaller)
+    WittyCode.ico              the app icon, also embedded in the launcher's GUI interpreter
     python\                    the embeddable Python from python.org (checked against the MD5 python.org publishes)
     site-packages\             the packages ``requirements.txt`` names and what they depend on, copied from this .venv
     app\                       the desktop package (with the built page) and WittyCode.pyw
@@ -19,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import re
 import shutil
 import subprocess
@@ -106,7 +108,18 @@ def copy_packages(dists: list[metadata.Distribution], target: Path) -> None:
 def copy_app(target: Path) -> None:
     if not (ROOT / "desktop" / "ui_dist" / "index.html").is_file():
         raise SystemExit("the page is not built: cd frontend; npm run build:app")
-    shutil.copytree(ROOT / "desktop", target / "desktop", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from desktop.core.connector_clients import from_environment
+    try:
+        clients = from_environment()
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
+    shutil.copytree(ROOT / "desktop", target / "desktop", ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "connector-clients.json"))
+    if clients:
+        file = target / "desktop" / "core" / "connector-clients.json"
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text(json.dumps(clients), encoding="utf-8")
     shutil.copy2(ROOT / "WittyCode.pyw", target / "WittyCode.pyw")
 
 
@@ -149,6 +162,17 @@ def build_launcher(target: Path, work: Path) -> None:
             shutil.copy2(item, target / item.name)
 
 
+def brand_gui_runtime(target: Path) -> None:
+    """Windows also sees the real GUI interpreter, not just the short-lived launcher."""
+    icon = target / "WittyCode.ico"
+    shutil.copy2(ROOT / "desktop" / "assets" / "icon.ico", icon)
+    build_python = ROOT / ".venv-build" / "Scripts" / "python.exe"
+    subprocess.run(
+        [str(build_python), str(ROOT / "scripts" / "set_exe_icon.py"), str(target / "python" / "pythonw.exe"), str(icon)],
+        check=True,
+    )
+
+
 def write_notices(dists: list[metadata.Distribution], target: Path, python_folder: Path) -> None:
     licenses = target / "licenses"
     licenses.mkdir(parents=True, exist_ok=True)
@@ -163,6 +187,7 @@ def write_notices(dists: list[metadata.Distribution], target: Path, python_folde
         "each under its own license; the license texts are in the folder licenses\\.",
         "",
         "Python " + PYTHON_VERSION + " (python\\) — PSF License (licenses\\python\\LICENSE.txt). https://www.python.org/",
+        "Modification: pythonw.exe uses WittyCode's icon resources; its executable code and other resources are unchanged.",
     ]
     packaged = licenses / "python"
     packaged.mkdir(exist_ok=True)
@@ -262,6 +287,7 @@ def main() -> int:
         copy_app(out / "app")
         precompile(out / "python" / "python.exe", [out / "site-packages", out / "app"])
         build_launcher(out, work)
+        brand_gui_runtime(out)
         write_notices(dists, out, out / "python")
         (out / "README.txt").write_text(README.format(version=version), encoding="utf-8")
         size = sum(path.stat().st_size for path in out.rglob("*") if path.is_file())

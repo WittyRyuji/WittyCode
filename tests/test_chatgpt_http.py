@@ -95,10 +95,14 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Transfer-Encoding", "chunked")
-            self.end_headers()
-            chunk = b"data: late\n\n"
-            self.wfile.write(f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n")
-            self.wfile.flush()
+            try:
+                self.end_headers()
+                chunk = b"data: late\n\n"
+                self.wfile.write(f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n")
+                self.wfile.flush()
+            except OSError:
+                type(self).dropped.set()  # cancellation can now close the socket before any response header arrives
+                return
             self._watch()
         elif self.path in ("/error-hang", "/error-cut"):
             self.send_response(500)

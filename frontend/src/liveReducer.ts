@@ -19,6 +19,7 @@ import type {
   SessionSettings,
   ThemeChoice,
   Turn,
+  TurnUpdate,
 } from "./types";
 import type { Events, FollowUp, InitResult, SavedRow, SettingsView } from "./protocol";
 
@@ -57,8 +58,22 @@ export interface LiveData {
   /** ChatGPT Plan: summarise the early part of a long conversation at this percent of the model's window (off: only after the server refuses) */
   compactAuto: boolean;
   compactAt: number;
+  fusionMain: string;
+  fusionWorkers: string[];
+  fusionLight: string;
+  fusionReasoning: Record<string, string>;
+  fusionPreference: number;
+  fusionMaxCalls: number;
+  fusionMaxTokens: number;
+  fusionMaxSeconds: number;
   /** every model is asked to write its thinking in Chinese */
   thinkChinese: boolean;
+  answerLanguage: "auto" | "zh-CN" | "en";
+  thinkingLanguage: "auto" | "zh-CN" | "en";
+  soundEnabled: boolean;
+  soundQuestion: string;
+  soundComplete: string;
+  soundError: string;
   /** the folder of the conversation started last: where the first message box starts when nothing else was chosen */
   lastProject: string;
   /** the newest change of the shared memory, and how many by agents the user has not looked at (the badge) */
@@ -129,7 +144,21 @@ export function emptyLiveData(theme: ThemeChoice = "system", fontScale: FontScal
     memoryEngines: [...ALL_ENGINES],
     compactAuto: true,
     compactAt: COMPACT_AT_DEFAULT,
+    fusionMain: "",
+    fusionWorkers: [],
+    fusionLight: "",
+    fusionReasoning: {},
+    fusionPreference: 50,
+    fusionMaxCalls: 8,
+    fusionMaxTokens: 500000,
+    fusionMaxSeconds: 900,
     thinkChinese: true,
+    answerLanguage: "auto",
+    thinkingLanguage: "zh-CN",
+    soundEnabled: true,
+    soundQuestion: "",
+    soundComplete: "",
+    soundError: "",
     lastProject: "",
     memory: { ...NO_MEMORY },
     maximized: false,
@@ -210,7 +239,21 @@ export function settingsFields(v: SettingsView): Partial<LiveData> {
     memoryEngines: v.memoryEngines ?? [...ALL_ENGINES],
     compactAuto: v.compactAuto ?? true,
     compactAt: v.compactAt ?? COMPACT_AT_DEFAULT,
+    fusionMain: v.fusionMain ?? "",
+    fusionWorkers: v.fusionWorkers ?? [],
+    fusionLight: v.fusionLight ?? "",
+    fusionReasoning: v.fusionReasoning ?? {},
+    fusionPreference: v.fusionPreference ?? 50,
+    fusionMaxCalls: v.fusionMaxCalls ?? 8,
+    fusionMaxTokens: v.fusionMaxTokens ?? 500000,
+    fusionMaxSeconds: v.fusionMaxSeconds ?? 900,
     thinkChinese: v.thinkChinese ?? true,
+    answerLanguage: v.answerLanguage ?? "auto",
+    thinkingLanguage: v.thinkingLanguage ?? (v.thinkChinese === false ? "auto" : "zh-CN"),
+    soundEnabled: v.soundEnabled ?? true,
+    soundQuestion: v.soundQuestion ?? "",
+    soundComplete: v.soundComplete ?? "",
+    soundError: v.soundError ?? "",
     lastProject: v.lastProject ?? "",
   };
 }
@@ -221,12 +264,18 @@ export function selectWhenKnown(s: Pick<LiveData, "sessions">, id: string): Part
 }
 
 /** Changed turns replace the ones with the same id; new ones are appended in the order given. */
-export function upsertTurns(turns: Turn[], incoming: Turn[]): Turn[] {
+export function upsertTurns(turns: Turn[], incoming: TurnUpdate[]): Turn[] {
   if (incoming.length === 0) return turns;
   const at = new Map(turns.map((t, i) => [t.id, i]));
   const out = [...turns];
-  for (const turn of incoming) {
-    const i = at.get(turn.id);
+  for (const update of incoming) {
+    const i = at.get(update.id);
+    const previous = new Map((i === undefined ? [] : out[i]!.blocks).map((block) => [block.id, block]));
+    const turn: Turn = !update.blocks.some((block) => block.kind === "unchanged") ? update as Turn : { ...update, blocks: update.blocks.flatMap((block) => {
+      if (block.kind !== "unchanged") return [block];
+      const kept = previous.get(block.id);
+      return kept ? [kept] : [];
+    }) };
     if (i === undefined) {
       at.set(turn.id, out.length);
       out.push(turn);
@@ -301,7 +350,7 @@ function onAgentTurns(s: LiveData, e: Events["agentTurns"]): Partial<LiveData> {
 function onTurns(s: LiveData, e: Events["turns"]): Partial<LiveData> {
   if (!s.tabs.includes(e.id)) return {};
   const before = s.sessions[e.id] ?? newConversation(e.id);
-  const turns = e.all ? [...e.turns] : upsertTurns(before.turns, e.turns);
+  const turns = upsertTurns(e.all ? [] : before.turns, e.turns);
   return { sessions: { ...s.sessions, [e.id]: { ...before, turns } } };
 }
 

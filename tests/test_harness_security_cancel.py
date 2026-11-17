@@ -95,8 +95,8 @@ def test_a_create_stopped_after_it_read_the_old_content_does_not_overwrite(proje
     fs_tools.read_file({"file_path": "f.txt"}, ctx)
     real = fs_tools._decode
 
-    def gated(data: bytes):
-        decoded = real(data)
+    def gated(data: bytes, encoding=None):
+        decoded = real(data, encoding)
         ctx.abort.set()
         return decoded
 

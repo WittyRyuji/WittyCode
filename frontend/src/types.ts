@@ -184,6 +184,9 @@ export interface QuestionPrompt {
 
 export type Prompt = PermissionPrompt | QuestionPrompt;
 
+/** Only live deltas may reference an unchanged block; cached/full history always contains actual blocks. */
+export type TurnUpdate = Omit<Turn, "blocks"> & { blocks: (Block | { id: string; kind: "unchanged" })[] };
+
 export interface Turn {
   id: string;
   blocks: Block[];
@@ -240,7 +243,10 @@ export interface AgentInfo {
   /** what it was asked (the first line) */
   task: string;
   /** `waiting`: it asks the user something (an approval), in its panel */
-  status: "working" | "waiting" | "done" | "stopped" | "failed";
+  status: "pending" | "working" | "waiting" | "done" | "stopped" | "failed";
+  fusionState?: "idle" | "running" | "done" | "failed" | "interrupted" | "retired" | null;
+  fusionModel?: string | null;
+  fusionRole?: "worker" | "light" | null;
   startedAt: number;
   finishedAt: number | null;
 }
@@ -257,6 +263,17 @@ export interface Speed {
   genTps: number | null;
 }
 
+export interface FusionSessionPolicy {
+  workers: string[];
+  light: string;
+  maxCalls: number;
+  calls: number;
+  maxTokens: number;
+  knownTokens: number;
+  unknown: boolean;
+  hadUnknown: boolean;
+}
+
 export interface Session {
   id: string;
   projectId: string;
@@ -264,6 +281,9 @@ export interface Session {
   handoff?: PendingHandoff;
   /** the sub-agents of an open conversation, oldest first */
   agents?: AgentInfo[];
+  /** Fixed own-harness multi-agent session. */
+  fusion?: boolean;
+  fusionPolicy?: FusionSessionPolicy | null;
   /** undefined: saved on disk, not open. Otherwise the open session's state. */
   mark?: SessionMark;
   modified: string; // "刚刚", "1 分钟前", ...
@@ -286,6 +306,8 @@ export interface Session {
   /** messages typed while the session was connecting or a turn was running: shown, and sent by Python one turn at a time,
    *  in order, each when the one before it is over */
   queued?: QueuedMessage[];
+  /** A complete plan waiting for an explicit decision, owned by the current conversation. */
+  pendingPlan?: { id: string; text: string; warning?: string } | null;
   /** the goal (`/goal`) the conversation is working toward ("" or absent: none) */
   goal?: string;
 }
@@ -643,6 +665,8 @@ export interface ApiProvider {
   models: ApiModel[];
   headers: { k: string; v: string }[]; // extraHeaders
   extraArgs: string; // extraArgs, as JSON text
+  reasoningArgs?: string; // effort -> top-level request body fragment; null fields are removed
+  reasoningArgsMixed?: boolean; // Keep distinct per-entry mappings unless the shared editor explicitly replaces them.
   status?: { ok: boolean; text: string };
 }
 

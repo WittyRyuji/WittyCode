@@ -44,6 +44,18 @@ class Goal:
     idle: int = 0
     """Turns in a row that touched no tool and did not end it."""
 
+    def to_json(self) -> dict:
+        return {"text": self.text, "rounds": self.rounds, "idle": self.idle}
+
+    @classmethod
+    def from_json(cls, raw) -> Goal | None:
+        if not isinstance(raw, dict) or not isinstance(raw.get("text"), str) or not raw["text"].strip():
+            return None
+        counts = [raw.get("rounds", 0), raw.get("idle", 0)]
+        if any(isinstance(n, bool) or not isinstance(n, int) or n < 0 for n in counts):
+            return None
+        return cls(raw["text"], *counts)
+
     def next_message(self) -> str:
         """The message of the next turn: the goal again, to be checked against the result so far."""
         return f"继续推进目标（第 {self.rounds + 1}/{ROUNDS} 轮）：{self.text}\n对照目标检查现在的结果（需要就运行测试、读输出）。{_HOW_TO_END}"

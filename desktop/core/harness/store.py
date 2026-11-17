@@ -85,8 +85,14 @@ class SavedSession:
     """Per ``call_id``: ``{"status": "done" | "error" | "cancelled", "diffs": [...]}``."""
     usage: dict[str, Any] = field(default_factory=dict)
     """Tokens of the whole conversation: ``input``, ``output``, optional ``cacheWrite``, ``cacheRead``."""
-    prompt: dict[str, str] = field(default_factory=dict)
+    prompt: dict[str, Any] = field(default_factory=dict)
     """The original instructions and their latest rendered state; updates are appended to ``items``."""
+    goal: dict[str, Any] = field(default_factory=dict)
+    """An unfinished goal checkpoint; reopening never auto-executes it (explicit /goal resume)."""
+    plan: dict[str, Any] = field(default_factory=dict)
+    """A submitted plan and its approval state; reopening never executes it automatically."""
+    fusion: dict[str, Any] = field(default_factory=dict)
+    """The session's fixed Fusion policy, expert ownership, and execution checkpoints."""
     requests: list[dict[str, Any]] = field(default_factory=list)
     """The most recent content-free request diagnostics (``harness.diagnostics``)."""
     context_used: int = 0
@@ -140,6 +146,23 @@ def diff_from_json(raw: Any) -> FileDiff | None:
 
 
 def _session_json(session: SavedSession) -> dict[str, Any]:
+    from desktop.core.harness.outputs import RETAIN_CHARS, hint
+    from desktop.core.harness.loop import clip_output
+    # Full results are immutable sidecars written once, not re-encoded at every checkpoint. Remove the reference
+    # before clipping so it cannot displace the tail; leave room for clip_output's omission marker on later saves.
+    def preview(item: dict[str, Any]) -> dict[str, Any]:
+        reference = item.get("wc_output_ref") if item.get("type") == "function_call_output" else None
+        if not reference:
+            return item
+        suffix = "\n" + hint(reference)
+        text = str(item.get("output") or "")
+        while text.endswith(suffix):
+            text = text[:-len(suffix)]
+        if len(text) > RETAIN_CHARS + 64:
+            text = clip_output(text, RETAIN_CHARS)
+        return {**item, "output": text + suffix}
+
+    items = [preview(item) for item in session.items]
     data: dict[str, Any] = {
         "version": VERSION,
         "id": session.id,
@@ -156,8 +179,14 @@ def _session_json(session: SavedSession) -> dict[str, Any]:
         "usage": session.usage,
         "context_used": session.context_used,
         "recalled": session.recalled,
-        "items": session.items,
+        "items": items,
     }
+    if session.goal:
+        data["goal"] = session.goal
+    if session.plan:
+        data["plan"] = session.plan
+    if session.fusion:
+        data["fusion"] = session.fusion
     if session.prompt:
         data["prompt"] = session.prompt
     if session.requests:
@@ -181,9 +210,28 @@ def _compaction_from(raw: Any, count: int) -> dict[str, Any]:
     return dict(raw)
 
 
+def _plan_from(raw: Any) -> dict[str, str]:
+    from desktop.core.harness.plan_approval import MAX_PLAN_CHARS
+    if not isinstance(raw, Mapping):
+        return {}
+    ident, text, status = raw.get("id"), raw.get("text"), raw.get("status")
+    if (not isinstance(ident, str) or not _ID.fullmatch(ident) or not isinstance(text, str) or not text.strip()
+            or len(text) > MAX_PLAN_CHARS or status not in ("pending", "approved")):
+        return {}
+    result = {"id": ident, "text": text, "status": status}
+    execution, warning = raw.get("execution"), raw.get("warning")
+    if status == "approved" and execution in ("starting", "started"):
+        result["execution"] = execution
+    if status == "pending" and isinstance(warning, str) and len(warning) <= 1000:
+        result["warning"] = warning
+    return result
+
+
 def _session_from(raw: Any) -> SavedSession | None:
     if not isinstance(raw, Mapping) or raw.get("version") != VERSION or not _ID.match(str(raw.get("id") or "")):
         return None
+    if "fusion" in raw and (not isinstance(raw["fusion"], Mapping) or not raw["fusion"]):
+        return None  # Never silently reopen a damaged Fusion session as an ordinary conversation.
     try:
         turns = [
             SavedTurn(int(t["start"]), float(t["at"]), t.get("finished"), str(t.get("status") or "done"), str(t.get("error") or ""), str(t.get("model") or ""), str(t.get("note") or ""))
@@ -205,9 +253,16 @@ def _session_from(raw: Any) -> SavedSession | None:
             turns=turns,
             tools={str(k): dict(v) for k, v in (raw.get("tools") or {}).items() if isinstance(v, Mapping)},
             usage={str(k): int(v) for k, v in (raw.get("usage") or {}).items() if isinstance(v, (int, float))},
-            prompt={key: value for key, value in raw.get("prompt", {}).items() if key in ("instructions", "current") and isinstance(value, str)} if isinstance(raw.get("prompt"), Mapping) else {},
+            prompt={key: value for key, value in raw.get("prompt", {}).items() if (
+                key in ("instructions", "current") and isinstance(value, str)
+                or key == "sections" and isinstance(value, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in value.items())
+                or key == "mcp" and isinstance(value, dict)
+            )} if isinstance(raw.get("prompt"), Mapping) else {},
             requests=[dict(entry) for entry in raw.get("requests", [])[-128:] if isinstance(entry, Mapping)] if isinstance(raw.get("requests"), list) else [],
             usage_models={str(k): dict(v) for k, v in raw.get("usage_models", {}).items() if isinstance(v, Mapping)} if isinstance(raw.get("usage_models"), Mapping) else {},
+            goal=dict(raw["goal"]) if isinstance(raw.get("goal"), Mapping) else {},
+            plan=_plan_from(raw.get("plan")),
+            fusion=dict(raw["fusion"]) if isinstance(raw.get("fusion"), Mapping) else {},
             context_used=int(raw.get("context_used") or 0),
             recalled=[str(x) for x in raw.get("recalled") or ()],
             origin=dict(raw["origin"]) if isinstance(raw.get("origin"), Mapping) else {},
@@ -342,7 +397,20 @@ def recover(session: SavedSession) -> bool:
     summary stops inside a step (an earlier version put it one place too early when the conversation began with a
     message that looked like a summary) is moved to the end of that step, so that no tool result is sent without its
     call. Whether anything changed (the caller saves it then, once: a recovered conversation has nothing left to recover)."""
+    from desktop.core.harness.history import orphan_reasoning
+
     changed = pair_in_place(session)
+    dropped = orphan_reasoning(session.items)
+    if dropped:
+        items, position = [], []
+        for index, item in enumerate(session.items):
+            position.append(len(items))
+            if index not in dropped:
+                items.append(item)
+        session.turns, session.compaction = _remapped(session, items, position, copy=False)
+        session.items = items
+        session.context_used = 0
+        changed = True
     if session.compaction:
         upto = int(session.compaction.get("upto") or 0)
         mended = mend_boundary(session.items, upto)
@@ -369,6 +437,8 @@ def _write(path: Path, data: Any) -> None:
     try:
         with os.fdopen(handle, "w", encoding="utf-8") as stream:
             json.dump(data, stream, ensure_ascii=False, separators=(",", ":"))
+            stream.flush()
+            os.fsync(stream.fileno())
         os.replace(temp, path)
     except BaseException:
         try:
@@ -386,6 +456,35 @@ class SessionStore:
         if not _ID.match(session_id):
             raise ValueError(f"not a session id: {session_id!r}")
         return self.root / SESSIONS / f"{session_id}.json"
+
+    def outputs(self, session_id: str):
+        from desktop.core.harness.outputs import OutputStore
+        self._path(session_id)
+        return OutputStore(self.root / "outputs" / session_id)
+
+    def claim(self, session_id: str) -> Any:
+        """One writer for an open conversation, across processes. The OS releases the lock after a crash."""
+        from desktop.core.chatgpt.accounts import _try_lock
+
+        self._path(session_id)  # validate before making any path
+        folder = self.root / "locks"
+        folder.mkdir(parents=True, exist_ok=True)
+        handle = (folder / f"{session_id}.lock").open("a+b")
+        try:
+            _try_lock(handle)
+        except OSError:
+            handle.close()
+            raise OSError("这个会话正在另一个窗口中打开；请先关闭那个窗口里的会话，再重试。") from None
+        return handle
+
+    @staticmethod
+    def release(handle: Any) -> None:
+        from desktop.core.chatgpt.accounts import _unlock
+
+        try:
+            _unlock(handle)
+        finally:
+            handle.close()
 
     def save(self, session: SavedSession) -> None:
         _write(self._path(session.id), _session_json(session))
@@ -406,6 +505,12 @@ class SessionStore:
             self._path(session_id).unlink()
         except OSError:
             pass
+        if not self._path(session_id).exists():
+            from desktop.core.harness.tools import ToolError
+            try:
+                self.outputs(session_id).delete()
+            except (OSError, ToolError):
+                log.warning("could not delete retained outputs", exc_info=True)
         index = self._index()
         if index.pop(session_id, None) is not None:
             self._write_index(index)
@@ -413,6 +518,8 @@ class SessionStore:
     def rows(self, project: str | None = None, limit: int | None = None) -> list[SavedRow]:
         rows = []
         for session_id, raw in self._index().items():
+            if raw.get("fusion_expert") is True:
+                continue
             if project is not None and not same_folder(raw.get("project", ""), project):
                 continue
             rows.append(
@@ -428,7 +535,10 @@ class SessionStore:
 
     @staticmethod
     def _row_json(session: SavedSession) -> dict[str, Any]:
-        return {"project": session.project, "title": session.title, "created_at": session.created_at, "modified_at": session.modified_at, "messages": session.messages, "model": session.model}
+        row = {"project": session.project, "title": session.title, "created_at": session.created_at, "modified_at": session.modified_at, "messages": session.messages, "model": session.model}
+        if session.origin.get("app") == "fusion":
+            row["fusion_expert"] = True
+        return row
 
     def _index(self) -> dict[str, dict[str, Any]]:
         path = self.root / INDEX

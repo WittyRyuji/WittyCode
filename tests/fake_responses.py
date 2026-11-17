@@ -189,7 +189,8 @@ class FakeResponses:
                     if body.get("instructions") == TITLE_SYSTEM:
                         # Independent scripts keep a title request from taking a main conversation's held answer.
                         fake.title_requests.append(body)
-                        turn = fake.title_turn if fake.title_turn is not None else say(fake.title_answer)
+                        # Accounting scenarios specify title usage; unrelated main-loop tests use a zero-cost title fixture.
+                        turn = fake.title_turn if fake.title_turn is not None else say(fake.title_answer, used=usage(0, 0))
                     else:
                         fake.requests.append(body)
                         fake.headers.append({key.lower(): value for key, value in self.headers.items()})

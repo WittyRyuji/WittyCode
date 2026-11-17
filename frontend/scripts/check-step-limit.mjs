@@ -22,7 +22,7 @@ for (const theme of ["light", "dark"]) {
     await page.click(".step-limit-setting .btn");
     await page.waitFor("document.querySelector('.step-limit-setting .btn').disabled", 1000);
     await page.click(".snav", 0);
-    await page.click(".snav", 3);
+    await page.click(".snav", 2);
     assert.equal(await value(), "240");
     await page.shot(resolve(`shots/step-limit-${theme}.png`));
     assert.equal(page.consoleErrors().length, 0);

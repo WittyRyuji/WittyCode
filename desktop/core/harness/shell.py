@@ -119,8 +119,9 @@ def _git_env(env: dict[str, str]) -> None:
     env["GIT_CONFIG_COUNT"] = str(start + len(_GIT_NEUTRAL))
 
 
-def _launch(command: str) -> tuple[list[str], dict[str, str]]:
-    env = dict(os.environ)
+def _launch(command: str, blocked: tuple[str, ...] = ()) -> tuple[list[str], dict[str, str]]:
+    from desktop.core.child_env import environment
+    env = environment(blocked=blocked)
     env.update(GIT_PAGER="cat", PAGER="cat", TERM="dumb", NO_COLOR="1", PYTHONIOENCODING="utf-8")
     _git_env(env)
     if IS_WINDOWS:
@@ -148,12 +149,19 @@ def cap_output(text: str, limit: int = MAX_OUTPUT_CHARS) -> str:
 class _Capture:
     """The first and the last bytes of a stream; whatever lies between is only counted."""
 
-    def __init__(self) -> None:
+    def __init__(self, retain: bool = False) -> None:
         self.head = bytearray()
         self.tail = bytearray()
         self.dropped = 0
+        self.full = bytearray() if retain else None
+        self.exceeded = False
 
     def feed(self, chunk: bytes) -> None:
+        if self.full is not None:
+            from desktop.core.harness.outputs import MAX_OUTPUT_BYTES
+            room = max(0, MAX_OUTPUT_BYTES - 4096 - len(self.full))
+            self.full += chunk[:room]
+            self.exceeded |= len(chunk) > room
         room = HEAD_BYTES - len(self.head)
         if room > 0:
             self.head += chunk[:room]
@@ -167,6 +175,9 @@ class _Capture:
             self.dropped += extra
 
     def text(self) -> str:
+        if self.full is not None:
+            note = "\n[Output retention limit reached; the command was stopped. This is partial output, not proof of completion.]" if self.exceeded else ""
+            return bytes(self.full).decode("utf-8", "replace") + note
         if not self.dropped:
             return cap_output(_normalise(bytes(self.head + self.tail).decode("utf-8", "replace")))
         # An incomplete character at either cut would decode to U+FFFD: drop it instead.
@@ -239,11 +250,13 @@ async def run_shell(
     cwd: Path,
     timeout: float,
     abort_event: threading.Event | None = None,
+    blocked: tuple[str, ...] = (),
+    *, retain: bool = False,
 ) -> tuple[str, int, bool, bool]:
     """Run ``command``; returns ``(output, exit_code, timed_out, aborted)``. ``exit_code`` is -1 when there is none."""
     if abort_event is not None and abort_event.is_set():
         return "", -1, False, True
-    argv, env = _launch(command)
+    argv, env = _launch(command, blocked)
     extra: dict[str, Any] = {"creationflags": CREATE_NO_WINDOW} if IS_WINDOWS else {"start_new_session": True}
     process = await asyncio.create_subprocess_exec(
         *argv,
@@ -254,7 +267,7 @@ async def run_shell(
         env=env,
         **extra,
     )
-    capture = _Capture()
+    capture = _Capture(retain=retain)
     assert process.stdout is not None
     reader = asyncio.ensure_future(_pump(process.stdout, capture))
     waiter = asyncio.ensure_future(process.wait())
@@ -263,6 +276,8 @@ async def run_shell(
     timed_out = aborted = False
     try:
         while True:
+            if capture.exceeded:
+                break
             if abort_event is not None and abort_event.is_set():
                 aborted = True
                 break
@@ -273,13 +288,13 @@ async def run_shell(
             done, _ = await asyncio.wait({waiter}, timeout=min(POLL_SECONDS, remaining))
             if done:
                 break
-        if timed_out or aborted:
+        if timed_out or aborted or capture.exceeded:
             await _kill_tree(process)
         await _reap(process, waiter, reader)
     except asyncio.CancelledError:
         await asyncio.shield(_cancel_cleanup(process, waiter, reader))
         raise
-    code = process.returncode if process.returncode is not None else -1
+    code = process.returncode if process.returncode is not None and not capture.exceeded else -1
     return capture.text(), code, timed_out, aborted
 
 
@@ -553,7 +568,7 @@ async def shell(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         )
     timeout = args.get("timeout", DEFAULT_TIMEOUT)
     try:
-        output, code, timed_out, aborted = await run_shell(command, cwd, timeout, ctx.abort)
+        output, code, timed_out, aborted = await run_shell(command, cwd, timeout, ctx.abort, ctx.secret_env, retain=ctx.outputs is not None)
     except OSError as error:
         raise ToolError(f"Could not start the shell: {error}") from None
     lines = [output or "(no output)"]
@@ -576,7 +591,7 @@ SHELL = ToolSpec(
     description=(
         f"Run one command in {_DIALECT} Returns the combined stdout and stderr, then a final `Exit code: N` line. "
         "Runs in `cwd` (default: the project folder). stdin is closed, so the command must not wait for input. "
-        f"Output beyond {MAX_OUTPUT_CHARS:,} characters is cut in the middle. After `timeout` seconds (default "
+        "Long output is previewed; use read_output for the retained text. Output above 16 MiB stops the command and is marked partial. After `timeout` seconds (default "
         f"{DEFAULT_TIMEOUT}, at most {MAX_TIMEOUT}) the command and every process it started are killed. Do not start "
         "servers or watchers that never exit. Prefer read_file, list_dir, glob, grep, create_file and edit_file to shell "
         "equivalents."
