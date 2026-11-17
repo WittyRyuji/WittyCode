@@ -59,12 +59,15 @@ test("Fusion is the first composer model choice and the only checked item when s
     devin: { enabled: true, auth: "signed-in" },
     chatgpt: { available: true, enabled: true, auth: "signed-in", planEnabled: true },
     onPick: (id) => picked.push(id), onManage: () => {},
-    fusion: { selected: true, description: "主模型：Visible", onSelect: () => picked.push("fusion") },
+    fusion: { selected: true, onSelect: () => picked.push("fusion"), onConfigure: () => picked.push("settings:fusion") },
   };
   const menu = buildModelMenu(input);
   assert.equal(menu[0].id, "fusion");
   assert.equal(menu[0].label, "Fusion");
-  assert.equal(menu[0].description, "主模型：Visible");
+  assert.equal(menu[0].description, undefined);
+  assert.equal(menu[0].configure.label, "Fusion 设置");
+  menu[0].configure.onSelect();
+  assert.deepEqual(picked.splice(0), ["settings:fusion"]);
   assert.equal(menu[1].separator, true);
   assert.equal(menu[2].id, "h-chatgpt");
   assert.deepEqual(menu.filter((item) => item.checked).map((item) => item.id), ["fusion"]);

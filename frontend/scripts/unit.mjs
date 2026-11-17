@@ -26,6 +26,7 @@ import "./factory.test.mjs";
 import "./fusion.test.mjs";
 import "./reasoning-args.test.mjs";
 import "./qwebchannel.test.mjs";
+import "./transport.test.mjs";
 import "./turn-delta.test.ts";
 import "./starmap.test.mjs";
 import "./skill-icons.test.mjs";

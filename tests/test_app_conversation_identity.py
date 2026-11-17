@@ -10,6 +10,7 @@ from desktop.core.app_core import AppError
 from desktop.core.settings import settings_from_dict, settings_to_dict
 from tests.app_support import MODEL, make_core
 from tests.devin_support import make_engine
+from tests.fake_responses import say
 from tests.test_app_core import devin_core, idle, new_session, talk
 
 
@@ -47,7 +48,7 @@ def test_engine_segments_stay_one_row_after_close_refresh_restart_and_archive(tm
             conv = again._by_cid[reopened]
             assert again._row_of(conv) == current, "old links reopen the current segment, not a fork"
             users = [t.user_block.text for t in conv.controller.transcript.turns if t.user_block]
-            assert users == ["检查库存导入流程", "继续检查重复数据", "汇总修复项"]
+            assert users == ["检查库存导入流程", "/compact", "继续检查重复数据", "/compact", "汇总修复项"]
             await again.call("session.archive", {"id": reopened})
             await again.call("project.refresh")
             assert again.project_rows()[0]["sessionIds"] == []
@@ -66,6 +67,7 @@ def test_switching_back_without_sending_preserves_the_pending_handoff_after_rest
         try:
             cid = await new_session(core, events, tmp_path / "proj")
             await talk(core, plan, cid, "检查库存导入", "需要检查重复行。")
+            plan.script(say("检查库存导入：需要检查重复行。"))
             await core.call("session.choose", {"id": cid, "field": "model", "value": "devin:swe-2-high"})
             await core.call("session.choose", {"id": cid, "field": "model", "value": MODEL})
             head = core._row_of(core._by_cid[cid])
@@ -83,7 +85,7 @@ def test_switching_back_without_sending_preserves_the_pending_handoff_after_rest
             assert again._by_cid[cid].controller.handoff is not None
             await talk(again, service, cid, "继续检查")
             assert "重复行" in str(service.requests[-1]["input"]), "the pending handoff must reach the next model, not just the UI"
-            assert [t.user_block.text for t in again._by_cid[cid].controller.transcript.turns if t.user_block] == ["检查库存导入", "继续检查"]
+            assert [t.user_block.text for t in again._by_cid[cid].controller.transcript.turns if t.user_block] == ["检查库存导入", "/compact", "继续检查"]
         finally:
             await again.shutdown()
 
@@ -104,7 +106,8 @@ def test_history_write_failure_rolls_back_without_hiding_the_source(tmp_path, mo
             monkeypatch.setattr(core.history, "save", denied)
             with pytest.raises(AppError, match="没有切换成功"):
                 await core.call("session.choose", {"id": cid, "field": "model", "value": "devin:swe-2-high"})
-            assert conv.controller is old and old.transcript.turns == before
+            assert conv.controller is old and old.transcript.turns[:len(before)] == before
+            assert old.transcript.turns[-1].user_block.text == "/compact", "the completed source summary and its cost remain visible"
             assert not core.settings.session_links and not conv.hidden
             assert conv.sidebar_key == core._row_of(conv)
         finally:

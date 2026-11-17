@@ -1,6 +1,10 @@
 /* ---------------------------------------------------------------- menus: a framed list; the item under the cursor is inverted */
 .menu { position: fixed; z-index: 1000; padding: 3px; background: var(--bg-raised); border: var(--bw) solid var(--ink); box-shadow: 4px 4px 0 var(--shadow-hard); animation: pop 0.12s ease-out; font-size: var(--fs-ui); }
 .menu-item { width: 100%; display: flex; align-items: center; gap: 8px; padding: 6px 10px 6px 8px; text-align: left; color: var(--fg); }
+.menu-row { display: flex; align-items: stretch; }
+.menu-row > .menu-item { flex: 1; min-width: 0; }
+.menu-configure { flex: none; width: 34px; display: grid; place-items: center; color: var(--muted); }
+.menu-configure:hover, .menu-configure:focus-visible { background: var(--ink); color: var(--paper); }
 .menu-item.active { background: var(--ink); color: var(--paper); }
 .menu-item:disabled { color: var(--faint); }
 .menu-item.danger { color: var(--err); }

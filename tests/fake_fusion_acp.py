@@ -68,7 +68,8 @@ class GuardedFake(Fake):
         try:
             current = text.rsplit("Current request:\n", 1)[-1]
             match = re.search(r"\[fusion-([a-z-]+)\]", current)
-            action = match[1] if match else "report"
+            summary = "Do not call any tools. Return only the summary." in text
+            action = "summary" if summary else match[1] if match else "report"
             tool, arguments = "", {}
             if action == "write":
                 tool, arguments = "create_file", {"file_path": "marker.txt", "content": "guarded ACP write"}
@@ -101,7 +102,7 @@ class GuardedFake(Fake):
                 result = await self.mcp(sid, "tools/call", {"name": tool, "arguments": arguments})
                 answer = json.dumps(result)
             else:
-                answer = "ACP report."
+                answer = "ACP summary: earlier work and evidence are retained; continue from the checkpoint." if summary else "ACP report."
             self.update(sid, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": answer}})
             self.call(sid, session, turn, 1200, 20, 400)
         finally:

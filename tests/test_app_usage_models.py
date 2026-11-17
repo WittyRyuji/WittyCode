@@ -42,6 +42,7 @@ def test_model_shares_include_cache_and_survive_closing_and_reopening_the_own_lo
             await core.call("session.send", {"id": cid, "text": "first"})
             await done(events, cid, 110)
             assert meta(events, cid)["usageModels"] == {"chatgpt:gpt-6.1-sol": 110}
+            plan.script(say("First turn summarised.", used=usage(0, 0)))
             await core.call("session.choose", {"id": cid, "field": "model", "value": "chatgpt:gpt-6-luna"})
             plan.script(say("two", used=usage(200, 20, cached=50)))
             await core.call("session.send", {"id": cid, "text": "second"})
@@ -70,7 +71,9 @@ def test_usage_is_attributed_to_the_running_model_not_the_next_model_chosen(tmp_
             plan.script([("hold", "one"), *say("done", used=usage(100, 10, cached=20))])
             await core.call("session.send", {"id": cid, "text": "first"})
             await until(lambda: len(plan.requests) == 1)
-            await core.call("session.choose", {"id": cid, "field": "model", "value": "chatgpt:gpt-6-luna"})
+            from desktop.core.app_core import AppError
+            with pytest.raises(AppError, match="本轮还在运行"):
+                await core.call("session.choose", {"id": cid, "field": "model", "value": "chatgpt:gpt-6-luna"})
             plan.release("one")
             await done(events, cid, 110)
             assert meta(events, cid)["usageModels"] == {"chatgpt:gpt-6.1-sol": 110}
@@ -92,7 +95,8 @@ def test_a_devin_turn_with_a_model_change_does_not_guess_the_split_of_its_aggreg
             await core.call("session.choose", {"id": cid, "field": "model", "value": "devin:swe-2-high"})
             await core.call("session.send", {"id": cid, "text": "[slow] wait"})
             await until(lambda: meta(events, cid).get("usageModels") == {"devin:swe-2-high": 1010})
-            await core.call("session.choose", {"id": cid, "field": "model", "value": "devin:glm-5-2"})
+            # A native/CLI-side update may still happen during a turn; the UI now rejects user model switches until idle.
+            assert await core._by_cid[cid].controller.update_settings(model="glm-5-2")
             await until(lambda: meta(events, cid).get("usageModels") == {})
             await core.call("session.stop", {"id": cid})
             await done(events, cid, 1010)
@@ -115,6 +119,7 @@ def test_an_engine_change_preserves_model_shares_and_caches_them_with_the_total(
             plan.script(say("one", used=usage(100, 10, cached=20)))
             await core.call("session.send", {"id": cid, "text": "first"})
             await done(events, cid, 110)
+            plan.script(say("First turn summarised.", used=usage(0, 0)))
             await core.call("session.choose", {"id": cid, "field": "model", "value": "devin:swe-2-high"})
             await core.call("session.send", {"id": cid, "text": "second"})
             await done(events, cid, 1322)
@@ -155,6 +160,7 @@ def test_restarting_the_app_keeps_both_models_before_the_next_message(tmp_path, 
             plan.script(say("first answer", used=usage(100, 10, cached=20)))
             await core.call("session.send", {"id": cid, "text": "first"})
             await done(events, cid, 110)
+            plan.script(say("First turn summarised.", used=usage(0, 0)))
             await core.call("session.choose", {"id": cid, "field": "model", "value": "chatgpt:gpt-6-luna"})
             plan.script(say("second answer", used=usage(200, 20, cached=50)))
             await core.call("session.send", {"id": cid, "text": "second"})

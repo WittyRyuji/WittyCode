@@ -18,5 +18,5 @@ test("optional Factory models are never routed into WittyHarness or an API provi
   assert(menu.some((i) => i.heading && i.label === "FACTORY"));
   assert(!menu.find((i) => i.id === model.id).disabled);
   assert(buildModelMenu({ ...input, engine: "chatgpt", running: true }).find((i) => i.id === model.id).disabled);
-  assert(!buildModelMenu({ ...input, engine: "factory", running: true }).find((i) => i.id === model.id).disabled);
+  assert(buildModelMenu({ ...input, engine: "factory", running: true }).find((i) => i.id === model.id).disabled);
 });

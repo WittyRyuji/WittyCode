@@ -257,6 +257,25 @@ class ChatGPTController:
             raise FusionError("Choose an available single-agent model before leaving Fusion.")
         self._set_fusion_mode(None, self._fusion, model, reasoning)
 
+    async def retire_acp_context(self) -> None:
+        """A successful handoff keeps the old native reference as evidence, not as the destination's context."""
+        checkpoint = self.saved.origin.get("fusionAcp")
+        if checkpoint is None:
+            return
+        archives = self.saved.origin.get("fusionAcpHistory", [])
+        if not isinstance(checkpoint, dict) or not isinstance(archives, list):
+            raise ChatGPTError("ACP 上下文检查点损坏，未切换模型。", code="fusion_acp_context")
+        if self._acp is not None:
+            await self._acp.close()
+        before = self.saved.origin
+        self.saved.origin = {key: value for key, value in before.items() if key != "fusionAcp"}
+        self.saved.origin["fusionAcpHistory"] = [*archives, {**checkpoint, "model": self.model}]
+        try:
+            self._save_now(required=True)
+        except BaseException:
+            self.saved.origin = before
+            raise
+
     async def release_inactive_acp(self) -> None:
         """Keep durable contexts, not unused Devin processes, when switching back to the own loop."""
         if self._acp is not None and not self.model.startswith("devin:"):
@@ -266,7 +285,7 @@ class ChatGPTController:
 
     def _set_fusion_mode(self, active: Any, paused: Any, model: str, reasoning: str | None) -> None:
         before = (self._fusion, self._paused_fusion, self.requested_model, self.transcript.model, self.reasoning,
-                  self.saved.model, self.saved.reasoning, self.saved.fusion, self.saved.origin)
+                  self.saved.model, self.saved.reasoning, self.saved.fusion, self.saved.origin, self.saved.prompt)
         runtime = active or paused
         self._fusion, self._paused_fusion = active, paused
         self.requested_model = self.transcript.model = model
@@ -276,11 +295,12 @@ class ChatGPTController:
         if active is None:
             self.saved.fusion["enabled"] = False
         self.saved.origin = {**self.saved.origin, "fusionOwner": runtime.owner, "fusionMainTokens": runtime.main_tokens}
+        self.saved.prompt = {}  # Mode instructions must also change when the underlying main model stays the same.
         try:
             self._save_now(required=True)
         except BaseException:
             (self._fusion, self._paused_fusion, self.requested_model, self.transcript.model, self.reasoning,
-             self.saved.model, self.saved.reasoning, self.saved.fusion, self.saved.origin) = before
+             self.saved.model, self.saved.reasoning, self.saved.fusion, self.saved.origin, self.saved.prompt) = before
             raise
         if self._tools is not None:
             self._tools.fusion_runner = active.delegate if active is not None else None
@@ -1059,13 +1079,27 @@ class ChatGPTController:
 
     # ------------------------------------------------------------------ command: /compact
 
-    def start_compaction(self) -> str | None:
+    async def compact_for_switch(self, window: int = 0) -> str:
+        """Finish a source-model summary before changing model; cancellation/failure never changes the model."""
+        if not self.saved.items:
+            return (self.handoff.summary or self.handoff.prefix) if self.handoff is not None and not self.handoff.empty else ""
+        reason = self.start_compaction(for_switch=True, window=window)
+        if reason:
+            raise ChatGPTError(reason, code="compaction")
+        task, turn = self._turn_task, self._turn
+        await task
+        record = self.saved.compaction
+        if turn.status is not TurnStatus.DONE or not record or record.get("upto") != len(self.saved.items):
+            raise ChatGPTError("上下文压缩未完成，原模型和历史保留；请重试切换。", code="compaction")
+        return str(record["summary"])
+
+    def start_compaction(self, *, for_switch: bool = False, window: int = 0) -> str | None:
         """``/compact``: turn the conversation so far into a summary now. It runs as a turn of its own (the page shows the command,
         the working state and the result; the stop button works) that adds nothing to the conversation but the summary.
         Why it cannot start (a sentence for the user), or ``None`` when it has started."""
         if self.state is not SessionState.READY:
             return "会话还没就绪，或这一轮还在运行：结束后再压缩。"
-        if self.model.startswith("devin:"):
+        if self.model.startswith("devin:") and not for_switch:
             return None if self.send_prompt("/compact") else "ACP 会话暂不能压缩。"
         if not self.saved.items:
             return "还没有对话可以压缩。"
@@ -1080,17 +1114,18 @@ class ChatGPTController:
         self._turn = turn
         self._turn_done = asyncio.Event()
         self.transcript.set_working_state("compacting_conversation")
-        self._turn_task = self._spawn(self._run_compaction(turn))
+        self._turn_task = self._spawn(self._run_compaction(turn, for_switch=for_switch, window=window))
         self._notify("state")
         self._changed()
         return None
 
-    async def _run_compaction(self, turn: Turn) -> None:
+    async def _run_compaction(self, turn: Turn, *, for_switch: bool = False, window: int = 0) -> None:
         failure: BaseException | None = None
         done = False
         try:
             view = compact.view_of(self.saved.items, self.saved.compaction)
-            done = await self._compact(turn, view, compact.estimate_items(view), False, manual=True)
+            done = await self._compact(turn, view, compact.estimate_items(view), False, manual=True,
+                                       for_switch=for_switch, switch_window=window)
         except asyncio.CancelledError:
             if self._turn is turn:
                 self.transcript.abort_turn("压缩已停止，对话没有改动。")
@@ -1187,7 +1222,8 @@ class ChatGPTController:
         return "low" if "low" in efforts else (efforts[0] if efforts else None)
 
     async def _compact(
-        self, owner: Turn, history: list[dict[str, Any]], estimate: int, overflow: bool, fixed: int = 0, *, must_fit: bool = False, manual: bool = False
+        self, owner: Turn, history: list[dict[str, Any]], estimate: int, overflow: bool, fixed: int = 0, *, must_fit: bool = False, manual: bool = False,
+        for_switch: bool = False, switch_window: int = 0,
     ) -> bool:
         """Summarise the start of the conversation so that the next request fits the model's window (``harness.compact``).
         ``history`` is the view the loop holds: on success it is replaced in place and the log remembers where the summary
@@ -1208,6 +1244,8 @@ class ChatGPTController:
         target = min(window, int(estimate * 0.7)) if window and overflow else (window or int(estimate * 0.7))
         if manual:
             target = window or MANUAL_WINDOW
+        if for_switch and switch_window:
+            target = min(target, switch_window)
         target = self._economic_window(target) or target
         record = self.saved.compaction
         # (the loop's view is view_of(log, record): it begins with a summary because there is a record, never because of what
@@ -1217,7 +1255,7 @@ class ChatGPTController:
         self.transcript.set_working_state("compacting_conversation")
         self._changed()
         prefix = None
-        if self._tools is not None and self.saved.prompt.get("instructions") and not model.startswith("api:"):
+        if not for_switch and self._tools is not None and self.saved.prompt.get("instructions") and not model.startswith(("api:", "devin:")):
             prefix = build_request(
                 model=model, instructions=self.saved.prompt["instructions"], items=[], tools=self._tools.declarations(),
                 reasoning=(self._turn_reasoning if self._turn_model else self.reasoning) or None, shape=self.manager.shape, conversation=self.session_id,
@@ -1237,6 +1275,10 @@ class ChatGPTController:
                 entry["kind"] = "summary"
                 self.saved.requests.append(entry)
                 del self.saved.requests[:-MAX_RECORDS]
+        stream = self.manager.stream
+        if model.startswith("devin:"):
+            from desktop.core.fusion.summary import summary_stream as acp_summary_stream
+            stream = acp_summary_stream(self.manager)
         async def summary_stream(request: dict[str, Any]):
             if fusion is not None:
                 estimate = compact.estimate_items(request.get("input") or ()) + compact.estimate_text(str(request.get("instructions") or ""))
@@ -1244,13 +1286,13 @@ class ChatGPTController:
                     fusion.check_budget(estimate)
                 except ValueError as error:
                     raise ChatGPTError("Fusion 预算不足或用量未知，已暂停摘要请求。", code="fusion_budget") from error
-            async with contextlib.aclosing(self.manager.stream(request)) as events:
+            async with contextlib.aclosing(stream(request)) as events:
                 async for event in events:
                     yield event
         try:
             result = await compact.compact(
                 history,
-                stream=summary_stream if fusion is not None else self.manager.stream,
+                stream=summary_stream if fusion is not None else stream,
                 model=model,
                 reasoning=self._summary_effort(),
                 window=target,
@@ -1277,7 +1319,9 @@ class ChatGPTController:
         if self._turn is not owner:
             return False
         entry: dict[str, Any] | None = None
-        if result is not None and result.fits:
+        # A short conversation may have a slightly longer summary. Switching still needs a semantic handoff,
+        # not raw replay; accept it only when it fits the destination window.
+        if result is not None and (result.fits or (for_switch and result.after + fixed <= compact.budget(target))):
             upto = compact.log_index(result.cut, start, synthetic)
             entry = {
                 "upto": upto, "summary": result.summary, "kept": result.kept, "at": time.time(), "before": result.before,

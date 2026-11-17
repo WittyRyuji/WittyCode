@@ -225,7 +225,7 @@ def test_the_sidebar_lists_saved_sessions_and_shows_an_open_one_once(tmp_path):
     run(scenario())
 
 
-def test_a_session_is_archived_listed_apart_and_brought_back(tmp_path):
+def test_a_session_is_archived_listed_apart_and_brought_back(tmp_path, monkeypatch):
     async def scenario():
         core, _, events, _, _ = await ready_core(tmp_path, projects=False)
         proj, side = await three_saved(core, events, tmp_path)
@@ -237,7 +237,11 @@ def test_a_session_is_archived_listed_apart_and_brought_back(tmp_path):
         assert [row["id"] for row in side["archived"]] == ["cg:mid"] and side["archived"][0]["title"] == "Middle"
         assert core.settings.archived_sessions["cg:mid"] >= before, "when it was archived, in ms"
         assert [row["id"] for row in (await core.call("app.init"))["archived"]] == ["cg:mid"], "a reloaded page is told too"
-        await core.call("session.archive", {"id": "cg:old"})
+        # Two async calls can share the same Windows clock tick; make the intended chronology explicit.
+        later = (core.settings.archived_sessions["cg:mid"] + 100) / 1000
+        with monkeypatch.context() as clock:
+            clock.setattr(time, "time", lambda: later)
+            await core.call("session.archive", {"id": "cg:old"})
         assert [row["id"] for row in events.last("sidebar")["archived"]] == ["cg:old", "cg:mid"], "the one archived last first"
         await core._reload_project(str(proj.resolve()))
         core._emit_sidebar()
@@ -799,6 +803,7 @@ def test_changing_engine_continues_the_same_conversation_with_the_text_handed_ov
         core, plan, events, _, harness = await devin_core(tmp_path)
         cid = await new_session(core, events, tmp_path / "proj")
         await talk(core, plan, cid, "What does context.py do?", "It reads the context size.")
+        plan.script(say("What does context.py do? It reads the context size."))
         events.clear()
 
         result = await ask_to_switch(core, cid)

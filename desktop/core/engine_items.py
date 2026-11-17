@@ -116,6 +116,8 @@ def split_handoff(text: str) -> tuple[str, tuple[int, bool] | None]:
     ``(carried, truncated)``; other text comes back as it is, except that the context WittyCode added after the typed text
     (``core/context_envelope``) is always taken out."""
     text = strip_context(text)
+    if text.startswith("WittyCode model-switch compaction request."):
+        return "/compact", None
     if not text.startswith(HANDOFF_START):
         return text, None
     end = text.find(HANDOFF_END)
@@ -130,5 +132,9 @@ def split_handoff(text: str) -> tuple[str, tuple[int, bool] | None]:
         except ValueError:
             entries = None
         carried = len(entries) if isinstance(entries, list) else 0
+        if isinstance(entries, list) and len(entries) == 1 and isinstance(entries[0], dict):
+            summary_count = entries[0].get("wc_summary_messages")
+            if type(summary_count) is int and summary_count >= 0:
+                carried = summary_count
     truncated = "bounded excerpt" in (head[:start] if start >= 0 else head)
     return text[end + len(HANDOFF_END) :], (carried, truncated)

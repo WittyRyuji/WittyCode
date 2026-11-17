@@ -40,7 +40,7 @@ def test_factory_segment_restores_only_the_typed_question_beside_the_archived_pr
             cid = (await core.call("session.openSaved", {"id": old_row, "projectId": str(tmp_path / "proj")}))["id"]
             await idle(core, cid)
             turns = core._by_cid[cid].controller.transcript.turns
-            assert [t.user_block.text for t in turns if t.user_block] == ["检查库存导入", "继续检查事务"]
+            assert [t.user_block.text for t in turns if t.user_block] == ["检查库存导入", "/compact", "继续检查事务"]
         finally:
             await core.shutdown()
 

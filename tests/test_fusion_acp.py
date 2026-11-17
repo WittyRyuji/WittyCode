@@ -199,13 +199,16 @@ def test_acp_main_preserves_full_evidence_and_context_across_runner_changes(tmp_
             assert (await core.call("fusion.changeMain", {"id": cid, "model": "devin:swe-2-high"}))["ok"]
             assert main.send_prompt("Continue from the review")
             await finish_turn(main)
-            assert main.saved.origin["fusionAcp"]["session"] == native
+            assert main.saved.origin["fusionAcp"]["session"] != native
+            assert any(item["session"] == native for item in main.saved.origin["fusionAcpHistory"])
+            refreshed_native = main.saved.origin["fusionAcp"]["session"]
             assert main._outputs.read(reference) == retained and main.saved.turns[-1].status == "done"
             saved = main.session_id
             await main.close()
             reopened = await main.manager.open_saved(tmp_path / "proj", saved)
             assert reopened._outputs.read(reference) == retained
-            assert reopened.saved.origin["fusionAcp"]["session"] == native
+            assert reopened.saved.origin["fusionAcp"]["session"] == refreshed_native
+            assert any(item["session"] == native for item in reopened.saved.origin["fusionAcpHistory"])
         finally:
             await core.shutdown()
     asyncio.run(go())

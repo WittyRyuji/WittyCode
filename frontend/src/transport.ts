@@ -79,7 +79,9 @@ export class QWebChannelTransport implements Transport {
     const callId = String(++this.sequence);
     return new Promise<T>((resolve, reject) => {
       const entry: Pending = { resolve: resolve as (value: unknown) => void, reject };
-      if (!WAITS_FOR_USER.has(method)) {
+      // Model switches wait for source-model compaction; progress and cancellation use the session turn UI.
+      const compacts = method === "fusion.changeMain" || (method === "session.choose" && "field" in params && params.field === "model" && "id" in params);
+      if (!WAITS_FOR_USER.has(method) && !compacts) {
         entry.timer = setTimeout(() => {
           this.pending.delete(callId);
           reject(new CallError(`WittyCode 后台 ${CALL_TIMEOUT_MS / 1000} 秒没有回应（${method}）。`));

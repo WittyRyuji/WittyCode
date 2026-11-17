@@ -231,6 +231,8 @@ class Conversation:
     dirty: bool = True
     switching: bool = False
     """A change of engine is under way: the new controller failing to open must not close the conversation."""
+    switch_task: asyncio.Task[Any] | None = None
+    """The interruptible source-model compaction, before any destination is opened."""
     created_at: float = field(default_factory=time.time)
     sidebar_key: str = ""
     """Stable sidebar identity, migrated to the native row id once it is known (also across engine changes)."""
@@ -1866,6 +1868,9 @@ class AppCore:
         return conv
 
     async def _close_conversation(self, conv: Conversation) -> None:
+        if conv.switch_task is not None:
+            conv.switch_task.cancel()
+            await asyncio.gather(conv.switch_task, return_exceptions=True)
         controller = conv.controller
         if conv.queue:  # closed by the user: they are not lost without a word
             self.say(f"已关闭会话，{len(conv.queue)} 条排队的消息没有发出。")
@@ -1942,7 +1947,9 @@ class AppCore:
 
     async def _m_session_stop(self, params: dict[str, Any]) -> None:
         conv = self._conversation(params["id"])
-        if conv.controller.busy:
+        if conv.switch_task is not None:
+            conv.switch_task.cancel()
+        elif conv.controller.busy:
             self._spawn(conv.controller.interrupt())
 
     async def _m_session_reconnect(self, params: dict[str, Any]) -> None:
@@ -2232,8 +2239,11 @@ class AppCore:
             raise AppError("主模型当前不可用；未自动更换其他模型。")
         settings, changed = settings_for_model(self.catalog, self._page_settings(conv), model)
         reasoning = settings.get("reasoning", "") if "reasoning" in changed else None
+        self._check_fusion_switch(conv)
         conv.switching = True
         try:
+            if self._page_settings(conv).get("model") != model:
+                await self._compact_model_switch(conv, model)
             changed_main = fusion.change_main(model, reasoning)
             if changed_main:
                 await conv.controller.release_inactive_acp()
@@ -2242,6 +2252,9 @@ class AppCore:
             raise AppError("无法更换主模型：请先处理待审批计划，并确认所选模型可用。") from error
         finally:
             conv.switching = False
+            self._feed_usage(conv)
+            conv.dirty = True
+            self._schedule_flush()
 
     async def _m_fusion_authorizeModel(self, params: dict[str, Any]) -> dict[str, Any]:
         from desktop.core.fusion.registry import FusionError
@@ -2724,6 +2737,8 @@ class AppCore:
             self._set_default(field_name, value)
             return {"ok": True}
         conv = self._conversation(cid)
+        if conv.switching:
+            raise AppError("模型正在压缩交接，稍后再修改设置。")
         if field_name == "model" and value == "fusion" and conv.controller.state is SessionState.OPENING:
             raise AppError("会话就绪后才能切换 Fusion。")
         if conv.controller.state is SessionState.OPENING:
@@ -2777,27 +2792,68 @@ class AppCore:
         self._schedule_flush()
         return ok
 
+    async def _compact_model_switch(self, conv: Conversation, page_model: str) -> str:
+        """The old model owns the summary. No destination settings are committed before it succeeds."""
+        from desktop.core.chatgpt.errors import ChatGPTError
+        from desktop.core.model_switch import compact_native, recall_for_switch
+        old = conv.controller
+        window = int((self.catalog.find(page_model) or {}).get("window") or 0)
+        conv.switch_task = asyncio.current_task()
+        try:
+            compact = getattr(old, "compact_for_switch", None)
+            summary = await compact(window) if compact is not None else await compact_native(old, window)
+            if summary and getattr(old, "saved", None) is not None and old.saved.compaction:
+                memory = recall_for_switch(old.manager.memory, old.engine, old.project, old.transcript)
+                if memory:
+                    record = dict(old.saved.compaction)
+                    record["continuity"] = (record.get("continuity", "") + "\n\n" + memory).strip()
+                    old.saved.compaction = record
+                # A model handoff is a new prompt boundary: rebuild AGENTS.md, mode and Fusion instructions for
+                # the destination instead of retaining an obsolete top-level instruction snapshot.
+                old.saved.prompt = {}
+                old._save_now(required=True)
+                await old.retire_acp_context()
+            return summary
+        except asyncio.CancelledError:
+            raise AppError("模型切换已停止，原模型和历史保留。") from None
+        except Exception as error:
+            detail = str(error) if isinstance(error, ChatGPTError) else error_text(error)
+            raise AppError(f"切换前压缩未完成，仍使用原模型：{detail}") from error
+        finally:
+            conv.switch_task = None
+
     async def _choose_model(
         self, conv: Conversation, page_model: str, carry_ids: Sequence[str] | None = None, over_ok: bool = False
     ) -> dict[str, Any]:
         if page_model == "fusion":
             return await self._enable_fusion(conv, carry_ids, over_ok)
         target = self.catalog.target(page_model)
+        if self._page_settings(conv).get("model") == page_model and getattr(conv.controller, "_fusion", None) is None:
+            return {"ok": True}
+        self._check_fusion_switch(conv)
+        chosen = self.catalog.find(page_model)
+        if not chosen or chosen.get("disabled"):
+            raise AppError("所选模型当前不可用，原模型保持不变。")
         if getattr(conv.controller, "_fusion", None) is not None:
             self._check_fusion_switch(conv)
             if target.engine == "chatgpt":
                 settings, _ = settings_for_model(self.catalog, self._page_settings(conv), page_model)
                 conv.switching = True
                 try:
+                    if conv.controller.model != target.model:
+                        await self._compact_model_switch(conv, page_model)
                     conv.controller.disable_fusion(target.model, settings.get("reasoning", ""))
                     await conv.controller.release_inactive_acp()
                 except ValueError as error:
                     raise AppError("无法退出 Fusion：所选模型不可用，原会话保持不变。") from error
                 finally:
                     conv.switching = False
+                    self._feed_usage(conv)
+                    conv.dirty = True
+                    self._schedule_flush()
                 self.say("已退出 Fusion；历史和专家上下文保留，后续消息使用所选普通模型。")
                 return {"ok": True}
-        if target.engine != conv.engine:
+        if target.engine != conv.engine or (target.engine in ("devin", "factory") and conv.controller.transcript.turns):
             plan = getattr(getattr(conv.controller, "saved", None), "plan", {})
             if isinstance(plan, dict) and plan.get("status") == "pending":
                 raise AppError("计划仍待确认；请先执行或修改计划，再切换引擎。")
@@ -2807,7 +2863,15 @@ class AppCore:
         changes: dict[str, str] = {"model": target.model}
         if "reasoning" in changed and settings.get("reasoning"):
             changes["reasoning"] = settings["reasoning"]
-        ok = await self._update_live(conv, **changes)
+        conv.switching = True
+        try:
+            await self._compact_model_switch(conv, page_model)
+            ok = await self._update_live(conv, **changes)
+        finally:
+            conv.switching = False
+            self._feed_usage(conv)
+            conv.dirty = True
+            self._schedule_flush()
         if ok:
             if "reasoning" in changed:
                 model = self.catalog.find(page_model) or {}
@@ -2823,7 +2887,7 @@ class AppCore:
         plan = getattr(getattr(controller, "saved", None), "plan", {})
         if (conv.switching or conv.queue or conv.goal is not None or controller.state is not SessionState.READY
                 or getattr(controller, "_turn", None) is not None or self._attention_prompts(conv)):
-            raise AppError("请先结束本轮、排队消息或目标任务，再切换 Fusion。")
+            raise AppError("本轮还在运行或仍有排队消息、目标任务；请先结束，再切换模型或 Fusion。")
         if isinstance(plan, dict) and plan.get("status") == "pending":
             raise AppError("计划仍待确认；请先处理计划，再切换 Fusion。")
 
@@ -2884,10 +2948,18 @@ class AppCore:
         settings = self._open_settings(policy.main, self._page_settings(conv))
         if conv.engine != "chatgpt":
             return await self._switch_engine(conv, policy.main, carry_ids, over_ok, fusion_policy=policy, fusion_retained=retained)
+        conv.switching = True
         try:
+            if conv.controller.model != model:
+                await self._compact_model_switch(conv, policy.main)
             conv.controller.enable_fusion(policy, reasoning=settings.get("reasoning", ""), retained=retained)
         except FusionError as error:
             raise AppError("无法启用 Fusion：模型档位或保留的专家配置不可用，原会话未改变。") from error
+        finally:
+            conv.switching = False
+            self._feed_usage(conv)
+            conv.dirty = True
+            self._schedule_flush()
         conv.ledger.seen.update(restored[0])
         conv.ledger.model_seen.update(restored[1])
         self.say("已在本会话启用 Fusion；历史和专家上下文保留，不会自动启动任务。")
@@ -2996,13 +3068,24 @@ class AppCore:
         # only reported once the session is open, so the session opens with a hand-over for the figure known now
         # (nothing may be sent without one) and gets the final one when the window arrives.
         window = int(model.get("window") or 0)
+        conv.switching = True
+        try:
+            summary = await self._compact_model_switch(conv, page_model)
+        finally:
+            conv.switching = False
+            self._feed_usage(conv)
+            conv.dirty = True
+            self._schedule_flush()
+        from desktop.core.model_switch import summary_handoff
         sent_as_files = any(not attachment_text(item).strip() for item in chosen)
         handoff = (
-            build_handoff(transcript.turns, window_tokens=window, carry=chosen)
-            if sent_as_files or conversation_messages(transcript.turns, carry={item.id for item in chosen})
-            else None
+            summary_handoff(summary, transcript, project=conv.project, memory=getattr(old.manager, "memory", None),
+                            engine=self.catalog.target(page_model).engine, window=window, carry=chosen)
+            if summary else build_handoff(transcript.turns, window_tokens=window, carry=chosen)
+            if sent_as_files or conversation_messages(transcript.turns, carry={item.id for item in chosen}) else None
         )
-        settings = self._open_settings(page_model, {**self._page_settings(conv), "autonomy": ""})
+        settings = self._open_settings(page_model, {**self._page_settings(conv),
+                                                   **({"autonomy": ""} if self.catalog.target(page_model).engine != conv.engine else {})})
         if fusion_policy is not None and settings.get("autonomy") in ("plan", "smart"):
             if settings["autonomy"] == "plan":
                 settings["mode"], settings["autonomy"] = "spec", "ask"
@@ -3038,7 +3121,7 @@ class AppCore:
                 )
             if controller.state is not SessionState.READY:
                 raise AppError(controller.last_error or "没有切换成功：新的会话没有启动。")
-            if handoff is not None and not window:
+            if handoff is not None and not window and not summary:
                 window = await self._window_of(controller, page_model)
                 if window and getattr(controller, "handoff", None) is handoff and controller.state is SessionState.READY:
                     handoff = controller.handoff = build_handoff(transcript.turns, window_tokens=window, carry=chosen)

@@ -428,7 +428,7 @@ def test_the_total_goes_on_across_a_restart_and_nothing_is_counted_twice(tmp_pat
 def test_a_chatgpt_plan_conversation_moves_to_devin_with_its_earlier_text_and_back(tmp_path):
     async def scenario():
         core, plan, events, harness = await devin_core(tmp_path)
-        plan.script(say("It is four."))
+        plan.script(say("It is four."), say("what is 2+2: It is four."))
         cid = (await core.call("session.new", {"projectId": str(tmp_path / "proj")}))["id"]
         await until(lambda: meta(events, cid).get("mark") == "ready")
         assert core._by_cid[cid].engine == "chatgpt"

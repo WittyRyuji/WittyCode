@@ -116,9 +116,11 @@ def test_landing_and_live_choices_never_overwrite_persistent_defaults_even_after
             rig.plan.script(say("demo answer"))
             await rig.send("check temporary defaults")
             await rig.wait_for(".tab", 1)
+            await rig.wait_text(".transcript", "demo answer")
             await rig.wait_for(".send.stop", 0)
             assert rig.core._page_settings(rig.core.order[0])["model"] == OTHER_MODEL
             assert rig.core.defaults() == expected
+            rig.plan.script(say("Temporary conversation summarised."))
             await rig.click(".controls .chip", 0)
             await rig.click_text(".menu-item", rig.core.catalog.find(MODEL)["label"])
             await rig.wait_text(".controls .chip-v", rig.core.catalog.find(MODEL)["label"])

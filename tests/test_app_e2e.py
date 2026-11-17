@@ -1618,7 +1618,9 @@ def test_token_tooltip_shows_the_models_share_of_the_whole_conversation(qapp, lo
             await rig.wait_text(".transcript", "first answer")
             await rig.wait_text(".statusbar .st-left", "就绪")
             await rig.click(".controls .chip", 0)
+            rig.plan.script(say("The first answer was completed.", used=usage(120, 30)))
             await rig.click_text(".menu-item", "GPT-6-Luna")
+            await rig.wait_text(".chip-model .chip-v", "GPT-6-Luna")
             rig.plan.script(say("second answer", used=usage(200, 20, cached=50)))
             await rig.send("second")
             await rig.wait_text(".transcript", "second answer")
@@ -1626,8 +1628,8 @@ def test_token_tooltip_shows_the_models_share_of_the_whole_conversation(qapp, lo
             at = await rig._center(".usage", 0)
             await outside_task(lambda: QTest.mouseMove(rig._target(), at))
             await rig.wait_for(".usage-pie", 1)
-            assert await rig.texts(".usage-percent") == ["66.7%", "33.3%"]
-            assert await rig.texts(".usage-model-name") == ["GPT-6-Luna", "GPT-6.1-Sol"]
+            assert await rig.texts(".usage-percent") == ["54.2%", "45.8%"], "the source model also owns its compaction request"
+            assert await rig.texts(".usage-model-name") == ["GPT-6.1-Sol", "GPT-6-Luna"]
             assert await rig.count(".usage-pie linearGradient") == 2 and await rig.count(".usage-pie path") == 2
             assert await rig.js("(() => { const r = document.querySelector('.usage .tip').getBoundingClientRect(); return r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight; })()")
         finally:

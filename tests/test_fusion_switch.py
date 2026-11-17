@@ -10,6 +10,7 @@ import pytest
 from desktop.core.app_core import AppError
 from desktop.core.chatgpt.errors import ChatGPTError
 from desktop.core.fusion.registry import Policy
+from desktop.core.usage import Tokens
 from tests.app_support import ready_core
 from tests.chatgpt_support import finish_turn
 from tests.fake_responses import call, say
@@ -43,18 +44,21 @@ def test_existing_conversation_switches_in_place_and_restores_paused_experts(tmp
             await core.call("session.send", {"id": cid, "text": "Inspect"})
             await finish_turn(main)
             items, native, count = deepcopy(main.saved.items), main.session_id, len(fake.requests)
+            fake.script(say("Before Fusion."))
             assert (await choose(core, cid, "fusion"))["ok"]
-            assert main.session_id == native and main.saved.items == items and len(fake.requests) == count
+            assert main.session_id == native and main.saved.items == items and len(fake.requests) == count + 1
+            assert fake.requests[-1]["model"] == "gpt-6-luna" and main.saved.compaction["upto"] == len(items)
             assert main.model == "gpt-6.1-sol" and main.reasoning == "high"
             fake.script(call("delegate_task", TASK), say("Expert baseline."), say("Reviewed."))
             await core.call("session.send", {"id": cid, "text": "Delegate"})
             await finish_turn(main)
             expert = next(iter(main.agents))
             count = len(fake.requests)
+            fake.script(say("Before Fusion. Reviewed."))
             assert (await choose(core, cid, LUNA))["ok"]
             assert main._fusion is None and main._paused_fusion is not None
             assert main.session_id == native and main.model == "gpt-6-luna" and expert in main.agents
-            assert len(fake.requests) == count
+            assert len(fake.requests) == count + 1 and fake.requests[-1]["model"] == "gpt-6.1-sol"
             fake.script(say("Between modes."))
             await core.call("session.send", {"id": cid, "text": "Continue without experts"})
             await finish_turn(main)
@@ -70,10 +74,11 @@ def test_existing_conversation_switches_in_place_and_restores_paused_experts(tmp
             assert (await core.call("agents.watch", {"id": cid, "agentId": expert}))["ok"]
             core.settings.fusion_main, core.settings.fusion_workers = LUNA, [SOL]
             count = len(fake.requests)
+            fake.script(say("Before Fusion. Between modes. Reviewed."))
             assert (await choose(core, cid, "fusion"))["ok"]
             assert main.session_id == native and main._fusion.registry.policy.main == SOL
             assert main._fusion.registry.policy.workers == (LUNA,) and main.reasoning == "high"
-            assert main._fusion.registry.calls == 1 and len(fake.requests) == count
+            assert main._fusion.registry.calls == 1 and len(fake.requests) == count + 1
             fake.script(call("delegate_task", {**TASK, "task": "Continue inspecting."}), say("Continued."), say("Finished."))
             await core.call("session.send", {"id": cid, "text": "Resume the original expert"})
             await finish_turn(main)
@@ -81,6 +86,26 @@ def test_existing_conversation_switches_in_place_and_restores_paused_experts(tmp
             assert "Expert baseline." in str(fake.requests[-2]["input"])
             assert "Between modes." in str(fake.requests[-3]["input"])
             assert core.defaults() == defaults and len(core.order) == 1
+        finally:
+            await core.shutdown()
+    asyncio.run(go())
+
+
+def test_fusion_mode_refreshes_instructions_even_when_the_underlying_model_stays_the_same(tmp_path):
+    async def go():
+        core, fake, _, _, _ = await ready_core(tmp_path)
+        try:
+            configure(core)
+            cid = (await core.call("session.new", {"projectId": str(tmp_path / "proj")}))["id"]
+            main = core._by_cid[cid].controller
+            for selected, enabled in (("fusion", True), (SOL, False), ("fusion", True)):
+                count = len(fake.requests)
+                await choose(core, cid, selected)
+                assert len(fake.requests) == count, "a mode-only change does not need a source-model handoff"
+                fake.script(say("Mode changed."))
+                await core.call("session.send", {"id": cid, "text": "Continue"})
+                await finish_turn(main)
+                assert ("Fusion mode: you are the fixed main agent" in fake.requests[-1]["instructions"]) is enabled
         finally:
             await core.shutdown()
     asyncio.run(go())
@@ -109,11 +134,15 @@ def test_cross_engine_pause_restores_expert_owner_budget_and_usage_without_doubl
             conv = core._by_cid[cid]
             core._feed_usage(conv)
             expert, owner = next(iter(main.agents)), main.session_id
+            count = len(fake.requests)
+            if main_model == SOL:
+                fake.script(say("Persistent expert context and reviewed module."))
+            assert (await choose(core, cid, "devin:swe-2-high"))["ok"]
+            assert core._by_cid[cid].engine == "devin" and len(core.order) == 1
+            assert len(fake.requests) == count + (main_model == SOL)
+            count = len(fake.requests)
             total, known = conv.ledger.total, main._fusion.known_tokens()
             by_model = dict(conv.ledger.by_model)
-            count = len(fake.requests)
-            assert (await choose(core, cid, "devin:swe-2-high"))["ok"]
-            assert core._by_cid[cid].engine == "devin" and len(core.order) == 1 and len(fake.requests) == count
             row = core._row_of(conv)
             await until(lambda: main.state.value == "closed")
             other = conv.controller
@@ -122,6 +151,7 @@ def test_cross_engine_pause_restores_expert_owner_budget_and_usage_without_doubl
             cid = (await core.call("session.openSaved", {"projectId": str(tmp_path / "proj"), "id": row}))["id"]
             conv = core._by_cid[cid]
             await until(lambda: conv.controller.state.value == "ready")
+            native_source = conv.controller
             assert (await choose(core, cid, "fusion"))["ok"]
             main = conv.controller
             assert main.session_id != owner and main._fusion.owner == owner and list(main.agents) == [expert]
@@ -131,7 +161,11 @@ def test_cross_engine_pause_restores_expert_owner_budget_and_usage_without_doubl
             assert len(fake.requests) == count and len(core.order) == 1
             assert (await core.call("agents.watch", {"id": cid, "agentId": expert}))["ok"]
             core._feed_usage(conv)
-            assert conv.ledger.total == total and conv.ledger.by_model == by_model
+            assert conv.ledger.total == total.plus(native_source.usage or Tokens())
+            assert all(conv.ledger.by_model[key] == value for key, value in by_model.items() if not key.startswith("devin:"))
+            counted = conv.ledger.total
+            core._feed_usage(conv)
+            assert conv.ledger.total == counted
             if main_model == SOL:
                 fake.script(call("delegate_task", {**TASK, "task": "Continue inspecting."}), say("Continued."), say("Finished."))
             else:
@@ -192,7 +226,11 @@ def test_returning_to_own_loop_releases_inactive_native_processes_but_retains_co
             assert main.send_prompt("Continue in the same native context")
             await finish_turn(main, timeout=30)
             runner = main if native_main else next(iter(main.agents.values())).controller
-            assert runner.saved.origin["fusionAcp"]["session"] == native
+            if native_main:
+                assert runner.saved.origin["fusionAcp"]["session"] != native
+                assert any(item["session"] == native for item in runner.saved.origin["fusionAcpHistory"])
+            else:
+                assert runner.saved.origin["fusionAcp"]["session"] == native  # Experts were not reassigned or compacted.
             assert main.saved.turns[-1].status == "done"
         finally:
             await core.shutdown()

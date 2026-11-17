@@ -413,7 +413,8 @@ def test_explicit_main_model_change_preserves_session_and_never_falls_back(tmp_p
             native = main.session_id
             assert not await main.update_settings(model="gpt-6-luna")
             assert (await core.call("fusion.changeMain", {"id": cid, "model": "chatgpt:gpt-6-luna"}))["ok"]
-            assert len(model.requests) == count and main.session_id == native
+            assert len(model.requests) == count + 1 and main.session_id == native
+            assert model.requests[-1]["model"] == "gpt-6.1-sol", "the old main produces the handoff first"
             assert main.model == "gpt-6-luna" and main._fusion.registry.policy.main == "chatgpt:gpt-6-luna"
             with pytest.raises(AppError):
                 await core.call("fusion.changeMain", {"id": cid, "model": "chatgpt:missing"})
@@ -432,7 +433,7 @@ def test_explicit_main_model_change_preserves_session_and_never_falls_back(tmp_p
             def fail_save(_saved):
                 raise OSError("simulated disk failure")
             monkeypatch.setattr(main.manager.sessions, "save", fail_save)
-            with pytest.raises(ChatGPTError):
+            with pytest.raises(AppError, match="仍使用原模型"):
                 await core.call("fusion.changeMain", {"id": cid, "model": "chatgpt:gpt-6.1-sol"})
             assert main.model == "gpt-6-luna" and main._fusion.registry.policy.main == "chatgpt:gpt-6-luna"
             monkeypatch.setattr(main.manager.sessions, "save", save)

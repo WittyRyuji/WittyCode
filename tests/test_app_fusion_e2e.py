@@ -58,8 +58,7 @@ def test_configure_and_start_fusion_with_a_local_fake(qapp, loop, tmp_path):
             await rig.click('.settings-body button[aria-label="关闭"]')
             await select_fusion(rig)
             await rig.wait_text(".chip-model .chip-v", "Fusion")
-            await rig.wait_text(".chip-reasoning .chip-v", "High")
-            assert await rig.js('document.querySelector(".chip-reasoning").disabled')
+            assert not await rig.exists(".chip-reasoning")
             assert not await rig.exists(".hint .fusion-choice, .fusion-badge")
             rig.plan.script(call("delegate_task", {"scope": "src", "model": "chatgpt:gpt-6-luna", "role": "worker", "task": "Inspect the module."}),
                             say("专家检查完成。"), say("主代理已检查报告。"))
@@ -76,20 +75,18 @@ def test_configure_and_start_fusion_with_a_local_fake(qapp, loop, tmp_path):
             assert rig.window.grab().save(str(tmp_path / "fusion-expert.png"))
             main = rig.core.order[0].controller
             await until(lambda: main.state.value == "ready")
-            await rig.click_text(".hint button", "更换主模型")
+            assert not await rig.exists(".chip-reasoning")
+            assert "更换主模型" not in await rig.text(".hint") and "授权模型" not in await rig.text(".hint")
+            await rig.click(".chip-model")
+            await rig.click('.menu-configure[aria-label="Fusion 设置"]')
+            await rig.wait_text(".settings-body h2", "Fusion")
+            await rig.click('.fusion-model-row[data-role="main"] .fusion-model-picker .selectbox')
             await rig.click_text(".menu-item", "GPT-6-Luna")
-            await rig.wait_text(".dialog", "更换主模型为 GPT-6-Luna")
-            assert main.model == "gpt-6.1-sol" and len(rig.plan.requests) == 3
-            assert rig.window.grab().save(str(tmp_path / "fusion-change-main.png"))
-            await rig.click_text(".dialog button", "更换主模型")
-            await until(lambda: main.model == "gpt-6-luna")
-            assert len(rig.plan.requests) == 3 and main._fusion.registry.policy.main == "chatgpt:gpt-6-luna"
-            await rig.click_text(".hint button", "授权模型")
-            await rig.click_text(".menu-item", "GPT-6.1-Sol")
-            await rig.wait_text(".dialog", "授权 GPT-6.1-Sol")
+            await until(lambda: rig.core.settings.fusion_main == "chatgpt:gpt-6-luna")
+            assert main.model == "gpt-6.1-sol" and main._fusion.registry.policy.main == "chatgpt:gpt-6.1-sol"
             assert "chatgpt:gpt-6.1-sol" not in main._fusion.registry.policy.workers
-            await rig.click_text(".dialog button", "授权模型")
-            await until(lambda: "chatgpt:gpt-6.1-sol" in main._fusion.registry.policy.workers)
+            assert rig.window.grab().save(str(tmp_path / "fusion-settings-shortcut.png"))
+            await rig.click('.settings-body button[aria-label="关闭"]')
             assert len(rig.plan.requests) == 3
             await rig.wait_for(".agentpanel-actions .btn")
             await rig.click_text(".agentpanel-actions .btn", "转交专家")

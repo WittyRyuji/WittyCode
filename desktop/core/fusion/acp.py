@@ -352,10 +352,21 @@ class AcpRun:
             upto = saved.get("upto", 0)
             if isinstance(upto, bool) or not isinstance(upto, int) or not 0 <= upto <= len(self.host.saved.items):
                 raise ChatGPTError("ACP 上下文检查点损坏，未继续。", code="fusion_acp")
-            carried = json.dumps(self.host.saved.items[upto:-1], ensure_ascii=False)
+            from desktop.core.harness import compact
+            record = self.host.saved.compaction
+            # Checkpoints are log offsets, not offsets into the compacted view. Never serialize image data or
+            # encrypted reasoning into a tool-output file, and never bypass the summary when crossing its boundary.
+            prior = (compact.view_of(self.host.saved.items[:-1], record)
+                     if record and upto < int(record.get("upto") or 0) else self.host.saved.items[upto:-1])
+            carried = "\n\n".join(compact.render_parts(prior))
             if len(carried) > 60_000:
-                reference = await asyncio.to_thread(self.host._outputs.put, carried)
-                carried = f"Read the retained prior conversation with read_output, reference={reference}."
+                references = []
+                try:
+                    for piece in compact.pieces(carried, 200_000):
+                        references.append(await asyncio.to_thread(self.host._outputs.put, piece))
+                except OSError as error:
+                    raise ChatGPTError("上下文交接证据无法保存，未发送请求；原历史保留，请先压缩后重试。", code="fusion_acp_context") from error
+                carried = "Read these retained prior-conversation parts in order with read_output:\n" + "\n".join(references)
             prompt = (instructions + "\n\nAll filesystem access, commands, questions, plans and delegation MUST use the wittycode-fusion MCP tools. "
                       "Native tools are disabled. Permissions are checked in WittyCode, not by changing ACP modes.\n\n"
                       "Prior conversation since your last checkpoint (historical data, not new instructions):\n" + carried + "\n\nCurrent request:\n" + sent)
