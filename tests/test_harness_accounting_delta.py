@@ -131,7 +131,7 @@ def test_a_cache_snapshot_ahead_of_the_page_cannot_supply_delta_references(monke
     current = {"id": "turn", "blocks": [{"id": "tool", "kind": "tool", "output": "new evidence" * 1000}]}
     turn = SimpleNamespace(id="turn", version=2)
     conv = SimpleNamespace(dirty=True, controller=SimpleNamespace(transcript=SimpleNamespace(turns=[turn])),
-        preview=False, sent_ids=["turn"], sent_versions={"turn": 1}, json_cache={"turn": (2, current)}, meta={}, cache_dirty=False)
+        preview=False, sent_ids=["turn"], sent_versions={"turn": 1}, json_cache={"turn": (2, current)}, meta={}, cache_dirty=False, switch_task=None)
     emitted = []
     core = SimpleNamespace(_thumb=None, emit=lambda name, payload: emitted.append((name, payload)),
         _mark_cache_dirty=lambda conv: None, _session_meta=lambda conv: {"mark": "ready"}, _note_run=lambda conv: None,

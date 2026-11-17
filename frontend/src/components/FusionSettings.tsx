@@ -57,7 +57,7 @@ export function FusionSettings() {
     const value = !id ? "思考等级" : effort ? `${effortLabel(effort)}${unsupported ? "（已不支持）" : ""}` : !model ? "模型不可用" : choices.length ? "默认" : "不支持";
     return <div className="fusion-model-row" key={`${role}:${id}`} data-role={role} data-model={id} role="group" aria-label={`${label} ${name(id)}`}>
       <div className="fusion-model-picker" title={name(id)}>
-        <Select value={id ? name(id) : role === "worker" ? "请选择一个或多个" : "请选择"} items={modelItems} ariaLabel={`${label}选择：${name(id)}`} />
+        <Select value={id ? name(id) : "请选择"} items={modelItems} ariaLabel={`${label}选择：${name(id)}`} />
       </div>
       <div className="fusion-effort-picker" title={`${value}；思考等级按角色和模型独立保存，同一模型的其他角色不受影响。默认保留原有行为。`}>
         <Select value={value} disabled={!effort && !choices.length} minWidth={160} ariaLabel={`${label}思考等级：${value}`} items={[
@@ -67,7 +67,8 @@ export function FusionSettings() {
       </div>
     </div>;
   };
-  const workerItems = items(s.fusionWorkers, (id) => set("fusionWorkers", s.fusionWorkers.includes(id) ? s.fusionWorkers.filter((item) => item !== id) : [...s.fusionWorkers, id]));
+  const worker = s.fusionWorkers[0] ?? "";
+  const workerItems = items([worker], (id) => set("fusionWorkers", [id]));
   return (
     <>
       <h3 className="settings-section-title">自有 Fusion</h3>
@@ -75,10 +76,8 @@ export function FusionSettings() {
       <Field label="主模型" hint="任务分析、分配和最终验收由同一主代理完成；这里的改动只影响之后首次启用 Fusion 的会话。">
         {modelRow(s.fusionMain, "main", items([s.fusionMain], (id) => set("fusionMain", id), true))}
       </Field>
-      <Field label="工作模型池" hint="允许主代理调用的模型；点模型框可增减，再次选择可取消。专家任务目前串行执行。">
-        <div className="fusion-model-list">
-          {(s.fusionWorkers.length ? s.fusionWorkers : [""]).map((id) => modelRow(id, "worker", workerItems))}
-        </div>
+      <Field label="工作模型" hint="供 Sub-Agent 执行工作任务使用；固定选择一个模型。">
+        {modelRow(worker, "worker", workerItems)}
       </Field>
       <Field label="轻量模型" hint="供简单任务使用，不会为了保活定时调用。">
         {modelRow(s.fusionLight, "light", items([s.fusionLight], (id) => set("fusionLight", id)))}

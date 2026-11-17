@@ -581,8 +581,8 @@ def test_an_engine_change_keeps_the_total_and_goes_on_counting_with_the_new_engi
         await say_and_wait(core, events, cid, "hello")
         await until(lambda: (total_of(events, cid) or {}).get("input") == 1000)
 
-        assert (await core.call("session.choose", {"id": cid, "field": "model", "value": "devin:swe-2-high"}))["switched"]
-        assert (total_of(events, cid)["input"], total_of(events, cid)["output"]) == (1120, 130), "the source conversation and its compaction are both billed"
+        assert await core.call("session.choose", {"id": cid, "field": "model", "value": "devin:swe-2-high"}) == {"ok": True}
+        assert (total_of(events, cid)["input"], total_of(events, cid)["output"]) == (1000, 100), "selection itself is not billed"
         await core.call("session.send", {"id": cid, "text": "and now?"})
         # The fake Devin adds 900 input, 12 output and 300 cache read to the source, including its 120/30 summary.
         await until(lambda: (total_of(events, cid) or {}).get("input") == 2020, timeout=10)

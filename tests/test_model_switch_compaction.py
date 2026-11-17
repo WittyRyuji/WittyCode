@@ -41,8 +41,10 @@ def test_source_summary_precedes_model_commit_and_target_gets_fresh_rules_and_re
             memory.store.create(title="Unrelated topic", text="Prefer oatmeal breakfast.", scope="global", kind="preference", tags=["breakfast"], by="user")
             engine.memory = memory
             (project / "AGENTS.md").write_text("CURRENT_RULE: inspect constraints before schema edits.", encoding="utf-8")
-            fake.script([("hold", "summary"), *say("SUMMARY: inventory migration reviewed; rollback check remains.")])
-            task = asyncio.create_task(choose(core, cid, LUNA))
+            fake.script([("hold", "summary"), *say("SUMMARY: inventory migration reviewed; rollback check remains.")], say("Continued from summary."))
+            assert (await choose(core, cid, LUNA))["ok"]
+            assert len(fake.requests) == 1
+            task = asyncio.create_task(core.call("session.send", {"id": cid, "text": "Continue"}))
             await until(lambda: len(fake.requests) == 2)
             assert main.model == "gpt-6.1-sol" and core._by_cid[cid].switching
             assert fake.requests[-1]["model"] == "gpt-6.1-sol"
@@ -53,8 +55,6 @@ def test_source_summary_precedes_model_commit_and_target_gets_fresh_rules_and_re
             assert (await task)["ok"]
             assert main.model == "gpt-6-luna" and main.saved.items == original
             assert main.saved.compaction["upto"] == len(original)
-            fake.script(say("Continued from summary."))
-            await core.call("session.send", {"id": cid, "text": "Continue"})
             await finish_turn(main)
             request = fake.requests[-1]
             assert request["model"] == "gpt-6-luna"
@@ -63,6 +63,7 @@ def test_source_summary_precedes_model_commit_and_target_gets_fresh_rules_and_re
             assert "Keep the migration rollback reversible" in context
             assert "oatmeal breakfast" not in context
             assert "Original evidence:" not in str(request["input"])
+            await until(lambda: core._by_cid[cid].ledger.by_model == {SOL: 300, LUNA: 150})
             assert core._by_cid[cid].ledger.by_model == {SOL: 300, LUNA: 150}, "the source model owns the summary's usage"
         finally:
             fake.release("summary")
@@ -83,7 +84,9 @@ def test_summary_failure_or_stop_keeps_original_model_history_and_mode(tmp_path,
             await finish_turn(main)
             before = deepcopy(main.saved.items)
             fake.script(fail("invalid_request", "summary unavailable") if outcome == "failure" else say("") if outcome == "empty" else [("hold", "summary"), *say("Summary")])
-            task = asyncio.create_task(choose(core, cid, "fusion"))
+            assert (await choose(core, cid, "fusion"))["ok"]
+            assert len(fake.requests) == 1
+            task = asyncio.create_task(core.call("session.send", {"id": cid, "text": "Continue with Fusion"}))
             if outcome == "cancel":
                 await until(lambda: len(fake.requests) == 2)
                 await core.call("session.stop", {"id": cid})
@@ -130,19 +133,18 @@ def test_native_source_summary_restores_permissions_and_does_not_run_prompt_hook
                       "factory": {"permission": "[permission]", "cancel": "[hold]"}}
             if outcome != "success":
                 monkeypatch.setattr(model_switch, "NATIVE_SUMMARY", model_switch.NATIVE_SUMMARY + "\n" + marker[engine_name][outcome])
-            switching = asyncio.create_task(choose(core, cid, SOL))
+            assert (await choose(core, cid, SOL))["ok"]
+            fake.script(say("Continued from the native summary."))
+            switching = asyncio.create_task(core.call("session.send", {"id": cid, "text": "Continue"}))
             if outcome == "cancel":
                 await until(lambda: source.state is SessionState.RUNNING and getattr(source, "_switch_summary", False))
                 await asyncio.sleep(0.1)
                 await core.call("session.stop", {"id": cid})
             if outcome == "success":
-                assert (await switching)["switched"]
+                assert (await switching)["ok"]
                 target = core._by_cid[cid].controller
                 assert target is not source and target.handoff.summary
                 assert "FRESH_NATIVE_RULE" in target.handoff.prefix
-                assert not fake.requests, "no destination request before the next user message"
-                fake.script(say("Continued from the native summary."))
-                await core.call("session.send", {"id": cid, "text": "Continue"})
                 await finish_turn(target)
                 assert target.handoff is None and "FRESH_NATIVE_RULE" in str(fake.requests[-1])
             else:
@@ -161,7 +163,7 @@ def test_native_source_summary_restores_permissions_and_does_not_run_prompt_hook
 
 
 @pytest.mark.parametrize("engine_name", ["devin", "factory"])
-def test_unused_native_segment_forwards_pending_summary_without_another_model_request(tmp_path, engine_name):
+def test_reselecting_source_before_send_does_not_open_an_unused_native_segment(tmp_path, engine_name):
     from tests.devin_support import make_engine
     from tests.test_factory import engine_for
 
@@ -176,14 +178,13 @@ def test_unused_native_segment_forwards_pending_summary_without_another_model_re
             await core.call("session.send", {"id": cid, "text": "Inspect inventory"})
             await finish_turn(core._by_cid[cid].controller)
             await choose(core, cid, "devin:swe-2-high" if engine_name == "devin" else "factory:demo-model")
-            native = core._by_cid[cid].controller
-            turns = list(native.transcript.turns)
-            summary = native.handoff.summary
+            source = core._by_cid[cid].controller
+            turns = list(source.transcript.turns)
+            assert source.engine == "chatgpt" and len(fake.requests) == 1
             await choose(core, cid, SOL)
-            assert core._by_cid[cid].controller.handoff.summary == summary
-            assert all(turn in core._by_cid[cid].controller.transcript.turns for turn in turns)
-            assert not any(tokens.total for tokens in native.usage_series().values())
-            assert len(fake.requests) == 2
+            assert core._by_cid[cid].controller is source
+            assert source.transcript.turns == turns and not core._by_cid[cid].pending_model
+            assert len(fake.requests) == 1
         finally:
             await core.shutdown()
     asyncio.run(go())

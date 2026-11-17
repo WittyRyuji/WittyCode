@@ -373,7 +373,7 @@ def settings_from_dict(raw: object) -> AppSettings:
         chatgpt_compact_at=compact_at,
         max_steps=max_steps,
         fusion_main=text("fusion_main"),
-        fusion_workers=list(dict.fromkeys(item for item in raw.get("fusion_workers", []) if isinstance(item, str) and item.strip()))[:32] if isinstance(raw.get("fusion_workers"), list) else [],
+        fusion_workers=list(dict.fromkeys(item for item in raw.get("fusion_workers", []) if isinstance(item, str) and item.strip()))[:1] if isinstance(raw.get("fusion_workers"), list) else [],
         fusion_light=text("fusion_light"),
         fusion_reasoning=fusion_reasoning,
         fusion_preference=raw.get("fusion_preference") if isinstance(raw.get("fusion_preference"), int) and not isinstance(raw.get("fusion_preference"), bool) and 0 <= raw["fusion_preference"] <= 100 else defaults.fusion_preference,

@@ -44,9 +44,9 @@ function byGroup(models: ModelChoice[]): [string | null, ModelChoice[]][] {
 export function buildModelMenu(i: ModelMenuInput): MenuItem[] {
   const items: MenuItem[] = [];
   if (i.fusion) items.push(
+    { id: "h-wittycode", heading: true, label: "WittyCode" },
     { id: "fusion", label: "Fusion", checked: i.fusion.selected, disabled: i.fusion.disabled, onSelect: i.fusion.onSelect,
       configure: i.fusion.onConfigure ? { label: "Fusion 设置", onSelect: i.fusion.onConfigure } : undefined },
-    { id: "sep-fusion", separator: true },
   );
   const hidden = new Set(i.hidden ?? []);
   const available = i.models.filter((m) => !m.disabled);

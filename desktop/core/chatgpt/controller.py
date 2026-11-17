@@ -573,7 +573,6 @@ class ChatGPTController:
         # after reopening (its contract is cached), rather than invalidating every previous request's cache prefix.
         self._tools.level = self.autonomy
         self._tools.strict_context = self._fusion is not None or self._fusion_parent is not None
-        self._tools.expert_command_approval = self._fusion_parent is not None
         return self._tools
 
     def _claim_session(self) -> None:
@@ -1083,15 +1082,38 @@ class ChatGPTController:
         """Finish a source-model summary before changing model; cancellation/failure never changes the model."""
         if not self.saved.items:
             return (self.handoff.summary or self.handoff.prefix) if self.handoff is not None and not self.handoff.empty else ""
-        reason = self.start_compaction(for_switch=True, window=window)
-        if reason:
-            raise ChatGPTError(reason, code="compaction")
-        task, turn = self._turn_task, self._turn
-        await task
+        if self.state is not SessionState.READY or self._turn is not None:
+            raise ChatGPTError("会话尚未就绪，未切换模型。", code="compaction")
         record = self.saved.compaction
-        if turn.status is not TurnStatus.DONE or not record or record.get("upto") != len(self.saved.items):
-            raise ChatGPTError("上下文压缩未完成，原模型和历史保留；请重试切换。", code="compaction")
-        return str(record["summary"])
+        if (record and record.get("upto") == len(self.saved.items) and record.get("summary")
+                and (not window or compact.estimate_items(compact.view_of(self.saved.items, record)) <= compact.budget(window))):
+            return str(record["summary"])
+        # A handoff is part of sending, not a synthetic user command. Keep the ownership needed by _compact without
+        # creating, completing or saving an independent /compact turn (or invoking prompt/stop hooks).
+        turn = Turn(id=self.transcript.new_id("switch"))
+        previous_task = self._turn_task
+        self._turn, self._turn_task = turn, asyncio.current_task()
+        self._turn_model, self._turn_reasoning, self._turn_mode = self.model, self.reasoning, self.mode
+        self._turn_start = len(self.saved.items)
+        self.state = SessionState.RUNNING
+        self._notify("state")
+        try:
+            view = compact.view_of(self.saved.items, self.saved.compaction)
+            done = await self._compact(turn, view, compact.estimate_items(view), False, manual=True,
+                                       for_switch=True, switch_window=window)
+            record = self.saved.compaction
+            if not done or not record or record.get("upto") != len(self.saved.items):
+                raise ChatGPTError("上下文压缩未完成，原模型和历史保留；请重试发送。", code="compaction")
+            self._save_now(required=True)
+            return str(record["summary"])
+        finally:
+            self._turn, self._turn_task = None, previous_task
+            self._turn_model = self._turn_reasoning = self._turn_mode = ""
+            if self.state is SessionState.RUNNING:
+                self.state = SessionState.READY
+            self.transcript.set_working_state(None)
+            self._notify("state")
+            self._changed()
 
     def start_compaction(self, *, for_switch: bool = False, window: int = 0) -> str | None:
         """``/compact``: turn the conversation so far into a summary now. It runs as a turn of its own (the page shows the command,

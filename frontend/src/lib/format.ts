@@ -28,7 +28,7 @@ export const TOOL_LABELS: Record<string, string> = {
   AskUser: "提问",
   FetchUrl: "抓取网页",
   WebSearch: "网络搜索",
-  Task: "子任务",
+  Task: "Sub-Agent",
   Skill: "技能",
   ExitSpecMode: "提交方案",
 };

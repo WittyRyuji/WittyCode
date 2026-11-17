@@ -32,7 +32,7 @@ function Card({ title, state, tone, children, actions }: { title: string; state:
 function devinState(d: DevinAccount): { text: string; tone: "ok" | "warn" | "off" | "busy" } {
   if (d.auth === "checking") return { text: "正在检测…", tone: "busy" };
   if (d.cli === "missing") return { text: "没有找到 devin 命令行", tone: "warn" };
-  if (d.auth === "signing-in") return { text: "正在等你在浏览器里完成登录…", tone: "busy" };
+  if (d.auth === "signing-in") return { text: "正在等待 Devin CLI 完成登录…", tone: "busy" };
   if (d.auth === "signed-in") return { text: ["已登录", d.email, d.plan].filter(Boolean).join(" · "), tone: "ok" };
   return { text: d.error ? `读不到登录状态：${d.error}` : "未登录", tone: d.error ? "warn" : "off" };
 }
@@ -52,9 +52,10 @@ function DevinCard() {
             重新检测
           </button>
         ) : d.auth === "signed-out" ? (
-          <button type="button" className="btn primary small" onClick={devinLogin}>
-            登录 Devin
-          </button>
+          <>
+            <button type="button" className="btn small" onClick={() => void recheckDevin()}>重新检测</button>
+            <button type="button" className="btn primary small" onClick={devinLogin}>登录 Devin CLI</button>
+          </>
         ) : d.auth === "signing-in" ? (
           <button type="button" className="btn small" onClick={devinCancel}>
             取消
@@ -72,11 +73,11 @@ function DevinCard() {
         </p>
       )}
       {d.cli === "found" && d.auth === "signed-out" && (
-        <p className="pcard-note">用 Devin 账号里的额度，不需要 API Key。点登录会打开浏览器；登录信息由 Devin 自己保存（<code>credentials.toml</code>），WittyCode 读不到令牌，Devin 桌面版和命令行共用这个登录。</p>
+        <p className="pcard-note">这里使用 Devin CLI 的账号状态。桌面版已登录不代表 CLI 也已登录；可先重新检测，或打开 Devin 登录窗口，选择浏览器登录或企业登录。登录信息由 Devin 自己保存，WittyCode 不读取或复制令牌。</p>
       )}
       {d.auth === "signing-in" && (
         <p className="pcard-note busy">
-          <Loader2 size={14} className="spin" /> 浏览器已经打开。登录完成后这里会自动更新。
+          <Loader2 size={14} className="spin" /> 请在 Devin 登录窗口选择登录方式并按提示操作。完成后这里会自动更新。
         </p>
       )}
       {d.auth === "signed-in" && (

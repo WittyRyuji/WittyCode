@@ -4,6 +4,11 @@ import { fusionChoices, fusionDisabledReason } from "../src/components/fusionMod
 import { applyEvent, emptyLiveData } from "../src/liveReducer.ts";
 import { buildModelMenu } from "../src/components/modelMenu.ts";
 import { fusionEffort, withFusionEffort } from "../src/lib/fusionReasoning.ts";
+import { toolLabel } from "../src/lib/format.ts";
+
+test("the agent tool uses the same Sub-Agent name as the team inspector", () => {
+  assert.equal(toolLabel("Task"), "Sub-Agent");
+});
 
 const models = [
   { id: "chatgpt:visible", label: "Visible", source: "chatgpt" },
@@ -62,25 +67,30 @@ test("Fusion is the first composer model choice and the only checked item when s
     fusion: { selected: true, onSelect: () => picked.push("fusion"), onConfigure: () => picked.push("settings:fusion") },
   };
   const menu = buildModelMenu(input);
-  assert.equal(menu[0].id, "fusion");
-  assert.equal(menu[0].label, "Fusion");
-  assert.equal(menu[0].description, undefined);
-  assert.equal(menu[0].configure.label, "Fusion 设置");
-  menu[0].configure.onSelect();
+  assert.deepEqual(menu[0], { id: "h-wittycode", heading: true, label: "WittyCode" });
+  const fusion = menu[1];
+  assert.equal(fusion.id, "fusion");
+  assert.equal(fusion.label, "Fusion");
+  assert.equal(fusion.description, undefined);
+  assert.equal(fusion.configure.label, "Fusion 设置");
+  fusion.configure.onSelect();
   assert.deepEqual(picked.splice(0), ["settings:fusion"]);
-  assert.equal(menu[1].separator, true);
+  assert(!menu.some((item) => item.id === "sep-fusion"));
   assert.equal(menu[2].id, "h-chatgpt");
   assert.deepEqual(menu.filter((item) => item.checked).map((item) => item.id), ["fusion"]);
-  menu[0].onSelect();
+  fusion.onSelect();
   menu.find((item) => item.id === "chatgpt:visible").onSelect();
   assert.deepEqual(picked, ["fusion", "chatgpt:visible"]);
   const normal = buildModelMenu({ ...input, fusion: { ...input.fusion, selected: false } });
   assert.deepEqual(normal.filter((item) => item.checked).map((item) => item.id), ["chatgpt:visible"]);
   const existing = buildModelMenu({ ...input, fusion: { ...input.fusion, disabled: false }, engine: "chatgpt", running: false, fresh: false });
-  assert.equal(existing[0].disabled, false);
+  assert.equal(existing.find((item) => item.id === "fusion").disabled, false);
   assert.equal(existing.find((item) => item.id === "chatgpt:visible").description, "退出 Fusion 并使用此普通模型");
   const busy = buildModelMenu({ ...input, fusion: { ...input.fusion, disabled: true }, engine: "chatgpt", running: true });
-  assert.equal(busy[0].disabled, true);
+  const busyFusion = busy.find((item) => item.id === "fusion");
+  assert.equal(busyFusion.disabled, true);
+  busyFusion.configure.onSelect();
+  assert.equal(picked.at(-1), "settings:fusion", "the gear remains independent of the busy model row");
   assert(busy.find((item) => item.id === "chatgpt:visible").disabled);
   assert(busy.find((item) => item.id === "devin:worker").disabled);
   const settings = buildModelMenu({ ...input, fusion: undefined });

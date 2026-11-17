@@ -7,8 +7,8 @@ program). The price: if the process dies, every open Devin session is DEAD at on
 new process, ``session/load``). Metadata queries release the process when no session uses it; open sessions keep it alive.
 
 The account is the CLI's own: ``devin auth status`` says whether it is signed in (and as whom), ``devin auth login`` is its
-browser sign-in, ``devin auth logout`` ends it. The tokens stay in Devin's ``credentials.toml``; the same sign-in serves the
-Devin desktop app and the CLI.
+interactive sign-in, ``devin auth logout`` ends it. The tokens stay in Devin's ``credentials.toml``. A desktop sign-in does
+not necessarily authenticate this CLI; never read or copy the desktop's credentials to work around that.
 
 No Qt here: async methods for a qasync loop, listeners like the other engines' (``cb(controller, kind)``), plus
 ``add_account_listener(cb(account_json))`` for sign-in and sign-out.
@@ -189,7 +189,10 @@ class DevinEngine:
         self._windows: dict[str, int] = {}
         self._status: DevinStatus | None = None
         self._status_at = 0.0
+        self._account_lock = asyncio.Lock()
+        self._login_lock = asyncio.Lock()
         self._login: _Login | None = None
+        self._closing = False
         self._tasks: set[asyncio.Task[Any]] = set()
 
     # ------------------------------------------------------------------ listeners
@@ -361,12 +364,11 @@ class DevinEngine:
         if binary is None:
             raise DevinNotFoundError()
         options: dict[str, Any] = {"creationflags": CREATE_NO_WINDOW} if sys.platform == "win32" else {}
-        process = await asyncio.create_subprocess_exec(
-            *binary.argv(*arguments),
+        process = await self._start_process(
+            binary.argv(*arguments),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            env=self._cli_env,
             **options,
         )
         try:
@@ -380,12 +382,29 @@ class DevinEngine:
             raise
         return process.returncode or 0, out.decode("utf-8", "replace")
 
+    async def _start_process(self, argv: list[str], **options: Any) -> asyncio.subprocess.Process:
+        # Windows can launch the child before create_subprocess_exec returns. Cancellation must still acquire it.
+        starting = asyncio.create_task(asyncio.create_subprocess_exec(*argv, env=self._cli_env, **options))
+        try:
+            return await asyncio.shield(starting)
+        except asyncio.CancelledError:
+            with contextlib.suppress(Exception):
+                await self._reap(await starting)
+            raise
+
     @staticmethod
     async def _reap(process: asyncio.subprocess.Process) -> None:
-        with contextlib.suppress(ProcessLookupError, OSError):
-            process.kill()
-        with contextlib.suppress(asyncio.TimeoutError, Exception):
-            await asyncio.wait_for(process.wait(), 5.0)
+        if process.returncode is None:
+            with contextlib.suppress(ProcessLookupError, OSError):
+                process.kill()
+        transport = process._transport
+        transport.close()  # Disconnect pipes even if a descendant inherited an output handle.
+        await asyncio.wait_for(process.wait(), 5.0)
+        # Process.wait() may return as soon as returncode is known, before the pipe callbacks have run.
+        async def disconnected() -> None:
+            while transport._loop is not None:
+                await asyncio.sleep(0.01)
+        await asyncio.wait_for(disconnected(), 5.0)
 
     # ------------------------------------------------------------------ the account
 
@@ -398,12 +417,18 @@ class DevinEngine:
         binary = await self.binary()
         if binary is None:
             return account_json(None)
-        try:
-            code, text = await self._cli("auth", "status")
-        except DevinError as error:
-            return account_json(binary, self._status, signing_in=self._login is not None, error=friendly_failure(error))
-        self._status = parse_status(text) if code == 0 else DevinStatus()
-        self._status_at = self._clock()
+        async with self._account_lock:
+            try:
+                code, text = await self._cli("auth", "status")
+                if code != 0:
+                    raise DevinProcessError("Devin CLI could not check authentication", exit_code=code)
+            except DevinError as error:
+                return account_json(binary, self._status, signing_in=self._login is not None, error=friendly_failure(error))
+            status = parse_status(text)
+            if status != self._status:
+                self._models = None  # A guest model list must not survive a newly authenticated CLI account.
+            self._status = status
+            self._status_at = self._clock()
         return account_json(binary, self._status, signing_in=self._login is not None)
 
     async def ensure_signed_in(self) -> None:
@@ -415,71 +440,57 @@ class DevinEngine:
             raise DevinSignedOutError()
 
     async def login(self) -> dict[str, Any]:
-        """Sign in with the CLI's browser flow (``devin auth login`` opens the browser itself and ends when it is done);
-        returns the account once signed in, cancelled or timed out (5 min)."""
-        current = self._login
+        """Use the CLI's interactive login picker, not a hidden process with closed stdin.
+
+        On Windows the CLI needs a real console for its browser/manual/enterprise choice. The application never handles
+        tokens or claims a browser opened before the CLI has even selected a login method.
+        """
+        async with self._login_lock:
+            current = self._login
+            if current is None:
+                account = await self.account()
+                if account.get("auth") == "signed-in":
+                    self._emit_account(account)
+                    return account
+                binary = await self.binary()
+                if binary is None:
+                    raise DevinNotFoundError()
+                options: dict[str, Any] = {"creationflags": subprocess.CREATE_NEW_CONSOLE} if sys.platform == "win32" else {}
+                # No redirected standard handles: the native picker must receive real console input.
+                process = await self._start_process(binary.argv("auth", "login"), stdin=None, stdout=None, stderr=None, **options)
+                attempt = _Login(process)
+                self._login = attempt
+                self._emit_account(self.cached_account())
         if current is not None:
-            with contextlib.suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(asyncio.shield(current.done), self.login_timeout)
+            await asyncio.shield(current.done)
             return await self.account()
-        binary = await self.binary()
-        if binary is None:
-            raise DevinNotFoundError()
-        options: dict[str, Any] = {"creationflags": CREATE_NO_WINDOW} if sys.platform == "win32" else {}
-        process = await asyncio.create_subprocess_exec(
-            *binary.argv("auth", "login"),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            env=self._cli_env,
-            **options,
-        )
-        attempt = _Login(process)
-        self._login = attempt
-        self._emit_account(self.cached_account())
-        output = self._spawn(self._drain(process))
-        self._spawn(self._watch(attempt))
+        error = ""
         try:
             try:
-                await asyncio.wait_for(asyncio.shield(attempt.done), self.login_timeout)
+                code = await asyncio.wait_for(process.wait(), self.login_timeout)
+                if code:
+                    error = "Devin 登录窗口已关闭，但 CLI 尚未完成登录。请重试。"
             except asyncio.TimeoutError:
-                await self._stop(attempt)
+                error = "Devin CLI 登录超时，请重试。"
         finally:
-            if self._login is attempt:
-                self._login = None
-            # (the pipe is read to its end before it is let go: a transport dropped open is closed late, by the collector)
-            with contextlib.suppress(asyncio.TimeoutError, Exception):
-                await asyncio.wait_for(output, 2.0)
-            output.cancel()
+            # Keep ownership until termination AND pipe/handle disconnection, including cancellation by shutdown.
+            await self._stop(attempt)
+        if self._closing:
+            return self.cached_account()
         account = await self.account()
+        if account.get("auth") != "signed-in" and error:
+            account["error"] = error
+        if account.get("auth") == "signed-in":
+            self._models = None
+            await self.release_idle()
         self._emit_account(account)
         return account
 
-    @staticmethod
-    async def _drain(process: asyncio.subprocess.Process) -> None:
-        """The CLI waits for nobody to read what it prints, but a full pipe would stop it."""
-        if process.stdout is not None:
-            with contextlib.suppress(Exception):
-                while await process.stdout.read(4096):
-                    pass
-
-    @staticmethod
-    async def _watch(attempt: _Login) -> None:
-        attempt.finish(await attempt.process.wait())
-
     async def _stop(self, attempt: _Login) -> None:
+        await self._reap(attempt.process)
         if self._login is attempt:
             self._login = None
-        process = attempt.process
-        if process.returncode is None:
-            with contextlib.suppress(ProcessLookupError, OSError):
-                process.terminate()
-            try:
-                await asyncio.wait_for(process.wait(), 5.0)
-            except asyncio.TimeoutError:
-                with contextlib.suppress(ProcessLookupError, OSError):
-                    process.kill()
-        attempt.finish(None)
+        attempt.finish(attempt.process.returncode)
 
     async def cancel_login(self) -> dict[str, Any]:
         attempt = self._login
@@ -514,6 +525,7 @@ class DevinEngine:
         They come from a scratch session (made and deleted again): its ``model`` select lists them, and choosing each one
         in turn shows that model's ``thought_level`` select (about 60 ms each)."""
         async with self._models_lock:
+            await self.ensure_signed_in()
             if self._models is None or refresh:
                 async with self._metadata_connection() as client:
                     created = await client.request("session/new", {"cwd": self._scratch(), "mcpServers": []}, timeout=NEW_SESSION_SECONDS)
@@ -669,6 +681,7 @@ class DevinEngine:
 
     async def close_all(self, timeout: float = 20.0) -> None:
         """Close every session, then the process."""
+        self._closing = True
         controllers = list(self.controllers)
         if controllers:
             with contextlib.suppress(asyncio.TimeoutError):

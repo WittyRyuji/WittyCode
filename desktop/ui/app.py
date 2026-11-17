@@ -183,9 +183,11 @@ def run(context: AppContext) -> int:
 
     try:
         with context.loop:
-            context.loop.run_until_complete(serve())
+            try:
+                context.loop.run_until_complete(serve())
+            finally:
+                kill_pending_timers(context.loop)
     finally:
-        kill_pending_timers(context.loop)
         window.deleteLater()
         cleanup(context.app)
     return 0

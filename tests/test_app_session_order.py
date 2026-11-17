@@ -110,7 +110,7 @@ def test_rows_do_not_vanish_at_an_activity_based_cutoff(tmp_path):
 
 
 def test_manual_order_and_creation_identity_follow_an_engine_change(tmp_path):
-    from tests.test_app_core import devin_core
+    from tests.test_app_core import ask_to_switch, devin_core
 
     async def scenario():
         core, _, events, _, _ = await devin_core(tmp_path, projects=False)
@@ -119,7 +119,7 @@ def test_manual_order_and_creation_identity_follow_an_engine_change(tmp_path):
         await idle(core, cid)
         created = core._by_cid[cid].created_at
         await core.call("session.reorder", {"projectId": str(proj), "id": cid, "targetId": "cg:new", "after": False})
-        assert (await core.call("session.choose", {"id": cid, "field": "model", "value": "devin:swe-2-high"}))["switched"]
+        assert (await ask_to_switch(core, cid))["switched"]
         conv = core._by_cid[cid]
         key = "dv:" + conv.controller.session_id
         core._emit_sidebar()

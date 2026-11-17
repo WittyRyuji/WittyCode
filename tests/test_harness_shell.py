@@ -292,7 +292,7 @@ def test_timeout_kills_the_whole_process_tree(ctx, project):
 
 
 @windows_only
-def test_abort_stops_a_long_command_quickly_and_kills_children(ctx, project):
+def test_abort_stops_a_long_command_quickly_and_kills_children(ctx, project, monkeypatch):
     pid_file = project / "child.pid"
     command = (
         "$child = Start-Process -FilePath powershell.exe -ArgumentList '-NoProfile','-Command','Start-Sleep 120' "
@@ -300,6 +300,11 @@ def test_abort_stops_a_long_command_quickly_and_kills_children(ctx, project):
         f"$child.Id | Out-File -Encoding ascii '{pid_file}'; Write-Output ready; Start-Sleep 120"
     )
     stamps: dict[str, float] = {}
+    kill_tree = shell_module._kill_tree
+    async def observed_kill(process):
+        stamps["kill_started"] = time.monotonic()
+        await kill_tree(process)
+    monkeypatch.setattr(shell_module, "_kill_tree", observed_kill)
 
     def stopper() -> None:
         end = time.monotonic() + 20
@@ -314,7 +319,9 @@ def test_abort_stops_a_long_command_quickly_and_kills_children(ctx, project):
     result = shell(ctx, command, timeout=120)
     stamps["done"] = time.monotonic()
     thread.join()
-    assert stamps["done"] - stamps["set"] < 2.5
+    assert stamps["kill_started"] - stamps["set"] < 0.5, "abort must be observed promptly"
+    # taskkill's process-tree walk is OS work; test its configured bound separately from our polling latency.
+    assert stamps["done"] - stamps["kill_started"] < shell_module.KILL_WAIT_SECONDS + 1
     assert result.is_error
     lines = result.output.splitlines()
     assert "ready" in lines and lines[-2] == "Stopped by the user" and lines[-1].startswith("Exit code: ")

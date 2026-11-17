@@ -29,7 +29,17 @@ def configure(core):
 
 
 async def choose(core, cid, model):
-    return await core.call("session.choose", {"id": cid, "field": "model", "value": model})
+    """Inspect the applied handoff before starting another turn, so usage/ownership assertions remain deterministic.
+
+    Selection alone no longer applies a handoff. The real select -> send path, including failed sends and drafts, is
+    exercised separately in test_model_switch_pending.py; these lifecycle tests cover the application phase itself.
+    """
+    result = await core.call("session.choose", {"id": cid, "field": "model", "value": model})
+    conv = core._by_cid[cid]
+    if result.get("ok") and conv.pending_model is not None:
+        await core._apply_pending_model(conv)
+        core._set_pending_model(conv, None)
+    return result
 
 
 def test_existing_conversation_switches_in_place_and_restores_paused_experts(tmp_path):
@@ -261,10 +271,11 @@ def test_entering_fusion_from_native_engine_keeps_attachment_confirmation(tmp_pa
             assert core._by_cid[cid].controller is original
             picked = [result["choose"]["attachments"][0]["id"]]
             result = await core.call("session.choose", {"id": cid, "field": "model", "value": "fusion", "attachments": picked})
-            main = core._by_cid[cid].controller
-            assert result["ok"] and main._fusion is not None and main.handoff.files == 1 and not fake.requests
+            assert result["ok"] and core._by_cid[cid].controller is original and not fake.requests
             fake.script(say("Continued with the selected notes."))
             await core.call("session.send", {"id": cid, "text": "Continue"})
+            main = core._by_cid[cid].controller
+            assert main._fusion is not None and main.handoff.files == 1
             await finish_turn(main)
             assert "Carry these reviewed notes." in str(fake.requests[-1]["input"])
         finally:

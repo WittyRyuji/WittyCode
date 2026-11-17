@@ -435,17 +435,22 @@ def test_a_chatgpt_plan_conversation_moves_to_devin_with_its_earlier_text_and_ba
         await core.call("session.send", {"id": cid, "text": "what is 2+2"})
         await until(lambda: core._by_cid[cid].controller.state is SessionState.READY and answer_of(events, cid) == "It is four.")
         result = await core.call("session.choose", {"id": cid, "field": "model", "value": "devin:swe-2-high"})
-        assert result["switched"] is True
-        assert core._by_cid[cid].engine == "devin" and meta(events, cid)["engine"] == "devin"
-        assert any("已换到 SWE-2（Devin）" in p["text"] for p in events.of("notice"))
-        assert meta(events, cid)["handoff"]["carried"] == 2
+        assert result == {"ok": True} and core._by_cid[cid].engine == "chatgpt"
+        assert len(plan.requests) == 1, "selection does not request a summary"
         await core.call("session.send", {"id": cid, "text": "and 3+3?"})
         await until(lambda: meta(events, cid).get("mark") == "ready" and answer_of(events, cid).endswith("and 3+3?"))
+        assert core._by_cid[cid].engine == "devin" and meta(events, cid)["engine"] == "devin"
+        assert any("已换到 SWE-2（Devin）" in p["text"] for p in events.of("notice"))
         (sent,) = harness.requests("session/prompt")
         assert "what is 2+2" in sent["prompt"][0]["text"] and "It is four." in sent["prompt"][0]["text"] and sent["prompt"][0]["text"].endswith("and 3+3?")
         assert meta(events, cid)["handoff"] is None
         # and back to ChatGPT Plan
-        assert (await core.call("session.choose", {"id": cid, "field": "model", "value": "chatgpt:gpt-6.1-sol"}))["switched"] is True
+        assert await core.call("session.choose", {"id": cid, "field": "model", "value": "chatgpt:gpt-6.1-sol"}) == {"ok": True}
+        assert core._by_cid[cid].engine == "devin"
+        plan.script(say("Back on the original engine."))
+        await core.call("session.send", {"id": cid, "text": "Back again"})
+        await until(lambda: meta(events, cid).get("mark") == "ready" and answer_of(events, cid) == "Back on the original engine.")
+        assert core._by_cid[cid].controller.transcript.turns[-1].status.value == "done", "closing the source must not cancel the destination's first turn"
         assert core._by_cid[cid].engine == "chatgpt"
         await core.shutdown()
 

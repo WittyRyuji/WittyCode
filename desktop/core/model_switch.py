@@ -78,6 +78,7 @@ async def compact_native(controller, window=0) -> str:
     if controller.state is not SessionState.READY:
         raise ChatGPTError("会话尚未就绪，未切换模型。", code="compaction")
     controller._switch_summary = True
+    before = controller.transcript.snapshot()
     turn = None
     autonomy = controller.autonomy
     safe = "off" if controller.engine == "factory" else "ask"
@@ -103,6 +104,7 @@ async def compact_native(controller, window=0) -> str:
             await controller.interrupt()
         raise
     finally:
+        controller.transcript.restore(before)  # Internal summary traffic is not an independent user turn.
         controller._switch_summary = False
         if controller.state is SessionState.READY and not await controller.update_settings(autonomy=autonomy):
             raise ChatGPTError("压缩后未能恢复原权限；会话保留在受限权限下，未切换模型。", code="compaction")

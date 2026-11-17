@@ -27,7 +27,8 @@ def test_fusion_is_first_in_model_menu_and_normal_model_exits_the_selection(qapp
             await rig.click(".chip-model")
             await rig.wait_text(".menu-item .menu-label", "Fusion")
             assert (await rig.texts(".menu-item .menu-label"))[0] == "Fusion"
-            assert await rig.js('document.querySelector(".menu").firstElementChild.querySelector(".menu-label").textContent') == "Fusion"
+            assert await rig.text(".menu-head") == "WittyCode"
+            assert not await rig.exists('.menu > .menu-sep')
             assert not await rig.exists(".menu-row .menu-desc")
             assert await rig.js('(() => { const row = document.querySelector(".menu-row").getBoundingClientRect(); const gear = document.querySelector(".menu-configure").getBoundingClientRect(); return Math.abs(row.right - gear.right) < 2 && gear.width >= 30; })()')
             assert rig.window.grab().save(str(tmp_path / "fusion-model-menu.png"))
@@ -64,12 +65,17 @@ def test_fusion_is_first_in_model_menu_and_normal_model_exits_the_selection(qapp
             await rig.wait_text(".menu-item .menu-label", "Fusion")
             await wait_for(lambda: rig.js('!document.querySelector(".menu-item").disabled'))
             assert not await rig.exists(".menu-row .menu-desc")
-            rig.plan.script(say("已检查模块，接下来继续工作。"))
             await rig.click_text(".menu-item", "Fusion")
             await rig.wait_text(".chip-model .chip-v", "Fusion")
-            assert main._fusion is not None and rig.core.order[0].cid == cid and main.session_id == native
-            assert len(rig.plan.requests) == count + 1 and not await rig.exists(".fusion-choice, .fusion-badge, .chip-reasoning")
-            assert rig.plan.requests[-1]["model"] == "gpt-6-luna"
+            assert main._fusion is None and rig.core.order[0].cid == cid and main.session_id == native
+            assert len(rig.plan.requests) == count and not await rig.exists(".fusion-choice, .fusion-badge, .chip-reasoning")
+            rig.plan.script(say("已检查模块，接下来继续工作。"), say("Fusion 已继续执行。"))
+            await rig.send("Continue with Fusion")
+            await rig.wait_text(".transcript", "Fusion 已继续执行")
+            await finish_turn(main)
+            assert main._fusion is not None and len(rig.plan.requests) == count + 2
+            assert [r["model"] for r in rig.plan.requests[-2:]] == ["gpt-6-luna", "gpt-6.1-sol"]
+            assert "/compact" not in await rig.text(".transcript")
             await rig.click(".chip-model")
             await rig.wait_text(".menu-item .menu-label", "Fusion")
             assert await rig.count(".menu-item .menu-check svg") == 1
@@ -77,12 +83,15 @@ def test_fusion_is_first_in_model_menu_and_normal_model_exits_the_selection(qapp
             assert rig.window.grab().save(str(tmp_path / "fusion-session-menu.png"))
             await rig.click_text(".menu-item", "GPT-6-Luna")
             await rig.wait_text(".chip-model .chip-v", "GPT-6-Luna")
-            assert main._fusion is None and main._paused_fusion is not None
-            assert main.session_id == native and rig.core.order[0].cid == cid and len(rig.plan.requests) == count + 1
+            assert main._fusion is not None
+            assert main.session_id == native and rig.core.order[0].cid == cid and len(rig.plan.requests) == count + 2
             assert not await rig.js('document.querySelector(".chip-reasoning").disabled')
-            rig.plan.script(say("已回到普通模型。"))
+            rig.plan.script(say("摘要：Fusion 已完成前一项检查。"), say("已回到普通模型。"))
             await rig.send("Continue without Fusion")
             await rig.wait_text(".transcript", "已回到普通模型")
+            await finish_turn(main)
+            assert main._fusion is None and main._paused_fusion is not None
+            assert len(rig.plan.requests) == count + 4
             assert "delegate_task" not in {tool.get("name") for tool in rig.plan.requests[-1]["tools"]}
         finally:
             await rig.finish()

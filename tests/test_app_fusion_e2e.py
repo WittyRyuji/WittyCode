@@ -17,6 +17,8 @@ async def select_fusion(rig):
     await rig.click(".chip-model")
     await rig.wait_text(".menu-item .menu-label", "Fusion")
     assert (await rig.texts(".menu-item .menu-label"))[0] == "Fusion"
+    assert await rig.text(".menu-head", 0) == "WittyCode"
+    assert await rig.js("document.querySelector('.menu-row').previousElementSibling.classList.contains('menu-head') && document.querySelector('.menu-row').nextElementSibling.classList.contains('menu-head')"), "Fusion shares the provider layout, without its own separator"
     await rig.click_text(".menu-item", "Fusion")
 
 

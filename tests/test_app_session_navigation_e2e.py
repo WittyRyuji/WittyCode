@@ -83,7 +83,12 @@ def test_real_model_menu_keeps_one_sidebar_row_after_switch_and_close(qapp, loop
             await rig.click(".controls .chip", 0)
             await rig.wait_for(".menu-item")
             await rig.click_text(".menu-item", "SWE-2")
+            await rig.wait_text(".chip-model .chip-v", "SWE-2")
+            assert await rig.count(".block.engine-switch") == 0
+            await rig.send("Continue in the same conversation")
             await rig.wait_for(".block.engine-switch", 1, timeout=15)
+            await rig.wait_text(".transcript", "echo:")
+            await rig.wait_for(".send.stop", 0)
             assert await rig.count(".tab") == 1
             await rig.core.call("session.close", {"id": rig.core.order[0].cid})
             await rig.core.call("project.refresh")

@@ -349,7 +349,10 @@ class FusionRuntime:
 
     async def delegate(self, scope: str, model: str, role: str, task: str) -> Outcome:
         from desktop.core.harness.outputs import hint
+        from desktop.core.harness.toolset import PLAN_REFUSAL
 
+        if (self.parent._turn_mode or self.parent.mode) == "spec":
+            return Outcome(PLAN_REFUSAL, True)
         native = native_model(model)
         if self.parent.manager.model_info(native) is None:
             return Outcome("The requested expert model is unavailable; no fallback was selected.", True)
@@ -385,6 +388,9 @@ class FusionRuntime:
             child = await self._open(view, created=created)
             if not await child.update_settings(autonomy=self.parent.autonomy, mode="auto"):
                 raise FusionError("The expert could not inherit the main conversation's permissions.")
+            parent_tools = await self.parent._ensure_tools()
+            child_tools = await child._ensure_tools()
+            child_tools.permission_parent = parent_tools
             before = child.usage
             self._active, self._active_before = child, before
             handoff = await self._handoff(expert, child)

@@ -79,8 +79,8 @@ export class QWebChannelTransport implements Transport {
     const callId = String(++this.sequence);
     return new Promise<T>((resolve, reject) => {
       const entry: Pending = { resolve: resolve as (value: unknown) => void, reject };
-      // Model switches wait for source-model compaction; progress and cancellation use the session turn UI.
-      const compacts = method === "fusion.changeMain" || (method === "session.choose" && "field" in params && params.field === "model" && "id" in params);
+      // Sending may first compact and apply a pending model selection; stop/progress stay in the session UI.
+      const compacts = method === "session.send" || method === "fusion.changeMain" || (method === "session.choose" && "field" in params && params.field === "model" && "id" in params);
       if (!WAITS_FOR_USER.has(method) && !compacts) {
         entry.timer = setTimeout(() => {
           this.pending.delete(callId);

@@ -119,16 +119,19 @@ def test_the_built_in_tools_follow_the_permission_level(tmp_path):
     assert code.check(outside).verdict == ASK
 
 
-def test_fusion_expert_full_access_still_asks_before_writing_commands(tmp_path):
-    tools = make(tmp_path, "full")
+def test_fusion_expert_follows_the_main_level_without_a_command_downgrade(tmp_path):
+    parent, tools = make(tmp_path, "full"), make(tmp_path, "ask")
+    tools.permission_parent = parent
     readonly = call("shell", command="git status")
     write = call("shell", command="New-Item marker.txt")
-    assert tools.check(write).verdict == ALLOW  # Ordinary main sessions keep their selected permissions.
-    tools.expert_command_approval = True
     assert tools.check(readonly).verdict == ALLOW
+    assert tools.check(write).verdict == ALLOW
+    parent.level = "code"
     assert tools.check(write).verdict == ASK
-    tools.remember(write)
-    assert tools.check(write).verdict == ALLOW  # An explicit, command-specific session approval still works.
+    parent.remember(write)
+    assert tools.check(write).verdict == ALLOW
+    parent.remembered.clear()
+    assert tools.check(write).verdict == ASK
 
 
 def test_allowing_a_built_in_call_for_the_conversation_is_remembered(tmp_path):

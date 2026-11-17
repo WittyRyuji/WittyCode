@@ -232,7 +232,9 @@ class Conversation:
     switching: bool = False
     """A change of engine is under way: the new controller failing to open must not close the conversation."""
     switch_task: asyncio.Task[Any] | None = None
-    """The interruptible source-model compaction, before any destination is opened."""
+    """The interruptible send-time handoff, including opening the destination."""
+    pending_model: dict[str, Any] | None = None
+    """A selection shown immediately, but not committed to the engine until the next user send."""
     created_at: float = field(default_factory=time.time)
     sidebar_key: str = ""
     """Stable sidebar identity, migrated to the native row id once it is known (also across engine changes)."""
@@ -1376,8 +1378,9 @@ class AppCore:
         return dict(conv.requested)
 
     def _shown_settings(self, conv: Conversation) -> dict[str, str]:
-        """The four settings under the message box: the session's own once it is connected; until then what it was left
-        with (read from the engine's file, else the cache) with whatever the user has chosen since laid over it."""
+        """The engine's settings, overlaid by a selection waiting for the next explicit send."""
+        if conv.pending_model is not None:
+            return dict(conv.pending_model["settings"])
         live = conv.controller.live_settings() if hasattr(conv.controller, "live_settings") else None
         if live is not None and conv.controller.state in (SessionState.READY, SessionState.RUNNING):
             return self._settings_of(conv.engine, live)
@@ -1392,6 +1395,8 @@ class AppCore:
     def _mark(self, conv: Conversation) -> str:
         controller = conv.controller
         state = controller.state
+        if conv.switch_task is not None:
+            return "running"
         if state is SessionState.RUNNING:
             return "attention" if self._attention_prompts(conv) else "running"
         return {SessionState.READY: "ready", SessionState.OPENING: "opening", SessionState.DEAD: "dead"}.get(state, "ready")
@@ -1478,7 +1483,7 @@ class AppCore:
             "projectId": conv.project,
             "title": self._title_of(conv),
             "mark": self._mark(conv),
-            "workingLabel": ("本地缓存 · " if conv.preview else "") + controller.working_label,
+            "workingLabel": "正在压缩并切换模型…" if conv.switch_task is not None else ("本地缓存 · " if conv.preview else "") + controller.working_label,
             "modified": format_relative(active),
             "modifiedAt": int(controller.active_at * 1000),
             "engine": conv.engine,
@@ -1490,7 +1495,7 @@ class AppCore:
             "context": context,
             "queued": self._queued_json(conv),
             "agents": self._agents_json(conv),
-            "fusion": getattr(controller, "_fusion", None) is not None,
+            "fusion": conv.pending_model["model"] == "fusion" if conv.pending_model is not None else getattr(controller, "_fusion", None) is not None,
             "fusionPolicy": ({"workers": list(controller._fusion.registry.policy.workers), "light": controller._fusion.registry.policy.light,
                               "maxCalls": controller._fusion.registry.policy.max_calls, "calls": controller._fusion.registry.calls,
                               "maxTokens": controller._fusion.registry.policy.max_tokens, "knownTokens": controller._fusion.known_tokens(),
@@ -1528,7 +1533,7 @@ class AppCore:
         if replace:
             conv.sent_versions = {}
         changed = [t for t in turns if conv.sent_versions.get(t.id) != t.version]
-        if (changed or replace) and not hold:
+        if (changed or replace) and not hold and conv.switch_task is None:
             built = []
             for turn in changed:
                 previous = conv.json_cache.get(turn.id) if not replace else None
@@ -1833,6 +1838,14 @@ class AppCore:
             self._ledger_seed = None
             self._opening_history = None
         conv = self._conv_of(controller)
+        if conv is not None:
+            pending = await asyncio.to_thread(self.history.load, "pending-switch:" + row_id)
+            if pending is not None and same_folder(pending.get("project", ""), folder):
+                target = pending.get("target")
+                if isinstance(target, dict) and isinstance(target.get("model"), str) and isinstance(target.get("settings"), dict):
+                    conv.pending_model = target
+                    conv.dirty = True
+                    self._schedule_flush()
         return {"id": conv.cid if conv else None}
 
     async def _cached_conversation(
@@ -2130,7 +2143,7 @@ class AppCore:
 
     async def _m_session_send(self, params: dict[str, Any]) -> dict[str, Any]:
         conv = self._conversation(params["id"])
-        if conv.switching:
+        if conv.switching or conv.switch_task is not None:
             raise AppError("模型正在切换，稍后再发送。")
         ids = params.get("attachmentIds")
         if ids is not None and not (isinstance(ids, list) and all(isinstance(i, str) for i in ids)):
@@ -2197,7 +2210,26 @@ class AppCore:
             elif state is SessionState.READY:
                 self._pump(conv)
             return {"ok": True, "queued": True}
-        if not controller.send_prompt(text, attachments):
+        if not text and not attachments:
+            raise AppError("现在不能发送：没有内容。")
+        if conv.pending_model is not None:
+            await self._apply_pending_model(conv)
+            controller = conv.controller
+            problem = controller.attachment_problem(self._carried_attachments(conv) + tuple(attachments))
+            if problem:
+                raise AppError(problem)
+        pending = conv.pending_model
+        if pending is not None:
+            self._set_pending_model(conv, None)  # Persist before accepting the message; a disk failure must not invite replay.
+        try:
+            accepted = controller.send_prompt(text, attachments)
+        except BaseException:
+            if pending is not None:
+                self._set_pending_model(conv, pending)
+            raise
+        if not accepted:
+            if pending is not None:
+                self._set_pending_model(conv, pending)
             raise AppError("现在不能发送：会话没有就绪。")
         self._start_title(conv, text)
         taken()
@@ -2409,7 +2441,7 @@ class AppCore:
     def _pump(self, conv: Conversation) -> None:
         """Send the next queued message, if the session can take one now."""
         controller = conv.controller
-        if not conv.queue or controller.state is not SessionState.READY or conv.cid not in self._by_cid:
+        if conv.switch_task is not None or conv.switching or not conv.queue or controller.state is not SessionState.READY or conv.cid not in self._by_cid:
             return
         plan = getattr(getattr(controller, "saved", None), "plan", {})
         if isinstance(plan, dict) and plan.get("status") == "pending":
@@ -2427,7 +2459,7 @@ class AppCore:
 
     def _follow_queue(self, conv: Conversation) -> None:
         """The state of the conversation changed with messages waiting (or a turn that has just ended)."""
-        if conv.cid not in self._by_cid:
+        if conv.cid not in self._by_cid or conv.switching or conv.switch_task is not None:
             return
         controller = conv.controller
         state = controller.state
@@ -2737,7 +2769,7 @@ class AppCore:
             self._set_default(field_name, value)
             return {"ok": True}
         conv = self._conversation(cid)
-        if conv.switching:
+        if conv.switching or conv.switch_task is not None:
             raise AppError("模型正在压缩交接，稍后再修改设置。")
         if field_name == "model" and value == "fusion" and conv.controller.state is SessionState.OPENING:
             raise AppError("会话就绪后才能切换 Fusion。")
@@ -2755,8 +2787,20 @@ class AppCore:
             over_ok = params.get("overLimit")
             if over_ok is not None and not isinstance(over_ok, bool):
                 raise AppError("这个设置的值不合法。")
+            if conv.controller.transcript.turns or conv.pending_model is not None:
+                return self._select_model(conv, value, carry_ids, over_ok is True)
             return await self._choose_model(conv, value, carry_ids, over_ok is True)
+        if conv.pending_model is not None and field_name == "reasoning":
+            model = self.catalog.find(conv.pending_model["settings"]["model"]) or {}
+            if conv.pending_model["model"] == "fusion" or value not in model.get("efforts", ()):
+                raise AppError("所选模型不支持这个推理档位。")
+            pending = {**conv.pending_model, "settings": {**conv.pending_model["settings"], "reasoning": value}}
+            self._set_pending_model(conv, pending)
+            return {"ok": True}
         ok = await self._update_live(conv, **{field_name: value})
+        if ok and conv.pending_model is not None:
+            pending = {**conv.pending_model, "settings": {**conv.pending_model["settings"], field_name: self._page_settings(conv).get(field_name, value)}}
+            self._set_pending_model(conv, pending)
         return {"ok": ok}
 
     def _set_default(self, field_name: str, value: str, *, engine: str | None = None) -> None:
@@ -2792,12 +2836,95 @@ class AppCore:
         self._schedule_flush()
         return ok
 
+    def _set_pending_model(self, conv: Conversation, target: dict[str, Any] | None, *, row: str = "") -> None:
+        # This intent is not a disposable UI cache or an engine setting. Reopening never executes it on its own.
+        row = row or self._row_of(conv)
+        if row:
+            try:
+                self.history.save("pending-switch:" + row, {"project": conv.project, "turns": [], "target": target})
+            except OSError as error:
+                raise AppError("无法保存模型选择，消息没有发出；请检查存储后重试。") from error
+        conv.pending_model = target
+        conv.dirty = True
+        self._schedule_flush()
+
+    def _select_model(
+        self, conv: Conversation, page_model: str, carry_ids: Sequence[str] | None, over_ok: bool,
+    ) -> dict[str, Any]:
+        self._check_fusion_switch(conv)
+        active_fusion = getattr(conv.controller, "_fusion", None) is not None
+        if (page_model == "fusion" and active_fusion or page_model != "fusion" and not active_fusion
+                and self._page_settings(conv).get("model") == page_model):
+            self._set_pending_model(conv, None)
+            return {"ok": True}
+        policy = None
+        if page_model == "fusion":
+            policy, _, _ = self._fusion_selection(conv)
+            destination = policy.main
+        else:
+            destination = page_model
+        chosen = self.catalog.find(destination)
+        if not chosen or chosen.get("disabled"):
+            raise AppError("所选模型当前不可用，原模型和待切换选择保持不变。")
+        target = self.catalog.target(destination)
+        if target.engine != conv.engine or target.engine in ("devin", "factory"):
+            carry = self._switch_carry(conv, destination, carry_ids, over_ok)
+            if isinstance(carry, dict):
+                return carry
+        settings = self._open_settings(destination, self._page_settings(conv))
+        if policy is not None:
+            from desktop.core.fusion.reasoning import configured_effort
+            try:
+                effort = configured_effort(policy.reasoning, policy.main, chosen.get("efforts", ()))
+            except ValueError as error:
+                raise AppError("Fusion 主模型的推理档位不可用。") from error
+            if effort is not None:
+                settings["reasoning"] = effort
+        self._set_pending_model(conv, {"model": page_model, "settings": settings, "attachments": list(carry_ids or ()),
+                                      "overLimit": over_ok, "policy": policy.to_json() if policy is not None else None})
+        return {"ok": True}
+
+    async def _apply_pending_model(self, conv: Conversation) -> dict[str, Any]:
+        pending = conv.pending_model
+        if pending is None:
+            return {"ok": True}
+        self._check_fusion_switch(conv)
+        old_row = self._row_of(conv)
+        conv.switch_task = asyncio.current_task()
+        conv.dirty = True
+        self._schedule_flush()
+        try:
+            result = await self._choose_model(conv, pending["model"], pending["attachments"], pending["overLimit"])
+            if not result.get("ok"):
+                raise AppError("所选模型未能接收交接；消息和待切换选择保留，请重试。")
+            # The pending target may have its own reasoning scale. Do not modify the source model at selection time.
+            if pending["model"] != "fusion" and pending["settings"].get("reasoning") != self._page_settings(conv).get("reasoning"):
+                if not await self._update_live(conv, reasoning=pending["settings"].get("reasoning", "")):
+                    raise AppError("目标模型的推理设置未生效，消息没有发出。")
+            return result
+        except asyncio.CancelledError:
+            raise AppError("模型切换已停止；消息和待切换选择保留，未自动重试。") from None
+        finally:
+            try:
+                if self._row_of(conv) != old_row:
+                    self._set_pending_model(conv, pending)
+                    self.history.save("pending-switch:" + old_row, {"project": conv.project, "turns": [], "target": None})
+            except OSError as error:
+                raise AppError("无法保存模型切换，消息没有发出；请检查存储后重试。") from error
+            finally:
+                conv.switch_task = None
+                conv.ran = False  # A handoff is neither a completed user turn nor a reason to advance goals/queues.
+                conv.dirty = True
+                self._feed_usage(conv)
+                self._schedule_flush()
+
     async def _compact_model_switch(self, conv: Conversation, page_model: str) -> str:
         """The old model owns the summary. No destination settings are committed before it succeeds."""
         from desktop.core.chatgpt.errors import ChatGPTError
         from desktop.core.model_switch import compact_native, recall_for_switch
         old = conv.controller
         window = int((self.catalog.find(page_model) or {}).get("window") or 0)
+        previous_task = conv.switch_task
         conv.switch_task = asyncio.current_task()
         try:
             compact = getattr(old, "compact_for_switch", None)
@@ -2820,7 +2947,7 @@ class AppCore:
             detail = str(error) if isinstance(error, ChatGPTError) else error_text(error)
             raise AppError(f"切换前压缩未完成，仍使用原模型：{detail}") from error
         finally:
-            conv.switch_task = None
+            conv.switch_task = previous_task
 
     async def _choose_model(
         self, conv: Conversation, page_model: str, carry_ids: Sequence[str] | None = None, over_ok: bool = False
@@ -2922,12 +3049,8 @@ class AppCore:
                 series[key] = tokens
         return restored
 
-    async def _enable_fusion(self, conv: Conversation, carry_ids: Sequence[str] | None, over_ok: bool) -> dict[str, Any]:
+    def _fusion_selection(self, conv: Conversation) -> tuple[Any, Any, Any]:
         from desktop.core.fusion.registry import FusionError, FusionRegistry, Policy
-        self._check_fusion_switch(conv)
-        if getattr(conv.controller, "_fusion", None) is not None:
-            return {"ok": True}
-        self._feed_usage(conv)
         retained = self._retained_fusion(conv)
         restored = ({}, {})
         try:
@@ -2937,11 +3060,22 @@ class AppCore:
                 registry = FusionRegistry.from_json(Path(conv.project), retained.get("registry"))
                 policy = registry.policy
                 restored = self._fusion_series(retained, registry.agents)
+            elif conv.pending_model is not None and conv.pending_model.get("policy") is not None:
+                policy = Policy.from_json(conv.pending_model["policy"])
             else:
                 policy = Policy(self.settings.fusion_main, tuple(self.settings.fusion_workers), self.settings.fusion_light,
                                 0, 0, self.settings.fusion_max_seconds, self.settings.fusion_preference, self.settings.fusion_reasoning)
         except FusionError as error:
             raise AppError("Fusion 配置不可用；请检查设置或保留的专家配置，原会话未改变。") from error
+        return policy, retained, restored
+
+    async def _enable_fusion(self, conv: Conversation, carry_ids: Sequence[str] | None, over_ok: bool) -> dict[str, Any]:
+        from desktop.core.fusion.registry import FusionError
+        self._check_fusion_switch(conv)
+        if getattr(conv.controller, "_fusion", None) is not None:
+            return {"ok": True}
+        self._feed_usage(conv)
+        policy, retained, restored = self._fusion_selection(conv)
         model = policy.main.removeprefix("chatgpt:")
         if self.chatgpt is None or self.chatgpt.model_info(model) is None:
             raise AppError("Fusion 主模型当前不可用；不会自动替换模型。")
@@ -3016,6 +3150,27 @@ class AppCore:
             chosen.append(option.attachment)
         return chosen
 
+    def _switch_carry(
+        self, conv: Conversation, page_model: str, carry_ids: Sequence[str] | None, over_ok: bool,
+    ) -> list[Attachment] | dict[str, Any]:
+        options = carry_options(conv.controller.transcript.turns, images_problem=self._images_problem(page_model),
+                                scans_problem=self._scans_problem(page_model))
+        in_box, in_box_bytes = len(conv.drafts), sum(item.size or 0 for item in conv.drafts)
+        if options and carry_ids is None:
+            return {"ok": False, "choose": {
+                "attachments": [self._carry_json(option) for option in options],
+                "limits": {"files": SOFT_ATTACHMENTS, "bytes": SOFT_TOTAL_BYTES},
+                "hard": {"files": HARD_ATTACHMENTS, "bytes": HARD_TOTAL_BYTES},
+                "drafts": {"count": in_box, "bytes": in_box_bytes},
+            }}
+        chosen = self._resolve_carry(options, carry_ids or ())
+        held = carry_overage(chosen, other_count=in_box, other_bytes=in_box_bytes)
+        if held.beyond_ceiling:
+            raise AppError(too_many(held))
+        if held.over and not over_ok:
+            raise AppError(f"{held.describe()}：要这样带过去，请在清单里确认。")
+        return chosen
+
     async def _switch_engine(
         self, conv: Conversation, page_model: str, carry_ids: Sequence[str] | None = None, over_ok: bool = False,
         *, fusion_policy: Any = None, fusion_retained: Any = None,
@@ -3043,27 +3198,9 @@ class AppCore:
         model = self.catalog.find(page_model) or {"label": page_model, "window": 0}
         was = self.catalog.find(self._page_settings(conv).get("model", "")) or {"label": old.model}
         transcript = old.transcript
-        options = carry_options(
-            transcript.turns, images_problem=self._images_problem(page_model), scans_problem=self._scans_problem(page_model)
-        )
-        # what the composer already holds goes with the next message too: it takes its share of the limits
-        in_box, in_box_bytes = len(conv.drafts), sum(item.size or 0 for item in conv.drafts)
-        if options and carry_ids is None:
-            return {
-                "ok": False,
-                "choose": {
-                    "attachments": [self._carry_json(option) for option in options],
-                    "limits": {"files": SOFT_ATTACHMENTS, "bytes": SOFT_TOTAL_BYTES},
-                    "hard": {"files": HARD_ATTACHMENTS, "bytes": HARD_TOTAL_BYTES},
-                    "drafts": {"count": in_box, "bytes": in_box_bytes},
-                },
-            }
-        chosen = self._resolve_carry(options, carry_ids or ())
-        held = carry_overage(chosen, other_count=in_box, other_bytes=in_box_bytes)
-        if held.beyond_ceiling:
-            raise AppError(too_many(held))
-        if held.over and not over_ok:
-            raise AppError(f"{held.describe()}：要这样带过去，请在清单里确认。")
+        chosen = self._switch_carry(conv, page_model, carry_ids, over_ok)
+        if isinstance(chosen, dict):
+            return chosen
         # What goes along depends on the new model's window. The model list usually knows it; where it does not, it is
         # only reported once the session is open, so the session opens with a hand-over for the figure known now
         # (nothing may be sent without one) and gets the final one when the window arrives.
@@ -3428,7 +3565,7 @@ class AppCore:
             s.max_steps = value
         elif key in ("fusionMain", "fusionLight") and isinstance(value, str) and len(value) <= 512 and (not value or value.startswith(("chatgpt:", "api:", "devin:"))):
             setattr(s, "fusion_main" if key == "fusionMain" else "fusion_light", value)
-        elif key == "fusionWorkers" and isinstance(value, list) and len(value) <= 32 and all(isinstance(item, str) and len(item) <= 512 and item.startswith(("chatgpt:", "api:", "devin:")) for item in value):
+        elif key == "fusionWorkers" and isinstance(value, list) and len(value) <= 1 and all(isinstance(item, str) and len(item) <= 512 and item.startswith(("chatgpt:", "api:", "devin:")) for item in value):
             s.fusion_workers = list(dict.fromkeys(value))
         elif key == "fusionReasoning":
             from desktop.core.fusion.reasoning import reasoning_map, reasoning_model

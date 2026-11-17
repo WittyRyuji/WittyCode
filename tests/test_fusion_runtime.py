@@ -119,7 +119,7 @@ def test_unavailable_acp_worker_cannot_be_started_even_if_a_model_requests_it(tm
     asyncio.run(go())
 
 
-def test_expert_coding_command_requires_approval_even_when_parent_is_full(tmp_path):
+def test_expert_coding_command_inherits_the_parents_full_access(tmp_path):
     async def go():
         core, model, _, _, _ = await ready_core(tmp_path)
         try:
@@ -128,15 +128,12 @@ def test_expert_coding_command_requires_approval_even_when_parent_is_full(tmp_pa
             assert await main.update_settings(autonomy="full")
             main.enable_fusion(Policy("chatgpt:gpt-6.1-sol", ("chatgpt:gpt-6-luna",), "chatgpt:gpt-6-luna", 3))
             model.script(call("delegate_task", {"scope": "src", "model": "chatgpt:gpt-6-luna", "role": "worker", "task": "Create a file."}),
-                         call("shell", {"command": "New-Item marker.txt"}), say("The command was declined."), say("Reported."))
+                         call("shell", {"command": "New-Item marker.txt"}), say("The command ran."), say("Reported."))
             await core.call("session.send", {"id": cid, "text": "Create a file"})
-            await until(lambda: bool(main.agent_prompts()) or main.state.value != "running")
-            assert main.agent_prompts() and not (tmp_path / "proj" / "marker.txt").exists()
-            expert = next(iter(main.agents.values()))
-            prompt = main.agent_prompts()[0]
-            assert (await core.call("session.answerPermission", {"id": cid, "agentId": expert.session_id, "promptId": prompt.id, "value": "cancel"}))["ok"]
             await finish_turn(main)
-            assert not (tmp_path / "proj" / "marker.txt").exists()
+            expert = next(iter(main.agents.values()))
+            assert not main.agent_prompts() and expert.record.status == "done"
+            assert (tmp_path / "proj" / "marker.txt").is_file()
         finally:
             await core.shutdown()
     asyncio.run(go())
@@ -144,7 +141,7 @@ def test_expert_coding_command_requires_approval_even_when_parent_is_full(tmp_pa
 
 def test_app_settings_start_fusion_explicitly_and_pin_the_main(tmp_path):
     async def go():
-        core, _, events, _, _ = await ready_core(tmp_path)
+        core, fake, events, _, _ = await ready_core(tmp_path)
         try:
             values = {"fusionMain": "chatgpt:gpt-6.1-sol", "fusionWorkers": ["chatgpt:gpt-6-luna"],
                       "fusionLight": "chatgpt:gpt-6-luna", "fusionMaxCalls": 3, "fusionMaxTokens": 50_000, "fusionMaxSeconds": 60}
@@ -157,8 +154,16 @@ def test_app_settings_start_fusion_explicitly_and_pin_the_main(tmp_path):
             assert not await main.update_settings(model="gpt-6-luna")
             assert main.model == "gpt-6.1-sol"
             assert (await core.call("session.choose", {"id": cid, "field": "model", "value": "chatgpt:gpt-6-luna"}))["ok"]
+            assert not fake.requests
+            fake.script(say("Continue without Fusion."))
+            await core.call("session.send", {"id": cid, "text": "Continue"})
+            await finish_turn(main)
             assert main._fusion is None and main._paused_fusion is not None
             assert (await core.call("session.choose", {"id": cid, "field": "model", "value": "fusion"}))["ok"]
+            assert main._fusion is None and core._session_meta(core._by_cid[cid])["fusion"]
+            fake.script(say("SUMMARY: continued without Fusion."), say("Fusion resumed."))
+            await core.call("session.send", {"id": cid, "text": "Resume Fusion"})
+            await finish_turn(main)
             assert main.model == "gpt-6.1-sol" and main._fusion is not None
             from desktop.core.settings import settings_from_dict, settings_to_dict
             restored = settings_from_dict(settings_to_dict(core.settings))

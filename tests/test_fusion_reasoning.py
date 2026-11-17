@@ -25,6 +25,26 @@ INVALID_MAPS = [None, [], "high", True, {MODEL: ""}, {MODEL: False}, {MODEL: {}}
                 {f"chatgpt:demo-{index}": "low" for index in range(257)}]
 
 
+def test_global_worker_setting_is_single_while_existing_session_pools_remain_readable(tmp_path):
+    assert settings_from_dict({"fusion_workers": [MODEL, OTHER_MODEL]}).fusion_workers == [MODEL]
+    assert settings_from_dict({"fusion_workers": []}).fusion_workers == []
+    policy = Policy(MODEL, (MODEL, OTHER_MODEL), OTHER_MODEL, 0)
+    assert Policy.from_json(policy.to_json()).workers == (MODEL, OTHER_MODEL)
+
+    async def go():
+        core, _, _, _, _ = await ready_core(tmp_path)
+        try:
+            for selected in ([MODEL], [MODEL], [OTHER_MODEL]):
+                await core.call("settings.set", {"key": "fusionWorkers", "value": selected})
+                assert core.settings.fusion_workers == selected
+            with pytest.raises(AppError):
+                await core.call("settings.set", {"key": "fusionWorkers", "value": [MODEL, OTHER_MODEL]})
+            assert core.settings.fusion_workers == [OTHER_MODEL]
+        finally:
+            await core.shutdown()
+    asyncio.run(go())
+
+
 def test_settings_and_policy_copy_and_round_trip_per_model_efforts():
     levels = {MODEL: "high", OTHER_MODEL: "low", "api:demo:small": "off", "devin:demo": "dynamic"}
     restored = settings_from_dict({"fusion_reasoning": levels})
@@ -85,7 +105,7 @@ def test_main_workers_and_light_use_their_snapshot_on_requests_and_after_reopeni
             engine.api = ApiBackend(store)
             try:
                 levels = {MODEL: "high", OTHER_MODEL: "low", api_id: "off"}
-                for key, value in {"fusionMain": MODEL, "fusionWorkers": [OTHER_MODEL, MODEL], "fusionLight": api_id,
+                for key, value in {"fusionMain": MODEL, "fusionWorkers": [OTHER_MODEL], "fusionLight": api_id,
                                    "fusionReasoning": levels}.items():
                     await core.call("settings.set", {"key": key, "value": value})
                 cid = (await core.call("session.new", {"projectId": str(tmp_path / "proj"), "fusion": True}))["id"]

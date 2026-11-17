@@ -72,7 +72,8 @@ class HarnessTools:
         self.plan_submitter: Callable[[str], None] | None = None
         self.fusion_runner: Callable[[str, str, str, str], Awaitable[Outcome]] | None = None
         self.strict_context = False
-        self.expert_command_approval = False
+        self.permission_parent: HarnessTools | None = None
+        """Fusion experts use the main session's live level and grants, without sharing their own approvals back."""
         self.plan = False
         """Plan mode (set by the controller for the turn): only reading, searching and read-only commands run."""
         self.remembered: set[str] = set()
@@ -112,31 +113,39 @@ class HarnessTools:
                 or (name == fusion_tools.NAME and self.fusion_runner is not None))
 
     def check(self, call: Call) -> Verdict:
+        parent = self.permission_parent
+        plan = self.plan or parent is not None and parent.plan
+        level = parent.level if parent is not None else self.level
+        remembered = self.remembered | parent.remembered if parent is not None else self.remembered
         if call.name == fusion_tools.NAME and self.fusion_runner is not None:
-            return Verdict(DENY, PLAN_REFUSAL) if self.plan else Verdict(ALLOW)
+            return Verdict(DENY, PLAN_REFUSAL) if plan else Verdict(ALLOW)
         if call.name == plan_approval.NAME and self.plan_submitter is not None:
-            return Verdict(ALLOW) if self.plan else Verdict(DENY, "Plans can only be submitted in Plan mode.")
+            return Verdict(ALLOW) if plan else Verdict(DENY, "Plans can only be submitted in Plan mode.")
         if call.name == asking.NAME:
             return Verdict(ALLOW)  # (asking is not an action: the question is the user's say)
         if call.name == "read_output":
             return Verdict(ALLOW)  # Validated opaque references only, confined to this conversation.
         spec = self.registry.get(call.name)
         if spec is not None:
-            if self.plan:
+            if plan:
                 return self._planned(spec, call)
-            if self.expert_command_approval and self.level == "full" and spec.kind == "exec":
-                return self._decided(spec, call, "code")
-            return self._decided(spec, call)
+            return self._decided(spec, call, level, remembered)
         client, tool = self._mcp[call.name]
         trusted = getattr(client, "trusted_annotations", False)
-        if self.plan:
+        if plan:
             return Verdict(ALLOW) if trusted and tool.read_only else Verdict(DENY, PLAN_REFUSAL)
-        if self.level == "full" or trusted and tool.harmless or f"mcp:{call.name}" in self.remembered:
+        if level == "full" or trusted and tool.harmless or f"mcp:{call.name}" in remembered:
             return Verdict(ALLOW)
         return Verdict(ASK, f"tool of the server {tool.server}")
 
     def _decided(self, spec: ToolSpec, call: Call, level: str | None = None, remembered: set[str] | None = None) -> Verdict:
         decision = decide(level or self.level, spec, call.args, self.context, remembered=self.remembered if remembered is None else remembered)
+        if self.permission_parent is not None:
+            # The expert keeps its own output/read tracking, but neither session's protected paths may be bypassed.
+            parent = decide(level or self.level, spec, call.args, self.permission_parent.context,
+                            remembered=self.remembered if remembered is None else remembered)
+            if parent.verdict == DENY or decision.verdict == ALLOW:
+                decision = parent
         return Verdict(decision.verdict, decision.reason)
 
     def _planned(self, spec: ToolSpec, call: Call) -> Verdict:

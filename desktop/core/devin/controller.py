@@ -466,7 +466,8 @@ class DevinController:
         client, session_id = self._client, self.session_id
         running = self._turn is not None
         self._expire_pending()
-        if self.transcript.active_turn is not None:
+        # After an engine handoff the shared transcript may already belong to the destination's first turn.
+        if self._turn is not None and self.transcript.active_turn is self._turn:
             self.transcript.abort_turn("本轮已取消。")
         if self._turn is not None:
             self._end_turn(self._turn, quiet=True)

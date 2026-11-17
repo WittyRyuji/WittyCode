@@ -351,7 +351,8 @@ export interface Calls {
   /** open a sub-agent's run: its whole run comes as an `agentTurns` event, then its changes, until `agents.unwatch` */
   "agents.watch": { params: { id: string; agentId: string }; result: { ok: boolean } };
   "agents.unwatch": { params: { id: string }; result: { ok: boolean } };
-  /** no id: the defaults for new sessions. A model of the other engine moves the conversation there (`switched`).
+  /** no id: the defaults for new sessions. An existing conversation saves its selected model until the next send;
+   *  an empty conversation may change engines immediately (`switched`).
    *  When the conversation holds any attachment, Python first answers `{ ok: false, choose }` and changes nothing: the
    *  page asks the user which to take along and calls again with `attachments`, the ids picked (empty: none), and
    *  `overLimit` when the user has confirmed a pick that makes the first message hold more than a message usually does. */

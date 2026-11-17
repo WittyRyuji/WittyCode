@@ -73,6 +73,14 @@ class GuardedFake(Fake):
             tool, arguments = "", {}
             if action == "write":
                 tool, arguments = "create_file", {"file_path": "marker.txt", "content": "guarded ACP write"}
+            elif action == "shell":
+                tool, arguments = "shell", {"command": "New-Item marker.txt"}
+            elif action == "delegate-shell":
+                tool, arguments = "delegate_task", {"scope": "src", "model": "chatgpt:gpt-6-luna", "role": "worker", "task": "Create the marker with a command."}
+            elif action == "delegate-acp-shell":
+                tool, arguments = "delegate_task", {"scope": "src", "model": "devin:swe-2-high", "role": "worker", "task": "[fusion-shell] Create the marker with a command."}
+            elif action == "delegate-acp-slow":
+                tool, arguments = "delegate_task", {"scope": "src", "model": "devin:swe-2-high", "role": "worker", "task": "[fusion-slow] Wait for cancellation."}
             elif action == "read":
                 tool, arguments = "read_file", {"file_path": "evidence.txt"}
             elif action == "plan":

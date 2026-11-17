@@ -120,13 +120,18 @@ def test_landing_and_live_choices_never_overwrite_persistent_defaults_even_after
             await rig.wait_for(".send.stop", 0)
             assert rig.core._page_settings(rig.core.order[0])["model"] == OTHER_MODEL
             assert rig.core.defaults() == expected
-            rig.plan.script(say("Temporary conversation summarised."))
             await rig.click(".controls .chip", 0)
             await rig.click_text(".menu-item", rig.core.catalog.find(MODEL)["label"])
             await rig.wait_text(".controls .chip-v", rig.core.catalog.find(MODEL)["label"])
             await rig.click(".controls .chip", 1)
             await rig.click_text(".menu-item", "Medium")
-            await wait_for(lambda: rig.core._page_settings(rig.core.order[0])["reasoning"] == "medium")
+            await wait_for(lambda: rig.core._shown_settings(rig.core.order[0])["reasoning"] == "medium")
+            assert rig.core._page_settings(rig.core.order[0])["model"] == OTHER_MODEL
+            rig.plan.script(say("Temporary conversation summarised."), say("Changed for this conversation only."))
+            await rig.send("Apply the selected model and reasoning")
+            await rig.wait_text(".transcript", "Changed for this conversation only.")
+            await rig.wait_for(".send.stop", 0)
+            assert rig.core._page_settings(rig.core.order[0])["reasoning"] == "medium"
             assert rig.core.defaults() == expected
             await rig.click(".newbtn")
             await rig.wait_text(".controls .chip-v", "High")

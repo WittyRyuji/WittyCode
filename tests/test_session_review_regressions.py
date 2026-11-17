@@ -6,7 +6,7 @@ import asyncio
 
 from tests.app_support import ready_core
 from tests.fakes import until
-from tests.test_app_core import devin_core, idle, new_session, talk
+from tests.test_app_core import ask_to_switch, devin_core, idle, new_session, talk
 from tests.test_factory import engine_for
 
 
@@ -40,7 +40,7 @@ def test_factory_segment_restores_only_the_typed_question_beside_the_archived_pr
             cid = (await core.call("session.openSaved", {"id": old_row, "projectId": str(tmp_path / "proj")}))["id"]
             await idle(core, cid)
             turns = core._by_cid[cid].controller.transcript.turns
-            assert [t.user_block.text for t in turns if t.user_block] == ["检查库存导入", "/compact", "继续检查事务"]
+            assert [t.user_block.text for t in turns if t.user_block] == ["检查库存导入", "继续检查事务"]
         finally:
             await core.shutdown()
 
@@ -57,7 +57,7 @@ def test_the_final_handoff_is_saved_when_the_target_window_is_learned_after_open
             async def learned(*args):
                 return 1_000_000
             monkeypatch.setattr(core, "_window_of", learned)
-            await core.call("session.choose", {"id": cid, "field": "model", "value": "devin:swe-2-high"})
+            await ask_to_switch(core, cid)
             conv = core._by_cid[cid]
             saved = core.history.load(core._row_of(conv))
             assert conv.controller.handoff.carried == 2

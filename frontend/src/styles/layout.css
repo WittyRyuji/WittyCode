@@ -16,11 +16,16 @@
 .tb-btn:hover { background: var(--hover); color: var(--fg); }
 .tb-btn.close:hover { background: #e81123; color: #fff; }
 
-.app { flex: 1; min-height: 0; position: relative; display: grid; grid-template-rows: minmax(0, 1fr) auto; overflow: hidden; }
+.app { flex: 1; min-height: 0; position: relative; display: grid; grid-template-columns: var(--sidebar-column) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; overflow: hidden; }
+.app.inspecting { grid-template-columns: var(--sidebar-column) minmax(0, 1fr) minmax(340px, 42%); }
 .app > .sidebar, .app > div:first-child { grid-row: 1; grid-column: 1; min-width: 0; }
 .app > .main { grid-row: 1; grid-column: 2; }
 .app > .agentpanel, .app > .filepanel { grid-row: 1; grid-column: 3; }
 .app > .statusbar { grid-row: 2; grid-column: 1 / -1; }
+@media (max-width: 1100px) {
+  .app.inspecting { grid-template-columns: var(--sidebar-column) minmax(0, 1fr); }
+  .app.inspecting > .agentpanel, .app.inspecting > .filepanel { grid-area: auto; position: absolute; z-index: 30; top: 0; right: 8px; bottom: 28px; width: min(520px, calc(100% - 24px)); border: var(--bw) solid var(--ink); box-shadow: -4px 4px 0 var(--shadow-hard); }
+}
 .splitter { position: absolute; top: 0; bottom: 28px; width: 6px; cursor: col-resize; z-index: 20; }
 .splitter:hover, body.resizing .splitter { background: linear-gradient(90deg, transparent 2px, var(--ink) 2px, var(--ink) 4px, transparent 4px); }
 body.resizing { cursor: col-resize; }

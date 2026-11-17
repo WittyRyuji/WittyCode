@@ -48,7 +48,7 @@ def test_engine_segments_stay_one_row_after_close_refresh_restart_and_archive(tm
             conv = again._by_cid[reopened]
             assert again._row_of(conv) == current, "old links reopen the current segment, not a fork"
             users = [t.user_block.text for t in conv.controller.transcript.turns if t.user_block]
-            assert users == ["检查库存导入流程", "/compact", "继续检查重复数据", "/compact", "汇总修复项"]
+            assert users == ["检查库存导入流程", "继续检查重复数据", "汇总修复项"]
             await again.call("session.archive", {"id": reopened})
             await again.call("project.refresh")
             assert again.project_rows()[0]["sessionIds"] == []
@@ -61,7 +61,7 @@ def test_engine_segments_stay_one_row_after_close_refresh_restart_and_archive(tm
     asyncio.run(scenario())
 
 
-def test_switching_back_without_sending_preserves_the_pending_handoff_after_restart(tmp_path):
+def test_switching_back_without_sending_cancels_intent_without_a_handoff_after_restart(tmp_path):
     async def scenario():
         core, plan, events, _, _ = await devin_core(tmp_path)
         try:
@@ -82,10 +82,11 @@ def test_switching_back_without_sending_preserves_the_pending_handoff_after_rest
             assert again.project_rows()[0]["sessionIds"] == [head]
             cid = (await again.call("session.openSaved", {"id": head, "projectId": str(tmp_path / "proj")}))["id"]
             await idle(again, cid)
-            assert again._by_cid[cid].controller.handoff is not None
+            assert again._by_cid[cid].controller.handoff is None and again._by_cid[cid].pending_model is None
             await talk(again, service, cid, "继续检查")
-            assert "重复行" in str(service.requests[-1]["input"]), "the pending handoff must reach the next model, not just the UI"
-            assert [t.user_block.text for t in again._by_cid[cid].controller.transcript.turns if t.user_block] == ["检查库存导入", "/compact", "继续检查"]
+            assert "重复行" in str(service.requests[-1]["input"]), "the original context remains with the original model"
+            assert len(service.requests) == 1
+            assert [t.user_block.text for t in again._by_cid[cid].controller.transcript.turns if t.user_block] == ["检查库存导入", "继续检查"]
         finally:
             await again.shutdown()
 
@@ -101,18 +102,49 @@ def test_history_write_failure_rolls_back_without_hiding_the_source(tmp_path, mo
             conv = core._by_cid[cid]
             old = conv.controller
             before = list(old.transcript.turns)
+            await core.call("session.choose", {"id": cid, "field": "model", "value": "devin:swe-2-high"})
             def denied(*args):
                 raise OSError("history disk unavailable")
             monkeypatch.setattr(core.history, "save", denied)
             with pytest.raises(AppError, match="没有切换成功"):
-                await core.call("session.choose", {"id": cid, "field": "model", "value": "devin:swe-2-high"})
-            assert conv.controller is old and old.transcript.turns[:len(before)] == before
-            assert old.transcript.turns[-1].user_block.text == "/compact", "the completed source summary and its cost remain visible"
+                await core.call("session.send", {"id": cid, "text": "Continue after the switch"})
+            assert conv.controller is old and old.transcript.turns == before
+            assert old.saved.compaction and conv.pending_model is not None
+            assert all(t.user_block is None or t.user_block.text != "/compact" for t in old.transcript.turns)
             assert not core.settings.session_links and not conv.hidden
             assert conv.sidebar_key == core._row_of(conv)
         finally:
             await core.shutdown()
 
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("fail_old_row", [False, True])
+def test_pending_migration_write_failure_releases_switch_and_does_not_send(tmp_path, monkeypatch, fail_old_row):
+    async def scenario():
+        core, plan, events, _, harness = await devin_core(tmp_path)
+        try:
+            cid = await new_session(core, events, tmp_path / "proj")
+            await talk(core, plan, cid, "Prepare a handoff")
+            conv = core._by_cid[cid]
+            old = "pending-switch:" + core._row_of(conv)
+            await core.call("session.choose", {"id": cid, "field": "model", "value": "devin:swe-2-high"})
+            save = core.history.save
+            def denied(row, entry):
+                if row.startswith("pending-switch:") and ((row == old) == fail_old_row):
+                    raise OSError("test disk failure")
+                return save(row, entry)
+            monkeypatch.setattr(core.history, "save", denied)
+            with pytest.raises(AppError, match="消息没有发出"):
+                await core.call("session.send", {"id": cid, "text": "Continue exactly once"})
+            assert conv.switch_task is None and conv.pending_model is not None
+            assert not harness.requests("session/prompt")
+            monkeypatch.setattr(core.history, "save", save)
+            await core.call("session.send", {"id": cid, "text": "Continue exactly once"})
+            await idle(core, cid)
+            assert len(harness.requests("session/prompt")) == 1
+        finally:
+            await core.shutdown()
     asyncio.run(scenario())
 
 

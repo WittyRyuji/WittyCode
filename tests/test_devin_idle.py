@@ -53,8 +53,9 @@ def test_metadata_cleanup_preserves_opening_and_open_sessions_and_last_close_rel
         waiting, release = asyncio.Event(), asyncio.Event()
         ensure = harness.engine.ensure_signed_in
         async def held_signin():
-            waiting.set()
-            await release.wait()
+            if not waiting.is_set():  # Hold only session opening; metadata also verifies CLI authentication now.
+                waiting.set()
+                await release.wait()
             await ensure()
         monkeypatch.setattr(harness.engine, "ensure_signed_in", held_signin)
         opening = asyncio.create_task(harness.engine.open_new(tmp_path))

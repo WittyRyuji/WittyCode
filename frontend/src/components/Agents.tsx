@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { X } from "lucide-react";
+import { ArrowLeft, UsersRound, X } from "lucide-react";
 import type { AgentInfo, Session, SessionMark } from "../types";
 import { currentSession, useStore } from "../store";
 import { TurnView } from "./Transcript";
@@ -15,30 +15,42 @@ export const AGENT_STATE: Record<AgentInfo["status"], { text: string; mark: Sess
   failed: { text: "失败", mark: "dead" },
 };
 
-/** What the sub-agents of the conversation are doing: one chip each, above the composer. A click opens its run. */
-export function AgentBar({ session }: { session: Session }) {
+/** The conversation's team in the right rail, independent of whether it has a plan. */
+export function AgentBar({ session, onClose }: { session: Session; onClose?: () => void }) {
   const agents = session.agents ?? [];
   const open = useStore((s) => s.agentPanel);
   const openAgent = useStore((s) => s.openAgent);
   if (agents.length === 0) return null;
   return (
-    <div className="agentbar" role="list" aria-label="子任务">
-      <span className="agentbar-title">子任务</span>
-      {agents.map((a) => (
-        <button
-          key={a.id}
-          type="button"
-          role="listitem"
-          className={`agent-chip ${a.status}${open?.agentId === a.id && open.sessionId === session.id ? " on" : ""}`}
-          title={a.task || a.name}
-          onClick={() => openAgent(session.id, a.id)}
-        >
-          <StateDot mark={AGENT_STATE[a.status].mark} size={8} />
-          <span className="agent-name">{a.name}</span>
-          <span className="agent-state">{AGENT_STATE[a.status].text}</span>
-        </button>
-      ))}
-    </div>
+    <section className="agentbar" aria-label="Agents Team">
+      <header className="agentbar-head">
+        <UsersRound size={16} aria-hidden />
+        <h3 className="agentbar-title">Agents Team</h3>
+        <span className="agentbar-count num">{agents.length}</span>
+        {onClose && <button type="button" className="icon-btn sm" aria-label="关闭 Agents Team" onClick={onClose}><X size={15} aria-hidden /></button>}
+      </header>
+      <ul className="agent-list" aria-label="Sub-Agents">
+        {agents.map((a) => (
+          <li key={a.id}>
+            <button
+              type="button"
+              className={`agent-chip ${a.status}${open?.agentId === a.id && open.sessionId === session.id ? " on" : ""}`}
+              aria-label={`查看 Sub-Agent ${a.name} · ${AGENT_STATE[a.status].text}`}
+              aria-pressed={open?.agentId === a.id && open.sessionId === session.id}
+              title={a.task || a.name}
+              onClick={() => openAgent(session.id, a.id)}
+            >
+              <StateDot mark={AGENT_STATE[a.status].mark} size={8} />
+              <span className="agent-summary">
+                <span className="agent-name">{a.name}</span>
+                <span className="agent-caption">{a.role || "Sub-Agent"}{a.model ? ` · ${a.model}` : ""}</span>
+              </span>
+              <span className="agent-state">{AGENT_STATE[a.status].text}</span>
+            </button>
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }
 
@@ -89,7 +101,13 @@ export function AgentPanel() {
   });
   const canManage = session.fusion && agent.fusionState !== "retired" && agent.fusionState !== "running" && session.mark === "ready";
   return (
-    <aside className="agentpanel" aria-label={`子任务 ${agent.name}`}>
+    <aside className="agentpanel" aria-label={`Sub-Agent ${agent.name}`}>
+      <div className="agentpanel-back">
+        <button type="button" className="linkbtn" aria-label="切回主对话" onClick={close}><ArrowLeft size={14} aria-hidden /> 主对话</button>
+        <span>Sub-Agent</span>
+        <button type="button" className="icon-btn sm" aria-label="关闭 Sub-Agent 面板" onClick={close}><X size={15} aria-hidden /></button>
+      </div>
+      <AgentBar session={session} />
       <header className="agentpanel-head">
         <StateDot mark={state.mark} size={9} />
         <div className="agentpanel-title">
@@ -97,9 +115,6 @@ export function AgentPanel() {
           {facts && <div className="agentpanel-facts">{facts}</div>}
         </div>
         <span className={`agent-state ${agent.status}`}>{state.text}</span>
-        <button type="button" className="icon-btn sm" aria-label="关闭子任务面板" onClick={close}>
-          <X size={15} />
-        </button>
       </header>
       {agent.task && <div className="agentpanel-task selectable">任务：{agent.task}</div>}
       {canManage && <div className="agentpanel-actions">

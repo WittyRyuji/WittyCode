@@ -49,9 +49,9 @@ async def new_session(core, events, project, **more):
 async def talk(core, plan, cid, text, answer="ok"):
     """One finished turn: ``text`` is sent, the model answers ``answer``."""
     plan.script(say(answer))
-    turns = len(core._by_cid[cid].controller.transcript.turns)
+    users = sum(turn.user_block is not None for turn in core._by_cid[cid].controller.transcript.turns)
     await core.call("session.send", {"id": cid, "text": text})
-    await until(lambda: len(core._by_cid[cid].controller.transcript.turns) == turns + 1)
+    await until(lambda: sum(turn.user_block is not None for turn in core._by_cid[cid].controller.transcript.turns) == users + 1)
     await idle(core, cid)
 
 
@@ -791,7 +791,17 @@ async def send_with_files(core, plan, cid, text, files):
 
 
 async def ask_to_switch(core, cid, *, model="devin:swe-2-high", **more):
-    return await core.call("session.choose", {"id": cid, "field": "model", "value": model, **more})
+    """Exercise attachment negotiation and the handoff phase without an extra user turn.
+
+    The menu now only saves intent. Real select/send behavior is covered by test_model_switch_pending and the menu e2e.
+    """
+    result = await core.call("session.choose", {"id": cid, "field": "model", "value": model, **more})
+    conv = core._by_cid[cid]
+    if result.get("ok") and conv.pending_model is not None:
+        result = await core._apply_pending_model(conv)
+        core._set_pending_model(conv, None)
+        core._flush(conv)
+    return result
 
 
 def prompt_blocks(harness):
