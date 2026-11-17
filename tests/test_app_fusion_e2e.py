@@ -26,24 +26,28 @@ def test_configure_and_start_fusion_with_a_local_fake(qapp, loop, tmp_path):
         try:
             await select_fusion(rig)  # The incomplete setup opens settings instead of silently enabling Fusion.
             await rig.wait_text(".settings-body h2", "Fusion")
-            for index, name in [(0, "GPT-6.1-Sol"), (1, "GPT-6-Luna"), (2, "GPT-6-Luna")]:
-                await rig.click(".settings-body .selectbox", index)
+            for role, name in [("main", "GPT-6.1-Sol"), ("worker", "GPT-6-Luna"), ("light", "GPT-6-Luna")]:
+                await rig.click(f'.fusion-model-row[data-role="{role}"] .fusion-model-picker .selectbox')
                 await rig.wait_text(".menu-item", name)
                 await rig.click_text(".menu-item", name)
             await until(lambda: rig.core.settings.fusion_main == "chatgpt:gpt-6.1-sol" and rig.core.settings.fusion_light == "chatgpt:gpt-6-luna" and rig.core.settings.fusion_workers == ["chatgpt:gpt-6-luna"])
-            await rig.wait_for(".fusion-reasoning-row", 2)  # The worker and lightweight role share one model.
-            for model_id, level in [("chatgpt:gpt-6.1-sol", "High"), ("chatgpt:gpt-6-luna", "Low")]:
-                await rig.click(f'.fusion-reasoning-row[data-model="{model_id}"] .selectbox')
-                if model_id.endswith("luna"):
+            await rig.wait_for(".fusion-model-row", 3)
+            for role, level in [("main", "High"), ("worker", "Low")]:
+                await rig.click(f'.fusion-model-row[data-role="{role}"] .fusion-effort-picker .selectbox')
+                if role == "worker":
                     assert await rig.texts(".menu-item .menu-label") == ["默认", "Low"]
                 await rig.click_text(".menu-item", level)
+            await rig.wait_text('.fusion-model-row[data-role="light"] .fusion-effort-picker .selectbox', "Low")  # Shared model, shared effort.
             levels = {"chatgpt:gpt-6.1-sol": "high", "chatgpt:gpt-6-luna": "low"}
             await until(lambda: rig.core.settings.fusion_reasoning == levels)
             await rig.click('.settings-body button[aria-label="关闭"]')
             await rig.press(",", Qt.KeyboardModifier.ControlModifier)
             await rig.click_text(".snav", "Fusion")
-            await rig.wait_text('.fusion-reasoning-row[data-model="chatgpt:gpt-6.1-sol"] .selectbox', "High")
-            await rig.wait_text('.fusion-reasoning-row[data-model="chatgpt:gpt-6-luna"] .selectbox', "Low")
+            await rig.wait_text('.fusion-model-row[data-role="main"] .fusion-effort-picker .selectbox', "High")
+            await rig.wait_text('.fusion-model-row[data-role="worker"] .fusion-effort-picker .selectbox', "Low")
+            await rig.wait_text('.fusion-model-row[data-role="light"] .fusion-effort-picker .selectbox', "Low")
+            assert not await rig.exists(".fusion-reasoning")
+            assert "各模型思考等级" not in await rig.text(".settings-body")
             assert not await rig.exists('input[aria-label="专家调用次数"]')
             assert not await rig.exists('input[aria-label="Token 预算"]')
             await rig.click('input[aria-label="成本与效率倾向"]')
@@ -153,14 +157,14 @@ def test_fusion_model_menus_respect_visibility_and_include_devin(qapp, loop, tmp
             await rig.core.call("models.setVisible", {"ids": ["chatgpt:gpt-6-luna", api_id], "visible": False})
             await select_fusion(rig)
             await rig.wait_text(".settings-body h2", "Fusion")
-            await rig.click(".settings-body .selectbox", 0)
+            await rig.click('.fusion-model-row[data-role="main"] .fusion-model-picker .selectbox')
             assert "GPT-6-Luna" not in await rig.text(".menu") and "Hidden API Demo" not in await rig.text(".menu")
             await rig.wait_text(".menu-item", "SWE-2")
             assert not await rig.js("[...document.querySelectorAll('.menu-item')].find(e => e.textContent.includes('SWE-2')).disabled")
             await rig.click_text(".menu-item", "SWE-2")
             await until(lambda: rig.core.settings.fusion_main == "devin:swe-2-high")
             await rig.click(".settings-body h2")
-            await rig.click(".settings-body .selectbox", 1)
+            await rig.click('.fusion-model-row[data-role="worker"] .fusion-model-picker .selectbox')
             await rig.wait_text(".menu-item", "SWE-2")
             assert "GPT-6-Luna" not in await rig.text(".menu") and "Hidden API Demo" not in await rig.text(".menu")
             assert not await rig.js("[...document.querySelectorAll('.menu-item')].find(e => e.textContent.includes('SWE-2')).disabled")

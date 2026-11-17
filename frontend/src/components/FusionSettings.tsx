@@ -4,7 +4,7 @@ import { sourceLabel } from "../lib/models";
 import { effortLabel, reasoningChoices } from "../lib/vocab";
 import type { FusionSettingKey, SettingValue } from "../protocol";
 import { Field, Select } from "./formkit";
-import { fusionChoices, fusionDisabledReason, fusionSelectedModels } from "./fusionModels";
+import { fusionChoices, fusionDisabledReason } from "./fusionModels";
 import type { MenuItem } from "./ui";
 
 function BudgetInput({ label, value, max, onChange }: { label: string; value: number; max: number; onChange: (value: number) => void }) {
@@ -46,45 +46,47 @@ export function FusionSettings() {
     checked: selected.includes(model.id), disabled: model.disabled, onSelect: () => choose(model.id),
   }));
   const set = (key: FusionSettingKey, value: SettingValue) => s.setFusionSetting(key, value);
-  const workers = s.fusionWorkers.map(name).join("、") || "请选择一个或多个";
-  const selected = fusionSelectedModels(s.fusionMain, s.fusionWorkers, s.fusionLight);
   const setReasoning = (id: string, effort: string) => {
     const next = { ...s.fusionReasoning };
     if (effort) next[id] = effort;
     else delete next[id];
     set("fusionReasoning", next);
   };
+  const modelRow = (id: string, role: "main" | "worker" | "light", modelItems: MenuItem[]) => {
+    const label = role === "main" ? "主模型" : role === "worker" ? "工作模型" : "轻量模型";
+    const model = s.models.find((item) => item.id === id);
+    const effort = s.fusionReasoning[id] ?? "";
+    const choices = model ? reasoningChoices(model) : [];
+    const unsupported = !!effort && !choices.some((item) => item.value === effort);
+    const value = !id ? "思考等级" : effort ? `${effortLabel(effort)}${unsupported ? "（已不支持）" : ""}` : !model ? "模型不可用" : choices.length ? "默认" : "不支持";
+    return <div className="fusion-model-row" key={`${role}:${id}`} data-role={role} data-model={id} role="group" aria-label={`${label} ${name(id)}`}>
+      <div className="fusion-model-picker" title={name(id)}>
+        <Select value={id ? name(id) : role === "worker" ? "请选择一个或多个" : "请选择"} items={modelItems} ariaLabel={`${label}选择：${name(id)}`} />
+      </div>
+      <div className="fusion-effort-picker" title={`${value}；思考等级按模型保存，同一模型的多个角色共用。默认保留原有行为。`}>
+        <Select value={value} disabled={!effort && !choices.length} minWidth={160} ariaLabel={`${label}思考等级：${value}`} items={[
+          { id: "default", label: "默认", checked: !effort, onSelect: () => setReasoning(id, "") },
+          ...choices.map((choice) => ({ id: choice.value, label: choice.label, checked: effort === choice.value, onSelect: () => setReasoning(id, choice.value) })),
+        ]} />
+      </div>
+    </div>;
+  };
+  const workerItems = items(s.fusionWorkers, (id) => set("fusionWorkers", s.fusionWorkers.includes(id) ? s.fusionWorkers.filter((item) => item !== id) : [...s.fusionWorkers, id]));
   return (
     <>
       <h3 className="settings-section-title">自有 Fusion</h3>
       <p className="page-note">在新会话输入框选择 Fusion 后使用。设置只影响此后新建的 Fusion 会话，不改变已有会话。</p>
       <Field label="主模型" hint="任务分析、分配和最终验收由同一主代理完成；会话中只能明确确认更换模型。">
-        <Select value={name(s.fusionMain)} items={items([s.fusionMain], (id) => set("fusionMain", id), true)} />
+        {modelRow(s.fusionMain, "main", items([s.fusionMain], (id) => set("fusionMain", id), true))}
       </Field>
-      <Field label="工作模型池" hint="允许主代理调用的模型；再次选择可取消。专家任务目前串行执行。">
-        <Select value={workers} items={items(s.fusionWorkers, (id) => set("fusionWorkers", s.fusionWorkers.includes(id) ? s.fusionWorkers.filter((item) => item !== id) : [...s.fusionWorkers, id]))} />
+      <Field label="工作模型池" hint="允许主代理调用的模型；点模型框可增减，再次选择可取消。专家任务目前串行执行。">
+        <div className="fusion-model-list">
+          {(s.fusionWorkers.length ? s.fusionWorkers : [""]).map((id) => modelRow(id, "worker", workerItems))}
+        </div>
       </Field>
       <Field label="轻量模型" hint="供简单任务使用，不会为了保活定时调用。">
-        <Select value={name(s.fusionLight)} items={items([s.fusionLight], (id) => set("fusionLight", id))} />
+        {modelRow(s.fusionLight, "light", items([s.fusionLight], (id) => set("fusionLight", id)))}
       </Field>
-      {selected.length > 0 && <Field label="各模型思考等级" hint="按模型分别保存；同一模型兼任多个角色时共用。选择「默认」保留原有默认行为。实际支持以模型和服务商为准。">
-        <div className="fusion-reasoning">
-          {selected.map(({ id, roles }) => {
-            const model = s.models.find((item) => item.id === id);
-            const effort = s.fusionReasoning[id] ?? "";
-            const choices = model ? reasoningChoices(model) : [];
-            const unsupported = !!effort && !choices.some((item) => item.value === effort);
-            const value = effort ? `${effortLabel(effort)}${unsupported ? "（已不支持）" : ""}` : !model ? "模型不可用" : choices.length ? "默认" : "不支持";
-            return <div className="fusion-reasoning-row" key={id} data-model={id} role="group" aria-label={`${name(id)} 思考等级`}>
-              <div className="fusion-reasoning-model"><span title={name(id)}>{name(id)}</span><small>{roles.join(" · ")}</small></div>
-              <Select value={value} disabled={!effort && !choices.length} minWidth={160} items={[
-                { id: "default", label: "默认", checked: !effort, onSelect: () => setReasoning(id, "") },
-                ...choices.map((choice) => ({ id: choice.value, label: choice.label, checked: effort === choice.value, onSelect: () => setReasoning(id, choice.value) })),
-              ]} />
-            </div>;
-          })}
-        </div>
-      </Field>}
       <Field label="成本与效率倾向" hint="作为主代理选择轻量模型或工作模型的相对权重，不是价格、速度或费用上限的保证。">
         <PreferenceInput value={s.fusionPreference} onChange={(v) => set("fusionPreference", v)} />
       </Field>

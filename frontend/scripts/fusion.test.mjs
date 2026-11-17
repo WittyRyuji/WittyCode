@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { fusionChoices, fusionDisabledReason, fusionSelectedModels } from "../src/components/fusionModels.ts";
+import { fusionChoices, fusionDisabledReason } from "../src/components/fusionModels.ts";
 import { applyEvent, emptyLiveData } from "../src/liveReducer.ts";
 import { buildModelMenu } from "../src/components/modelMenu.ts";
 
@@ -20,18 +20,6 @@ test("Fusion choices honour hidden models and include guarded ACP models", () =>
   assert.equal(fusionDisabledReason({ ...models[2], disabledReason: "Unavailable" }), "Unavailable");
   assert.equal(fusionDisabledReason(models[0]), "");
   assert.deepEqual(fusionChoices(models, [...hidden, "devin:worker"], true).map((m) => m.id), ["chatgpt:visible"]);
-});
-
-test("selected Fusion models share one effort across roles without losing hidden or unavailable selections", () => {
-  assert.deepEqual(fusionSelectedModels("", [], ""), []);
-  assert.deepEqual(fusionSelectedModels("chatgpt:visible", ["api:demo:hidden", "chatgpt:visible", "api:demo:hidden"], "api:missing"), [
-    { id: "chatgpt:visible", roles: ["主模型", "工作模型"] },
-    { id: "api:demo:hidden", roles: ["工作模型"] },
-    { id: "api:missing", roles: ["轻量模型"] },
-  ]);
-  assert.deepEqual(fusionSelectedModels("devin:worker", ["devin:worker"], "devin:worker"), [
-    { id: "devin:worker", roles: ["主模型", "工作模型", "轻量模型"] },
-  ]);
 });
 
 test("live settings hydrate and explicitly clear Fusion effort overrides, including older senders", () => {
