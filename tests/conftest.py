@@ -33,6 +33,14 @@ def _no_files_of_the_real_user(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("WITTYCODE_SETTINGS", str(tmp_path_factory.mktemp("app") / "settings.json"))
 
 
+@pytest.fixture(autouse=True)
+def _fusion_gates_off(request, monkeypatch):
+    from desktop.core.fusion import gates
+
+    if request.node.get_closest_marker("fusion_gates") is None:
+        monkeypatch.setattr(gates, "DEFAULT", False)
+
+
 @pytest.fixture(scope="session")
 def qapp():
     pytest.importorskip("PySide6.QtWebEngineWidgets")

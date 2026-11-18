@@ -557,7 +557,7 @@ class ChatGPTController:
         from desktop.core.settings import default_settings_path
         providers = getattr(getattr(self.manager, "api", None), "providers", None)
         protected = [self.manager.root, default_settings_path().parent]
-        protected += [self.manager.root.parent / name for name in ("models.json", "providers.json", "connections.json", "settings.json", "memory", "conversations", "cache")]
+        protected += [self.manager.root.parent / name for name in ("models.json", "providers.json", "connections.json", "settings.json", "memory", "conversations", "cache", "fusion-drive")]
         for name in ("models_file", "sidecar"):
             path = getattr(providers, name, None)
             if isinstance(path, Path):
@@ -588,6 +588,8 @@ class ChatGPTController:
         # after reopening (its contract is cached), rather than invalidating every previous request's cache prefix.
         self._tools.level = self.autonomy
         self._tools.strict_context = self._fusion is not None or self._fusion_parent is not None
+        fusion = self._fusion or getattr(self._fusion_parent, "_fusion", None)
+        self._tools.record_reader = fusion.read_record if fusion is not None and fusion.drive_enabled else None
         return self._tools
 
     def _claim_session(self) -> None:

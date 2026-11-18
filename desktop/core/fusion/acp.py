@@ -24,6 +24,7 @@ from desktop.core.devin.models import current_value
 from desktop.core.devin.policy import CANCELLED
 from desktop.core.engine_errors import EngineRpcError
 from desktop.core.fusion.acp_server import ADDRESS, AUTH, MCP_CALL, MCP_LIST, MCP_WRAPPERS, PREFIX, SERVER, private_mcp_name
+from desktop.core.fusion.tools import READ_RECORD
 from desktop.core.harness.loop import AgentLoop, Call, TurnEnd
 from desktop.core.memory.launch import PACKAGE_ROOT, console_python
 
@@ -175,6 +176,8 @@ class AcpRun:
                 self.boundary = "plan"
                 self._stop()
             reply = {"content": [{"type": "text", "text": result["output"]}]}
+            if name == READ_RECORD and self.host.saved.tools.get(ident, {}).get("status") == "error":
+                reply["isError"] = True
             self._replies[invocation] = (signature, reply)
             return reply
 
