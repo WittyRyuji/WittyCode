@@ -840,6 +840,7 @@ class ChatGPTController:
         self._recall_turn, self._recall_ids = turn, context.ids
         self._turn = turn
         if self._fusion is not None:
+            self._fusion.start_metrics(turn)
             self._fusion.start_route_turn()
         self._turn_done = asyncio.Event()
         self.transcript.set_working_state("thinking")
@@ -909,6 +910,7 @@ class ChatGPTController:
             self.saved.mode = PLAN if self.mode == PLAN else ""
             self._save_now(required=True)  # The first request must have a durable input/goal checkpoint.
             if self._fusion is not None:
+                await self._fusion.sample_metrics(turn, start=True)
                 await self._fusion.retain_plan_route()
             if tuple(notes) != self._prompt_notes:
                 self._prompt_notes = tuple(notes)
@@ -962,8 +964,12 @@ class ChatGPTController:
                     # This hook runs after the answer; a veto must not reclassify completed actions as failed.
                     self.stop_hook_blocked = True
                     self.transcript.add_notice("Stop Hook 未通过；模型回合已完成，未自动重做。请检查 Hook 或继续给出要求。")
+            if self._fusion is not None:
+                await self._fusion.sample_metrics(turn)
         except asyncio.CancelledError:
             if self._turn is turn:
+                if self._fusion is not None:
+                    await self._fusion.sample_metrics(turn)
                 self._release_steers()
                 self.transcript.abort_turn("本轮已停止。")
                 self._record_turn("interrupted")
@@ -1041,6 +1047,8 @@ class ChatGPTController:
     def _end_turn(self, turn: Turn) -> None:
         if self._turn is not turn:
             return
+        if self._fusion is not None:
+            self._fusion.finish_metrics(turn)
         self._settle_expired()
         if self._handoff_turn is turn:
             if turn.status is TurnStatus.DONE:
@@ -1431,6 +1439,9 @@ class ChatGPTController:
         elif self.saved.prompt.get("current"):
             self.saved.prompt["instructions"] = self.saved.prompt["current"]
         history[:] = result.view
+        fusion = self._fusion or getattr(self._fusion_parent, "_fusion", None)
+        if fusion is not None:
+            fusion.metric_compaction(self.session_id)
         self._publish_context(replace(self.context, used=None, compacted=True))
         notice = ("已为模型切换压缩上下文；完整历史和执行证据仍保留。" if for_switch
                   else self._compaction_notice(result, model, window, overflow, manual))
@@ -1738,6 +1749,8 @@ class _Watch(Observer):
         if self.current:
             fusion = self.ctl._fusion or getattr(self.ctl._fusion_parent, "_fusion", None)
             if fusion is not None:
+                usage = finished.usage if finished is not None else None
+                fusion.metric_request(self.ctl.session_id, usage is not None, usage.input_tokens if usage is not None else None)
                 fusion.record_request(finished, failed)
             self.ctl.saved.requests.append(self.ctl._trace.record(request, finished, seconds, failed))
             del self.ctl.saved.requests[:-MAX_RECORDS]

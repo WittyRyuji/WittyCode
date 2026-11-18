@@ -6,6 +6,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field, fields
 from typing import Any
 
+RETAINED_TASKS = 200
 _DESTINATIONS = ("", "self", "coder", "split")
 _SCORES = ("-1", "0", "1")
 
@@ -73,6 +74,17 @@ def _add_run(usage: Usage, tokens: int | None, seconds: float, first: int | None
     usage.tokens = _total_tokens(usage.tokens, tokens)
     usage.seconds += seconds
     usage.unknown += tokens is None
+
+
+def drive_counts(before: Mapping, after: Mapping) -> dict[str, int]:
+    """Project counters are cumulative; remove neutral defaults from the explicit rating shares."""
+    counts = {name: max(0, after[key] - before.get(key, 0)) for name, key in (
+        ("shared_hits", "shared_hits"), ("unrated", "unrated"), ("out_of_use", "expired"), ("above_qk", "above_qk"),
+    )}
+    for score in (-1, 0, 1):
+        difference = after["ratings"][score] - before.get("ratings", {}).get(score, 0)
+        counts[f"rating_{score}"] = max(0, difference - (counts["unrated"] if score == 0 else 0))
+    return counts
 
 
 class Recorder:
@@ -197,6 +209,17 @@ def load(raw: Any) -> TaskMetrics | None:
         return task
     except (KeyError, TypeError, ValueError):
         return None
+
+
+def retained_tasks(raw: Any) -> list[dict]:
+    """Ignore malformed observations without making a conversation impossible to open."""
+    entries = []
+    for item in raw[-RETAINED_TASKS:] if isinstance(raw, list) else ():
+        if (task := load(item)) is not None:
+            ident = item.get("task_id")
+            if isinstance(ident, str) and 0 < len(ident) <= 128:
+                entries.append({**asdict(task), "task_id": ident})
+    return entries
 
 
 def summary(tasks: Sequence[Mapping]) -> dict:

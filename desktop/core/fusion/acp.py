@@ -425,6 +425,9 @@ class AcpRun:
         finally:
             self.active = False
             self._flush()
+            if requested and fusion is not None:
+                # ACP reports whole-prompt totals, not the first native model request's input.
+                fusion.metric_request(self.host.session_id, bool(self._usage))
             if self._usage:
                 tokens = Tokens()
                 for more in self._usage.values():

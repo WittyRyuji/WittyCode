@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -14,8 +15,9 @@ from dataclasses import asdict, dataclass, field, fields, replace
 from functools import cached_property
 from typing import TYPE_CHECKING, Any
 
-from desktop.core.fusion import gates, identity
+from desktop.core.fusion import gates, identity, metrics
 from desktop.core.fusion.drive.fingerprint import Manifest, _GitError, _head, changed_since, fingerprint, workspace_kind
+from desktop.core.fusion.drive.retention import Retention
 from desktop.core.fusion.drive.store import Drive, DriveError, Record
 from desktop.core.fusion.protocol import (
     REPORT_TOKENS, Brief, Report, Route, brief_writes, checks_after, parse_report, parse_route, risk_signals, route_refusal, settle_ratings,
@@ -203,6 +205,36 @@ class RouteTurn:
     delegations: list[DelegationResult] = field(default_factory=list)
 
 
+@dataclass(slots=True)
+class MeasuredUsage:
+    before: Tokens | None
+    started: float = field(default_factory=time.monotonic)
+    seen: bool = False
+    unknown: bool = False
+    first_input: int | None = None
+
+    def request(self, known: bool, first_input: int | None) -> None:
+        if not self.seen:
+            self.first_input = first_input
+        self.seen = True
+        self.unknown |= not known
+
+    def total(self, after: Tokens | None) -> int | None:
+        if self.unknown or after is None:
+            return None
+        delta = after if self.before is None else after.since(self.before)
+        return delta.total if delta is not None else None
+
+
+@dataclass(slots=True)
+class TaskMeasurement:
+    owner: object
+    main: MeasuredUsage
+    recorder: metrics.Recorder = field(default_factory=metrics.Recorder)
+    experts: dict[str, MeasuredUsage] = field(default_factory=dict)
+    drive_before: dict | None = None
+
+
 class FusionRuntime:
     def __init__(self, parent: ChatGPTController, registry: FusionRegistry, *, owner: str | None = None, main_tokens: int | None = None) -> None:
         self.parent = parent
@@ -216,6 +248,7 @@ class FusionRuntime:
         self._active: dict[str, tuple[ChatGPTController, Tokens | None]] = {}
         self.report_runs: dict[str, ReportRun] = {}
         self.route_turn: RouteTurn | None = None
+        self.measurement: TaskMeasurement | None = None
         self._delegations: set[asyncio.Task[Any]] = set()
         self._closing = False
         self._drive_warned = False
@@ -225,11 +258,67 @@ class FusionRuntime:
         settings = getattr(getattr(self.parent, "manager", None), "settings", None)
         return settings is not None and gates.enabled(settings, name)
 
+    def start_metrics(self, owner: object) -> None:
+        task = TaskMeasurement(owner, MeasuredUsage(self.parent.usage))
+        task.recorder.begin(uuid.uuid4().hex)
+        self.measurement = task
+
+    def metric_request(self, session: str, known: bool, first_input: int | None = None) -> None:
+        task = self.measurement
+        if task is not None:
+            run = task.main if session == self.parent.session_id else task.experts.get(session)
+            if run is not None:
+                run.request(known, first_input)
+
+    def metric_compaction(self, session: str) -> None:
+        task = self.measurement
+        if task is not None and (session == self.parent.session_id or session in task.experts):
+            task.recorder.compaction()
+
+    def retention(self) -> Retention:
+        settings = self.parent.manager.settings
+        return Retention(settings.fusion_drive_warm, settings.fusion_drive_keep_days, settings.fusion_drive_qk)
+
+    def _drive_stats(self) -> dict:
+        # Observe an existing project DB without creating one just to measure an idle turn.
+        root = self.parent.manager.root.parent / "fusion-drive"
+        project = self.parent.project
+        key = (hashlib.sha256(os.path.normcase(str(project.resolve())).encode()).hexdigest()[:32]
+               if project is not None else "session-" + self.owner)
+        return self.drive.stats(self.retention()) if (root / key / "drive.sqlite").is_file() else {}
+
+    async def sample_metrics(self, owner: object, *, start: bool = False) -> None:
+        task = self.measurement
+        if task is None or task.owner is not owner or not self.drive_enabled or (not start and task.drive_before is None):
+            return
+        try:
+            stats = await asyncio.wait_for(asyncio.to_thread(self._drive_stats), timeout=1.0)
+        except (DriveError, OSError, sqlite3.Error, ValueError, TimeoutError):
+            return  # Telemetry is best effort, never a tool or turn failure.
+        if self.measurement is task:
+            if start:
+                task.drive_before = stats
+            elif stats:
+                task.recorder.drive(metrics.drive_counts(task.drive_before or {}, stats))
+
+    def finish_metrics(self, owner: object) -> None:
+        task = self.measurement
+        if task is not None and task.owner is owner:
+            self.measurement = None
+            task.recorder.main(task.main.total(self.parent.usage), time.monotonic() - task.main.started)
+            self.registry.record_task(task.recorder.finish())
+            self.parent.saved.fusion = self.registry.to_json()
+
+    def metrics_summary(self) -> dict:
+        return metrics.summary(self.registry.task_metrics)
+
     def start_route_turn(self) -> None:
         self.route_turn = RouteTurn() if self.gate("route") else None
         if self.route_turn is not None and self.parent.saved.plan.get("status") == "approved":
             self.route_turn.route = Route("split", "Taken from the approved plan.", "runner")
             self.route_turn.from_plan = True
+            if self.measurement is not None:
+                self.measurement.recorder.route(self.route_turn.route.destination)
 
     def route_guard(self, action: str, workstreams: tuple[str, ...]) -> str:
         turn = self.route_turn
@@ -273,6 +362,10 @@ class FusionRuntime:
                 self.registry.misroutes -= 1
                 raise
             turn.reroute_due = False
+            if self.measurement is not None:
+                self.measurement.recorder.misroute()
+        if self.measurement is not None:
+            self.measurement.recorder.route(route.destination)
         turn.route, turn.from_plan = route, False
         turn.submitted_at = time.time()
         turn.workstreams.clear()
@@ -320,6 +413,8 @@ class FusionRuntime:
         return AcceptanceVerdict(route, from_plan, checks, missing, signals, skip)
 
     async def retain_verdict(self, verdict: AcceptanceVerdict) -> None:
+        if self.measurement is not None:
+            self.measurement.recorder.accept(not verdict.missing)
         turn = self.route_turn
         if turn is not None:
             status = "unverified" if verdict.missing else "verified"
@@ -851,6 +946,10 @@ class FusionRuntime:
         self.parent._changed()
         child: ChatGPTController | None = None
         before: Tokens | None = None
+        measured_task = self.measurement
+        measured = MeasuredUsage(None) if measured_task is not None else None
+        if measured_task is not None and measured is not None:
+            measured_task.experts[expert.id] = measured
         started = False
         brief_write: asyncio.Task[Record | None] | None = None
         outcome: Outcome | None = None
@@ -884,6 +983,8 @@ class FusionRuntime:
             child_tools = await child._ensure_tools()
             child_tools.permission_parent = parent_tools
             before = child.usage
+            if measured is not None:
+                measured.before = before
             self._active[expert.id] = (child, before)
             handoff = await self._handoff(expert, child)
             current = self.parent._turn.user_block.text if self.parent._turn is not None and self.parent._turn.user_block is not None else ""
@@ -1001,6 +1102,16 @@ class FusionRuntime:
             outcome = Outcome(message, True)
             return outcome
         finally:
+            if measured_task is not None and measured_task is self.measurement and measured is not None:
+                measured_task.experts.pop(expert.id, None)
+                measured_task.recorder.expert(expert.identity or expert.role,
+                                              tokens=measured.total(child.usage) if started and child is not None else 0,
+                                              seconds=time.monotonic() - measured.started, first_request_tokens=measured.first_input)
+                # What a check found is in its report; the expert's own status only says whether it ran to the end.
+                if structured_report is not None and expert.identity == "Runner":
+                    measured_task.recorder.runner(structured_report.status == "done")
+                elif structured_report is not None and expert.identity == "QualitySampler":
+                    measured_task.recorder.sampler(structured_report.status != "done")
             if route_turn is not None and expert.finished_at is not None and expert.finished_at >= route_turn.latest_finished:
                 route_turn.latest_finished = expert.finished_at
                 route_turn.reroute_due = (expert.status in ("failed", "interrupted") or

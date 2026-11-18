@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from desktop.core.fusion.identity import display_name, load
+from desktop.core.fusion.metrics import RETAINED_TASKS, retained_tasks
 from desktop.core.fusion.reasoning import reasoning_map
 
 _IDENTITIES = load(None).names
@@ -111,6 +112,7 @@ class FusionRegistry:
     unmetered: bool = False
     had_unknown: bool = False
     misroutes: int = 0
+    task_metrics: list[dict] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.project = Path(self.project).resolve(strict=False)
@@ -257,10 +259,13 @@ class FusionRegistry:
         expert.status = status
         expert.finished_at = time.time()
 
+    def record_task(self, task: dict) -> None:
+        self.task_metrics = [*self.task_metrics, task][-RETAINED_TASKS:]
+
     def to_json(self) -> dict[str, Any]:
         return {"version": 2, "policy": self.policy.to_json(), "agents": [agent.to_json() for agent in self.agents.values()],
                 "calls": self.calls, "tokens": self.tokens, "unmetered": self.unmetered, "hadUnknown": self.had_unknown,
-                "misroutes": self.misroutes}
+                "misroutes": self.misroutes, "metrics": self.task_metrics[-RETAINED_TASKS:]}
 
     @classmethod
     def from_json(cls, project: Path, raw: Any) -> FusionRegistry:
@@ -276,7 +281,7 @@ class FusionRegistry:
         if type(misroutes) is not int or misroutes < 0:
             raise FusionError("The Fusion misroute count is invalid.")
         result = cls(project, Policy.from_json(raw.get("policy")), calls=calls, tokens=tokens, unmetered=unmetered,
-                     had_unknown=had_unknown, misroutes=misroutes)
+                     had_unknown=had_unknown, misroutes=misroutes, task_metrics=retained_tasks(raw.get("metrics")))
         for item in raw["agents"]:
             if not isinstance(item, Mapping):
                 raise FusionError("The expert record is invalid.")
