@@ -316,9 +316,10 @@ export interface Session {
 
 /** A file shown in the side panel (what `files.read` answers). `line` / `lineEnd`: the lines the reference named.
  *  `kind`: a text file comes with its `text`; a PDF with the size of each page in points (the pages are drawn by Python and
- *  asked for one at a time, `files.page`); a picture with nothing more (`files.page` sends it). */
+ *  asked for one at a time, `files.page`); pictures and Office files get their bytes from `files.page`. */
+export type OfficeKind = "word" | "sheet" | "slides";
 export interface FileView {
-  kind: "text" | "pdf" | "image";
+  kind: "text" | "pdf" | "image" | OfficeKind;
   pages: { w: number; h: number }[];
   path: string;
   name: string;

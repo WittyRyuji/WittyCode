@@ -161,8 +161,8 @@ export interface Store extends LiveData {
   openFile: (ref: string, how?: "panel" | "default" | "choose" | "reveal") => void;
   /** read the ChatGPT account again (what the ChatGPT Plan badge shows); at most once in a while */
   refreshPlanUsage: () => void;
-  /** a page of the PDF (or the picture) in the file panel, as a `data:` URI; null when it could not be drawn */
-  filePage: (ref: string, page: number, width: number) => Promise<string | null>;
+  /** Preview data as a `data:` URI; null on failure unless the caller wants the bridge's error. */
+  filePage: (ref: string, page: number, width: number, reportError?: boolean) => Promise<string | null>;
   closeFile: () => void;
   copyPath: (ref: string) => void;
   /** the menu of a path (right click) */

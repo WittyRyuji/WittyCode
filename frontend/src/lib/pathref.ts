@@ -7,7 +7,7 @@
 const BARE = new Set(
   (
     "md markdown mdx txt py pyw ts tsx js jsx mjs cjs json jsonl yaml yml toml css scss html htm log ini cfg conf csv tsv xml sql rs go " +
-    "java kt c h cpp hpp cs cu cuh sh ps1 bat cmd vue svelte lock env gitignore pdf png jpg jpeg gif svg webp docx xlsx pptx zip patch diff ipynb rst tex proto"
+    "java kt c h cpp hpp cs cu cuh sh ps1 bat cmd vue svelte lock env gitignore pdf png jpg jpeg gif svg webp doc docx docm dotx xls xlsx xlsm ppt pptx pptm ppsx zip patch diff ipynb rst tex proto"
   ).split(" "),
 );
 

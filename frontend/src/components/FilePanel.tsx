@@ -4,6 +4,7 @@ import { currentSession, useStore } from "../store";
 import type { FileView } from "../types";
 import { highlight } from "../lib/highlight";
 import { Markdown } from "./blocks/Markdown";
+import { OfficePreview } from "./OfficePreview";
 import { Menu, type MenuItem } from "./ui";
 
 /** Height of one line of the code view: the highlight of the named lines is placed by it. */
@@ -160,7 +161,18 @@ export function FilePanel() {
   }, [shown, close]);
   if (!panel || !shown) return null;
   const file = panel.file;
+  const kind = file?.kind;
+  const office = kind === "word" || kind === "sheet" || kind === "slides" ? kind : null;
   const title = file?.name ?? panel.ref.replace(/:\d+(-\d+)?$/, "").split(/[\\/]/).pop() ?? panel.ref;
+  const renderError = (message: string) => (
+    <div className="fp-state fp-error" role="alert">
+      <div>{message}</div>
+      <div className="fp-actions">
+        <button type="button" className="btn small" onClick={() => openFile(panel.ref, "default")}>用默认程序打开</button>
+        <button type="button" className="btn small" onClick={() => openFile(panel.ref, "reveal")}>在文件夹中显示</button>
+      </div>
+    </div>
+  );
   return (
     <aside className="filepanel" aria-label={`文件 ${title}`}>
       <header className="fp-head">
@@ -189,7 +201,7 @@ export function FilePanel() {
           <X size={15} />
         </button>
       </header>
-      {file && (
+      {file && !office && (
         <div className="fp-facts">
           <span>
             {file.kind === "pdf" ? `${file.pages.length.toLocaleString()} 页 · ${size(file.size)}` : file.kind === "image" ? size(file.size) : `${file.lines.toLocaleString()} 行 · ${size(file.size)} · ${file.encoding}`}
@@ -214,19 +226,8 @@ export function FilePanel() {
             <Loader2 size={15} className="spin" /> 正在读取…
           </div>
         )}
-        {panel.status === "error" && (
-          <div className="fp-state fp-error" role="alert">
-            <div>{panel.error}</div>
-            <div className="fp-actions">
-              <button type="button" className="btn small" onClick={() => openFile(panel.ref, "default")}>
-                用默认程序打开
-              </button>
-              <button type="button" className="btn small" onClick={() => openFile(panel.ref, "reveal")}>
-                在文件夹中显示
-              </button>
-            </div>
-          </div>
-        )}
+        {panel.status === "error" && renderError(panel.error ?? "读不了这个文件。")}
+        {office && file && <OfficePreview key={`${panel.sessionId}:${panel.ref}:${file.path}`} kind={office} fileRef={panel.ref} size={size(file.size)} renderError={renderError} />}
         {file?.kind === "pdf" && <Pdf key={file.path} file={file} fileRef={panel.ref} />}
         {file?.kind === "image" && <Picture file={file} fileRef={panel.ref} />}
         {file?.kind === "text" && (file.markdown && !source ? <div className="fp-doc"><Markdown source={file.text} /></div> : <Code file={file} />)}

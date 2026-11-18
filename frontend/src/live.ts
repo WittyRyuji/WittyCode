@@ -71,8 +71,8 @@ function onEvent(name: string, payload: unknown): void {
  *  else does nothing. */
 function guardLinks(): void {
   const follow = (event: MouseEvent) => {
-    const link = event.target instanceof Element ? event.target.closest("a[href]") : null;
-    if (!link) return;
+    const link = event.composedPath().find((node) => node instanceof Element && node.matches("a[href]"));
+    if (!(link instanceof Element)) return;
     event.preventDefault();
     if (event.type === "auxclick" && event.button !== 1) return;
     const url = link.getAttribute("href") ?? "";
@@ -254,13 +254,14 @@ function liveActions(): Partial<Store> {
       }
       // The panel opens at once with what is being asked for; the file replaces the wait (or the sentence says why not).
       const watched = get().agentPanel;
-      set({ agentPanel: null, agentTurns: [], filePanel: { sessionId: id, ref, status: "loading" } });
+      const request = { sessionId: id, ref, status: "loading" } as const;
+      set({ agentPanel: null, agentTurns: [], filePanel: request });
       if (watched) void attempt(liveCall("agents.unwatch", { id: watched.sessionId }));
       try {
         const file = await liveCall("files.read", { id, path: ref });
-        if (get().filePanel?.ref === ref) set({ filePanel: { sessionId: id, ref, status: "ready", file } });
+        if (get().filePanel === request) set({ filePanel: { sessionId: id, ref, status: "ready", file } });
       } catch (error) {
-        if (get().filePanel?.ref === ref) set({ filePanel: { sessionId: id, ref, status: "error", error: messageOf(error) } });
+        if (get().filePanel === request) set({ filePanel: { sessionId: id, ref, status: "error", error: messageOf(error) } });
       }
     },
     refreshPlanUsage: async () => {
@@ -273,12 +274,13 @@ function liveActions(): Partial<Store> {
         /* the figures stay as they were; the badge says why it has none */
       }
     },
-    filePage: async (ref, page, width) => {
+    filePage: async (ref, page, width, reportError) => {
       const id = get().currentId;
       if (!id) return null;
       try {
         return (await liveCall("files.page", { id, path: ref, page, width })).url;
-      } catch {
+      } catch (error) {
+        if (reportError) throw error;
         return null;
       }
     },

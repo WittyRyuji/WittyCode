@@ -657,7 +657,7 @@ function fakeBackend(config) {
       const row = S.saved.find((r) => r.id === p.id);
       const c = open(p.projectId, row?.engine === "devin" ? "devin:swe-2-high" : "api:gw:claude-haiku-5-5", { title: p.title || row?.title || "（无标题）", savedId: p.id, nativeId: p.id });
       // Python sends the restored history before the conversation's first session event
-      c.turns = [{ id: nid("t"), status: "done", seconds: 4.2, blocks: [{ kind: "user", id: nid("b"), text: "上次的问题" }, { kind: "text", id: nid("b"), markdown: "上次的回答，见 `docs/notes.md:5`，另有 `docs/report.pdf`、`docs/long.pdf`、`docs/broken.pdf` 和 `shots/ui.png`。", streaming: false }], prompts: [] }];
+      c.turns = [{ id: nid("t"), status: "done", seconds: 4.2, blocks: [{ kind: "user", id: nid("b"), text: "上次的问题" }, { kind: "text", id: nid("b"), markdown: "上次的回答，见 `docs/notes.md:5`，另有 `docs/report.pdf`、`docs/long.pdf`、`docs/broken.pdf` 和 `shots/ui.png`。" + (config.office ? " 样例：`sample.docx`、`sample.xlsx`、`sample.pptx`。安全测试：`hostile.docx`、`hostile.xlsx`、`hostile.pptx`。" : ""), streaming: false }], prompts: [] }];
       later(20, () => emitTurns(c, c.turns));
       return { id: c.cid };
     },
@@ -1057,17 +1057,23 @@ function fakeBackend(config) {
     "files.resolve": (p) => ({ path: `D:\\Work\\demo-project\\${String(p.path).replace(/:\d+(-\d+)?$/, "").replace(/\//g, "\\")}`, isDir: false, line: null }),
     "files.read": (p) => {
       if (/missing/.test(p.path)) throw new Error("找不到这个文件：" + p.path);
-      const preview = /\.pdf$/i.test(p.path) ? "pdf" : /\.(png|jpe?g|svg)$/i.test(p.path) ? "image" : null;
+      const name = p.path.split("/").pop();
+      const office = config.office?.[name];
+      const preview = office?.kind ?? (/\.pdf$/i.test(p.path) ? "pdf" : /\.(png|jpe?g|svg)$/i.test(p.path) ? "image" : null);
       if (preview) {
-        const name = p.path.split("/").pop();
         const pages = preview === "pdf" ? Array.from({ length: /long/.test(p.path) ? 40 : 5 }, (_, i) => ({ w: 595, h: i === 2 ? 595 : 842 })) : [];
-        return { kind: preview, pages, path: "D:\\Work\\demo-project\\" + name, name, dir: "D:\\Work\\demo-project", text: "", size: 183400, lines: 0, encoding: "", truncated: false, markdown: false, line: null, lineEnd: null };
+        return { kind: preview, pages, path: "D:\\Work\\demo-project\\" + name, name, dir: "D:\\Work\\demo-project", text: "", size: office?.size ?? 183400, lines: 0, encoding: "", truncated: false, markdown: false, line: null, lineEnd: null };
       }
       const range = /:(\d+)(?:-(\d+))?$/.exec(p.path);
       const text = Array.from({ length: 12 }, (_, i) => (i === 0 ? "# 笔记" : `第 ${i + 1} 行`)).join("\n");
       return { kind: "text", pages: [], path: "D:\\Work\\demo-project\\docs\\notes.md", name: "notes.md", dir: "D:\\Work\\demo-project\\docs", text, size: text.length, lines: 12, encoding: "UTF-8", truncated: false, markdown: true, line: range ? Number(range[1]) : null, lineEnd: range?.[2] ? Number(range[2]) : null };
     },
     "files.page": (p) => {
+      const office = config.office?.[p.path.split("/").pop()];
+      if (office) {
+        if (p.page !== 0) throw new Error("页码不合法。");
+        return { url: office.url };
+      }
       if (/broken/.test(p.path) && p.page === 1) throw new Error("这一页画不出来。");
       const w = /\.pdf$/i.test(p.path) ? 595 : 320;
       const h = /\.pdf$/i.test(p.path) ? (p.page === 2 ? 595 : 842) : 200;

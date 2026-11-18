@@ -2731,29 +2731,29 @@ class AppCore:
 
     # ------------------------------------------------------------------ files the conversation names
 
-    def _file_named(self, params: dict[str, Any]) -> tuple[Path, filetools.Ref]:
+    async def _file_named(self, params: dict[str, Any]) -> tuple[Path, filetools.Ref]:
         conv = self._conversation(params["id"])
         raw = params.get("path")
         if not isinstance(raw, str) or not raw.strip():
             raise AppError("没有指定文件。")
         try:
-            return filetools.resolve(raw, conv.project)
+            return await asyncio.to_thread(filetools.resolve, raw, conv.project)
         except filetools.FileProblem as problem:
             raise AppError(str(problem)) from problem
 
     async def _m_files_resolve(self, params: dict[str, Any]) -> dict[str, Any]:
         """Where a path the way the model wrote it is, for the page's menu (copy the path)."""
-        path, ref = self._file_named(params)
+        path, ref = await self._file_named(params)
         return {"path": str(path), "isDir": path.is_dir(), "line": ref.line}
 
     async def _m_files_read(self, params: dict[str, Any]) -> dict[str, Any]:
-        """A file for the side panel: its text, or for a PDF the size of every page and for a picture just its size (the page
-        asks for what it draws with ``files.page``). The project's folder is where a relative path is looked for."""
-        path, ref = self._file_named(params)
-        kind = filetools.preview_kind(path)
+        """A file for the side panel: its text, or metadata for PDF, picture and Office previews (``files.page`` supplies
+        what the page draws). Relative paths are looked for in the project's folder."""
+        path, ref = await self._file_named(params)
+        kind = await asyncio.to_thread(filetools.preview_kind, path)
         if kind is not None:
             try:
-                size = filetools.preview_size(path, kind)
+                size = await asyncio.to_thread(filetools.preview_size, path, kind)
                 pages = [{"w": w, "h": h} for w, h in self.platform.pdf_pages(str(path))] if kind == "pdf" else []
             except filetools.FileProblem as problem:
                 raise AppError(str(problem)) from problem
@@ -2796,17 +2796,23 @@ class AppCore:
         }
 
     async def _m_files_page(self, params: dict[str, Any]) -> dict[str, Any]:
-        """What the side panel draws of a PDF or a picture: one page of the PDF at the width asked for, or the picture itself
-        (``data:`` URIs)."""
-        path, _ = self._file_named(params)
-        kind = filetools.preview_kind(path)
+        """A PDF page at the requested width, or the bytes of a picture or Office file (``data:`` URIs)."""
+        path, _ = await self._file_named(params)
+        kind = await asyncio.to_thread(filetools.preview_kind, path)
         page, width = params.get("page", 0), params.get("width", 900)
         if kind is None:
             raise AppError("这个文件不能在侧栏里画出来。")
         if not (isinstance(page, int) and not isinstance(page, bool) and isinstance(width, int) and not isinstance(width, bool)) or page < 0:
             raise AppError("页码或宽度不合法。")
         try:
-            url = filetools.image_data_url(path) if kind == "image" else self.platform.pdf_page(str(path), page, width)
+            if kind == "pdf":
+                url = self.platform.pdf_page(str(path), page, width)
+            elif kind == "image":
+                url = await asyncio.to_thread(filetools.image_data_url, path)
+            elif page == 0:
+                url = await asyncio.to_thread(filetools.office_data_url, path, kind)
+            else:
+                raise AppError("页码不合法。")
         except filetools.FileProblem as problem:
             raise AppError(str(problem)) from problem
         return {"url": url}
@@ -2817,7 +2823,7 @@ class AppCore:
         how = params.get("how")
         if how not in ("default", "choose", "reveal"):
             raise AppError("打开方式不合法。")
-        path, _ = self._file_named(params)
+        path, _ = await self._file_named(params)
         target = str(path)
         if how == "reveal":
             self.platform.show_in_folder(target)

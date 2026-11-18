@@ -339,10 +339,10 @@ export interface Calls {
   "fusion.updateBudget": { params: { id: string; maxCalls: number; maxTokens: number; acceptUnknown: boolean }; result: { ok: boolean } };
   "fusion.authorizeModel": { params: { id: string; model: string }; result: { ok: boolean } };
   "fusion.changeMain": { params: { id: string; model: string }; result: { ok: boolean } };
-  /** a text file the conversation named, for the side panel; `path` as the model wrote it (relative to the project, an optional
-   *  `:line` or `:line-line` at the end). An error is one sentence for the user (no such file, not text, a folder). */
+  /** A file the conversation named, for the side panel; `path` as the model wrote it (relative to the project, an optional
+   *  `:line` or `:line-line` at the end). An error is one sentence for the user. */
   "files.read": { params: { id: string; path: string }; result: FileView };
-  /** what the panel draws of a PDF (page `page` from 0, drawn `width` pixels wide) or a picture (the whole picture), as a
+  /** A PDF page (`page` from 0, drawn `width` pixels wide), or the bytes of a picture or Office file (page 0), as a
    *  `data:` URI. An error is one sentence for the user. */
   "files.page": { params: { id: string; path: string; page: number; width: number }; result: { url: string } };
   /** open it outside the window: `default` program (a program or script is only shown in its folder: `shown`, `message`),

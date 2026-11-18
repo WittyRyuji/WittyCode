@@ -10,8 +10,12 @@ from __future__ import annotations
 
 import base64
 import codecs
+import io
 import os
 import re
+import struct
+import zipfile
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -42,6 +46,21 @@ PREVIEW_IMAGES = {
 """The pictures the side panel shows, with the type the page needs to draw them (an SVG in an ``<img>`` runs no script)."""
 PREVIEW_IMAGE_BYTES = 25_000_000
 PREVIEW_PDF_BYTES = 80_000_000
+PREVIEW_OFFICE_BYTES = 30_000_000
+OFFICE_ZIP_ENTRIES = 5_000
+OFFICE_ZIP_BYTES = 300_000_000
+
+_OFFICE_TYPES = {
+    **dict.fromkeys((".docx", ".docm", ".dotx"), "word"),
+    **dict.fromkeys((".xlsx", ".xlsm", ".xls"), "sheet"),
+    **dict.fromkeys((".pptx", ".pptm", ".ppsx"), "slides"),
+}
+_OFFICE_MIME = {
+    "word": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "sheet": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "slides": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+}
+_LEGACY_OFFICE = {".doc": ".docx", ".ppt": ".pptx"}
 
 _SUFFIX = re.compile(r":(\d+)(?:-(\d+))?(?::\d+)?$")
 
@@ -122,13 +141,19 @@ def is_runnable(path: Path) -> bool:
 
 
 def preview_kind(path: Path) -> str | None:
-    """``"pdf"`` or ``"image"`` for a file the panel draws instead of reading as text (by its name; a folder is neither)."""
+    """The kind the panel draws instead of reading as text (by suffix; never a folder)."""
     suffix = path.suffix.lower()
     if path.is_dir():
         return None
     if suffix == ".pdf":
         return "pdf"
-    return "image" if suffix in PREVIEW_IMAGES else None
+    if suffix in PREVIEW_IMAGES:
+        return "image"
+    return _OFFICE_TYPES.get(suffix)
+
+
+def _too_large(size: int) -> FileProblem:
+    return FileProblem(f"文件有 {size / 1_000_000:.0f} MB，太大了，不在侧栏里预览：用默认程序打开。")
 
 
 def preview_size(path: Path, kind: str) -> int:
@@ -137,9 +162,9 @@ def preview_size(path: Path, kind: str) -> int:
         size = path.stat().st_size
     except OSError as error:
         raise FileProblem(f"读不了这个文件：{error.strerror or error}。") from error
-    limit = PREVIEW_PDF_BYTES if kind == "pdf" else PREVIEW_IMAGE_BYTES
+    limit = {"pdf": PREVIEW_PDF_BYTES, "image": PREVIEW_IMAGE_BYTES}.get(kind, PREVIEW_OFFICE_BYTES)
     if size > limit:
-        raise FileProblem(f"文件有 {size / 1_000_000:.0f} MB，太大了，不在侧栏里预览：用默认程序打开。")
+        raise _too_large(size)
     return size
 
 
@@ -151,6 +176,63 @@ def image_data_url(path: Path) -> str:
     except OSError as error:
         raise FileProblem(f"读不了这个文件：{error.strerror or error}。") from error
     return f"data:{PREVIEW_IMAGES[path.suffix.lower()]};base64,{base64.b64encode(data).decode('ascii')}"
+
+
+def _check_office_entry(data: bytes, archive: zipfile.ZipFile, entry: zipfile.ZipInfo) -> None:
+    # ZipExtFile checks the local header, but its read() stops at the declared size. The page's ZIP readers may inflate
+    # beyond it, so check the real size and CRC in bounded chunks before sharing the same bytes with the page.
+    with archive.open(entry):
+        offset = entry.header_offset
+        name_length, extra_length = struct.unpack_from("<HH", data, offset + 26)
+        start = offset + 30 + name_length + extra_length
+        end = start + entry.compress_size
+        remaining, crc = entry.file_size, 0
+        inflater = zlib.decompressobj(-15) if entry.compress_type == zipfile.ZIP_DEFLATED else None
+        for at in range(start, end, 65_536):
+            raw = data[at:min(at + 65_536, end)]
+            while raw:
+                chunk = inflater.decompress(raw, min(remaining + 1, 256_000)) if inflater else raw
+                remaining -= len(chunk)
+                if remaining < 0:
+                    raise zipfile.BadZipFile("entry exceeds declared size")
+                crc = zlib.crc32(chunk, crc)
+                raw = inflater.unconsumed_tail if inflater else b""
+        if remaining or crc != entry.CRC or (inflater and (not inflater.eof or inflater.unused_data)):
+            raise zipfile.BadZipFile("incomplete entry or incorrect checksum")
+
+
+def office_data_url(path: Path, kind: str) -> str:
+    """Read a bounded snapshot, validate the archive, and pass only those exact bytes to the page."""
+    preview_size(path, kind)
+    try:
+        with path.open("rb") as handle:
+            data = handle.read(PREVIEW_OFFICE_BYTES + 1)
+    except OSError as error:
+        raise FileProblem(f"读不了这个文件：{error.strerror or error}。") from error
+    if len(data) > PREVIEW_OFFICE_BYTES:
+        raise _too_large(len(data))
+    mime = _OFFICE_MIME[kind]
+    if path.suffix.lower() == ".xls":
+        # Excel 97–2003 compound binary files and earlier raw BIFF workbooks, not arbitrary SheetJS inputs.
+        if not data.startswith((bytes.fromhex("D0 CF 11 E0 A1 B1 1A E1"), b"\x09\x00", b"\x09\x02", b"\x09\x04", b"\x09\x08")):
+            raise FileProblem("这不是有效的 Excel 工作簿：用默认程序打开。")
+        mime = "application/vnd.ms-excel"
+    else:
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                entries = archive.infolist()
+                if len(entries) > OFFICE_ZIP_ENTRIES or sum(e.file_size for e in entries) > OFFICE_ZIP_BYTES:
+                    raise FileProblem("Office 文件解压后太大或文件过多，不能在侧栏里预览：用默认程序打开。")
+                names = {e.filename for e in entries}
+                if len(names) != len(entries) or not {"[Content_Types].xml", "_rels/.rels"} <= names:
+                    raise zipfile.BadZipFile("missing or duplicate package entries")
+                for entry in entries:
+                    if entry.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+                        raise zipfile.BadZipFile("unsupported compression")
+                    _check_office_entry(data, archive, entry)
+        except (zipfile.BadZipFile, RuntimeError, NotImplementedError, struct.error, UnicodeError, zlib.error) as error:
+            raise FileProblem("这不是有效的 Office 文件，或文件已损坏、加密：用默认程序打开。") from error
+    return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
 
 
 def _decode(data: bytes, cut: bool) -> tuple[str, str]:
@@ -178,6 +260,9 @@ def read_for_panel(path: Path, *, limit: int = PANEL_BYTES) -> PanelFile:
     """The text of ``path``, for the side panel. Raises ``FileProblem`` for a folder, an unreadable file or a binary one."""
     if path.is_dir():
         raise FileProblem("这是文件夹，不是文件：可以在文件夹中显示它。")
+    suffix = path.suffix.lower()
+    if suffix in _LEGACY_OFFICE:
+        raise FileProblem(f"旧版 Office 格式（{suffix}）不能在侧栏里预览：用默认程序打开，或另存为 {_LEGACY_OFFICE[suffix]}。")
     try:
         size = path.stat().st_size
         with path.open("rb") as handle:
