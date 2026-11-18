@@ -234,6 +234,8 @@ class Conversation:
     """A change of engine is under way: the new controller failing to open must not close the conversation."""
     switch_task: asyncio.Task[Any] | None = None
     """The interruptible send-time handoff, including opening the destination."""
+    preparing: QueuedMessage | None = None
+    """A submitted message visible in the timeline while the source prepares its handoff, not yet a model turn."""
     pending_model: dict[str, Any] | None = None
     """A selection shown immediately, but not committed to the engine until the next user send."""
     created_at: float = field(default_factory=time.time)
@@ -1496,6 +1498,9 @@ class AppCore:
             "speed": speed,
             "context": context,
             "queued": self._queued_json(conv),
+            "preparing": ({"id": conv.preparing.id, "text": conv.preparing.text,
+                           "attachments": [self._attachment_view(a) for a in conv.preparing.attachments]}
+                          if conv.preparing is not None else None),
             "agents": self._agents_json(conv),
             "fusion": conv.pending_model["model"] == "fusion" if conv.pending_model is not None else getattr(controller, "_fusion", None) is not None,
             "fusionPolicy": ({"workers": list(controller._fusion.registry.policy.workers), "light": controller._fusion.registry.policy.light,
@@ -2195,7 +2200,8 @@ class AppCore:
                 "ok": False,
                 "over": {"count": held.count, "total": held.total, "files": held.files, "bytes": held.bytes, "text": held.describe()},
             }
-        text = str(params.get("text", "")).strip()
+        draft = str(params.get("text", ""))
+        text = draft.strip()
         how = params.get("how")
         if how is not None and how not in FOLLOW_UPS:
             raise AppError("发送方式不合法。")
@@ -2237,10 +2243,36 @@ class AppCore:
             return {"ok": True, "queued": True}
         if not text and not attachments:
             raise AppError("现在不能发送：没有内容。")
+        if state is not SessionState.READY or not changing:
+            await self._send_ready(conv, text, attachments, wanted)
+            return {"ok": True}
+
+        # Publish the submitted message before waiting for the source summary. It is not a real turn yet: none of
+        # its contents may enter the summary, history, or the source runner. Keep the attachments reserved in drafts
+        # until the destination accepts them (also used when checking the cross-engine carry limits).
+        conv.preparing = QueuedMessage(f"q{next(self._queue_ids)}", draft, tuple(attachments))
+        conv.switch_task = asyncio.current_task()
+        try:
+            self._flush(conv)
+            await self._send_ready(conv, text, attachments, wanted)
+        except (Exception, asyncio.CancelledError) as error:
+            self._restore(conv, [(draft, ())])
+            if isinstance(error, asyncio.CancelledError) and not self._shutting_down:
+                # QWebChannel does not reply to a bare cancellation; the composer would remain locked.
+                raise AppError("模型交接已停止；消息已放回输入框，未自动重试。") from None
+            raise
+        finally:
+            conv.preparing = None
+            conv.switch_task = None
+            conv.dirty = True
+            self._schedule_flush()
+        return {"ok": True, "prepared": True}
+
+    async def _send_ready(self, conv: Conversation, text: str, attachments: Sequence[Attachment], wanted: set[str]) -> None:
         if conv.pending_model is not None:
             await self._apply_pending_model(conv)
-            controller = conv.controller
         await self._refresh_fusion_settings(conv)
+        controller = conv.controller
         problem = controller.attachment_problem(self._carried_attachments(conv) + tuple(attachments))
         if problem:
             raise AppError(problem)
@@ -2258,10 +2290,9 @@ class AppCore:
                 self._set_pending_model(conv, pending)
             raise AppError("现在不能发送：会话没有就绪。")
         self._start_title(conv, text)
-        taken()
+        conv.drafts = [a for a in conv.drafts if a.id not in wanted]
         if attachments:
             conv.inflight = (controller.transcript.turns[-1], text, tuple(attachments))
-        return {"ok": True}
 
     async def _m_session_approvePlan(self, params: dict[str, Any]) -> dict[str, Any]:
         conv = self._conversation(params["id"])
@@ -2936,6 +2967,7 @@ class AppCore:
             return {"ok": True}
         self._check_fusion_switch(conv)
         old_row = self._row_of(conv)
+        previous_task = conv.switch_task
         conv.switch_task = asyncio.current_task()
         conv.dirty = True
         self._schedule_flush()
@@ -2958,7 +2990,7 @@ class AppCore:
             except OSError as error:
                 raise AppError("无法保存模型切换，消息没有发出；请检查存储后重试。") from error
             finally:
-                conv.switch_task = None
+                conv.switch_task = previous_task
                 conv.ran = False  # A handoff is neither a completed user turn nor a reason to advance goals/queues.
                 conv.dirty = True
                 self._feed_usage(conv)

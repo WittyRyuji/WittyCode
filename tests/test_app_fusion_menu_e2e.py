@@ -76,6 +76,8 @@ def test_fusion_is_first_in_model_menu_and_normal_model_exits_the_selection(qapp
             assert main._fusion is not None and len(rig.plan.requests) == count + 2
             assert [r["model"] for r in rig.plan.requests[-2:]] == ["gpt-6-luna", "gpt-6.1-sol"]
             assert "/compact" not in await rig.text(".transcript")
+            # The Python turn can be READY before the page receives its final state patch.
+            await rig.wait_for(".chip-model:not(:disabled)")
             await rig.click(".chip-model")
             await rig.wait_text(".menu-item .menu-label", "Fusion")
             assert await rig.count(".menu-item .menu-check svg") == 1

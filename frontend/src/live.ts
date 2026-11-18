@@ -380,7 +380,7 @@ function liveActions(): Partial<Store> {
           const r = await attempt(
             liveCall("session.send", { id, text, attachmentIds, ...(confirmOver ? { confirmOver } : {}), ...(running ? { how: how ?? get().followUp } : {}) }),
           );
-          if (r === FAILED) return;
+          if (r === FAILED || r.prepared) return; // The handoff acceptance event already moved the draft into the timeline.
           if (!r.ok && r.over) return askToSendOver(r.over, () => void submit(true));
           // What was typed while the message was on its way stays.
           get().patchSession(id, (x) => ({ ...x, draft: x.draft === text ? "" : x.draft, attachments: x.attachments.filter((a) => !attachmentIds.includes(a.id)) }));

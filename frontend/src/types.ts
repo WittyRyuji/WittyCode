@@ -306,6 +306,8 @@ export interface Session {
   /** messages typed while the session was connecting or a turn was running: shown, and sent by Python one turn at a time,
    *  in order, each when the one before it is over */
   queued?: QueuedMessage[];
+  /** Submitted and visible in the timeline, but not yet sent to the destination model. */
+  preparing?: QueuedMessage;
   /** A complete plan waiting for an explicit decision, owned by the current conversation. */
   pendingPlan?: { id: string; text: string; warning?: string } | null;
   /** the goal (`/goal`) the conversation is working toward ("" or absent: none) */

@@ -5,7 +5,7 @@ import pytest
 from PySide6.QtCore import Qt
 
 from tests.e2e_support import open_rig
-from tests.fake_responses import call, say
+from tests.fake_responses import call, fail, say
 from tests.fakes import until
 from tests.ui_support import run
 
@@ -105,6 +105,73 @@ def test_configure_and_start_fusion_with_a_local_fake(qapp, loop, tmp_path):
             assert "cost x0.50" in rig.plan.requests[0]["instructions"] and "efficiency x1.50" in rig.plan.requests[0]["instructions"]
             assert len(rig.plan.requests) == 3
         finally:
+            await rig.finish()
+    run(loop, scenario())
+
+
+@pytest.mark.parametrize(("gesture", "outcome"), [("enter", "done"), ("click", "done"), ("click", "stop"), ("enter", "fail")])
+def test_submitted_message_leaves_composer_while_fusion_handoff_is_blocked(qapp, loop, tmp_path, gesture, outcome):
+    async def scenario():
+        rig = await open_rig(tmp_path)
+        try:
+            rig.plan.script(say("Original response."))
+            await rig.send("Source conversation")
+            await rig.wait_text(".transcript", "Original response.")
+            main = rig.core.order[0].controller
+            await until(lambda: main.state.value == "ready")
+            for key, value in {"fusionMain": "chatgpt:gpt-6-luna", "fusionWorkers": ["chatgpt:gpt-6.1-sol"],
+                               "fusionLight": "chatgpt:gpt-6.1-sol"}.items():
+                await rig.core.call("settings.set", {"key": key, "value": value})
+            await select_fusion(rig)
+            await rig.wait_text(".chip-model .chip-v", "Fusion")
+            attachment = tmp_path / "handoff.txt"
+            attachment.write_text("Attached to the new request, not its summary.", encoding="utf-8")
+            await rig.drop_files([attachment])
+            await rig.wait_for(".att-row .att", 1)
+            summary = fail("invalid_request", "Summary unavailable") if outcome == "fail" else say("Handoff summary.")
+            rig.plan.script([("hold", "handoff"), *summary], say("Destination response."))
+            await rig.focus_composer()
+            await rig.type("Submitted user request")
+            if gesture == "enter":
+                await rig.press("Enter")
+            else:
+                await rig.click('button[aria-label="发送"]')
+            await rig.wait_text(".preparing-turn .body", "Submitted user request")
+            await rig.wait_text(".preparing-turn [role=status]", "正在压缩并切换模型")
+            await rig.wait_text(".preparing-turn .fname", "handoff.txt")
+            assert await rig.js("document.querySelector('.input').value") == ""
+            assert not await rig.exists(".att-row .att")
+            await until(lambda: len(rig.plan.requests) == 2)
+            assert main.model == "gpt-6.1-sol" and len(main.transcript.turns) == 1
+            assert "Submitted user request" not in str(rig.plan.requests[1])
+            assert "Attached to the new request" not in str(rig.plan.requests[1])
+            assert rig.window.grab().save(str(tmp_path / "fusion-preparing.png"))
+
+            # Same text typed again on purpose must not be deleted a second time when the pending RPC replies.
+            followup = "Submitted user request" if outcome == "done" else "A new draft during the handoff"
+            await rig.focus_composer()
+            await rig.type(followup)
+            await rig.press("Enter")
+            assert await rig.js("document.querySelector('.input').value") == followup
+            assert len(rig.plan.requests) == 2 and not await rig.exists(".send.how")
+            if outcome == "stop":
+                await rig.click(".send.stop")
+            else:
+                rig.plan.release("handoff")
+            await rig.wait_for(".preparing-turn", 0)
+            if outcome == "done":
+                await rig.wait_text(".text-block", "Destination response.")
+                assert await rig.js("document.querySelector('.input').value") == followup
+                assert [r["model"] for r in rig.plan.requests] == ["gpt-6.1-sol", "gpt-6.1-sol", "gpt-6-luna"]
+                assert (await rig.texts(".block.user .body")).count("Submitted user request") == 1
+            else:
+                await rig.wait_for(".att-row .att", 1)
+                assert await rig.js("document.querySelector('.input').value") == "Submitted user request\n\n" + followup
+                assert await rig.texts(".att-row .fname") == ["handoff.txt"]
+                assert len(rig.plan.requests) == 2 and len(main.transcript.turns) == 1
+                assert rig.core.order[0].pending_model["model"] == "fusion"
+        finally:
+            rig.plan.release("handoff")
             await rig.finish()
     run(loop, scenario())
 

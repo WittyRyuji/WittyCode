@@ -167,6 +167,7 @@ export interface ConversationMeta {
   context: ContextState;
   handoff: PendingHandoff | null;
   queued: QueuedMessage[];
+  preparing?: QueuedMessage | null;
   agents: AgentInfo[];
   fusion?: boolean;
   fusionPolicy?: FusionSessionPolicy | null;
@@ -320,7 +321,7 @@ export interface Calls {
   /** `how`, for a message sent while a turn runs: `queue` holds it until the turn is over, `steer` gives it to the running
    *  turn now. `queued`: the message is kept and goes out by itself, in its turn (`session.unqueue` takes it back); `steered`:
    *  the running turn has it. A steer the engine cannot take is queued instead (Python says so in a notice). */
-  "session.send": { params: { id: string; text: string; attachmentIds?: string[]; confirmOver?: boolean; how?: FollowUp }; result: { ok: boolean; over?: SendOver; queued?: boolean; steered?: boolean } };
+  "session.send": { params: { id: string; text: string; attachmentIds?: string[]; confirmOver?: boolean; how?: FollowUp }; result: { ok: boolean; over?: SendOver; queued?: boolean; steered?: boolean; prepared?: boolean } };
   /** takes queued messages back into the composer: the one `queueId` names, or all of them */
   "session.unqueue": { params: { id: string; queueId?: string }; result: { ok: boolean } };
   /** changes the words of a waiting message (it keeps its place and attachments); ok false: it had gone out or been taken back */

@@ -77,6 +77,8 @@ class GuardedFake(Fake):
                 tool, arguments = "create_file", {"file_path": "marker.txt", "content": "guarded ACP write"}
             elif action == "shell":
                 tool, arguments = "shell", {"command": "New-Item marker.txt"}
+            elif action == "matrix":
+                tool, arguments = "delegate_tasks", json.loads(current.splitlines()[0].removeprefix("[fusion-matrix] "))
             elif action == "delegate-parallel":
                 tool, arguments = "delegate_tasks", {"tasks": [
                     {"workstream": name, "paths": paths, "model": "chatgpt:gpt-6-luna", "role": "worker", "task": "Report on the independent workstream."}

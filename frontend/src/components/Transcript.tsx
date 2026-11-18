@@ -167,7 +167,7 @@ export function Transcript({ session, positions }: { session: Session; positions
     if (!el || restoring.current) return;
     const top = jumpTarget.current ?? el.scrollTop;
     const origin = el.getBoundingClientRect().top;
-    const turns = [...(inner.current?.querySelectorAll<HTMLElement>(":scope > .turn") ?? [])];
+    const turns = [...(inner.current?.querySelectorAll<HTMLElement>(":scope > .turn[data-turn-id]") ?? [])];
     const anchor = [...turns].reverse().find((turn) => turn.getBoundingClientRect().top <= origin + 40) ?? turns[0];
     position.current = { follow: stick.current, top, ...(anchor ? { anchor: { id: anchor.dataset.turnId!, offset: anchor.getBoundingClientRect().top - origin - (top - el.scrollTop) } } : {}) };
     positions.set(session.id, position.current);
@@ -175,7 +175,7 @@ export function Transcript({ session, positions }: { session: Session; positions
   const syncActive = useCallback(() => {
     const el = scroller.current;
     if (!el || !inner.current || jumpTarget.current !== null) return;
-    const turns = [...inner.current.querySelectorAll<HTMLElement>(":scope > .turn")];
+    const turns = [...inner.current.querySelectorAll<HTMLElement>(":scope > .turn[data-turn-id]")];
     const origin = el.getBoundingClientRect().top - el.scrollTop;
     const tops = turns.map((turn) => turn.getBoundingClientRect().top - origin);
     const index = activeTurnAt(tops, el.scrollTop + 40, stick.current || el.scrollHeight - el.scrollTop - el.clientHeight < 48);
@@ -184,7 +184,7 @@ export function Transcript({ session, positions }: { session: Session; positions
   const applyLayout = () => {
     const el = scroller.current;
     if (!el || !inner.current) return;
-    if (restoring.current && !inner.current.querySelector(":scope > .turn")) return;
+    if (restoring.current && !inner.current.querySelector(":scope > .turn[data-turn-id]")) return;
     const sizeChanged = measured.current.content !== el.scrollHeight || measured.current.viewport !== el.clientHeight;
     if (stick.current) {
       if (sizeChanged || restoring.current) {
@@ -193,7 +193,7 @@ export function Transcript({ session, positions }: { session: Session; positions
       }
     } else if (restoring.current || (sizeChanged && jumpTarget.current === null)) {
       const saved = position.current;
-      const anchor = [...inner.current.querySelectorAll<HTMLElement>(":scope > .turn")].find((turn) => turn.dataset.turnId === saved.anchor?.id);
+      const anchor = [...inner.current.querySelectorAll<HTMLElement>(":scope > .turn[data-turn-id]")].find((turn) => turn.dataset.turnId === saved.anchor?.id);
       const top = anchor && saved.anchor ? el.scrollTop + anchor.getBoundingClientRect().top - el.getBoundingClientRect().top - saved.anchor.offset : saved.top;
       el.scrollTo({ top, behavior: "instant" });
     }
@@ -216,7 +216,7 @@ export function Transcript({ session, positions }: { session: Session; positions
   };
   const jumpTo = (id: string) => {
     const el = scroller.current;
-    const turn = [...(inner.current?.querySelectorAll<HTMLElement>(":scope > .turn") ?? [])].find((item) => item.dataset.turnId === id);
+    const turn = [...(inner.current?.querySelectorAll<HTMLElement>(":scope > .turn[data-turn-id]") ?? [])].find((item) => item.dataset.turnId === id);
     if (!el || !turn) return;
     restoring.current = false;
     const top = Math.max(0, Math.min(el.scrollHeight - el.clientHeight, el.scrollTop + turn.getBoundingClientRect().top - el.getBoundingClientRect().top - 28));
@@ -285,7 +285,8 @@ export function Transcript({ session, positions }: { session: Session; positions
     scrollTimer.current = window.setTimeout(() => setScrolling(false), 800);
   };
 
-  const empty = session.turns.length === 0 && !session.queued;
+  const preparing = session.preparing;
+  const empty = session.turns.length === 0 && !session.queued && !preparing;
   return (
     <div className="stage">
       <TurnNav links={links} activeId={activeId} onSelect={jumpTo} />
@@ -308,6 +309,12 @@ export function Transcript({ session, positions }: { session: Session; positions
               {session.turns.map((t) => (
                 <TurnView key={t.id} turn={t} session={session} />
               ))}
+              {preparing && (
+                <section className="turn preparing-turn">
+                  <UserView block={{ kind: "user", ...preparing, pending: true }} />
+                  <div className="turnfoot live" role="status"><span className="pulse" />{session.workingLabel}</div>
+                </section>
+              )}
             </>
           )}
         </div>

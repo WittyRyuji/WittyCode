@@ -301,6 +301,29 @@ test("session: messages queued while connecting or running are shown in order, a
   assert.equal(s.sessions.c1.queued, undefined);
 });
 
+test("a handoff takes only the submitted draft and puts it back before newer text on failure", () => {
+  let s = withConversation();
+  const file = { id: "sent", kind: "text", name: "sent.txt" };
+  const added = { id: "new", kind: "text", name: "new.txt" };
+  const preparing = { id: "q1", text: "  first draft  ", attachments: [file] };
+  s.sessions.c1 = { ...s.sessions.c1, draft: preparing.text, attachments: [file, added] };
+  const acceptance = ["session", { id: "c1", patch: { preparing, mark: "running" } }];
+  s = play(s, acceptance).state;
+  assert.equal(s.sessions.c1.draft, "");
+  assert.deepEqual(s.sessions.c1.attachments, [added]);
+  assert.equal(s.sessions.c1.turns.length, 0, "the preview is not a recorded turn");
+  assert.equal(s.sessions.c1.preparing, preparing);
+  s.sessions.c1 = { ...s.sessions.c1, draft: preparing.text };
+  s = play(s, acceptance).state;
+  assert.equal(s.sessions.c1.draft, preparing.text, "a repeated metadata patch does not consume the next draft");
+  s.sessions.c1 = { ...s.sessions.c1, draft: "second draft" };
+  s = play(s, ["restore", { id: "c1", text: preparing.text, attachments: [file, added] }]).state;
+  s = play(s, ["session", { id: "c1", patch: { preparing: null, mark: "ready" } }]).state;
+  assert.equal(s.sessions.c1.preparing, undefined);
+  assert.equal(s.sessions.c1.draft, "  first draft  \n\nsecond draft");
+  assert.deepEqual(s.sessions.c1.attachments, [file, added]);
+});
+
 test("a steer in a running turn is a user block marked steer, dashed (pending) until the engine has taken it in", () => {
   let s = withConversation();
   const turn = (pending) => ({

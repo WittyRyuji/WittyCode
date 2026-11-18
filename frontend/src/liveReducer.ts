@@ -327,10 +327,19 @@ export function applyInit(s: LiveData, init: InitResult): Partial<LiveData> {
 function onSession(s: LiveData, e: Events["session"]): Partial<LiveData> {
   if (!s.tabs.includes(e.id)) return {}; // a conversation that is not (or no longer) open
   const before = s.sessions[e.id] ?? newConversation(e.id);
-  const { handoff, queued, ...rest } = e.patch;
+  const { handoff, queued, preparing, ...rest } = e.patch;
   const next: Session = { ...before, ...rest, id: e.id };
   if ("handoff" in e.patch) next.handoff = handoff ?? undefined;
   if ("queued" in e.patch) next.queued = queued && queued.length > 0 ? queued : undefined;
+  if ("preparing" in e.patch) {
+    next.preparing = preparing ?? undefined;
+    if (preparing && preparing.id !== before.preparing?.id) {
+      // Python accepted this specific submission. Leave anything typed or attached afterwards alone.
+      if (before.draft === preparing.text) next.draft = "";
+      const sent = new Set(preparing.attachments.map((a) => a.id));
+      next.attachments = before.attachments.filter((a) => !sent.has(a.id));
+    }
+  }
   const patch: Partial<LiveData> = { sessions: { ...s.sessions, [e.id]: next } };
   if (s.pendingSelect === e.id) {
     patch.currentId = e.id;

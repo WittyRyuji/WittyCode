@@ -91,6 +91,45 @@ def test_running_turn_keeps_policy_and_queued_turn_applies_latest(tmp_path):
     asyncio.run(go())
 
 
+def test_stopping_preset_cleanup_returns_the_prepared_message_and_settles_send(tmp_path, monkeypatch):
+    async def go():
+        core, fake, events, _, _ = await ready_core(tmp_path)
+        task = None
+        try:
+            cid, main = await open_fusion(core, tmp_path)
+            await configure(core, worker=SOL)
+            entered = asyncio.Event()
+
+            async def closing_old_experts():
+                entered.set()
+                await asyncio.Event().wait()
+
+            monkeypatch.setattr(main, "release_inactive_acp", closing_old_experts)
+            text = "  Keep the original draft  "
+            task = asyncio.create_task(core.call("session.send", {"id": cid, "text": text}))
+            await asyncio.wait_for(entered.wait(), 5)
+            assert any(event["id"] == cid and (event["patch"].get("preparing") or {}).get("text") == text
+                       for event in events.of("session"))
+            assert not main.transcript.turns and not fake.requests
+            await core.call("session.stop", {"id": cid})
+            with pytest.raises(AppError, match="已停止"):
+                await task
+            conv = core._by_cid[cid]
+            assert conv.preparing is None and conv.switch_task is None
+            assert events.last("restore")["text"] == text
+            assert not main.transcript.turns and not fake.requests
+            fake.script(say("A new explicit send succeeded."))
+            assert (await core.call("session.send", {"id": cid, "text": text}))["ok"]
+            await finish_turn(main)
+            assert len(fake.requests) == 1
+        finally:
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            await core.shutdown()
+    asyncio.run(go())
+
+
 def test_expert_effort_only_change_reuses_owner_without_main_compaction(tmp_path):
     async def go():
         core, fake, _, _, _ = await ready_core(tmp_path)

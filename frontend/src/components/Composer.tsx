@@ -225,9 +225,11 @@ export function Composer() {
       : READY_PLACEHOLDER
     : dead
       ? "连接已断开，重新连接后才能继续。"
-      : running
-        ? runningPlaceholder(followUp)
-        : READY_PLACEHOLDER;
+      : session.preparing
+        ? "正在交接，可先写下一条…"
+        : running
+          ? runningPlaceholder(followUp)
+          : READY_PLACEHOLDER;
 
   useEffect(() => {
     const el = area.current;
@@ -293,8 +295,8 @@ export function Composer() {
     }
     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
-      // Ctrl+Enter does the other one of the two things a message typed during a turn can do.
-      send(session.id, e.ctrlKey || e.metaKey ? otherHow(followUp) : followUp);
+      // A handoff has not started the model turn; keep a new draft rather than pretending to steer or queue it.
+      if (!session.preparing) send(session.id, e.ctrlKey || e.metaKey ? otherHow(followUp) : followUp);
     } else if (e.key === "Escape" && running) {
       e.preventDefault();
       stop(session.id);
@@ -440,7 +442,7 @@ export function Composer() {
           <div className="bar-actions">
           {running ? (
             <>
-              {hasContent &&
+              {hasContent && !session?.preparing &&
                 [otherHow(followUp), followUp].map((how) => (
                   <Tip key={how} text={`${HOW[how].what}${how === followUp ? "（Enter）" : "（Ctrl+Enter）"}`} side="top">
                     <button type="button" className={`send how${how === followUp ? "" : " alt"}`} onClick={() => session && send(session.id, how)} aria-label={HOW[how].label}>
