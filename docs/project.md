@@ -21,6 +21,8 @@ WittyCode：Windows 上的编程代理桌面应用，Python 3.11 + PySide6 + Qt 
 | `frontend/` | 界面的全部：React 19 + TS + Vite + zustand。所有用户动作在 `src/store.ts`，对 Python 的契约在 `src/bridge.ts` / `src/transport.ts`，数据结构在 `src/types.ts`（camelCase，和 `core/viewmodel.py` 对应） |
 | `desktop/ui/app.py` | 入口：命令行（`--settings` / `--project` / `--page` / `--debug`）、QApplication、qasync 事件循环、日志 |
 | `desktop/ui/pdfview.py` | 侧栏预览 PDF：`PdfReader` 用 QtPdf 从内存读文档、逐页画成 PNG 的 `data:` 图（`pages` 尺寸、`page_image(路径, 页, 宽)`），只缓存最后一个文档，不锁文件；失败是一句中文 `FileProblem` |
+| `desktop/ui/imageview.py` | 侧栏预览页面画不了的图片：`picture_png(路径)` 用 `QImageReader` 读 TIFF／TGA／PBM／ICNS／SVGZ 等并转成 PNG 的 `data:` 图，限文件大小和像素数，只取第一帧；失败是一句中文 `FileProblem` |
+| `desktop/ui/videoview.py` | 侧栏预览视频：`VideoView` 用 Qt Multimedia 解码一个本地视频，把画面缩小转成 JPEG 逐帧交给页面（每秒最多 20 帧，不排队），带播放、暂停、跳转、音量；一次只开一个，关闭时清空媒体源而不调 `stop()`；见「侧栏预览图片与视频」一条 |
 | `desktop/ui/shell.py` | 无边框主窗口 `MainWindow` 和 QWebChannel 桥（页面 → Python `backend.call`，回答 `backend.reply`，推送 `backend.event`）；`QtPlatform`：文件对话框、无边框窗口的移动 / 缩放（`startSystemMove/Resize`）、缩略图、系统浏览器；页面锁定（OTR profile、禁跳转、链接交给系统浏览器） |
 | `desktop/ui/winframe.py` | Windows 上无边框窗口的阴影（`WS_THICKFRAME` + `DwmExtendFrameIntoClientArea`）、Windows 11 的圆角和自带边框的关闭；`frame_kind` 告诉页面画哪种圆角的描边 |
 | `desktop/ui/{attachments,imaging,theme,tasks}.py` | 剪贴板图片 / 拖放数据 → `Attachment`（含 `claim_drag`）；图片缩放压缩、缩略图；深浅色判断；后台任务收尾和 qasync 挂起定时器的清理（`kill_pending_timers`） |
