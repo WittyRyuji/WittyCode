@@ -15,7 +15,7 @@ from dataclasses import asdict, dataclass, field, fields, replace
 from functools import cached_property
 from typing import TYPE_CHECKING, Any
 
-from desktop.core.fusion import gates, identity, metrics
+from desktop.core.fusion import gates, identity, inject, metrics
 from desktop.core.fusion.drive.fingerprint import Manifest, _GitError, _head, changed_since, fingerprint, workspace_kind
 from desktop.core.fusion.drive.retention import Retention
 from desktop.core.fusion.drive.store import Drive, DriveError, Record
@@ -25,6 +25,7 @@ from desktop.core.fusion.protocol import (
 from desktop.core.fusion.reasoning import configured_effort
 from desktop.core.fusion.registry import Expert, FusionError, FusionRegistry, Policy
 from desktop.core.harness.loop import Outcome, clip_tokens
+from desktop.core.memory import recall
 from desktop.core.session_state import SessionState
 from desktop.core.transcript import TextBlockView, Transcript
 from desktop.core.usage import Tokens
@@ -448,6 +449,74 @@ class FusionRuntime:
             self._drive_warned = True
             self.parent.transcript.add_notice("Fusion Drive 暂不可用；委派仍可继续。")
             self.parent._changed()
+
+    def _inject_from_drive(self, profile: identity.Identity, task: inject.Task, workstream: str,
+                           own_brief: Record | None, memory: list[str]) -> inject.Pack:
+        drive, project = self.drive, self.parent.project
+        stamp = (lambda paths: fingerprint(project, paths)) if project is not None else None
+        candidates = drive.candidates(shared=self.parent.manager.settings.fusion_drive_shared,
+                                      retention=self.retention(), fingerprint=stamp)
+        paths = tuple(os.path.normcase(path).replace("\\", "/") for path in task.paths)
+        lane = workstream.casefold()
+        labels = (lane, *(f"{role}-{lane}" for role in ("coder", "runner", "qualitysampler", "observer")))
+        # A stored label ends at the status or summary, not at an arbitrary matching suffix.
+        prefixes = tuple(f"{label}{end}" for label in labels for end in (": ", " ["))
+        maps, same_lane, same_path = [], [], []
+        foreign: set[str] = set()
+        for candidate in sorted(candidates, key=lambda item: item.record.updated, reverse=True):
+            record = candidate.record
+            if own_brief is not None and record.id == own_brief.id:
+                continue
+            record_paths = (os.path.normcase(path).replace("\\", "/") for path in record.paths)
+            overlaps = any(FusionRegistry._overlaps(left, right) for left in record_paths for right in paths)
+            summary = record.summary
+            if record.kind == "map":
+                if overlaps:
+                    suffix = "(needs review: files changed since this was written)" if candidate.stale else ""
+                    maps.append(inject.Entry(record.id, summary, record.pointers, suffix=suffix))
+                continue
+            if profile.name == "QualitySampler" and not (
+                record.kind in ("run", "artifact") or (record.kind == "report" and summary.startswith("Runner-"))
+            ):
+                continue
+            entry = inject.Entry(record.id, summary, record.pointers)
+            if summary.casefold().startswith(prefixes):
+                same_lane.append(entry)
+            elif overlaps:
+                same_path.append(entry)
+            if candidate.foreign:
+                foreign.add(record.id)
+        pack = inject.build(profile.name, profile.instructions, task, map_entries=maps,
+                            task_entries=same_lane + same_path, memory=memory)
+        for record_id in pack.used:
+            if record_id in foreign:
+                drive.note_shared_hit(record_id)
+        return pack
+
+    def _brief_memory(self, brief: Brief) -> list[str]:
+        memory = self.parent.manager.memory
+        if memory is None or not memory.enabled(self.parent.engine) or not memory.recall():
+            return []
+        message = "\n".join((brief.goal, brief.acceptance, *brief.paths))
+        try:
+            notes = recall.pick(memory.store.candidates(str(self.parent.project) if self.parent.project else None), message)
+        except (OSError, sqlite3.Error, ValueError):
+            return []
+        return recall.render_notes(notes)[0]
+
+    async def _expert_pack(self, profile: identity.Identity, brief: Brief, current: str,
+                           own_brief: Record | None) -> inject.Pack:
+        memory = (await asyncio.to_thread(self._brief_memory, brief)
+                  if profile.name != "Observer" and self.parent.manager.memory is not None else [])
+        budget = ", ".join(f"{count} {unit[:-1] if count == 1 else unit}"
+                           for unit in ("steps", "seconds") if (count := brief.budget.get(unit)) is not None)
+        task = inject.Task(brief.goal, brief.constraints, brief.acceptance, brief.paths, budget, request=current)
+        if self.drive_enabled and profile.name in ("Coder", "QualitySampler"):
+            try:
+                return await asyncio.to_thread(self._inject_from_drive, profile, task, brief.workstream, own_brief, memory)
+            except (DriveError, OSError, sqlite3.Error, ValueError):
+                self._drive_notice()
+        return inject.build(profile.name, profile.instructions, task, memory=memory)
 
     async def read_record(self, pointer: str, *, used: set[str] | None = None) -> Outcome:
         if not self.drive_enabled:
@@ -990,24 +1059,31 @@ class FusionRuntime:
             current = self.parent._turn.user_block.text if self.parent._turn is not None and self.parent._turn.user_block is not None else ""
             goal = self.parent.saved.goal.get("text", "")
             plan = self.parent.saved.plan.get("text", "") if self.parent.saved.plan.get("status") == "approved" else ""
-            inherited = (f"\n\nCurrent user request:\n{current}" if current else "")
+            pack = None
+            if profile is not None and brief is not None and self.brief_enabled and self.gate("inject"):
+                pack = await self._expert_pack(profile, brief, current, brief_write.result() if brief_write else None)
+                if reporting is not None:
+                    reporting.used.update(pack.used)
+            inherited = (f"\n\nCurrent user request:\n{current}" if current and pack is None else "")
             inherited += (f"\n\nActive goal:\n{goal}" if isinstance(goal, str) and goal else "")
             inherited += (f"\n\nPlan approved by the user for this conversation (later user directions may refine it):\n{plan}" if plan else "")
             empty_paths = "none" if profile else "whole project (exclusive)"
             prompt = (f"Your responsibility / deliverable: {expert.label}.\n"
                       f"Declared write paths: {', '.join(write_paths) or empty_paths}.\n"
                       "This work may span multiple files. Other experts may run concurrently; do not edit outside these "
-                      "write paths or undo their changes. Report a needed scope expansion to the main agent.\n\n"
-                      + task + inherited + "\n\n"
+                      "write paths or undo their changes. Report a needed scope expansion to the main agent."
+                      + ("\n\n" + task if pack is None else "") + inherited + "\n\n"
                       "Report what you changed, checks actually run, evidence and anything unfinished. "
                       "Do not delegate further. The main agent will review your result." + handoff)
-            if profile is not None:
-                prompt = (profile.instructions + "\n\n" if profile.instructions else "") + prompt
+            if pack is None and profile is not None and profile.instructions:
+                prompt = profile.instructions + "\n\n" + prompt
             if child._fusion_read_only:
                 prompt = "This brief is read-only. Do not change anything.\n\n" + prompt
+            if pack is not None:
+                prompt = pack.text + "\n\n" + prompt
             if reporting is not None:
                 prompt += "\n\nFinish with submit_report. Rate each Fusion Drive record you used by record ID."
-            if not child.send_prompt(prompt):
+            if not child.send_prompt(prompt, packed_context=pack is not None):
                 raise FusionError("The expert session is not ready.")
             started = True
             seconds = self.registry.policy.max_seconds

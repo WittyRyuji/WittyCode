@@ -35,6 +35,7 @@ class Entry:
     id: str
     text: str
     pointers: tuple[str, ...] = ()
+    suffix: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,11 +87,14 @@ def _entries(entries: Sequence[Entry]) -> tuple[tuple[str, str], ...]:
     for entry in entries:
         pointers = ", ".join(entry.pointers) or "(none)"
         header = f"- ID: {entry.id}\n  Pointers: {pointers}"
-        if estimate_text(header) > ENTRY_TOKENS:
+        bare = f"{header}\n{entry.suffix}" if entry.suffix else header
+        if estimate_text(bare) > ENTRY_TOKENS:
             continue  # An entry with unusable pointers must not be rated as if it were given.
-        room = ENTRY_TOKENS - estimate_text(header + "\n")
+        # Keep the review marker even when the summary needs clipping.
+        tail = " " + entry.suffix if entry.suffix else ""
+        room = ENTRY_TOKENS - estimate_text(header + "\n" + tail)
         body = clip_tokens(entry.text, room) if room > 0 else ""
-        result.append((entry.id, f"{header}\n{body}" if body and estimate_text(body) <= room else header))
+        result.append((entry.id, f"{header}\n{body}{tail}" if body and estimate_text(body) <= room else bare))
     return tuple(result)
 
 

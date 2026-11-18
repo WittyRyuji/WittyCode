@@ -263,6 +263,7 @@ def build_instructions(
     answer_language: str = "auto",
     thinking_language: str = "",
     sections: dict[str, str] | None = None,
+    include_project_rules: bool = True,
 ) -> str:
     """``servers``: ``(name, instructions)`` of the MCP servers connected to the conversation. ``notes``, when given, gets
     the sentences (Chinese, for the user) about instruction files that did not fit whole. ``plan``: the Plan mode (nothing
@@ -287,7 +288,7 @@ def build_instructions(
     global_rules = global_instructions()
     if global_rules:
         fields["customization:global"] = "WittyCode global AGENTS.md instructions (project rules take precedence):\n" + global_rules
-    agents = load_agents(project)
+    agents = load_agents(project) if include_project_rules else AgentsContext()
     for index, item in enumerate(agents.files):
         nearest = index == len(agents.files) - 1
         where = "the working folder's" if nearest else "a parent folder's"

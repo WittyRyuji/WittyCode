@@ -796,7 +796,8 @@ class ChatGPTController:
                 return f"ChatGPT 只能读 PDF 里的文字，「{item.name}」里没有提取到文字：请换成图片或文本文件再发送。"
         return None
 
-    def send_prompt(self, text: str, attachments: Sequence[Attachment] = (), *, approved_plan: str = "") -> bool:
+    def send_prompt(self, text: str, attachments: Sequence[Attachment] = (), *, approved_plan: str = "",
+                    packed_context: bool = False) -> bool:
         text = text.strip()
         attachments = tuple(attachments)
         if attachments and not text:
@@ -822,7 +823,9 @@ class ChatGPTController:
         self.last_turn_end = None
         self._turn_model, self._turn_reasoning, self._turn_mode = self.model, self.reasoning, self.mode
         self._turn_start = len(self.saved.items)  # even setup failures belong to a new boundary, never the previous turn
-        context = self.manager.hooks.prompt(PromptEvent(self.engine, self.project, text, frozenset(self.recalled), first=bool(self.preface)))
+        # A Fusion pack already carries brief-based recall instead of the memory preface.
+        preface = "" if packed_context else self.preface
+        context = self.manager.hooks.prompt(PromptEvent(self.engine, self.project, text, frozenset(self.recalled), first=bool(preface)))
         sent, carried, outgoing = text, None, attachments
         handoff = self.handoff if self.handoff is not None and not self.handoff.empty else None
         if handoff is not None:
@@ -830,7 +833,7 @@ class ChatGPTController:
             carried = (handoff.carried, handoff.truncated) if handoff.carried else None
             outgoing = tuple(handoff.attachments) + attachments
         approval = "The user explicitly approved this plan for execution:\n\n" + approved_plan if approved_plan else ""
-        sent += wrap_context(self.preface, context.text, approval)  # (after the message: see core/context_envelope)
+        sent += wrap_context(preface, context.text, approval)  # (after the message: see core/context_envelope)
         self.transcript.output_probe = self._output_so_far
         turn = self.transcript.start_turn(text, attachments, handoff=carried)
         if context.notice:
@@ -848,6 +851,11 @@ class ChatGPTController:
         self._notify("state")
         self._changed()
         return True
+
+    def _include_project_rules(self) -> bool:
+        parent_fusion = getattr(self._fusion_parent, "_fusion", None)
+        return not (self._fusion_identity is not None and self._fusion_identity.name in ("Runner", "Observer")
+                    and parent_fusion is not None and parent_fusion.brief_enabled and parent_fusion.gate("inject"))
 
     async def _run_turn(self, turn: Turn, sent: str, attachments: Sequence[Attachment]) -> None:
         failure: BaseException | None = None
@@ -885,6 +893,7 @@ class ChatGPTController:
                 answer_language=self.manager.settings.answer_language,
                 thinking_language=self.manager.settings.thinking_language,
                 sections=sections,
+                include_project_rules=self._include_project_rules(),
             )
             if self._fusion is not None:
                 fusion_instructions = self._fusion.instructions()
@@ -1797,6 +1806,7 @@ class _Watch(Observer):
             build_instructions, ctl.project, model=ctl.running_model, level=ctl.autonomy, servers=self.tools.servers(),
             notes=notes, plan=ctl._turn_mode == PLAN, skills=found, think_chinese=settings.think_chinese,
             answer_language=settings.answer_language, thinking_language=settings.thinking_language, sections=sections,
+            include_project_rules=ctl._include_project_rules(),
         )
         if ctl._fusion is not None:
             own = ctl._fusion.instructions()
