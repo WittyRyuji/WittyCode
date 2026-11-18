@@ -4,11 +4,13 @@ from __future__ import annotations
 import asyncio
 import json
 import shlex
+from types import SimpleNamespace
 
 import pytest
 
-from desktop.core.fusion.acp import guard_config
-from desktop.core.fusion.acp_server import PREFIX, hook
+from desktop.core.devin.policy import CANCELLED
+from desktop.core.fusion.acp import AcpRun, guard_config
+from desktop.core.fusion.acp_server import MCP_CALL, MCP_LIST, PREFIX, SERVER, hook
 from desktop.core.fusion.registry import Policy
 from tests.app_support import ready_core
 from tests.chatgpt_support import finish_turn
@@ -16,15 +18,50 @@ from tests.fake_responses import call, say
 from tests.fakes import until
 
 
-def test_guard_denies_native_tools_and_keeps_only_the_private_bridge(tmp_path):
+def test_guard_denies_native_tools_and_keeps_only_the_private_bridge():
     config = guard_config()
-    assert {"read", "write", "edit", "exec", "grep", "glob"} <= set(config["permissions"]["deny"])
+    assert {"read", "write", "edit", "exec", "grep", "glob", "mcp_list_servers", "mcp_read_resource"} <= set(config["permissions"]["deny"])
+    assert config["permissions"]["allow"] == [PREFIX + "*"] and {MCP_LIST, MCP_CALL} <= set(config["permissions"]["ask"])
+    assert {MCP_LIST, MCP_CALL} <= set(guard_config(tool_free=True)["permissions"]["deny"])
     assert config["subagents_enabled"] is False
     assert all(not value for value in config["read_config_from"].values())
     for name in ("exec", "read", "mcp__other__run", "run_subagent", "unknown"):
         result, code = hook({"hook_event_name": "PreToolUse", "tool_name": name})
         assert code == 2 and result["decision"] == "block"
-    assert hook({"hook_event_name": "PreToolUse", "tool_name": PREFIX + "read_file"}) == ({}, 0)
+
+
+@pytest.mark.parametrize(("name", "arguments", "allowed"), [
+    (MCP_LIST, {"server_name": SERVER}, True),
+    (MCP_LIST, None, False),
+    (MCP_LIST, {}, False),
+    (MCP_LIST, {"server_name": "other"}, False),
+    (MCP_CALL, {"server_name": SERVER, "tool_name": "read_file", "arguments": {}}, True),
+    (MCP_CALL, {"server_name": SERVER, "tool_name": "read_file", "arguments": []}, False),
+    (MCP_CALL, {"server_name": SERVER, "tool_name": "exec", "arguments": {}}, False),
+    (MCP_CALL, {"server_name": "other", "tool_name": "read_file", "arguments": {}}, False),
+    (PREFIX + "read_file", None, True),
+    (PREFIX + "unregistered", None, False),
+    ("exec", {"server_name": SERVER, "tool_name": "read_file", "arguments": {}}, False),
+])
+def test_acp_wrappers_require_an_exact_private_target_at_every_check(monkeypatch, name, arguments, allowed):
+    run = AcpRun(SimpleNamespace())
+    run.session, run.active = "private", True
+    run.tools = SimpleNamespace(known=lambda tool: tool == "read_file")
+    call = {"toolCallId": name + ":0#1", "rawInput": arguments}
+    params = {"sessionId": run.session, "toolCall": call, "options": [{"kind": "allow_always", "optionId": "always"}]}
+    assert asyncio.run(run._request("session/request_permission", params, 0)) == CANCELLED
+    params["options"].append({"kind": "allow_once", "optionId": "once"})
+    expected = {"outcome": {"outcome": "selected", "optionId": "once"}} if allowed else CANCELLED
+    assert asyncio.run(run._request("session/request_permission", params, 1)) == expected
+    monkeypatch.setattr("desktop.core.fusion.acp_server.request", lambda method, payload: asyncio.run(run.dispatch(method, payload)))
+    payload = {"hook_event_name": "PreToolUse", "tool_name": name, "tool_input": arguments}
+    assert hook(payload)[1] == (0 if allowed else 2)
+    run._notify("session/update", {"sessionId": run.session, "update": {"sessionUpdate": "tool_call", **call}})
+    assert bool(run.violation) is not allowed
+    run.active = False
+    assert hook(payload)[1] == 2
+    run.active, run.tool_free = True, True
+    assert hook(payload)[1] == 2
 
 
 @pytest.mark.parametrize("python", [r"C:\Tools\Python\python.exe", r"C:\Tools With Spaces\python.exe", "C:/Tools' Profile/python.exe"])
@@ -40,7 +77,7 @@ def test_own_main_can_delegate_to_acp_and_forward_approval_and_restore_context(t
     from tests.fusion_acp_support import make_guarded_engine
 
     async def go():
-        harness = make_guarded_engine(tmp_path, FAKE_FUSION_BRIDGE_NOTICE="id-only")
+        harness = make_guarded_engine(tmp_path, FAKE_FUSION_BRIDGE_NOTICE="id-only", FAKE_FUSION_MCP_WRAPPERS="1")
         core, model, _, _, _ = await ready_core(tmp_path, devin_engine=harness.engine)
         try:
             await until(lambda: any(item["source"] == "devin" for item in core.catalog.models), timeout=20)

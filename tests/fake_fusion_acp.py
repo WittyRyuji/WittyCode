@@ -9,7 +9,7 @@ import shlex
 import sys
 from pathlib import Path
 
-from desktop.core.fusion.acp_server import PREFIX
+from desktop.core.fusion.acp_server import MCP_CALL, MCP_LIST, PREFIX, SERVER
 from tests.fake_devin import HOME, Fake, RpcError
 
 
@@ -20,15 +20,20 @@ class GuardedFake(Fake):
         self.ids = 0
         self.replayed = {}
 
+    def config(self):
+        return json.loads(Path(sys.argv[sys.argv.index("--config") + 1]).read_text(encoding="utf-8"))
+
+    async def run_hook(self, sid, event, **fields):
+        command = self.config()["hooks"][event][0]["hooks"][0]["command"]
+        process = await asyncio.create_subprocess_exec(*shlex.split(command), stdin=asyncio.subprocess.PIPE,
+                                                      stdout=asyncio.subprocess.PIPE)
+        out, _ = await process.communicate(json.dumps({"hook_event_name": event, "session_id": sid, **fields}).encode())
+        return process.returncode, json.loads(out)
+
     async def bridge(self, sid, params):
-        config = json.loads(Path(sys.argv[sys.argv.index("--config") + 1]).read_text(encoding="utf-8"))
-        assert {"read", "write", "edit", "exec", "grep", "glob"} <= set(config["permissions"]["deny"])
+        assert {"read", "write", "edit", "exec", "grep", "glob"} <= set(self.config()["permissions"]["deny"])
         if os.environ.get("FAKE_FUSION_NO_GUARD") != "1":
-            command = config["hooks"]["SessionStart"][0]["hooks"][0]["command"]
-            process = await asyncio.create_subprocess_exec(*shlex.split(command), stdin=asyncio.subprocess.PIPE,
-                                                          stdout=asyncio.subprocess.PIPE)
-            out, _ = await process.communicate(json.dumps({"hook_event_name": "SessionStart", "session_id": sid}).encode())
-            assert process.returncode == 0, out
+            assert await self.run_hook(sid, "SessionStart") == (0, {})
         if os.environ.get("FAKE_FUSION_NO_BRIDGE") == "1":
             return
         command = params["mcpServers"][0]
@@ -51,6 +56,17 @@ class GuardedFake(Fake):
         child.stdin.write((json.dumps({"jsonrpc": "2.0", "id": self.ids if identifier is None else identifier, "method": method, "params": params}) + "\n").encode())
         await child.stdin.drain()
         return json.loads(await child.stdout.readline())
+
+    async def approve_tool(self, sid, name, arguments):
+        call = {"toolCallId": name + ":0#1", "title": "Private MCP call", "kind": "other", "rawInput": arguments}
+        if os.environ.get("FAKE_FUSION_BRIDGE_NOTICE") != "id-only":
+            call["_meta"] = {"cognition.ai/inferenceToolName": name}
+        self.update(sid, {"sessionUpdate": "tool_call", **call})
+        answer = await self.ask("session/request_permission", {"sessionId": sid, "toolCall": call, "options": [
+            {"optionId": "always", "kind": "allow_always"}, {"optionId": "once", "kind": "allow_once"},
+        ]})
+        assert answer == {"outcome": {"outcome": "selected", "optionId": "once"}}, answer
+        assert await self.run_hook(sid, "PreToolUse", tool_name=name, tool_input=arguments) == (0, {})
 
     async def m_session_new(self, params):
         result = super().m_session_new(params)
@@ -119,17 +135,13 @@ class GuardedFake(Fake):
                 await turn["cancel"].wait()
                 stop = "cancelled"
             if tool:
-                name = PREFIX + tool
-                # Exercise notifications and approvals as well as actual MCP dispatch. Tool IDs can carry the name
-                # even when the provider does not attach inferenceToolName to every ACP message.
-                call = {"toolCallId": name + ":0#1", "title": "Private MCP call", "kind": "other"}
-                if os.environ.get("FAKE_FUSION_BRIDGE_NOTICE") != "id-only":
-                    call["_meta"] = {"cognition.ai/inferenceToolName": name}
-                self.update(sid, {"sessionUpdate": "tool_call", **call})
-                answer = await self.ask("session/request_permission", {"sessionId": sid, "toolCall": call, "options": [
-                    {"optionId": "always", "kind": "allow_always"}, {"optionId": "once", "kind": "allow_once"},
-                ]})
-                assert answer == {"outcome": {"outcome": "selected", "optionId": "once"}}, answer
+                if os.environ.get("FAKE_FUSION_MCP_WRAPPERS") == "1":
+                    await self.approve_tool(sid, MCP_LIST, {"server_name": SERVER})
+                    manifest = (await self.mcp(sid, "tools/list", {}))["result"]["tools"]
+                    assert any(item["name"] == tool for item in manifest)
+                    await self.approve_tool(sid, MCP_CALL, {"server_name": SERVER, "tool_name": tool, "arguments": arguments})
+                else:
+                    await self.approve_tool(sid, PREFIX + tool, arguments)
                 result = await self.mcp(sid, "tools/call", {"name": tool, "arguments": arguments})
                 answer = json.dumps(result)
             else:

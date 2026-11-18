@@ -18,6 +18,7 @@ class AcpSummary(AcpRun):
     """Ephemeral native session: no task tools, no persisted main-session checkpoint and no execution replay."""
 
     acp_args = ("--agent-type", "summarizer")
+    tool_free = True
 
     def __init__(self, manager):
         host = SimpleNamespace(manager=manager, session_id="summary-" + uuid.uuid4().hex,

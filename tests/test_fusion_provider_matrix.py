@@ -43,7 +43,7 @@ def test_fusion_provider_matrix(tmp_path, main_runner, worker_runner, light_runn
                                       environ={"MATRIX_TEST_KEY": "test-fixture"}, registry_env=lambda: {})
             http = HttpClient(urllib.request.build_opener(urllib.request.ProxyHandler({})))
             engine = make_engine(tmp_path, plan, api=ApiBackend(providers, http=http))
-            devin = make_guarded_engine(tmp_path, FAKE_FUSION_BRIDGE_NOTICE="id-only")
+            devin = make_guarded_engine(tmp_path, FAKE_FUSION_BRIDGE_NOTICE="id-only", FAKE_FUSION_MCP_WRAPPERS="1")
             core, _, _, _, _ = await ready_core(tmp_path, chatgpt_engine=engine, devin_engine=devin.engine, providers=providers)
             try:
                 await until(lambda: core.catalog.find(DEVIN) and core.catalog.find(PLAN), timeout=20)
