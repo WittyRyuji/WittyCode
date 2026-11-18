@@ -10,9 +10,10 @@ from dataclasses import dataclass, field, fields, replace
 from functools import cached_property
 from typing import TYPE_CHECKING, Any
 
-from desktop.core.fusion import gates
+from desktop.core.fusion import gates, identity
 from desktop.core.fusion.drive.fingerprint import fingerprint
 from desktop.core.fusion.drive.store import Drive, DriveError, Record
+from desktop.core.fusion.protocol import Brief
 from desktop.core.fusion.reasoning import configured_effort
 from desktop.core.fusion.registry import Expert, FusionError, FusionRegistry, Policy
 from desktop.core.harness.loop import Outcome
@@ -22,6 +23,8 @@ from desktop.core.usage import Tokens
 
 if TYPE_CHECKING:
     from desktop.core.chatgpt.controller import ChatGPTController
+
+_BUDGET_EXCEEDED = "The expert exceeded its {unit} budget. The estimate or the split was wrong; review the work before retrying."
 
 
 def native_model(page_id: str) -> str:
@@ -40,7 +43,7 @@ class ExpertView:
 
     @property
     def name(self) -> str:
-        return (self.record.workstream or self.record.scope) + ("（已转交）" if self.record.status == "retired" else "")
+        return self.record.label + ("（已转交）" if self.record.status == "retired" else "")
 
     @property
     def role(self) -> str:
@@ -92,9 +95,28 @@ class FusionRuntime:
         self._closing = False
         self._drive_warned = False
 
+    def gate(self, name: str) -> bool:
+        """A runtime that is not attached to an application (restored for inspection only) has every gate off."""
+        settings = getattr(getattr(self.parent, "manager", None), "settings", None)
+        return settings is not None and gates.enabled(settings, name)
+
+    @property
+    def brief_enabled(self) -> bool:
+        return self.gate("brief")
+
+    @cached_property
+    def identities(self) -> identity.Identities:
+        from desktop.core.settings import default_settings_path
+
+        loaded = identity.load(default_settings_path().parent / "configs" / "agents")
+        if loaded.problems:
+            self.parent.transcript.add_notice("Fusion identity configuration:\n" + "\n".join(loaded.problems))
+            self.parent._changed()
+        return loaded
+
     @property
     def drive_enabled(self) -> bool:
-        return gates.enabled(self.parent.manager.settings, "drive")
+        return self.gate("drive")
 
     @cached_property
     def drive(self) -> Drive:
@@ -124,8 +146,7 @@ class FusionRuntime:
         return self.drive.put(kind, key, summary, body=body, paths=paths, fingerprint=stamp, open=kind == "brief")
 
     async def _retain_record(self, kind: str, expert: Expert, answer: str, paths: tuple[str, ...], *, evidence: str = "") -> Record | None:
-        workstream = expert.workstream or expert.scope
-        label = f"{workstream} [{expert.status}]" if kind == "report" else workstream
+        label = f"{expert.label} [{expert.status}]" if kind == "report" else expert.label
         preview = " ".join(answer.split(maxsplit=16)[:16])[:240]
         body = answer + ("\n\nEvidence references:\n" + evidence if evidence else "")
         try:
@@ -167,6 +188,9 @@ class FusionRuntime:
 
     def instructions(self) -> str:
         policy = self.registry.policy
+        if self.brief_enabled:
+            return (self.identities.main + "\n\nUse the user's weights as a preference when deciding whether to delegate: "
+                    f"cost x{1.5 - policy.preference / 100:.2f}, efficiency x{0.5 + policy.preference / 100:.2f}.")
         return (
             "Fusion mode: you are the fixed main agent. You own task analysis, planning, delegation and final verification. "
             "For implementation work, assess delegation before doing the whole task yourself: use experts for separable "
@@ -390,11 +414,25 @@ class FusionRuntime:
         self.parent._changed()
         return True
 
-    async def _open(self, view: ExpertView, *, created: bool) -> ChatGPTController:
+    def _expert_effort(self, expert: Expert, profile: identity.Identity | None) -> str | None:
+        if profile is not None and profile.reasoning:
+            info = self.parent.manager.model_info(native_model(expert.model))
+            if info is None or profile.reasoning not in info.efforts:
+                raise FusionError("The identity's reasoning level is not supported by the assigned model.")
+            return profile.reasoning
+        return self.reasoning_for(expert.model, expert.role)
+
+    async def _open(self, view: ExpertView, *, created: bool, profile: identity.Identity | None = None) -> ChatGPTController:
         from desktop.core.chatgpt.controller import ChatGPTController
         from desktop.core.settings import same_folder
 
-        reasoning = self.reasoning_for(view.record.model, view.record.role)
+        if profile is None and view.record.identity:
+            # Opened for viewing (no delegation in hand): the saved identity still decides the tools, because a later
+            # delegation reuses this open conversation.
+            profile = self.identities.get(view.record.identity)
+            if profile is None:
+                raise FusionError("The expert's identity is no longer defined; it was not reopened without its limits.")
+        reasoning = self._expert_effort(view.record, profile)
         if view.controller is not None and view.controller.is_open:
             return view.controller
         parent, expert = self.parent, view.record
@@ -408,7 +446,8 @@ class FusionRuntime:
             raise FusionError("The expert session is already open elsewhere.")
         model = native_model(expert.model)
         child = ChatGPTController(manager=parent.manager, project=parent.project, session_id=expert.id,
-                                  requested_model=model, reasoning=reasoning or "", autonomy=parent.autonomy, _fusion_parent=parent)
+                                  requested_model=model, reasoning=reasoning or "", autonomy=parent.autonomy,
+                                  _fusion_parent=parent, _fusion_identity=profile)
         child.saved.origin = {"app": "fusion", "parent": self.owner}
         parent.manager.controllers.append(child)
         view.controller = child
@@ -479,7 +518,18 @@ class FusionRuntime:
         return next((block.text for block in reversed(turn.blocks)
                      if isinstance(block, TextBlockView) and block.text.strip()), "") if turn else ""
 
-    async def delegate(self, scope: str, model: str, role: str, task: str, paths: tuple[str, ...] | None = None, resume: bool = False) -> Outcome:
+    async def delegate_brief(self, brief: Brief) -> Outcome:
+        if not self.brief_enabled:
+            return Outcome("Structured Fusion delegation is unavailable.", True)
+        profile = self.identities.get(brief.identity)
+        if profile is None or profile.name == "Observer":
+            return Outcome("This identity cannot be delegated by the main agent.", True)
+        policy = self.registry.policy
+        model = policy.workers[0] if profile.role == "worker" else policy.light
+        return await self.delegate(brief.workstream, model, profile.role, brief.text(), brief.paths, brief.resume, brief=brief, profile=profile)
+
+    async def delegate(self, scope: str, model: str, role: str, task: str, paths: tuple[str, ...] | None = None, resume: bool = False,
+                       *, brief: Brief | None = None, profile: identity.Identity | None = None) -> Outcome:
         from desktop.core.harness.outputs import hint
         from desktop.core.harness.tools import ToolError
         from desktop.core.harness.toolset import PLAN_REFUSAL
@@ -497,8 +547,9 @@ class FusionRuntime:
         saved_fusion = self.parent.saved.fusion
         try:
             self.check_budget()
-            expert = (self.registry.assign(scope, model, role) if paths is None
-                      else self.registry.assign_workstream(scope, paths, model, role))
+            expert = (self.registry.assign(scope, model, role) if paths is None else
+                      self.registry.assign_workstream(scope, paths, model, role, identity=profile.name if profile else "",
+                                                      reuse=profile.reuse if profile else True))
             transferred_new = bool(expert.transferred_from and expert.started_at == 0)
             self.registry.begin(expert.id, resume=resume)
             expert.task = task
@@ -538,10 +589,12 @@ class FusionRuntime:
                 # A cancelled waiter must still close a brief written by the worker thread.
                 brief_write = asyncio.create_task(self._retain_record("brief", expert, task, write_paths))
                 await asyncio.shield(brief_write)
-            child = await self._open(view, created=created)
+            child = await self._open(view, created=created, profile=profile)
             if not await child.update_settings(autonomy=self.parent.autonomy, mode="auto",
-                                               reasoning=self.reasoning_for(expert.model, expert.role)):
+                                               reasoning=self._expert_effort(expert, profile)):
                 raise FusionError("The expert could not inherit the main conversation's permissions.")
+            child._fusion_read_only = brief is not None and brief.read_only
+            child._fusion_step_limit = brief.budget.get("steps") if brief is not None else None
             parent_tools = await self.parent._ensure_tools()
             child_tools = await child._ensure_tools()
             child_tools.permission_parent = parent_tools
@@ -554,22 +607,39 @@ class FusionRuntime:
             inherited = (f"\n\nCurrent user request:\n{current}" if current else "")
             inherited += (f"\n\nActive goal:\n{goal}" if isinstance(goal, str) and goal else "")
             inherited += (f"\n\nPlan approved by the user for this conversation (later user directions may refine it):\n{plan}" if plan else "")
-            prompt = (f"Your responsibility / deliverable: {expert.workstream or expert.scope}.\n"
-                      f"Declared write paths: {', '.join(write_paths) or 'whole project (exclusive)'}.\n"
+            empty_paths = "none" if profile else "whole project (exclusive)"
+            prompt = (f"Your responsibility / deliverable: {expert.label}.\n"
+                      f"Declared write paths: {', '.join(write_paths) or empty_paths}.\n"
                       "This work may span multiple files. Other experts may run concurrently; do not edit outside these "
                       "write paths or undo their changes. Report a needed scope expansion to the main agent.\n\n"
                       + task + inherited + "\n\n"
                       "Report what you changed, checks actually run, evidence and anything unfinished. "
                       "Do not delegate further. The main agent will review your result." + handoff)
+            if profile is not None:
+                prompt = (profile.instructions + "\n\n" if profile.instructions else "") + prompt
+            if child._fusion_read_only:
+                prompt = "This brief is read-only. Do not change anything.\n\n" + prompt
             if not child.send_prompt(prompt):
                 raise FusionError("The expert session is not ready.")
             started = True
             assert child._turn_done is not None
-            await asyncio.wait_for(child._turn_done.wait(), timeout=self.registry.policy.max_seconds)
+            seconds = self.registry.policy.max_seconds
+            if brief is not None:
+                seconds = min(seconds, brief.budget.get("seconds", seconds))
+            await asyncio.wait_for(child._turn_done.wait(), timeout=seconds)
             after = child.usage
             delta = after if before is None else (after.since(before) if after is not None else None)
             tokens = delta.total if delta is not None else None
             record = child.saved.turns[-1] if child.saved.turns else None
+            if brief is not None and record is not None and record.start != child._turn_start:
+                record = None  # An early failure may discard the current turn, but not the previous one.
+            end = child.last_turn_end
+            if child._fusion_step_limit is not None and end is not None and end.reason == "step_limit" and end.steps >= child._fusion_step_limit:
+                self._active.pop(expert.id, None)
+                self.registry.finish(expert.id, status="interrupted", tokens=tokens)
+                self._checkpoint()
+                outcome = Outcome(_BUDGET_EXCEEDED.format(unit="step"), True)
+                return outcome
             if record is None or record.status != "done" or child.stop_hook_blocked:
                 self._active.pop(expert.id, None)
                 self.registry.finish(expert.id, status="failed", tokens=tokens)
@@ -613,11 +683,13 @@ class FusionRuntime:
                     self.registry.unmetered = self.registry.had_unknown = True
                 self._checkpoint()
             detail = str(error) if isinstance(error, FusionError) else type(error).__name__
-            outcome = Outcome(f"The expert stopped without a confirmed result: {detail}. Check the workspace before retrying.", True)
+            message = (_BUDGET_EXCEEDED.format(unit="time") if brief is not None and started and isinstance(error, TimeoutError)
+                       else f"The expert stopped without a confirmed result: {detail}. Check the workspace before retrying.")
+            outcome = Outcome(message, True)
             return outcome
         finally:
             try:
-                if brief_write is not None and (brief := await brief_write) is not None:
+                if brief_write is not None and (stored_brief := await brief_write) is not None:
                     try:
                         if not answer and started and child is not None:
                             answer = self._final_text(child)
@@ -629,7 +701,7 @@ class FusionRuntime:
                         if report is not None and outcome is not None:
                             outcome.output += f"\nFusion Drive report {report.id}: {', '.join(report.pointers)}"
                     finally:
-                        await self._close_brief(brief)
+                        await self._close_brief(stored_brief)
             finally:
                 self._active.pop(expert.id, None)
                 self._delegations.discard(running)

@@ -148,7 +148,7 @@ class AcpRun:
             name, args = params.get("name"), params.get("arguments", {})
             if not isinstance(name, str) or not isinstance(args, dict) or not self.tools.known(name):
                 raise ValueError("Unknown Fusion tool.")
-            if self.steps >= self.host.manager.settings.max_steps:
+            if self.steps >= self.host.turn_step_limit():
                 self.boundary = "step_limit"
                 self._stop()
                 raise ValueError("The turn reached its step limit.")

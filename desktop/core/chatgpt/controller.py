@@ -65,6 +65,7 @@ from desktop.core.usage import Tokens
 
 if TYPE_CHECKING:
     from desktop.core.chatgpt.engine import ChatGPTEngine
+    from desktop.core.fusion.identity import Identity
 
 log = logging.getLogger("desktop.chatgpt")
 
@@ -187,6 +188,9 @@ class ChatGPTController:
     _fusion: Any = None
     _paused_fusion: Any = None
     _fusion_parent: Any = None
+    _fusion_identity: Identity | None = None
+    _fusion_read_only: bool = False
+    _fusion_step_limit: int | None = None
     _acp: Any = None
 
     def __post_init__(self) -> None:
@@ -540,6 +544,10 @@ class ChatGPTController:
                 await client.close()
         await asyncio.gather(*(start(client, key) for client, key in launches))
 
+    def turn_step_limit(self) -> int:
+        maximum = self.manager.settings.max_steps
+        return maximum if self._fusion_step_limit is None else min(maximum, self._fusion_step_limit)
+
     async def _ensure_tools(self) -> HarnessTools:
         if self._mcp_task is not None and not self._mcp_task.done():
             with contextlib.suppress(asyncio.TimeoutError):
@@ -582,6 +590,8 @@ class ChatGPTController:
                 self.transcript.add_notice("部分 MCP 工具仍在启动；本次工具清单已固定。待服务器就绪后，重新打开会话可使用新工具。")
             self._tools = HarnessTools(self.manager.registry, self._context, self.autonomy, self._clients, asker=self._ask_questions)
             self._tools.plan_submitter = self._submit_plan
+            if self._fusion_identity is not None:
+                self._tools.identity_tools = self._fusion_identity.tools
             if self._fusion is not None:
                 self._tools.fusion_runner = self._fusion.delegate
         # The offered manifest is fixed for this open session. A first-time server that misses startup can be used
@@ -590,6 +600,8 @@ class ChatGPTController:
         self._tools.strict_context = self._fusion is not None or self._fusion_parent is not None
         fusion = self._fusion or getattr(self._fusion_parent, "_fusion", None)
         self._tools.record_reader = fusion.read_record if fusion is not None and fusion.drive_enabled else None
+        self._tools.fusion_brief_runner = self._fusion.delegate_brief if self._fusion is not None and self._fusion.brief_enabled else None
+        self._tools.read_only_brief = self._fusion_read_only
         return self._tools
 
     def _claim_session(self) -> None:
@@ -900,7 +912,7 @@ class ChatGPTController:
                 instructions=instructions,
                 shape=self.manager.shape,
                 conversation=self.session_id,
-                max_steps=lambda: self.manager.settings.max_steps,
+                max_steps=self.turn_step_limit,
                 max_continuations=2,
                 **self._carried_measure(model),
             )

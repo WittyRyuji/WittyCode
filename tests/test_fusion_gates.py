@@ -26,6 +26,14 @@ def test_default_and_independent_gate_overrides():
         gates.enabled(settings, "unknown")
 
 
+@pytest.mark.fusion_gates("drive", "brief")
+def test_marker_with_names_turns_on_only_those_gates():
+    settings = AppSettings()
+    assert [name for name in gates.GATES if gates.enabled(settings, name)] == ["drive", "brief"]
+    assert gates.enabled(AppSettings(fusion_gates={"route": True}), "route")
+    assert not gates.enabled(AppSettings(fusion_gates={"drive": False}), "drive")
+
+
 def test_drive_settings_defaults_and_round_trip(tmp_path):
     path = tmp_path / "settings.json"
     defaults = load_settings(path)

@@ -24,6 +24,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any
 
 from desktop.core.fusion import tools as fusion_tools
+from desktop.core.fusion.protocol import Brief
 from desktop.core.harness import asking, plan_approval
 from desktop.core.harness.loop import ALLOW, ASK, DENY, Call, Outcome, Verdict
 from desktop.core.harness.mcp import McpClient, McpTool
@@ -38,6 +39,9 @@ PLAN_REFUSAL = (
     "Plan mode is on: nothing may be changed yet, so this was not done. Only reading and searching run. Finish the plan as "
     "your answer; the user switches to Auto to let you carry it out."
 )
+
+READ_ONLY_REFUSAL = "This Fusion brief is read-only: no edits or non-read-only commands are allowed."
+IDENTITY_REFUSAL = "This tool is not available to the expert's Fusion identity."
 
 Asker = Callable[[Call, tuple[QuestionView, ...]], Awaitable["list[str | list[str]] | None"]]
 """Shows the questions of a call and waits: the answers (one per question), or ``None`` when the user skipped them."""
@@ -72,6 +76,9 @@ class HarnessTools:
         self.asker = asker
         self.plan_submitter: Callable[[str], None] | None = None
         self.fusion_runner: Callable[..., Awaitable[Outcome]] | None = None
+        self.fusion_brief_runner: Callable[[Brief], Awaitable[Outcome]] | None = None
+        self.identity_tools: frozenset[str] | None = None
+        self.read_only_brief = False
         self.record_reader: Callable[[str], Awaitable[Outcome]] | None = None
         self.strict_context = False
         self.permission_parent: HarnessTools | None = None
@@ -103,26 +110,70 @@ class HarnessTools:
             declared.append(dict(asking.DECLARATION))
         if self.plan_submitter is not None:
             declared.append(dict(plan_approval.DECLARATION))
-        if self.fusion_runner is not None:
+        if self.fusion_brief_runner is not None:
+            declared.extend((dict(fusion_tools.DELEGATE_DECLARATION), dict(fusion_tools.BRIEF_BATCH_DECLARATION)))
+        elif self.fusion_runner is not None:
             declared.extend((dict(fusion_tools.DECLARATION), dict(fusion_tools.BATCH_DECLARATION)))
         if self.record_reader is not None:
             declared.append(dict(fusion_tools.READ_RECORD_DECLARATION))
         for name, (_, tool) in self._mcp.items():
             declared.append({"name": name, "description": tool.description, "parameters": tool.input_schema})
-        return declared
+        return [item for item in declared if not self.identity_refusal(item["name"])] if self.identity_tools is not None else declared
+
+    def identity_refusal(self, name: str) -> str:
+        kinds = self.identity_tools
+        if kinds is None:
+            return ""
+        spec = self.registry.get(name)
+        mcp = self._mcp.get(name)
+        if mcp is not None:
+            _, tool = mcp
+            if tool.server == "wittycode-memory":
+                if tool.name not in ("memory_search", "memory_read"):
+                    return IDENTITY_REFUSAL
+                kind = "read"
+            else:
+                kind = "read" if tool.read_only else "edit"
+        elif spec is not None:
+            kind = spec.kind
+        elif name == fusion_tools.READ_RECORD:
+            kind = "read"
+        elif name in (asking.NAME, plan_approval.NAME, fusion_tools.NAME, fusion_tools.BATCH_NAME):
+            return IDENTITY_REFUSAL
+        else:
+            return ""  # Unknown names still go through the usual unknown-tool handling.
+        if kind == "edit" and self.read_only_brief:
+            return READ_ONLY_REFUSAL
+        return "" if kind in kinds else IDENTITY_REFUSAL
 
     def known(self, name: str) -> bool:
-        return (self.registry.get(name) is not None or name in self._mcp or (name == asking.NAME and self.asker is not None)
+        return not self.identity_refusal(name) and (self.registry.get(name) is not None or name in self._mcp
+                or (name == asking.NAME and self.asker is not None)
                 or (name == plan_approval.NAME and self.plan_submitter is not None)
-                or (name in (fusion_tools.NAME, fusion_tools.BATCH_NAME) and self.fusion_runner is not None)
+                or (name in (fusion_tools.NAME, fusion_tools.BATCH_NAME) and (self.fusion_runner is not None or self.fusion_brief_runner is not None))
                 or (name == fusion_tools.READ_RECORD and self.record_reader is not None))
 
+    def _identity_check(self, call: Call) -> Verdict | None:
+        reason = self.identity_refusal(call.name)
+        if reason:
+            return Verdict(DENY, reason)
+        spec = self.registry.get(call.name) if self.read_only_brief else None
+        if spec is not None and spec.kind == "exec":
+            verdict = self._planned(spec, call)
+            if verdict.verdict != ALLOW:
+                return Verdict(DENY, READ_ONLY_REFUSAL if verdict.reason == PLAN_REFUSAL else f"{READ_ONLY_REFUSAL} {verdict.reason}")
+            return verdict
+        return None
+
     def check(self, call: Call) -> Verdict:
+        identity = self._identity_check(call)
+        if identity is not None:
+            return identity
         parent = self.permission_parent
         plan = self.plan or parent is not None and parent.plan
         level = parent.level if parent is not None else self.level
         remembered = self.remembered | parent.remembered if parent is not None else self.remembered
-        if call.name in (fusion_tools.NAME, fusion_tools.BATCH_NAME) and self.fusion_runner is not None:
+        if call.name in (fusion_tools.NAME, fusion_tools.BATCH_NAME) and (self.fusion_runner is not None or self.fusion_brief_runner is not None):
             return Verdict(DENY, PLAN_REFUSAL) if plan else Verdict(ALLOW)
         if call.name == plan_approval.NAME and self.plan_submitter is not None:
             return Verdict(ALLOW) if plan else Verdict(DENY, "Plans can only be submitted in Plan mode.")
@@ -169,7 +220,7 @@ class HarnessTools:
 
     def parallel_safe(self, call: Call) -> bool:
         """Reads or guarded delegations; do not mix these groups or parallelise arbitrary writes/hooks."""
-        delegate = call.name == fusion_tools.NAME and self.fusion_runner is not None
+        delegate = call.name == fusion_tools.NAME and (self.fusion_runner is not None or self.fusion_brief_runner is not None)
         if self.strict_context and not delegate:
             return False
         if self.connections is not None:
@@ -193,6 +244,9 @@ class HarnessTools:
         self.remembered.add(remember_key(spec, call.args, self.context) if spec is not None else f"mcp:{call.name}")
 
     async def run(self, call: Call) -> Outcome:
+        identity = self._identity_check(call)
+        if identity is not None and identity.verdict == DENY:
+            return Outcome(f"Refused: {identity.reason}", True)
         if self.connections is not None:
             from desktop.core.connections import ConnectionError
             try:
@@ -216,11 +270,13 @@ class HarnessTools:
             if not isinstance(pointer, str):
                 return Outcome("Provide a Fusion Drive page pointer.", True)
             return await self.record_reader(pointer)
-        if call.name == fusion_tools.BATCH_NAME and self.check(call).verdict == ALLOW and self.fusion_runner is not None:
-            values, problem = fusion_tools.parse_batch(call.args)
+        runner = self.fusion_brief_runner or self.fusion_runner
+        structured = self.fusion_brief_runner is not None
+        if call.name == fusion_tools.BATCH_NAME and self.check(call).verdict == ALLOW and runner is not None:
+            values, problem = fusion_tools.parse_batch(call.args, structured=structured)
             if problem or values is None:
                 return Outcome(problem, True)
-            tasks = [asyncio.create_task(self.fusion_runner(*args)) for args in values]
+            tasks = [asyncio.create_task(runner(*args)) for args in values]
             try:
                 results = await asyncio.gather(*tasks)
             except BaseException:
@@ -228,13 +284,13 @@ class HarnessTools:
                     task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
                 raise
-            return Outcome("\n\n".join(f"Workstream {args[0]}:\n{result.output}" for args, result in zip(values, results)),
-                           any(result.is_error for result in results))
-        if call.name == fusion_tools.NAME and not self.plan and self.fusion_runner is not None:
-            values, problem = fusion_tools.parse(call.args)
+            return Outcome("\n\n".join(f"Workstream {args[0].workstream if structured else args[0]}:\n{result.output}"
+                                       for args, result in zip(values, results)), any(result.is_error for result in results))
+        if call.name == fusion_tools.NAME and not self.plan and runner is not None:
+            values, problem = fusion_tools.parse_delegation(call.args, structured=structured)
             if problem or values is None:
                 return Outcome(problem, True)
-            return await self.fusion_runner(*values)
+            return await runner(*values)
         if call.name == plan_approval.NAME and self.plan and self.plan_submitter is not None:
             text, problem = plan_approval.parse(call.args)
             if problem:

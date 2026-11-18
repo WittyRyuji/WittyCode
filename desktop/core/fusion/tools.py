@@ -4,6 +4,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from desktop.core.fusion.protocol import BRIEF_PARAMETERS, DELEGATE_DECLARATION, parse_brief
+
 NAME = "delegate_task"
 BATCH_NAME = "delegate_tasks"
 MAX_PARALLEL = 4
@@ -40,6 +42,9 @@ BATCH_DECLARATION: dict[str, Any] = {
         "tasks": {"type": "array", "items": PARAMETERS, "minItems": 1, "maxItems": MAX_PARALLEL},
     }, "required": ["tasks"]},
 }
+BRIEF_BATCH_DECLARATION = {**BATCH_DECLARATION, "parameters": {"type": "object", "properties": {
+    "tasks": {"type": "array", "items": BRIEF_PARAMETERS, "minItems": 1, "maxItems": MAX_PARALLEL},
+}, "required": ["tasks"]}}
 
 READ_RECORD = "read_record"
 READ_RECORD_DECLARATION: dict[str, Any] = {
@@ -72,7 +77,16 @@ def parse(args: Mapping[str, Any]) -> tuple[tuple[Any, ...] | None, str]:
     return ((*values, resume) if modern else (*values, None, resume)) if resume else values, ""
 
 
-def parse_batch(args: Mapping[str, Any]) -> tuple[list[tuple[Any, ...]] | None, str]:
+def parse_delegation(args: Mapping[str, Any], *, structured: bool) -> tuple[tuple[Any, ...] | None, str]:
+    if not structured:
+        return parse(args)
+    brief, problem = parse_brief(args)
+    if brief is None and all(field in args for field in ("model", "role", "task")):
+        problem += " Required brief fields: " + ", ".join(BRIEF_PARAMETERS["required"]) + "."
+    return ((brief,) if brief is not None else None), problem
+
+
+def parse_batch(args: Mapping[str, Any], *, structured: bool = False) -> tuple[list[tuple[Any, ...]] | None, str]:
     tasks = args.get("tasks")
     if not isinstance(tasks, list) or not 1 <= len(tasks) <= MAX_PARALLEL:
         return None, f"Provide between 1 and {MAX_PARALLEL} independent tasks."
@@ -80,7 +94,7 @@ def parse_batch(args: Mapping[str, Any]) -> tuple[list[tuple[Any, ...]] | None, 
     for task in tasks:
         if not isinstance(task, Mapping):
             return None, "Every task must be an object."
-        values, problem = parse(task)
+        values, problem = parse_delegation(task, structured=structured)
         if problem or values is None:
             return None, problem
         parsed.append(values)

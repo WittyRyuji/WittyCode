@@ -684,6 +684,9 @@ class AgentLoop:
         if call.problem:
             return Outcome(call.problem, True)
         if not self.tools.known(call.name):
+            refusal = getattr(self.tools, "identity_refusal", None)
+            if refusal is not None and (reason := refusal(call.name)):
+                return Outcome(f"Refused: {reason}", True)
             return Outcome(f"There is no tool named {call.name!r}. Use one of: {', '.join(d['name'] for d in self.tools.declarations())}.", True)
         verdict = self.tools.check(call)
         if verdict.verdict == DENY:

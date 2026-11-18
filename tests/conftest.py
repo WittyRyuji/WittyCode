@@ -35,10 +35,12 @@ def _no_files_of_the_real_user(tmp_path_factory, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _fusion_gates_off(request, monkeypatch):
+    """Fusion gates are off in tests; ``@pytest.mark.fusion_gates`` turns all on, with names only those."""
     from desktop.core.fusion import gates
 
-    if request.node.get_closest_marker("fusion_gates") is None:
-        monkeypatch.setattr(gates, "DEFAULT", False)
+    marker = request.node.get_closest_marker("fusion_gates")
+    if marker is None or marker.args:
+        monkeypatch.setattr(gates, "DEFAULT", frozenset(marker.args) if marker else False)
 
 
 @pytest.fixture(scope="session")

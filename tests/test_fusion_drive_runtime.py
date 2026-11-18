@@ -21,7 +21,7 @@ from tests.fake_responses import FakeResponses, call, fail, say
 from tests.fakes import until
 from tests.fusion_acp_support import make_guarded_engine
 
-pytestmark = pytest.mark.fusion_gates
+pytestmark = pytest.mark.fusion_gates("drive")  # Today's free-text delegation with only the store switched on.
 
 MAIN = "chatgpt:gpt-6.1-sol"
 WORKER = "chatgpt:gpt-6-luna"
