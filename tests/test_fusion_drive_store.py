@@ -45,6 +45,18 @@ def test_clean_rechecks_open_records_before_dropping_any_pages_of_a_session(tmp_
     assert peer.get(brief.id).open and peer.read(brief.pointers[0]) == "Task brief."
 
 
+def test_traces_are_kept_for_replay_but_not_candidates_or_shared_reads(tmp_path):
+    project = tmp_path / "project"
+    drive, other = Drive(tmp_path, project, "owner"), Drive(tmp_path, project, "other")
+    first = drive.put("trace", "trace:expert:1", "One tool call", body='{"name":"read_file"}', fingerprint="matching")
+    second = drive.put("trace", "trace:expert:2", "One tool call", body='{"name":"create_file"}', fingerprint="matching")
+    assert drive.traces() == [first, second] and drive.read(first.pointers[0]) == '{"name":"read_file"}'
+    assert not drive.candidates(shared=False, retention=Retention())
+    assert not other.candidates(shared=True, retention=Retention(), fingerprint=lambda _: "matching")
+    with pytest.raises(DriveError, match="another conversation"):
+        other.read_for_session(first.pointers[0], shared=True)
+
+
 def test_clips_summary_pages_body_and_masks_before_storage(tmp_path):
     root, project = tmp_path / "drive", tmp_path / "project"
     drive = Drive(root, project, "test")

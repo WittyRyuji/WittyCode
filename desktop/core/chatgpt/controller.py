@@ -985,7 +985,7 @@ class ChatGPTController:
                 if not plan:
                     await fusion.finish_map_turn(verdict)
                 await fusion.settle_main_ratings()
-            if tools.connections is not None:
+            if tools.connections is not None and end.reason != "observer":
                 try:
                     await tools.connections.hooks("Stop", self.project, {"session_id": self.session_id, "stop_hook_active": True})
                 except ExtensionError:
@@ -1015,6 +1015,12 @@ class ChatGPTController:
             return
         assert end is not None
         self.last_turn_end = end
+        if end.reason == "observer":
+            self._release_steers()
+            self.transcript.abort_turn("Observer 已暂停此专家。")
+            self._record_turn("interrupted")
+            self._end_turn(turn)
+            return
         if end.reason == "plan":
             previous = self.saved.plan
             self.mode = PLAN  # A mode change made during planning cannot approve or hide the submitted plan.
@@ -1902,6 +1908,9 @@ class _Watch(Observer):
         if self.ctl._turn_mode == PLAN and self.ctl._proposed_plan:
             return "plan"
         fusion = getattr(self.ctl._fusion_parent, "_fusion", None)
+        observed = fusion.observer_runs.get(self.ctl.session_id) if fusion is not None else None
+        if observed is not None and observed.report is not None:
+            return "observer"
         reporting = fusion.report_runs.get(self.ctl.session_id) if fusion is not None else None
         return "report" if reporting is not None and reporting.accepted is not None else ""
 

@@ -10,6 +10,7 @@ import re
 import sqlite3
 import time
 import uuid
+from collections import deque
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, fields, replace
 from functools import cached_property
@@ -17,7 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from weakref import WeakValueDictionary
 
-from desktop.core.fusion import gates, identity, inject, map as project_map, metrics
+from desktop.core.fusion import gates, identity, inject, map as project_map, metrics, observer
 from desktop.core.fusion.drive.fingerprint import Manifest, _GitError, _head, changed_since, fingerprint, workspace_kind
 from desktop.core.fusion.drive.retention import Retention
 from desktop.core.fusion.drive.store import Drive, DriveError, Record, SessionUsage
@@ -208,6 +209,27 @@ class RouteTurn:
     workspace: asyncio.Task[WorkspaceStart | None] | None = None
     changes: set[str] = field(default_factory=set)
     delegations: list[DelegationResult] = field(default_factory=list)
+    observer_reported: bool = False
+
+
+@dataclass(slots=True)
+class ObservedRun:
+    watch: observer.Watch
+    report: observer.Report | None = None
+    events: deque[observer.Event] = field(default_factory=lambda: deque(maxlen=400))
+    count: int = 0
+    judged: bool = False
+
+    def observe(self, event: observer.Event) -> None:
+        self.count += 1
+        self.events.append(event)
+        if self.report is not None:
+            return
+        report = self.watch.observe(event)
+        # The delegation already enforces time and model-step limits on its own clock.
+        while report is not None and report.kind in ("timeout", "over_budget"):
+            report = self.watch.tick(event.at)
+        self.report = report
 
 
 @dataclass(slots=True)
@@ -258,6 +280,7 @@ class FusionRuntime:
         self.agents = {key: ExpertView(expert) for key, expert in registry.agents.items()}
         self._active: dict[str, tuple[ChatGPTController, Tokens | None]] = {}
         self.report_runs: dict[str, ReportRun] = {}
+        self.observer_runs: dict[str, ObservedRun] = {}
         self.route_turn: RouteTurn | None = None
         self.measurement: TaskMeasurement | None = None
         self.main_used: set[str] = set()
@@ -433,7 +456,7 @@ class FusionRuntime:
         runners = [work for work in turn.delegations if work.identity == "Runner" and work.report_status]
         repaired = any(runner.report_status != "done" and any(work.identity == "Coder" and work.started >= runner.finished for work in writes)
                        for runner in runners)
-        signals = risk_signals(status=status, observer_reported=False, out_of_scope=out_of_scope, repaired=repaired)
+        signals = risk_signals(status=status, observer_reported=turn.observer_reported, out_of_scope=out_of_scope, repaired=repaired)
         checks = tuple(check for check, identity_name in (("runner", "Runner"), ("sampler", "QualitySampler"))
                        if any(work.identity == identity_name and work.report_status and work.finished > last_write for work in turn.delegations))
         missing = () if skip else tuple(check for check in checks_after(route, signals) if check not in checks)
@@ -711,7 +734,7 @@ class FusionRuntime:
         foreign: set[str] = set()
         for candidate in sorted(candidates, key=lambda item: item.record.updated, reverse=True):
             record = candidate.record
-            if own_brief is not None and record.id == own_brief.id:
+            if record.kind == "trace" or (own_brief is not None and record.id == own_brief.id):
                 continue
             record_paths = (os.path.normcase(path).replace("\\", "/") for path in record.paths)
             overlaps = any(FusionRegistry._overlaps(left, right) for left in record_paths for right in paths)
@@ -870,6 +893,59 @@ class FusionRuntime:
         project = self.parent.project
         stamp = fingerprint(project, paths) if project else ""
         return self.drive.put(kind, key, summary, body=body, paths=paths, fingerprint=stamp, open=kind == "brief")
+
+    async def _observe_tool(self, run: ObservedRun, task: str, call: Call, outcome: Outcome, kind: str) -> None:
+        changed = kind == "edit" and not (outcome.is_error or outcome.cancelled)
+        raw_paths = ([diff.path for diff in outcome.diffs] or [call.args.get("file_path")]) if changed else []
+        written = []
+        for raw in raw_paths:
+            if isinstance(raw, str) and raw:
+                try:
+                    project = self.registry.project
+                    path = (project / raw).resolve()
+                    written.append(path.relative_to(project).as_posix())
+                except (OSError, ValueError, RuntimeError):
+                    written.append("../<outside project>")
+        args = json.dumps(call.args, sort_keys=True, ensure_ascii=False, default=str)
+        error = re.sub(r"\d+", "#", " ".join(outcome.output.partition("\n")[0].split()))[:120] if outcome.is_error else ""
+        run.observe(observer.Event(call.name, hashlib.sha256(f"{call.name}\0{args}".encode(errors="replace")).hexdigest(),
+                                   hashlib.sha256(outcome.output.encode(errors="replace")).hexdigest(),
+                                   kind, tuple(dict.fromkeys(written)), time.monotonic(), error, changed))
+        if not self.parent.manager.settings.fusion_observer_judgement or run.report is not None or run.judged or not error:
+            return
+        model = native_model(self.registry.policy.light)
+        events = tuple(run.events)
+        if model.startswith("devin:") or not observer.precondition(events):
+            return  # The available side-request helper accepts ChatGPT and API models.
+        from desktop.core.chatgpt import side
+
+        async def ask(prompt: str) -> str | None:
+            with contextlib.suppress(FusionError):
+                self.check_budget()
+                return await side.ask(self.parent.manager, prompt, model_id=model, timeout=10,
+                                      on_usage=lambda usage, used: self.parent._add_usage(
+                                          usage, measures_context=False, counts_speed=False, model=used))
+            return None
+
+        run.judged = True
+        run.report = await observer.judgement_async(task, events, ask)
+
+    async def _retain_observer_report(self, expert: Expert, paths: tuple[str, ...], report: observer.Report) -> None:
+        if self.drive_writable:
+            try:
+                summary = f"Observer [{report.kind}] {expert.label}: {report.detail}"
+                await asyncio.to_thread(self._put_record, "finding", f"observer:{expert.id}", summary, report.detail, paths)
+            except _DRIVE_ERRORS:
+                self._drive_notice()
+
+    async def _retain_trace(self, expert: Expert, number: int, paths: tuple[str, ...], run: ObservedRun) -> None:
+        if self.drive_writable:
+            try:
+                body = "\n".join(json.dumps(asdict(event), ensure_ascii=False) for event in run.events)
+                await asyncio.to_thread(lambda: self.drive.put("trace", f"trace:{expert.id}:{number}",
+                                                               f"{expert.label}: {run.count} tool calls", body=body, paths=paths))
+            except _DRIVE_ERRORS:
+                self._drive_notice()
 
     async def _retain_record(self, kind: str, expert: Expert, answer: str, paths: tuple[str, ...], *, evidence: str = "",
                              structured: Report | None = None) -> Record | None:
@@ -1319,6 +1395,7 @@ class FusionRuntime:
         self._delegations.add(running)
         self.parent._changed()
         child: ChatGPTController | None = None
+        observed: ObservedRun | None = None
         before: Tokens | None = None
         measured_task = self.measurement
         measured = MeasuredUsage(None) if measured_task is not None else None
@@ -1391,6 +1468,13 @@ class FusionRuntime:
                 prompt = pack.text + "\n\n" + prompt
             if reporting is not None:
                 prompt += "\n\nFinish with submit_report. Rate each Fusion Drive record you used by record ID."
+            if self.gate("observer"):
+                budget = brief.budget if brief is not None else {}
+                observed = ObservedRun(observer.Watch(write_paths, read_only=child._fusion_read_only,
+                                                       steps=budget.get("steps", 0), seconds=budget.get("seconds", 0),
+                                                       started=time.monotonic()))
+                self.observer_runs[expert.id] = observed
+                child_tools.tool_finished = lambda call, outcome, kind: self._observe_tool(observed, task, call, outcome, kind)
             if not child.send_prompt(prompt, packed_context=pack is not None):
                 raise FusionError("The expert session is not ready.")
             started = True
@@ -1407,6 +1491,14 @@ class FusionRuntime:
                 assert child._turn_done is not None
                 await asyncio.wait_for(child._turn_done.wait(), timeout=deadline - clock())
                 tokens = partial_tokens()
+                if observed is not None and observed.report is not None:
+                    fact = observed.report
+                    self._active.pop(expert.id, None)
+                    self.registry.finish(expert.id, status="interrupted", tokens=tokens)
+                    self._checkpoint()
+                    outcome = Outcome(f"Observer report ({fact.kind}): {fact.detail}\n"
+                                      "The expert is paused; the main agent decides whether to continue with resume, reassign the work, or take it over.", True)
+                    return outcome
                 record = child.saved.turns[-1] if child.saved.turns else None
                 if brief is not None and record is not None and record.start != child._turn_start:
                     record = None  # An early failure may discard the current turn, but not the previous one.
@@ -1419,6 +1511,8 @@ class FusionRuntime:
                     self.registry.finish(expert.id, status="interrupted", tokens=tokens)
                     self._checkpoint()
                     outcome = Outcome(_BUDGET_EXCEEDED.format(unit="step"), True)
+                    if observed is not None:
+                        observed.report = observer.Report("over_budget", "fact", outcome.output)
                     return outcome
                 if not finished:
                     self._active.pop(expert.id, None)
@@ -1486,10 +1580,17 @@ class FusionRuntime:
             message = (_BUDGET_EXCEEDED.format(unit="time") if brief is not None and started and isinstance(error, TimeoutError)
                        else f"The expert stopped without a confirmed result: {detail}. Check the workspace before retrying.")
             outcome = Outcome(message, True)
+            if observed is not None and started and isinstance(error, TimeoutError) and observed.report is None:
+                observed.report = observer.Report("timeout", "fact", _BUDGET_EXCEEDED.format(unit="time"))
             return outcome
         finally:
+            fact = observed.report if started and observed is not None else None
+            if fact is not None and route_turn is not None:
+                route_turn.observer_reported = True
             if measured_task is not None and measured_task is self.measurement and measured is not None:
                 measured_task.experts.pop(expert.id, None)
+                if fact is not None:
+                    measured_task.recorder.observer()
                 measured_task.recorder.expert(expert.identity or expert.role,
                                               tokens=measured.total(child.usage) if started and child is not None else 0,
                                               seconds=time.monotonic() - measured.started, first_request_tokens=measured.first_input)
@@ -1503,6 +1604,10 @@ class FusionRuntime:
                 route_turn.reroute_due = (expert.status in ("failed", "interrupted") or
                                           structured_report is not None and structured_report.status in ("blocked", "needs_context"))
             try:
+                if fact is not None:
+                    await self._retain_observer_report(expert, write_paths, fact)
+                if started and observed is not None:
+                    await self._retain_trace(expert, calls + 1, write_paths, observed)
                 if brief_write is not None and (stored_brief := await brief_write) is not None:
                     try:
                         if reporting is None or structured_report is not None:
@@ -1520,6 +1625,10 @@ class FusionRuntime:
                 if observing and started and route_turn is not None:
                     await self._observe_delegation(route_turn, expert, write_paths, structured_report)
             finally:
+                if observed is not None:
+                    self.observer_runs.pop(expert.id, None)
+                    if child is not None and child._tools is not None:
+                        child._tools.tool_finished = None
                 if reporting is not None and self.report_runs.get(expert.id) is reporting:
                     del self.report_runs[expert.id]
                     if child is not None and child._tools is not None:

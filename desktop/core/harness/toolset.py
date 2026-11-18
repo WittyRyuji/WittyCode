@@ -73,6 +73,7 @@ class HarnessTools:
         self.clients = list(clients)
         self.connections = None
         self.asker = asker
+        self.tool_finished: Callable[[Call, Outcome, str], Awaitable[None]] | None = None
         self.plan_submitter: Callable[[str], None] | None = None
         self.fusion_runner: Callable[..., Awaitable[Outcome]] | None = None
         self.fusion_brief_runner: Callable[..., Awaitable[Outcome]] | None = None
@@ -311,6 +312,9 @@ class HarnessTools:
                 await self.connections.hooks("PostToolUse", self.context.project, {"tool_name": call.name, "tool_input": call.args, "tool_response": outcome.output})
             except ConnectionError as error:
                 outcome.output += "\n" + str(error)
+        if self.tool_finished is not None:
+            spec = self.registry.get(call.name)
+            await self.tool_finished(call, outcome, spec.kind if spec is not None else "read")
         return outcome
 
     async def _run(self, call: Call) -> Outcome:

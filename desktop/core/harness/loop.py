@@ -608,8 +608,10 @@ class AgentLoop:
                         await commit(position, calls[position], Outcome("Not run: the model response was incomplete.", True, cancelled=True))
                     break
                 if reason := self.observer.finish_requested():
+                    message = ("Not run: Observer paused the expert." if reason == "observer" else
+                               f"Not run: this turn ended after the {reason} was submitted.")
                     for position in range(index, len(calls)):
-                        await commit(position, calls[position], Outcome(f"Not run: this turn ended after the {reason} was submitted.", True, cancelled=True))
+                        await commit(position, calls[position], Outcome(message, True, cancelled=True))
                     break
                 if getattr(self.tools, "strict_context", False):
                     check = getattr(self.observer, "before_tools", None)

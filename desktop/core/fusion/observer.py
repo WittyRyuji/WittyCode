@@ -5,7 +5,7 @@ import json
 import ntpath
 import os
 from collections import deque
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 
@@ -157,16 +157,25 @@ def agreed(first: tuple[bool, float] | None, second: tuple[bool, float] | None, 
                for verdict in (first, second))
 
 
+def _judgement_report(first: str, second: str) -> Report | None:
+    if agreed(parse_verdict(first), parse_verdict(second)):
+        return Report("stuck", "judgement", "Two independent assessments found that the expert appears stuck.")
+    return None
+
+
 def judgement(task: str, events: Sequence[Event], ask: Callable[[str], str]) -> Report | None:
     """Explicit replay/opt-in entry point; the caller supplies independent asks."""
     if not precondition(events):
         return None
     prompt = judgement_prompt(task, events)
-    first = parse_verdict(ask(prompt))
-    second = parse_verdict(ask(prompt))
-    if agreed(first, second):
-        return Report("stuck", "judgement", "Two independent assessments found that the expert appears stuck.")
-    return None
+    return _judgement_report(ask(prompt), ask(prompt))
+
+
+async def judgement_async(task: str, events: Sequence[Event], ask: Callable[[str], Awaitable[str | None]]) -> Report | None:
+    if not precondition(events):
+        return None
+    prompt = judgement_prompt(task, events)
+    return _judgement_report((await ask(prompt)) or "", (await ask(prompt)) or "")
 
 
 def replay(runs: Mapping[str, Sequence[Event]], ask: Callable[[str], str], *,

@@ -27,7 +27,7 @@ from desktop.core.harness.loop import clip_tokens
 
 L0_TOKENS = 512
 L1_TOKENS = 8000
-KINDS = ("map", "route", "brief", "report", "run", "artifact", "finding", "verdict")
+KINDS = ("map", "route", "brief", "report", "run", "artifact", "finding", "verdict", "trace")
 FACT_KINDS = frozenset({"run", "artifact"})
 
 _SESSION = re.compile(r"[A-Za-z0-9_-]{1,128}")
@@ -314,6 +314,12 @@ class Drive:
             row = db.execute(_SELECT + " WHERE id = ?", (record_id,)).fetchone()
         return None if row is None else _record(row)
 
+    def traces(self) -> list[Record]:
+        """List retained run traces for local replay, not model injection."""
+        with self._connect() as db:
+            rows = db.execute(_SELECT + " WHERE kind = 'trace' AND status = 'active' ORDER BY created, records.rowid").fetchall()
+        return [_record(row) for row in rows]
+
     def set_open(self, record_id: str, open: bool) -> None:
         """Mark task state without making its content newer."""
         with self._write() as db:
@@ -390,7 +396,7 @@ class Drive:
         with self._connect() as db, db:
             db.execute("BEGIN")
             period = self._period(db, now)
-            rows = db.execute(_SELECT + " WHERE status = 'active' AND q >= 0").fetchall()
+            rows = db.execute(_SELECT + " WHERE status = 'active' AND kind <> 'trace' AND q >= 0").fetchall()
         result = []
         for row in rows:
             record = _record(row)
