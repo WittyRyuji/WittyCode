@@ -29,10 +29,10 @@ def test_team_rail_and_agent_prompts_do_not_depend_on_a_plan(qapp, loop, tmp_pat
             if with_plan:
                 rig.plan.script(call("todo_write", {"todos": [{"content": "检查模块", "status": "in_progress"}, {"content": "验证结果", "status": "pending"}]}))
             rig.plan.script(
-                call("delegate_task", {"scope": "frontend", "model": "chatgpt:gpt-6-luna", "role": "worker", "task": "Inspect the frontend."}),
+                call("delegate_task", {"workstream": "Login flow", "paths": ["frontend/auth", "desktop/auth.py"], "model": "chatgpt:gpt-6-luna", "role": "worker", "task": "Inspect the frontend."}),
                 call("shell", {"command": "New-Item team-marker.txt"}),
                 say("Frontend report."),
-                call("delegate_task", {"scope": "tests", "model": "chatgpt:gpt-6-luna", "role": "worker", "task": "Inspect the tests."}, call_id="delegate-tests", item_id="fc-tests"),
+                call("delegate_task", {"workstream": "Regression coverage", "paths": ["tests"], "model": "chatgpt:gpt-6-luna", "role": "worker", "task": "Inspect the tests."}, call_id="delegate-tests", item_id="fc-tests"),
                 call("ask_user", {"questions": [{"header": "Coverage", "question": "Which regression?", "options": ["Unit", "UI"]}]}),
                 say("Tests report."),
                 say("Team reports checked."),
@@ -65,7 +65,7 @@ def test_team_rail_and_agent_prompts_do_not_depend_on_a_plan(qapp, loop, tmp_pat
             await rig.wait_text(".agentpanel .agent-chip", "等你确认")
             await rig.click(".agentpanel .agent-chip", 1)
             await rig.wait_for(".agentpanel .prompt.ask .otherinput")
-            assert await rig.js("document.querySelector('.agentpanel .agent-chip.on .agent-name').textContent === 'tests'")
+            assert await rig.js("document.querySelector('.agentpanel .agent-chip.on .agent-name').textContent === 'Regression coverage'")
             assert await rig.js("document.querySelector('.conversation-column').getBoundingClientRect().width >= 400"), "the narrow inspector overlays rather than crushes the composer"
             await rig.click(".agentpanel .prompt.ask .otherinput")
             await rig.type("UI and keyboard")

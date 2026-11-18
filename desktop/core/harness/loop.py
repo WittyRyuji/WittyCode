@@ -566,6 +566,7 @@ class AgentLoop:
         notified: set[int] = set()
         tasks: list[asyncio.Task[Any]] = []
         safe = getattr(self.tools, "parallel_safe", lambda call: False)
+        group = getattr(self.tools, "parallel_group", lambda call: "safe" if safe(call) else "")
 
         async def commit(index: int, call: Call, outcome: Outcome) -> None:
             nonlocal room, released
@@ -617,8 +618,9 @@ class AgentLoop:
                             await commit(position, calls[position], Outcome("Not run: session rules changed; review the updated context before retrying.", True, cancelled=True))
                         break
                 end = index + 1
-                if safe(calls[index]):
-                    while end < min(index + MAX_PARALLEL_READS, len(calls)) and safe(calls[end]):
+                category = group(calls[index])
+                if category:
+                    while end < min(index + MAX_PARALLEL_READS, len(calls)) and group(calls[end]) == category:
                         end += 1
                 tasks = [asyncio.create_task(execute(position)) for position in range(index, end)]
                 await asyncio.gather(*tasks)

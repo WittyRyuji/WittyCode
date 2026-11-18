@@ -41,6 +41,7 @@ FOLLOW_UPS = ("queue", "steer")
 """What Enter does with a message typed while a turn runs: ``queue`` holds it until the turn is over, ``steer`` gives it
 to the running turn now. Ctrl+Enter does the other one."""
 SIDEBAR_WIDTH_RANGE = (220, 440)
+CONVERSATION_WIDTH_RANGE = (240, 600)
 MAX_OPEN_SESSIONS_RANGE = (1, 16)
 DEFAULT_MAX_OPEN_SESSIONS = 4
 DEFAULT_MAX_STEPS = 80
@@ -82,6 +83,7 @@ class AppSettings:
     follow_up: str = "queue"
     """One of ``FOLLOW_UPS``: what Enter does while a turn is running."""
     sidebar_width: int = 288
+    conversation_width: int = 280
     default_model: str = ""
     """Model id for new sessions; empty: the first model of the menu."""
     reasoning_effort: str = ""
@@ -241,6 +243,9 @@ def settings_from_dict(raw: object) -> AppSettings:
     low_w, high_w = SIDEBAR_WIDTH_RANGE
     if not isinstance(sidebar, int) or isinstance(sidebar, bool) or not low_w <= sidebar <= high_w:
         sidebar = defaults.sidebar_width
+    conversation = raw.get("conversation_width")
+    if type(conversation) is not int or not CONVERSATION_WIDTH_RANGE[0] <= conversation <= CONVERSATION_WIDTH_RANGE[1]:
+        conversation = defaults.conversation_width
     devin_enabled = raw.get("devin_enabled")
     if not isinstance(devin_enabled, bool):
         devin_enabled = defaults.devin_enabled
@@ -363,6 +368,7 @@ def settings_from_dict(raw: object) -> AppSettings:
         font_scale=text("font_scale", FONT_SCALES),
         follow_up=text("follow_up", FOLLOW_UPS),
         sidebar_width=sidebar,
+        conversation_width=conversation,
         default_model=text("default_model"),
         reasoning_effort=text("reasoning_effort"),
         devin_autonomy=text("devin_autonomy", DEVIN_PERMISSIONS),

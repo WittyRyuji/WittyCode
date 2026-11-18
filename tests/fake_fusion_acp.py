@@ -75,6 +75,11 @@ class GuardedFake(Fake):
                 tool, arguments = "create_file", {"file_path": "marker.txt", "content": "guarded ACP write"}
             elif action == "shell":
                 tool, arguments = "shell", {"command": "New-Item marker.txt"}
+            elif action == "delegate-parallel":
+                tool, arguments = "delegate_tasks", {"tasks": [
+                    {"workstream": name, "paths": paths, "model": "chatgpt:gpt-6-luna", "role": "worker", "task": "Report on the independent workstream."}
+                    for name, paths in (("Login flow", ["frontend/auth", "desktop/auth.py"]), ("Icon design", ["assets/icons"]))
+                ]}
             elif action == "delegate-shell":
                 tool, arguments = "delegate_task", {"scope": "src", "model": "chatgpt:gpt-6-luna", "role": "worker", "task": "Create the marker with a command."}
             elif action == "delegate-acp-shell":

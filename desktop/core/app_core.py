@@ -82,6 +82,7 @@ from desktop.core.settings import (
     MAX_SESSION_TITLE,
     MEMORY_ENGINES,
     SIDEBAR_WIDTH_RANGE,
+    CONVERSATION_WIDTH_RANGE,
     THEMES,
     AppSettings,
     default_settings_path,
@@ -562,6 +563,7 @@ class AppCore:
             "fontScale": self.settings.font_scale,
             "followUp": self.settings.follow_up,
             "sidebarWidth": self.settings.sidebar_width,
+            "conversationWidth": self.settings.conversation_width,
             "lastProject": self.settings.last_project,
             "compactAuto": self.settings.chatgpt_compact,
             "compactAt": self.settings.chatgpt_compact_at,
@@ -3613,6 +3615,8 @@ class AppCore:
             s.max_open_sessions = value
         elif key == "sidebarWidth" and _is_int(value) and SIDEBAR_WIDTH_RANGE[0] <= value <= SIDEBAR_WIDTH_RANGE[1]:
             s.sidebar_width = value
+        elif key == "conversationWidth" and _is_int(value) and CONVERSATION_WIDTH_RANGE[0] <= value <= CONVERSATION_WIDTH_RANGE[1]:
+            s.conversation_width = value
         elif key == "devinPath" and isinstance(value, str):
             changed = value.strip() != s.devin_path
             s.devin_path = value.strip()

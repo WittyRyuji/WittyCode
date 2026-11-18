@@ -48,6 +48,7 @@ export interface LiveData {
   /** what Enter does with a message typed while a turn runs (Ctrl+Enter does the other) */
   followUp: FollowUp;
   sidebarWidth: number;
+  conversationWidth: number;
   /** the shared memory is given to new and resumed conversations of these engines (master switch, engines) */
   memoryEnabled: boolean;
   /** each message goes with the notes that bear on it */
@@ -137,6 +138,7 @@ export function emptyLiveData(theme: ThemeChoice = "system", fontScale: FontScal
     fontScale,
     followUp: "queue",
     sidebarWidth: 288,
+    conversationWidth: 280,
     memoryEnabled: true,
     memoryRecall: true,
     memoryCapture: true,
@@ -232,6 +234,7 @@ export function settingsFields(v: SettingsView): Partial<LiveData> {
     fontScale: v.fontScale,
     followUp: v.followUp ?? "queue",
     sidebarWidth: v.sidebarWidth,
+    conversationWidth: v.conversationWidth ?? 280,
     memoryEnabled: v.memoryEnabled ?? true,
     memoryRecall: v.memoryRecall ?? true,
     memoryCapture: v.memoryCapture ?? true,

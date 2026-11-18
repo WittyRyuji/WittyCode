@@ -17,6 +17,7 @@ the question (``asker``), asks no permission itself, and is shown on the page as
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -70,7 +71,7 @@ class HarnessTools:
         self.connections = None
         self.asker = asker
         self.plan_submitter: Callable[[str], None] | None = None
-        self.fusion_runner: Callable[[str, str, str, str], Awaitable[Outcome]] | None = None
+        self.fusion_runner: Callable[..., Awaitable[Outcome]] | None = None
         self.strict_context = False
         self.permission_parent: HarnessTools | None = None
         """Fusion experts use the main session's live level and grants, without sharing their own approvals back."""
@@ -102,7 +103,7 @@ class HarnessTools:
         if self.plan_submitter is not None:
             declared.append(dict(plan_approval.DECLARATION))
         if self.fusion_runner is not None:
-            declared.append(dict(fusion_tools.DECLARATION))
+            declared.extend((dict(fusion_tools.DECLARATION), dict(fusion_tools.BATCH_DECLARATION)))
         for name, (_, tool) in self._mcp.items():
             declared.append({"name": name, "description": tool.description, "parameters": tool.input_schema})
         return declared
@@ -110,14 +111,14 @@ class HarnessTools:
     def known(self, name: str) -> bool:
         return (self.registry.get(name) is not None or name in self._mcp or (name == asking.NAME and self.asker is not None)
                 or (name == plan_approval.NAME and self.plan_submitter is not None)
-                or (name == fusion_tools.NAME and self.fusion_runner is not None))
+                or (name in (fusion_tools.NAME, fusion_tools.BATCH_NAME) and self.fusion_runner is not None))
 
     def check(self, call: Call) -> Verdict:
         parent = self.permission_parent
         plan = self.plan or parent is not None and parent.plan
         level = parent.level if parent is not None else self.level
         remembered = self.remembered | parent.remembered if parent is not None else self.remembered
-        if call.name == fusion_tools.NAME and self.fusion_runner is not None:
+        if call.name in (fusion_tools.NAME, fusion_tools.BATCH_NAME) and self.fusion_runner is not None:
             return Verdict(DENY, PLAN_REFUSAL) if plan else Verdict(ALLOW)
         if call.name == plan_approval.NAME and self.plan_submitter is not None:
             return Verdict(ALLOW) if plan else Verdict(DENY, "Plans can only be submitted in Plan mode.")
@@ -161,17 +162,23 @@ class HarnessTools:
         return Verdict(DENY, PLAN_REFUSAL)
 
     def parallel_safe(self, call: Call) -> bool:
-        """Only approved, independent filesystem reads; hooks, commands and memory writes retain serial ordering."""
-        if self.strict_context:
+        """Reads or guarded delegations; do not mix these groups or parallelise arbitrary writes/hooks."""
+        delegate = call.name == fusion_tools.NAME and self.fusion_runner is not None
+        if self.strict_context and not delegate:
             return False
         if self.connections is not None:
             hint = getattr(self.connections, "has_tool_hooks", None)
             if hint is None or hint(self.context.project):
                 return False
         return (
-            not call.problem and call.name in ("read_file", "list_dir", "glob", "grep")
+            not call.problem and (delegate or call.name in ("read_file", "list_dir", "glob", "grep"))
             and self.known(call.name) and self.check(call).verdict == ALLOW
         )
+
+    def parallel_group(self, call: Call) -> str:
+        if not self.parallel_safe(call):
+            return ""
+        return "delegates" if call.name == fusion_tools.NAME else "reads"
 
     def remember(self, call: Call) -> None:
         spec = self.registry.get(call.name)
@@ -196,6 +203,20 @@ class HarnessTools:
         return outcome
 
     async def _run(self, call: Call) -> Outcome:
+        if call.name == fusion_tools.BATCH_NAME and self.check(call).verdict == ALLOW and self.fusion_runner is not None:
+            values, problem = fusion_tools.parse_batch(call.args)
+            if problem or values is None:
+                return Outcome(problem, True)
+            tasks = [asyncio.create_task(self.fusion_runner(*args)) for args in values]
+            try:
+                results = await asyncio.gather(*tasks)
+            except BaseException:
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
+            return Outcome("\n\n".join(f"Workstream {args[0]}:\n{result.output}" for args, result in zip(values, results)),
+                           any(result.is_error for result in results))
         if call.name == fusion_tools.NAME and not self.plan and self.fusion_runner is not None:
             values, problem = fusion_tools.parse(call.args)
             if problem or values is None:

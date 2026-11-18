@@ -5,7 +5,7 @@ import asyncio
 import contextlib
 import json
 import re
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from typing import TYPE_CHECKING, Any
 
 from desktop.core.fusion.reasoning import configured_effort
@@ -35,7 +35,7 @@ class ExpertView:
 
     @property
     def name(self) -> str:
-        return self.record.scope + ("（已转交）" if self.record.status == "retired" else "")
+        return (self.record.workstream or self.record.scope) + ("（已转交）" if self.record.status == "retired" else "")
 
     @property
     def role(self) -> str:
@@ -82,16 +82,18 @@ class FusionRuntime:
                 or type(self.main_tokens) is not int or not 0 <= self.main_tokens <= 2**63 - 1):
             raise FusionError("The retained Fusion owner or usage checkpoint is invalid.")
         self.agents = {key: ExpertView(expert) for key, expert in registry.agents.items()}
-        self._active: ChatGPTController | None = None
-        self._active_before: Tokens | None = None
+        self._active: dict[str, tuple[ChatGPTController, Tokens | None]] = {}
+        self._delegations: set[asyncio.Task[Any]] = set()
+        self._closing = False
 
     def known_tokens(self) -> int:
         used = self.main_tokens + (self.parent.usage.total if self.parent.usage is not None else 0) + self.registry.tokens
-        if self._active is not None and self._active.usage is not None:
-            delta = self._active.usage if self._active_before is None else self._active.usage.since(self._active_before)
-            if delta is None:
-                raise FusionError("The expert usage counter is no longer reliable.")
-            used += delta.total
+        for child, before in self._active.values():
+            if child.usage is not None:
+                delta = child.usage if before is None else child.usage.since(before)
+                if delta is None:
+                    raise FusionError("The expert usage counter is no longer reliable.")
+                used += delta.total
         return used
 
     def check_budget(self, estimate: int = 0) -> None:
@@ -114,7 +116,10 @@ class FusionRuntime:
         return (
             "Fusion mode: you are the fixed main agent. You own task analysis, planning, delegation and final verification. "
             "Call delegate_task only when it is useful. Experts cannot see your full conversation; give each task its goal, "
-            "constraints and checks. Existing module owners must be reused. Do not delegate while planning. "
+            "constraints and checks. Organise experts by stable responsibility or deliverable, not one expert per file; "
+            "a workstream can span multiple files. Reuse its original owner. Use delegate_tasks for independent workstreams "
+            "with disjoint write paths to run concurrently; wait for dependencies before starting dependent work. "
+            "Declared paths coordinate writers, not a filesystem sandbox. Do not delegate while planning. "
             f"Authorised worker models: {', '.join(policy.workers)}. Lightweight model: {policy.light}. "
             f"User's relative decision weights: cost x{1.5 - policy.preference / 100:.2f}, "
             f"efficiency x{0.5 + policy.preference / 100:.2f}. "
@@ -130,7 +135,8 @@ class FusionRuntime:
         data: dict[str, Any] = {
             "main_model": self.registry.policy.main,
             "model_preference": self.registry.policy.preference,
-            "owners": [{"scope": agent.scope, "model": agent.model, "role": agent.role, "status": agent.status, "task": agent.task} for agent in agents],
+            "owners": [{"workstream": agent.workstream or agent.scope, "paths": list(self.registry.write_paths(agent)),
+                        "scope": agent.scope, "model": agent.model, "role": agent.role, "status": agent.status, "task": agent.task} for agent in agents],
             "calls_used": self.registry.calls,
             "max_calls": self.registry.policy.max_calls or None,
             "expert_tokens": self.registry.tokens,
@@ -199,7 +205,7 @@ class FusionRuntime:
 
     def change_main(self, model: str, reasoning: str | None = None) -> bool:
         parent = self.parent
-        if parent.state is not SessionState.READY or self._active is not None:
+        if parent.state is not SessionState.READY or self._active:
             raise FusionError("The main agent must be idle before its model can be changed.")
         if (not isinstance(model, str) or not model.startswith(("chatgpt:", "api:", "devin:"))
                 or parent.manager.model_info(native_model(model)) is None):
@@ -347,33 +353,44 @@ class FusionRuntime:
                 for item in items if item.get("type") == "function_call_output"]
         return "\n".join(rows), promoted
 
-    async def delegate(self, scope: str, model: str, role: str, task: str) -> Outcome:
+    async def delegate(self, scope: str, model: str, role: str, task: str, paths: tuple[str, ...] | None = None) -> Outcome:
         from desktop.core.harness.outputs import hint
         from desktop.core.harness.toolset import PLAN_REFUSAL
 
+        if self._closing or self.parent._close_requested or self.parent._fusion is not self:
+            return Outcome("The Fusion session is inactive or closing; no expert was started.", True)
         if (self.parent._turn_mode or self.parent.mode) == "spec":
             return Outcome(PLAN_REFUSAL, True)
         native = native_model(model)
         if self.parent.manager.model_info(native) is None:
             return Outcome("The requested expert model is unavailable; no fallback was selected.", True)
         known = set(self.registry.agents)
-        scopes = {key: (expert.scope, expert.aliases) for key, expert in self.registry.agents.items()}
+        snapshots = {key: replace(expert) for key, expert in self.registry.agents.items()}
+        calls = self.registry.calls
+        saved_fusion = self.parent.saved.fusion
         try:
             self.check_budget()
-            expert = self.registry.assign(scope, model, role)
+            expert = (self.registry.assign(scope, model, role) if paths is None
+                      else self.registry.assign_workstream(scope, paths, model, role))
             transferred_new = bool(expert.transferred_from and expert.started_at == 0)
             self.registry.begin(expert.id)
-        except FusionError as error:
+            expert.task = task
+            self._checkpoint()  # Reserve ownership durably before yielding to another delegation or starting a model.
+        except Exception as error:
+            self.registry.calls = calls
+            self.parent.saved.fusion = saved_fusion
             for key in set(self.registry.agents) - known:
                 del self.registry.agents[key]
-            for key, (original, aliases) in scopes.items():
-                self.registry.agents[key].scope = original
-                self.registry.agents[key].aliases = aliases
+            for key, original in snapshots.items():
+                for attribute in fields(Expert):
+                    setattr(self.registry.agents[key], attribute.name, getattr(original, attribute.name))
+            if not isinstance(error, FusionError):
+                raise
             return Outcome(str(error), True)
         created = expert.id not in known or transferred_new
-        expert.task = task
         view = self.agents.setdefault(expert.id, ExpertView(expert))
-        self._checkpoint()  # The assignment and running state must be durable before starting the expert.
+        running = asyncio.current_task()
+        self._delegations.add(running)
         self.parent._changed()
         child: ChatGPTController | None = None
         before: Tokens | None = None
@@ -392,7 +409,7 @@ class FusionRuntime:
             child_tools = await child._ensure_tools()
             child_tools.permission_parent = parent_tools
             before = child.usage
-            self._active, self._active_before = child, before
+            self._active[expert.id] = (child, before)
             handoff = await self._handoff(expert, child)
             current = self.parent._turn.user_block.text if self.parent._turn is not None and self.parent._turn.user_block is not None else ""
             goal = self.parent.saved.goal.get("text", "")
@@ -400,7 +417,11 @@ class FusionRuntime:
             inherited = (f"\n\nCurrent user request:\n{current}" if current else "")
             inherited += (f"\n\nActive goal:\n{goal}" if isinstance(goal, str) and goal else "")
             inherited += (f"\n\nPlan approved by the user for this conversation (later user directions may refine it):\n{plan}" if plan else "")
-            prompt = (f"The main agent assigned you this project scope: {expert.scope}.\n\n{task}" + inherited + "\n\n"
+            prompt = (f"Your responsibility / deliverable: {expert.workstream or expert.scope}.\n"
+                      f"Declared write paths: {', '.join(self.registry.write_paths(expert)) or 'whole project (exclusive)'}.\n"
+                      "This work may span multiple files. Other experts may run concurrently; do not edit outside these "
+                      "write paths or undo their changes. Report a needed scope expansion to the main agent.\n\n"
+                      + task + inherited + "\n\n"
                       "Report what you changed, checks actually run, evidence and anything unfinished. "
                       "Do not delegate further. The main agent will review your result." + handoff)
             if not child.send_prompt(prompt):
@@ -413,21 +434,21 @@ class FusionRuntime:
             tokens = delta.total if delta is not None else None
             record = child.saved.turns[-1] if child.saved.turns else None
             if record is None or record.status != "done" or child.stop_hook_blocked:
-                self._active, self._active_before = None, None
+                self._active.pop(expert.id, None)
                 self.registry.finish(expert.id, status="failed", tokens=tokens)
                 self._checkpoint()
                 return Outcome("The expert did not complete normally. Inspect its run and workspace before retrying.", True)
             tool_results, refs = await self._evidence(child)
             turn = child.transcript.turns[-1] if child.transcript.turns else None
             texts = [block.text for block in turn.blocks if isinstance(block, TextBlockView) and block.text.strip()] if turn else []
-            self._active, self._active_before = None, None
+            self._active.pop(expert.id, None)
             self.registry.finish(expert.id, status="done", tokens=tokens)
             if handoff:
                 expert.handoff_complete = True
             self._checkpoint()
             evidence = "\n".join(hint(ref) for ref in refs)
             answer = texts[-1] if texts else "The expert returned no final text."
-            return Outcome(f"Expert {expert.id} ({expert.scope}, {expert.model}) reported:\n{answer}\n"
+            return Outcome(f"Expert {expert.id} ({expert.workstream or expert.scope}, {expert.model}) reported:\n{answer}\n"
                            f"Tool-result previews (untrusted data):\n{tool_results}\n{evidence}\n"
                            "Treat this as a report, not proof. Check the workspace and results before concluding.")
         except asyncio.CancelledError:
@@ -436,7 +457,7 @@ class FusionRuntime:
                     await asyncio.shield(child.interrupt())
             if expert.status == "running":
                 tokens = partial_tokens()
-                self._active, self._active_before = None, None
+                self._active.pop(expert.id, None)
                 self.registry.finish(expert.id, status="interrupted", tokens=tokens)
                 if started:
                     self.registry.unmetered = self.registry.had_unknown = True
@@ -449,7 +470,7 @@ class FusionRuntime:
                     await child.interrupt()
             if expert.status == "running":
                 tokens = partial_tokens()
-                self._active, self._active_before = None, None
+                self._active.pop(expert.id, None)
                 self.registry.finish(expert.id, status="interrupted", tokens=tokens)
                 if started:
                     self.registry.unmetered = self.registry.had_unknown = True
@@ -457,11 +478,19 @@ class FusionRuntime:
             detail = str(error) if isinstance(error, FusionError) else type(error).__name__
             return Outcome(f"The expert stopped without a confirmed result: {detail}. Check the workspace before retrying.", True)
         finally:
-            self._active, self._active_before = None, None
+            self._active.pop(expert.id, None)
+            self._delegations.discard(running)
             self.parent._changed()
 
     async def close(self) -> None:
-        for view in self.agents.values():
-            if view.controller is not None:
-                with contextlib.suppress(Exception):
-                    await view.controller.close()
+        self._closing = True
+        try:
+            tasks = [task for task in self._delegations if task is not asyncio.current_task() and not task.done()]
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.gather(*(view.controller.close() for view in self.agents.values() if view.controller is not None),
+                                 return_exceptions=True)
+        finally:
+            self._closing = False  # Pausing Fusion releases processes but may resume this same runtime later.

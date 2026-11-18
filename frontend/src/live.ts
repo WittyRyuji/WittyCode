@@ -458,6 +458,10 @@ function liveActions(): Partial<Store> {
       set({ sidebarWidth: px });
       if (commit) void setting("sidebarWidth", Math.round(px));
     },
+    setConversationWidth: (px, commit = false) => {
+      set({ conversationWidth: px });
+      if (commit) void setting("conversationWidth", Math.round(px));
+    },
 
     saveProvider: async (draft) => {
       try {

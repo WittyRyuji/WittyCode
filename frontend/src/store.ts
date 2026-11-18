@@ -248,6 +248,7 @@ export interface Store extends LiveData {
   setDevinPath: (p: string) => void;
   /** while the splitter is dragged; `commit` once it is let go (the live app then saves it) */
   setSidebarWidth: (px: number, commit?: boolean) => void;
+  setConversationWidth: (px: number, commit?: boolean) => void;
   setSidebarOpen: (open: boolean) => void;
   setReviewOpen: (open: boolean) => void;
   setDragging: (v: boolean) => void;
@@ -304,6 +305,7 @@ function mockData(): LiveData {
     fontScale: "md",
     followUp: "queue",
     sidebarWidth: 288,
+    conversationWidth: 280,
     memoryEnabled: true,
     memoryRecall: true,
     memoryCapture: true,
@@ -806,6 +808,7 @@ export const useStore = create<Store>((set, get) => ({
   setMemoryState: (memory) => set({ memory: { latest: memory.latest, unseen: memory.unseen, seen: memory.seen, pending: memory.pending ?? 0 } }),
   setDevinPath: (devinPath) => set({ devinPath }),
   setSidebarWidth: (sidebarWidth) => set({ sidebarWidth }),
+  setConversationWidth: (conversationWidth) => set({ conversationWidth }),
   setSidebarOpen: (sidebarOpen) => set({ sidebarOpen }),
   setReviewOpen: (reviewOpen) => set({ reviewOpen }),
   setDragging: (dragging) => set({ dragging }),

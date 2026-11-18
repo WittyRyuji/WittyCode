@@ -66,6 +66,7 @@ export interface SettingsView {
   /** what Enter does with a message typed while a turn runs; Ctrl+Enter does the other */
   followUp: FollowUp;
   sidebarWidth: number;
+  conversationWidth?: number;
   /** the shared memory is given to new and resumed conversations (master switch), of these engines */
   memoryEnabled: boolean;
   /** each message goes with the notes that bear on it (the application's own hook before sending) */
@@ -94,7 +95,7 @@ export interface SettingsView {
 export type FollowUp = "queue" | "steer";
 export type Language = "auto" | "zh-CN" | "en";
 export type FusionSettingKey = "fusionMain" | "fusionWorkers" | "fusionLight" | "fusionReasoning" | "fusionPreference" | "fusionMaxSeconds";
-export type SettingKey = "theme" | "fontScale" | "followUp" | "maxOpen" | "maxSteps" | "sidebarWidth" | "devinPath" | "memoryEnabled" | "memoryRecall" | "memoryCapture" | "memoryCurate" | "memoryEngines" | "compactAuto" | "compactAt" | "thinkChinese" | "answerLanguage" | "thinkingLanguage" | "soundEnabled" | SoundKey | FusionSettingKey;
+export type SettingKey = "theme" | "fontScale" | "followUp" | "maxOpen" | "maxSteps" | "sidebarWidth" | "conversationWidth" | "devinPath" | "memoryEnabled" | "memoryRecall" | "memoryCapture" | "memoryCurate" | "memoryEngines" | "compactAuto" | "compactAt" | "thinkChinese" | "answerLanguage" | "thinkingLanguage" | "soundEnabled" | SoundKey | FusionSettingKey;
 export type SoundKind = "question" | "complete" | "error";
 export type SoundKey = "soundQuestion" | "soundComplete" | "soundError";
 export type SettingValue = string | number | boolean | string[] | Record<string, string>;

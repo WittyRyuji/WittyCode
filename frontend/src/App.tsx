@@ -10,6 +10,7 @@ import { FilePanel, PathMenuHost } from "./components/FilePanel";
 import { Composer } from "./components/Composer";
 import { StatusBar } from "./components/StatusBar";
 import { PlanPanel } from "./components/PlanPanel";
+import { ConversationRail } from "./components/ConversationRail";
 import { ChatGPTWelcome, DialogHost, DropOverlay, EmptyPage, LightboxHost } from "./components/Overlays";
 import { ReviewBar, WIDTHS } from "./components/Review";
 import { TitleBar } from "./components/TitleBar";
@@ -126,10 +127,10 @@ function Main() {
           {session ? <Transcript key={session.id} session={session} positions={readingPositions.current} /> : <EmptyPage />}
           <Composer />
         </div>
-        {(planOpen || teamOpen) && <aside className="conversation-rail" aria-label="会话计划与 Agents Team">
+        {(planOpen || teamOpen) && <ConversationRail>
           {planOpen && plan && <PlanPanel key={`plan:${session.id}`} plan={plan} onClose={() => setPlanOpen(false)} />}
           {teamOpen && <div id="conversation-team"><AgentBar session={session} onClose={() => setTeamOpen(false)} /></div>}
-        </aside>}
+        </ConversationRail>}
       </div>
       <DropOverlay />
     </main>
