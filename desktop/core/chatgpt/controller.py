@@ -34,6 +34,7 @@ import time
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -599,7 +600,10 @@ class ChatGPTController:
         self._tools.level = self.autonomy
         self._tools.strict_context = self._fusion is not None or self._fusion_parent is not None
         fusion = self._fusion or getattr(self._fusion_parent, "_fusion", None)
-        self._tools.record_reader = fusion.read_record if fusion is not None and fusion.drive_enabled else None
+        reporting = fusion.report_runs.get(self.session_id) if fusion is not None and self._fusion_identity is not None else None
+        self._tools.report_submitter = reporting.submit if reporting is not None else None
+        reader = fusion.read_record if fusion is not None and fusion.drive_enabled else None
+        self._tools.record_reader = partial(reader, used=reporting.used) if reader is not None and reporting is not None else reader
         self._tools.fusion_brief_runner = self._fusion.delegate_brief if self._fusion is not None and self._fusion.brief_enabled else None
         self._tools.read_only_brief = self._fusion_read_only
         return self._tools
@@ -1825,8 +1829,14 @@ class _Watch(Observer):
         self._compacted_to = compact.estimate_items(history) + fixed if done else estimate
         return done
 
-    def finish_requested(self) -> bool:
-        return self.current and self.ctl._turn_mode == PLAN and bool(self.ctl._proposed_plan)
+    def finish_requested(self) -> str:
+        if not self.current:
+            return ""
+        if self.ctl._turn_mode == PLAN and self.ctl._proposed_plan:
+            return "plan"
+        fusion = getattr(self.ctl._fusion_parent, "_fusion", None)
+        reporting = fusion.report_runs.get(self.ctl.session_id) if fusion is not None else None
+        return "report" if reporting is not None and reporting.accepted is not None else ""
 
     def has_steer(self) -> bool:
         return self.current and bool(self.ctl._steers)

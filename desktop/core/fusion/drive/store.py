@@ -322,6 +322,16 @@ class Drive:
                 continue
         raise DriveError("Drive page is missing or failed its integrity check.")
 
+    def owner_of(self, pointer: str) -> str | None:
+        """Resolve a live page to its record, preferring this session and then the newest revision."""
+        if not isinstance(pointer, str) or not _POINTER.fullmatch(pointer):
+            return None
+        with self._connect() as db:
+            row = db.execute("SELECT id FROM pages JOIN records ON id = record_id WHERE available = 1 AND pointer = ? "
+                             "ORDER BY (session = ?) DESC, created DESC, records.rowid DESC LIMIT 1",
+                             (pointer, self._session)).fetchone()
+        return row[0] if row is not None else None
+
     def rate(self, record_id: str, score: int, reason: str = "") -> float:
         """Store an explicit rating and update quality, not the content timestamp."""
         next_q(0.0, score)  # Validate before checking for the record.

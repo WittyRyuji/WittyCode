@@ -80,6 +80,7 @@ class HarnessTools:
         self.identity_tools: frozenset[str] | None = None
         self.read_only_brief = False
         self.record_reader: Callable[[str], Awaitable[Outcome]] | None = None
+        self.report_submitter: Callable[[Mapping[str, Any]], Outcome] | None = None
         self.strict_context = False
         self.permission_parent: HarnessTools | None = None
         """Fusion experts use the main session's live level and grants, without sharing their own approvals back."""
@@ -116,6 +117,8 @@ class HarnessTools:
             declared.extend((dict(fusion_tools.DECLARATION), dict(fusion_tools.BATCH_DECLARATION)))
         if self.record_reader is not None:
             declared.append(dict(fusion_tools.READ_RECORD_DECLARATION))
+        if self.report_submitter is not None:
+            declared.append(dict(fusion_tools.REPORT_DECLARATION))
         for name, (_, tool) in self._mcp.items():
             declared.append({"name": name, "description": tool.description, "parameters": tool.input_schema})
         return [item for item in declared if not self.identity_refusal(item["name"])] if self.identity_tools is not None else declared
@@ -151,7 +154,8 @@ class HarnessTools:
                 or (name == asking.NAME and self.asker is not None)
                 or (name == plan_approval.NAME and self.plan_submitter is not None)
                 or (name in (fusion_tools.NAME, fusion_tools.BATCH_NAME) and (self.fusion_runner is not None or self.fusion_brief_runner is not None))
-                or (name == fusion_tools.READ_RECORD and self.record_reader is not None))
+                or (name == fusion_tools.READ_RECORD and self.record_reader is not None)
+                or (name == fusion_tools.SUBMIT_REPORT and self.report_submitter is not None))
 
     def _identity_check(self, call: Call) -> Verdict | None:
         reason = self.identity_refusal(call.name)
@@ -183,6 +187,8 @@ class HarnessTools:
             return Verdict(ALLOW)  # Validated opaque references only, confined to this conversation.
         if call.name == fusion_tools.READ_RECORD:
             return Verdict(ALLOW) if self.record_reader is not None else Verdict(DENY, "Fusion Drive is unavailable.")
+        if call.name == fusion_tools.SUBMIT_REPORT:
+            return Verdict(ALLOW) if self.report_submitter is not None else Verdict(DENY, "No active expert report.")
         spec = self.registry.get(call.name)
         if spec is not None:
             if plan:
@@ -263,6 +269,8 @@ class HarnessTools:
         return outcome
 
     async def _run(self, call: Call) -> Outcome:
+        if call.name == fusion_tools.SUBMIT_REPORT:
+            return self.report_submitter(call.args) if self.report_submitter is not None else Outcome("No active expert report.", True)
         if call.name == fusion_tools.READ_RECORD:
             if self.record_reader is None:
                 return Outcome("Fusion Drive is unavailable.", True)

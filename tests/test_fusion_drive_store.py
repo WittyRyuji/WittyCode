@@ -64,6 +64,23 @@ def test_pointer_is_project_local_and_detects_damage(tmp_path):
         drive.read(pointer)
 
 
+def test_pointer_owner_is_project_local_and_prefers_the_local_revision(tmp_path):
+    project = tmp_path / "project"
+    one, two, three = (Drive(tmp_path, project, session, clock=lambda: 1.0) for session in ("one", "two", "three"))
+    old = one.put("run", "result", "First revision", body="Same page")
+    current = one.put("run", "result", "Latest revision", body="Same page")
+    peer = two.put("map", "index", "Peer map", body="Same page")
+    pointer, = old.pointers
+    assert one.owner_of(pointer) == current.id and two.owner_of(pointer) == peer.id
+    assert three.owner_of(pointer) == peer.id
+    assert Drive(tmp_path, tmp_path / "unrelated", "one").owner_of(pointer) is None
+    assert one.owner_of("../page") is None and one.owner_of("d-" + "0" * 64) is None
+    two.delete_session("two")
+    assert two.owner_of(pointer) == current.id and two.get(peer.id) is not None
+    one.delete_session("one")
+    assert two.owner_of(pointer) is None
+
+
 def test_supersedes_only_matching_scope_and_session(tmp_path):
     project = tmp_path / "project"
     one, two = (Drive(tmp_path, project, session) for session in ("one", "two"))

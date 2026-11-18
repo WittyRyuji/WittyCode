@@ -186,9 +186,9 @@ class Observer:
         (``OUTPUT_LIMIT``)."""
         return None
 
-    def finish_requested(self) -> bool:
-        """A tool has requested a safe turn boundary, such as a submitted plan."""
-        return False
+    def finish_requested(self) -> str:
+        """The tool-driven end reason (e.g. plan or report), or empty if the turn should continue."""
+        return ""
 
     def retry_allowed(self) -> bool:
         """Whether an unmetered failure may be retried automatically."""
@@ -213,7 +213,7 @@ Stream = Callable[[dict[str, Any]], AsyncIterator[Any]]
 @dataclass(slots=True)
 class TurnEnd:
     reason: str
-    """``done`` | ``incomplete`` | ``step_limit``."""
+    """``done`` | ``incomplete`` | ``step_limit`` | ``plan`` | ``report``."""
     detail: str = ""
     steps: int = 0
 
@@ -393,8 +393,8 @@ class AgentLoop:
             await self._run_calls(history, calls, incomplete=bool(incomplete))
             if incomplete:
                 return TurnEnd("incomplete", incomplete, step)
-            if self.observer.finish_requested():
-                return TurnEnd("plan", steps=step)
+            if reason := self.observer.finish_requested():
+                return TurnEnd(reason, steps=step)
         return TurnEnd("step_limit", steps=step)
 
     # ------------------------------------------------------------------ a step
@@ -607,9 +607,9 @@ class AgentLoop:
                     for position in range(index, len(calls)):
                         await commit(position, calls[position], Outcome("Not run: the model response was incomplete.", True, cancelled=True))
                     break
-                if self.observer.finish_requested():
+                if reason := self.observer.finish_requested():
                     for position in range(index, len(calls)):
-                        await commit(position, calls[position], Outcome("Not run: this turn ended after the plan was submitted.", True, cancelled=True))
+                        await commit(position, calls[position], Outcome(f"Not run: this turn ended after the {reason} was submitted.", True, cancelled=True))
                     break
                 if getattr(self.tools, "strict_context", False):
                     check = getattr(self.observer, "before_tools", None)
