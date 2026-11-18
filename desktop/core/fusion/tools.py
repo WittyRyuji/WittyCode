@@ -4,7 +4,9 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from desktop.core.fusion.protocol import BRIEF_PARAMETERS, DELEGATE_DECLARATION, REPORT_DECLARATION, ROUTE_DECLARATION, brief_writes, parse_brief
+from desktop.core.fusion.protocol import (
+    BRIEF_PARAMETERS, DELEGATE_DECLARATION, RATE_DECLARATION, REPORT_DECLARATION, ROUTE_DECLARATION, brief_writes, parse_brief,
+)
 
 NAME = "delegate_task"
 BATCH_NAME = "delegate_tasks"
@@ -48,6 +50,7 @@ BRIEF_BATCH_DECLARATION = {**BATCH_DECLARATION, "parameters": {"type": "object",
 
 SUBMIT_REPORT = REPORT_DECLARATION["name"]
 SUBMIT_ROUTE = ROUTE_DECLARATION["name"]
+RATE_RECORDS = RATE_DECLARATION["name"]
 READ_RECORD = "read_record"
 READ_RECORD_DECLARATION: dict[str, Any] = {
     "name": READ_RECORD,

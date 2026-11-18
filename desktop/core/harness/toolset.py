@@ -83,6 +83,7 @@ class HarnessTools:
         self.report_submitter: Callable[[Mapping[str, Any]], Outcome] | None = None
         self.route_submitter: Callable[[Mapping[str, Any]], Awaitable[Outcome]] | None = None
         self.route_guard: Callable[[str, tuple[str, ...]], str] | None = None
+        self.rating_submitter: Callable[[Mapping[str, Any]], Awaitable[Outcome]] | None = None
         self.strict_context = False
         self.permission_parent: HarnessTools | None = None
         """Fusion experts use the main session's live level and grants, without sharing their own approvals back."""
@@ -123,6 +124,8 @@ class HarnessTools:
             declared.append(dict(fusion_tools.REPORT_DECLARATION))
         if self.route_submitter is not None:
             declared.append(dict(fusion_tools.ROUTE_DECLARATION))
+        if self.rating_submitter is not None:
+            declared.append(dict(fusion_tools.RATE_DECLARATION))
         for name, (_, tool) in self._mcp.items():
             declared.append({"name": name, "description": tool.description, "parameters": tool.input_schema})
         return [item for item in declared if not self.identity_refusal(item["name"])] if self.identity_tools is not None else declared
@@ -160,7 +163,8 @@ class HarnessTools:
                 or (name in (fusion_tools.NAME, fusion_tools.BATCH_NAME) and (self.fusion_runner is not None or self.fusion_brief_runner is not None))
                 or (name == fusion_tools.READ_RECORD and self.record_reader is not None)
                 or (name == fusion_tools.SUBMIT_REPORT and self.report_submitter is not None)
-                or (name == fusion_tools.SUBMIT_ROUTE and self.route_submitter is not None))
+                or (name == fusion_tools.SUBMIT_ROUTE and self.route_submitter is not None)
+                or (name == fusion_tools.RATE_RECORDS and self.rating_submitter is not None))
 
     def _identity_check(self, call: Call) -> Verdict | None:
         reason = self.identity_refusal(call.name)
@@ -210,6 +214,8 @@ class HarnessTools:
             return Verdict(ALLOW) if self.record_reader is not None else Verdict(DENY, "Fusion Drive is unavailable.")
         if call.name == fusion_tools.SUBMIT_REPORT:
             return Verdict(ALLOW) if self.report_submitter is not None else Verdict(DENY, "No active expert report.")
+        if call.name == fusion_tools.RATE_RECORDS:  # (a judgement on retained data: nothing in the workspace changes)
+            return Verdict(ALLOW) if self.rating_submitter is not None else Verdict(DENY, "Fusion Drive is unavailable.")
         if call.name == fusion_tools.SUBMIT_ROUTE:
             if plan:
                 return Verdict(DENY, PLAN_REFUSAL)
@@ -303,6 +309,10 @@ class HarnessTools:
             return await self.route_submitter(call.args)
         if call.name == fusion_tools.SUBMIT_REPORT:
             return self.report_submitter(call.args) if self.report_submitter is not None else Outcome("No active expert report.", True)
+        if call.name == fusion_tools.RATE_RECORDS:
+            if self.rating_submitter is None:
+                return Outcome("Fusion Drive is unavailable.", True)
+            return await self.rating_submitter(call.args)
         if call.name == fusion_tools.READ_RECORD:
             if self.record_reader is None:
                 return Outcome("Fusion Drive is unavailable.", True)

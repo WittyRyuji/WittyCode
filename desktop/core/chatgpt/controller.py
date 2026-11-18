@@ -603,7 +603,10 @@ class ChatGPTController:
         reporting = fusion.report_runs.get(self.session_id) if fusion is not None and self._fusion_identity is not None else None
         self._tools.report_submitter = reporting.submit if reporting is not None else None
         reader = fusion.read_record if fusion is not None and fusion.drive_enabled else None
-        self._tools.record_reader = partial(reader, used=reporting.used) if reader is not None and reporting is not None else reader
+        rating = self._fusion if self._fusion is not None and self._fusion.rating_enabled else None
+        used = reporting.used if reporting is not None else rating.main_used if rating is not None else None
+        self._tools.record_reader = partial(reader, used=used) if reader is not None and used is not None else reader
+        self._tools.rating_submitter = rating.rate_records if rating is not None else None
         self._tools.fusion_brief_runner = self._fusion.delegate_brief if self._fusion is not None and self._fusion.brief_enabled else None
         routing = self._fusion if self._fusion is not None and self._fusion.gate("route") else None
         self._tools.route_submitter = routing.submit_route if routing is not None else None
@@ -844,6 +847,7 @@ class ChatGPTController:
         self._turn = turn
         if self._fusion is not None:
             self._fusion.start_metrics(turn)
+            self._fusion.start_ratings()
             self._fusion.start_route_turn()
         self._turn_done = asyncio.Event()
         self.transcript.set_working_state("thinking")
@@ -950,9 +954,14 @@ class ChatGPTController:
                 end = await loop.run(compact.view_of(self.saved.items, self.saved.compaction))
             fusion = self._fusion
             verdict = fusion.acceptance_verdict() if fusion is not None and not plan else None
-            if verdict is not None:
-                if verdict.missing and end.reason == "done" and end.steps < self.turn_step_limit():
-                    continuation = verdict.continuation()
+            unrated = fusion.unrated_records() if fusion is not None else ()
+            if verdict is not None or unrated:
+                # One continuation per turn at most: missing verification and missing ratings are asked for together.
+                asks = [verdict.continuation()] if verdict is not None and verdict.missing else []
+                if unrated:
+                    asks.append(fusion.rating_request(unrated))
+                if asks and end.reason == "done" and end.steps < self.turn_step_limit():
+                    continuation = "\n\n".join(asks)
                     loop.observer.history_grew([{"type": "message", "role": "developer", "content": [{"type": "input_text", "text": continuation}]}])
                     self._save_now(required=True)
                     history = compact.view_of(self.saved.items, self.saved.compaction)
@@ -966,6 +975,7 @@ class ChatGPTController:
                     if verdict.missing:
                         self.transcript.add_notice("Fusion：本轮工作未验证；缺少检查：" + ", ".join(verdict.missing) + "。")
                     await fusion.retain_verdict(verdict)
+                await fusion.settle_main_ratings()
             if tools.connections is not None:
                 try:
                     await tools.connections.hooks("Stop", self.project, {"session_id": self.session_id, "stop_hook_active": True})

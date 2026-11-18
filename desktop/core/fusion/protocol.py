@@ -79,6 +79,16 @@ ROUTE_DECLARATION: dict[str, Any] = {
     "description": "Choose a destination and verification depth before editing or delegating writes.",
     "parameters": ROUTE_PARAMETERS,
 }
+RATE_PARAMETERS: dict[str, Any] = {
+    "type": "object",
+    "properties": {"ratings": REPORT_PARAMETERS["properties"]["ratings"]},
+    "required": ["ratings"],
+}
+RATE_DECLARATION: dict[str, Any] = {
+    "name": "rate_records",
+    "description": "Rate every Fusion Drive record you read in this turn: 1 helped, 0 made no difference, -1 was wrong or harmful.",
+    "parameters": RATE_PARAMETERS,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -231,6 +241,14 @@ def settle_ratings(ratings: Any, used: Sequence[str]) -> tuple[dict[str, tuple[i
     valid, _ = _ratings(ratings, used)
     settled = {record: valid.get(record, (0, "")) for record in used}
     return settled, len(settled) - len(valid)
+
+
+def parse_ratings(args: Mapping[str, Any], used: Sequence[str]) -> tuple[dict[str, tuple[int, str]], tuple[str, ...]]:
+    """The main agent's ratings of the records it read, under the same rules as the ratings of a report."""
+    if not isinstance(args, Mapping):
+        return {}, ("Provide the ratings as an object.",)
+    valid, problems = _ratings(args.get("ratings"), used)
+    return valid, tuple(problems)
 
 
 def parse_route(args: Mapping[str, Any]) -> tuple[Route | None, str]:
