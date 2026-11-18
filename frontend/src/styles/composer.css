@@ -90,6 +90,60 @@
 .agent-chip:hover { border-color: var(--ink); background: var(--hover); }
 .agent-chip.on { background: var(--ink); border-color: var(--ink); color: var(--paper); }
 .agent-chip.waiting { border-color: var(--st-attention); font-weight: 600; }
+.dragon-sprite { display: block; flex: none; width: var(--dragon-size); height: var(--dragon-size); background-size: var(--dragon-strip) var(--dragon-size); background-position: 0 0; background-repeat: no-repeat; image-rendering: pixelated; }
+.dragon-sprite.playing { animation: dragon-frames var(--dragon-time) steps(var(--dragon-frames), end) infinite; }
+@keyframes dragon-frames { to { background-position: calc(0px - var(--dragon-strip)) 0; } }
+.agent-flow {
+  --flow-bg: var(--bg-side); --flow-glow: var(--flow-bg); --flow-grid: #a2a8af;
+  --flow-label: var(--fg); --flow-model: var(--fg-2); --flow-ring: var(--bg-raised); --flow-hover: #e3e8ed;
+  --flow-credit: var(--bg-bar); --flow-particle: #005440;
+  --flow-idle: #536174; --flow-working: #006b53; --flow-waiting: #885000;
+  --flow-done: #596b7b; --flow-stopped: #62666b; --flow-failed: #a62924;
+  position: relative; isolation: isolate; width: 100%; height: clamp(150px, 25vh, 340px); margin-bottom: 10px; overflow: hidden; overscroll-behavior: contain;
+  border: 1px solid var(--ink); background-color: var(--flow-bg);
+}
+html[data-theme="dark"] .agent-flow {
+  --flow-bg: #090f1d; --flow-glow: #152437; --flow-grid: #52647c;
+  --flow-label: #f3f6fd; --flow-model: #bac5d7; --flow-ring: #121b2a; --flow-hover: #22334a;
+  --flow-credit: #121d2c; --flow-particle: #e2fff9;
+  --flow-idle: #8293a9; --flow-working: #56ecc7; --flow-waiting: #ffc264;
+  --flow-done: #8098ad; --flow-stopped: #929398; --flow-failed: #ff776e;
+  background-image: radial-gradient(ellipse at 48% 42%, var(--flow-glow), var(--flow-bg) 83%);
+}
+.agent-flow .react-flow__pane { cursor: inherit; }
+.agent-flow .react-flow__pane.dragging { cursor: grabbing; }
+.agent-flow .react-flow__handle { top: 25px; opacity: 0; pointer-events: none; }
+.agent-flow .react-flow__handle-left { left: 18px; }
+.agent-flow .react-flow__handle-right { right: 18px; }
+.agent-flow .react-flow__attribution { --xy-attribution-background-color: var(--flow-credit); }
+.agent-flow .react-flow__attribution a { color: var(--flow-model); }
+.agent-flow-node, .agent-flow-edge { --agent-wire: var(--flow-idle); }
+.agent-flow-node.working, .agent-flow-edge.working { --agent-wire: var(--flow-working); }
+.agent-flow-node.waiting, .agent-flow-edge.waiting { --agent-wire: var(--flow-waiting); }
+.agent-flow-node.done, .agent-flow-edge.done { --agent-wire: var(--flow-done); }
+.agent-flow-node.stopped, .agent-flow-edge.stopped { --agent-wire: var(--flow-stopped); }
+.agent-flow-node.failed, .agent-flow-edge.failed { --agent-wire: var(--flow-failed); }
+.agent-flow-character { display: flex; flex-direction: column; align-items: center; width: 100%; gap: 2px; padding: 0; border: 0; background: transparent; color: var(--flow-label); line-height: 1.2; }
+button.agent-flow-character { pointer-events: auto; }
+button.agent-flow-character:hover, button.agent-flow-character:focus-visible { background: var(--flow-hover); outline: 1px solid var(--agent-wire); outline-offset: 1px; }
+.agent-flow-ring { display: grid; place-items: center; width: 50px; height: 50px; border: 1px solid var(--agent-wire); border-radius: 50%; background: var(--flow-ring); }
+.agent-flow-name, .agent-flow-model { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-flow-name { font-size: 13px; font-weight: 600; }
+.agent-flow-model { font-size: 11px; color: var(--flow-model); }
+.agent-flow-edge { pointer-events: none; }
+.agent-flow-wire, .agent-flow-signal { fill: none; stroke: var(--agent-wire); stroke-width: 2; stroke-linecap: round; }
+.agent-flow-wire { opacity: 0.82; }
+.agent-flow-edge.working .agent-flow-wire { opacity: 0.38; }
+.agent-flow-edge.failed .agent-flow-wire { opacity: 0.94; stroke-dasharray: 5 5; }
+.agent-flow-edge.waiting .agent-flow-wire { animation: agent-flow-pulse 2.6s ease-in-out infinite; }
+.agent-flow-signal { stroke-dasharray: 5 19; animation: agent-flow-current 0.75s linear infinite; }
+.agent-flow-particle { fill: var(--flow-particle); filter: drop-shadow(0 0 3px var(--agent-wire)); }
+@keyframes agent-flow-current { to { stroke-dashoffset: -24; } }
+@keyframes agent-flow-pulse { 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .dragon-sprite.playing, .agent-flow-edge .agent-flow-wire, .agent-flow-signal { animation: none; }
+  .agent-flow-particle { display: none; }
+}
 .agent-summary { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .agent-name, .agent-caption { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-name { font-weight: 600; }

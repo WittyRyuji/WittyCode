@@ -1,21 +1,14 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ArrowLeft, ChevronRight, UsersRound, X } from "lucide-react";
-import type { AgentInfo, Session, SessionMark, Usage } from "../types";
+import type { AgentInfo, Session, Usage } from "../types";
 import { currentSession, useStore } from "../store";
-import { groupAgents } from "../lib/agentTeam";
+import { AGENT_STATE, groupAgents } from "../lib/agentTeam";
+import { dragonIdentity, dragonPalette } from "../lib/dragonSprites";
 import { formatTokens, usageTotal } from "../lib/format";
+import { AgentFlow } from "./AgentFlow";
+import { DragonSprite } from "./DragonSprite";
 import { TurnView } from "./Transcript";
 import { MenuButton, StateDot, type MenuItem } from "./ui";
-
-/** The words for a sub-agent's state, and the dot it gets (the conversation tabs' own dots). */
-export const AGENT_STATE: Record<AgentInfo["status"], { text: string; mark: SessionMark }> = {
-  pending: { text: "待分配", mark: "ready" },
-  working: { text: "运行中", mark: "running" },
-  waiting: { text: "等你确认", mark: "attention" },
-  done: { text: "已完成", mark: "ready" },
-  stopped: { text: "已停止", mark: "ready" },
-  failed: { text: "失败", mark: "dead" },
-};
 
 /** The conversation's team in the right rail and in the inspector. */
 export function AgentBar(props: { session: Session; onClose?: () => void; inspector?: boolean }) {
@@ -42,7 +35,7 @@ function AgentTeam({ session, onClose, inspector }: { session: Session; onClose?
               title={a.task.split(/\r?\n/, 1)[0].trim().slice(0, 200) || a.name}
               onClick={() => openAgent(session.id, a.id)}
             >
-              <StateDot mark={AGENT_STATE[a.status].mark} size={8} />
+              <DragonSprite identity={dragonIdentity(a.fusionRole)} palette={dragonPalette(dragonIdentity(a.fusionRole), a.id)} status={a.status} scale={2} />
               <span className="agent-summary">
                 <span className="agent-name">{a.name}</span>
                 <span className="agent-caption">{a.role || "Sub-Agent"}{a.model ? ` · ${a.model}` : ""}</span>
@@ -63,6 +56,7 @@ function AgentTeam({ session, onClose, inspector }: { session: Session; onClose?
         {teamTokens !== null && <span className="agentbar-tokens num" title="已知专家的累计 Token 用量">{formatTokens(teamTokens)} Token</span>}
         {onClose && <button type="button" className="icon-btn sm" aria-label="关闭 Agents Team" onClick={onClose}><X size={15} aria-hidden /></button>}
       </header>
+      {!inspector && <AgentFlow session={session} agents={[...active, ...history]} onOpen={(id) => openAgent(session.id, id)} />}
       {active.length > 0 && list(active, "当前 Sub-Agents")}
       {history.length > 0 && <div className="agent-history">
         <button type="button" className="agent-history-toggle" aria-expanded={historyOpen} onClick={() => setHistoryOpen(!historyOpen)}>
