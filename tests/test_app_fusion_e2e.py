@@ -66,8 +66,10 @@ def test_configure_and_start_fusion_with_a_local_fake(qapp, loop, tmp_path):
                             say("专家检查完成。"), say("主代理已检查报告。"))
             await rig.send("请检查模块")
             await rig.wait_text(".chip-model .chip-v", "Fusion")
-            await rig.wait_text(".agent-chip", "src")
             await rig.wait_text(".transcript", "主代理已检查报告")
+            await rig.wait_for(".agent-history-toggle")
+            await rig.click(".agent-history-toggle")
+            await rig.wait_text(".agent-chip", "src")
             assert len(rig.core.order) == 1
             assert [request["model"] for request in rig.plan.requests] == ["gpt-6.1-sol", "gpt-6-luna", "gpt-6.1-sol"]
             assert [request["reasoning"]["effort"] for request in rig.plan.requests] == ["high", "low", "high"]

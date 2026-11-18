@@ -259,7 +259,9 @@ class FusionRegistry:
                 raise FusionError("The expert record is invalid.")
             ident, scope, model, role, status = (item.get(k) for k in ("id", "scope", "model", "role", "status"))
             if (not isinstance(ident, str) or len(ident) != 32 or any(c not in "0123456789abcdef" for c in ident)
-                    or not result.policy.allowed(model, role) or status not in ("idle", "running", "done", "failed", "interrupted", "retired")):
+                    or role not in ("worker", "light") or not _model(model, external=True)
+                    or (status != "retired" and not result.policy.allowed(model, role))
+                    or status not in ("idle", "running", "done", "failed", "interrupted", "retired")):
                 raise FusionError("The expert record is invalid.")
             workstream = item.get("workstream", "")
             if workstream:

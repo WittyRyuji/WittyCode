@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import pytest
+from PySide6.QtCore import Qt
 
 from tests.e2e_support import open_rig
 from tests.fake_responses import call, say
@@ -61,9 +62,14 @@ def test_team_rail_and_agent_prompts_do_not_depend_on_a_plan(qapp, loop, tmp_pat
             await rig.click(".agentpanel .prompt.perm .btn.primary")
             await rig.wait_for(".agentpanel .prompt.perm", 0)
             await until(lambda: (rig.project / "team-marker.txt").exists())
-            await rig.wait_for(".agentpanel .agent-chip", 2)
             await rig.wait_text(".agentpanel .agent-chip", "等你确认")
-            await rig.click(".agentpanel .agent-chip", 1)
+            assert await rig.js("document.querySelector('.agentpanel .agent-history-toggle').getAttribute('aria-expanded') === 'false'")
+            assert await rig.texts(".agentpanel .agent-name") == ["Regression coverage"]
+            await rig.click(".agentpanel .agent-history-toggle")
+            await rig.wait_for(".agentpanel .agent-chip", 2)
+            assert await rig.texts(".agentpanel .agent-name") == ["Regression coverage", "Login flow"]
+            assert await rig.js("document.querySelector('.agentpanel .agent-list').getBoundingClientRect().bottom <= document.querySelector('.agentpanel .agent-history').getBoundingClientRect().top")
+            await rig.click(".agentpanel .agent-chip", 0)
             await rig.wait_for(".agentpanel .prompt.ask .otherinput")
             assert await rig.js("document.querySelector('.agentpanel .agent-chip.on .agent-name').textContent === 'Regression coverage'")
             assert await rig.js("document.querySelector('.conversation-column').getBoundingClientRect().width >= 400"), "the narrow inspector overlays rather than crushes the composer"
@@ -72,16 +78,23 @@ def test_team_rail_and_agent_prompts_do_not_depend_on_a_plan(qapp, loop, tmp_pat
             await rig.click_text(".agentpanel .prompt.ask .pbtns .btn", "提交回答")
             await rig.wait_text(".agentpanel-run", "Tests report.")
             await until(lambda: rig.core.order[0].controller.state.value == "ready")
-            await rig.click(".agentpanel .agent-chip", 0)
+            await rig.click_text(".agentpanel .agent-chip", "Login flow")
             await rig.wait_text(".agentpanel-run", "Frontend report.")
             assert rig.window.grab().save(str(tmp_path / f"sub-agent-{size[0]}.png"))
             await rig.click('[aria-label="切回主对话"]')
             await rig.wait_for(".agentpanel", 0)
+            await rig.wait_for(".conversation-rail .agent-chip", 0)
+            assert await rig.js("document.querySelector('.conversation-rail .agent-history-toggle').getAttribute('aria-expanded') === 'false'")
+            await rig.click(".conversation-rail .agent-history-toggle")
+            await rig.wait_for(".conversation-rail .agent-chip", 2)
+            await rig.press(Qt.Key.Key_Space)
+            await rig.wait_for(".conversation-rail .agent-chip", 0)
+            await rig.press("Enter")
             await rig.wait_for(".conversation-rail .agent-chip", 2)
             await rig.wait_text(".conversation-column .transcript", "Team reports checked.")
             await rig.focus_composer()
             await rig.type("Draft for the main agent")
-            await rig.click(".conversation-rail .agent-chip", 1)
+            await rig.click_text(".conversation-rail .agent-chip", "Regression coverage")
             await rig.wait_text(".agentpanel-run", "Tests report.")
             await rig.press("Escape")
             await rig.wait_for(".agentpanel", 0)

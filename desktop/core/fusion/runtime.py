@@ -9,7 +9,7 @@ from dataclasses import dataclass, field, fields, replace
 from typing import TYPE_CHECKING, Any
 
 from desktop.core.fusion.reasoning import configured_effort
-from desktop.core.fusion.registry import Expert, FusionError, FusionRegistry
+from desktop.core.fusion.registry import Expert, FusionError, FusionRegistry, Policy
 from desktop.core.harness.loop import Outcome
 from desktop.core.session_state import SessionState
 from desktop.core.transcript import TextBlockView, Transcript
@@ -115,9 +115,13 @@ class FusionRuntime:
         policy = self.registry.policy
         return (
             "Fusion mode: you are the fixed main agent. You own task analysis, planning, delegation and final verification. "
-            "Call delegate_task only when it is useful. Experts cannot see your full conversation; give each task its goal, "
+            "For implementation work, assess delegation before doing the whole task yourself: use experts for separable "
+            "responsibilities or useful independent verification. Handle trivial edits and advice directly; do not invent "
+            "busywork or force delegation in every turn. Experts cannot see your full conversation; give each task its goal, "
             "constraints and checks. Organise experts by stable responsibility or deliverable, not one expert per file; "
-            "a workstream can span multiple files. Reuse its original owner. Use delegate_tasks for independent workstreams "
+            "a workstream can span multiple files. Reuse its original owner. If it is interrupted or failed, inspect the "
+            "workspace and previous evidence, then explicitly use resume=true with a new next-step task. Do not blindly "
+            "replay its old task. Use delegate_tasks for independent workstreams "
             "with disjoint write paths to run concurrently; wait for dependencies before starting dependent work. "
             "Declared paths coordinate writers, not a filesystem sandbox. Do not delegate while planning. "
             f"Authorised worker models: {', '.join(policy.workers)}. Lightweight model: {policy.light}. "
@@ -202,6 +206,56 @@ class FusionRuntime:
             return configured_effort(self.registry.policy.reasoning, model, info.efforts if info is not None else (), role=role)
         except ValueError as error:
             raise FusionError(str(error)) from error
+
+    @staticmethod
+    def settings_snapshot(policy: Policy) -> dict[str, Any]:
+        return {key: value for key, value in policy.to_json().items() if key not in ("maxCalls", "maxTokens")}
+
+    def pending_settings(self) -> Policy | None:
+        settings, current = self.parent.manager.settings, self.registry.policy
+        # An unconfigured global preset must not invalidate a restored, self-contained session.
+        if not settings.fusion_main or not settings.fusion_workers or not settings.fusion_light:
+            return None
+        desired = Policy(settings.fusion_main, tuple(settings.fusion_workers), settings.fusion_light,
+                         current.max_calls, current.max_tokens, settings.fusion_max_seconds,
+                         settings.fusion_preference, settings.fusion_reasoning)
+        previous = self.parent.saved.origin.get("fusionSettings", self.settings_snapshot(current))
+        return desired if self.settings_snapshot(desired) != previous else None
+
+    def prepare_settings(self, policy: Policy) -> FusionRegistry:
+        if self.parent.state is not SessionState.READY or self._active or self._delegations:
+            raise FusionError("Wait for the current turn and experts before applying Fusion settings.")
+        for model, role in [(policy.main, "main"), *((model, "worker") for model in policy.workers), (policy.light, "light")]:
+            info = self.parent.manager.model_info(native_model(model))
+            if info is None:
+                raise FusionError("A configured Fusion model is unavailable; no fallback was selected.")
+            configured_effort(policy.reasoning, model, info.efforts, role=role)
+        prepared = FusionRegistry.from_json(self.registry.project, self.registry.to_json())
+        prepared.policy = policy
+        for expert in list(prepared.agents.values()):
+            if expert.status != "retired" and not policy.allowed(expert.model, expert.role):
+                # Changing the role's configured model authorises a context-preserving handoff, never an execution.
+                model = policy.light if expert.role == "light" else policy.workers[0]
+                incomplete = expert.status in ("interrupted", "failed")
+                replacement = prepared.transfer(expert.id, model, expert.role)
+                replacement.status = "interrupted" if incomplete else "idle"
+        return prepared
+
+    def apply_settings(self, prepared: FusionRegistry, reasoning: str) -> None:
+        parent = self.parent
+        before = self.registry, self.agents, parent.saved.origin
+        # The source-model summary may report usage (or uncertainty) after preparation. Never roll that evidence back.
+        prepared.calls, prepared.tokens = self.registry.calls, self.registry.tokens
+        prepared.unmetered, prepared.had_unknown = self.registry.unmetered, self.registry.had_unknown
+        self.registry = prepared
+        self.agents = {key: ExpertView(record, self.agents[key].controller if key in self.agents else None)
+                       for key, record in prepared.agents.items()}
+        parent.saved.origin = {**parent.saved.origin, "fusionSettings": self.settings_snapshot(prepared.policy)}
+        try:
+            parent._set_fusion_mode(self, None, native_model(prepared.policy.main), reasoning)
+        except BaseException:
+            self.registry, self.agents, parent.saved.origin = before
+            raise
 
     def change_main(self, model: str, reasoning: str | None = None) -> bool:
         parent = self.parent
@@ -320,12 +374,24 @@ class FusionRuntime:
                 await child.close()
             raise
 
+    def archive_source(self, agent_id: str) -> str:
+        """An unstarted replacement has no archive yet; its evidence still belongs to its predecessor."""
+        expert = self.registry.agents.get(agent_id)
+        if expert is None:
+            raise FusionError("The expert is not part of this conversation.")
+        while not expert.started_at and expert.transferred_from:
+            expert = self.registry.agents[expert.transferred_from]
+        return expert.id
+
     async def _handoff(self, expert: Expert, child: ChatGPTController) -> str:
         from desktop.core.harness.outputs import REFERENCE, hint
         if not expert.transferred_from or expert.handoff_complete:
             return ""
-        previous = await self._archive(expert.transferred_from)
-        source = self.parent.manager.sessions.outputs(expert.transferred_from)
+        source_id = self.archive_source(expert.transferred_from)
+        if not self.registry.agents[source_id].started_at:
+            return ""
+        previous = await self._archive(source_id)
+        source = self.parent.manager.sessions.outputs(source_id)
         source._safe_root()
         references = [path.stem for path in source.root.glob("*.txt") if REFERENCE.fullmatch(path.stem)]
         for reference in references:
@@ -353,7 +419,7 @@ class FusionRuntime:
                 for item in items if item.get("type") == "function_call_output"]
         return "\n".join(rows), promoted
 
-    async def delegate(self, scope: str, model: str, role: str, task: str, paths: tuple[str, ...] | None = None) -> Outcome:
+    async def delegate(self, scope: str, model: str, role: str, task: str, paths: tuple[str, ...] | None = None, resume: bool = False) -> Outcome:
         from desktop.core.harness.outputs import hint
         from desktop.core.harness.toolset import PLAN_REFUSAL
 
@@ -373,7 +439,7 @@ class FusionRuntime:
             expert = (self.registry.assign(scope, model, role) if paths is None
                       else self.registry.assign_workstream(scope, paths, model, role))
             transferred_new = bool(expert.transferred_from and expert.started_at == 0)
-            self.registry.begin(expert.id)
+            self.registry.begin(expert.id, resume=resume)
             expert.task = task
             self._checkpoint()  # Reserve ownership durably before yielding to another delegation or starting a model.
         except Exception as error:
@@ -403,7 +469,8 @@ class FusionRuntime:
             return delta.total if delta is not None else None
         try:
             child = await self._open(view, created=created)
-            if not await child.update_settings(autonomy=self.parent.autonomy, mode="auto"):
+            if not await child.update_settings(autonomy=self.parent.autonomy, mode="auto",
+                                               reasoning=self.reasoning_for(expert.model, expert.role)):
                 raise FusionError("The expert could not inherit the main conversation's permissions.")
             parent_tools = await self.parent._ensure_tools()
             child_tools = await child._ensure_tools()

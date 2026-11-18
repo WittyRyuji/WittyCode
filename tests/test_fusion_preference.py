@@ -51,7 +51,7 @@ def test_invalid_saved_preferences_do_not_become_instructions():
         assert settings_from_dict({"fusion_preference": value}).fusion_preference == 50
 
 
-def test_new_sessions_snapshot_preference_and_ignore_legacy_default_budgets(tmp_path):
+def test_sessions_refresh_preference_at_send_and_ignore_legacy_default_budgets(tmp_path):
     async def go():
         core, model, _, _, _ = await ready_core(tmp_path)
         try:
@@ -71,18 +71,19 @@ def test_new_sessions_snapshot_preference_and_ignore_legacy_default_budgets(tmp_
             policy = main._fusion.registry.policy
             assert (policy.max_calls, policy.max_tokens, policy.preference) == (0, 0, 80)
             await core.call("settings.set", {"key": "fusionPreference", "value": 10})
+            assert main._fusion.registry.policy.preference == 80 and not model.requests
             model.script(say("Done."))
             await core.call("session.send", {"id": cid, "text": "Inspect"})
             await finish_turn(main)
             instructions = model.requests[0]["instructions"]
-            assert "0.70" in instructions and "1.30" in instructions
+            assert "1.40" in instructions and "0.60" in instructions
             assert "light" in instructions.lower() and "worker" in instructions.lower()
-            assert main._fusion.registry.policy.preference == 80
+            assert main._fusion.registry.policy.preference == 10
             native = main.session_id
             await main.close()
             reopened = await main.manager.open_saved(tmp_path / "proj", native)
-            assert reopened._fusion.registry.policy.preference == 80
-            assert "0.70" in reopened._fusion.instructions()
+            assert reopened._fusion.registry.policy.preference == 10
+            assert "1.40" in reopened._fusion.instructions()
         finally:
             await core.shutdown()
     asyncio.run(go())

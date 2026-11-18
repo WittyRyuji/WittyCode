@@ -1,7 +1,8 @@
-import { useEffect, useRef } from "react";
-import { ArrowLeft, UsersRound, X } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { ArrowLeft, ChevronRight, UsersRound, X } from "lucide-react";
 import type { AgentInfo, Session, SessionMark } from "../types";
 import { currentSession, useStore } from "../store";
+import { groupAgents } from "../lib/agentTeam";
 import { TurnView } from "./Transcript";
 import { MenuButton, StateDot, type MenuItem } from "./ui";
 
@@ -16,21 +17,20 @@ export const AGENT_STATE: Record<AgentInfo["status"], { text: string; mark: Sess
 };
 
 /** The conversation's team in the right rail, independent of whether it has a plan. */
-export function AgentBar({ session, onClose }: { session: Session; onClose?: () => void }) {
+export function AgentBar(props: { session: Session; onClose?: () => void }) {
+  return <AgentTeam key={props.session.id} {...props} />;
+}
+
+function AgentTeam({ session, onClose }: { session: Session; onClose?: () => void }) {
   const agents = session.agents ?? [];
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const { active, history } = groupAgents(agents);
   const open = useStore((s) => s.agentPanel);
   const openAgent = useStore((s) => s.openAgent);
   if (agents.length === 0) return null;
-  return (
-    <section className="agentbar" aria-label="Agents Team">
-      <header className="agentbar-head">
-        <UsersRound size={16} aria-hidden />
-        <h3 className="agentbar-title">Agents Team</h3>
-        <span className="agentbar-count num">{agents.length}</span>
-        {onClose && <button type="button" className="icon-btn sm" aria-label="关闭 Agents Team" onClick={onClose}><X size={15} aria-hidden /></button>}
-      </header>
-      <ul className="agent-list" aria-label="Sub-Agents">
-        {agents.map((a) => (
+  const list = (items: AgentInfo[], label: string) => (
+      <ul className="agent-list" aria-label={label}>
+        {items.map((a) => (
           <li key={a.id}>
             <button
               type="button"
@@ -50,6 +50,23 @@ export function AgentBar({ session, onClose }: { session: Session; onClose?: () 
           </li>
         ))}
       </ul>
+  );
+  return (
+    <section className="agentbar" aria-label="Agents Team">
+      <header className="agentbar-head">
+        <UsersRound size={16} aria-hidden />
+        <h3 className="agentbar-title">Agents Team</h3>
+        <span className="agentbar-count num">{agents.length}</span>
+        {onClose && <button type="button" className="icon-btn sm" aria-label="关闭 Agents Team" onClick={onClose}><X size={15} aria-hidden /></button>}
+      </header>
+      {active.length > 0 && list(active, "当前 Sub-Agents")}
+      {history.length > 0 && <div className="agent-history">
+        <button type="button" className="agent-history-toggle" aria-expanded={historyOpen} onClick={() => setHistoryOpen(!historyOpen)}>
+          <ChevronRight size={14} className={`chev${historyOpen ? " down" : ""}`} aria-hidden />
+          <span>历史专家</span><span className="num">{history.length}</span>
+        </button>
+        {historyOpen && list(history, "历史 Sub-Agents")}
+      </div>}
     </section>
   );
 }
@@ -133,7 +150,7 @@ export function AgentPanel() {
         }}
       >
         <div className="transcript agentpanel-transcript">
-          {turns.length === 0 ? <div className="snote">{agent.fusionState === "idle" ? "等待主代理分配任务。" : "正在读取它的运行…"}</div> : turns.map((t) => <TurnView key={t.id} turn={t} session={run} />)}
+          {turns.length === 0 ? <div className="snote">{agent.fusionState === "idle" ? "等待主代理分配任务。" : agent.fusionState === "interrupted" ? "尚无可显示的运行记录；继续前请检查原专家记录与工作区。" : "正在读取它的运行…"}</div> : turns.map((t) => <TurnView key={t.id} turn={t} session={run} />)}
         </div>
       </div>
     </aside>

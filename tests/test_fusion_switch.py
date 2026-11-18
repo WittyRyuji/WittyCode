@@ -84,16 +84,18 @@ def test_existing_conversation_switches_in_place_and_restores_paused_experts(tmp
             assert (await core.call("agents.watch", {"id": cid, "agentId": expert}))["ok"]
             core.settings.fusion_main, core.settings.fusion_workers = LUNA, [SOL]
             count = len(fake.requests)
-            fake.script(say("Before Fusion. Between modes. Reviewed."))
             assert (await choose(core, cid, "fusion"))["ok"]
-            assert main.session_id == native and main._fusion.registry.policy.main == SOL
-            assert main._fusion.registry.policy.workers == (LUNA,) and main.reasoning == "high"
-            assert main._fusion.registry.calls == 1 and len(fake.requests) == count + 1
-            fake.script(call("delegate_task", {**TASK, "task": "Continue inspecting."}), say("Continued."), say("Finished."))
-            await core.call("session.send", {"id": cid, "text": "Resume the original expert"})
+            assert main.session_id == native and main._fusion.registry.policy.main == LUNA
+            assert main._fusion.registry.policy.workers == (SOL,) and main.reasoning == "low"
+            assert main._fusion.registry.calls == 1 and len(fake.requests) == count
+            fake.script(call("delegate_task", {**TASK, "model": SOL, "task": "Continue inspecting."}), say("Continued."), say("Finished."))
+            await core.call("session.send", {"id": cid, "text": "Resume the original responsibility"})
             await finish_turn(main)
-            assert list(main.agents) == [expert] and main._fusion.registry.calls == 2
-            assert "Expert baseline." in str(fake.requests[-2]["input"])
+            assert len(main.agents) == 2 and main._fusion.registry.calls == 2
+            assert main.agents[expert].record.status == "retired"
+            replacement = next(view for key, view in main.agents.items() if key != expert)
+            assert replacement.record.transferred_from == expert and replacement.record.handoff_complete
+            assert "retained tool evidence" in str(fake.requests[-2]["input"])
             assert "Between modes." in str(fake.requests[-3]["input"])
             assert core.defaults() == defaults and len(core.order) == 1
         finally:

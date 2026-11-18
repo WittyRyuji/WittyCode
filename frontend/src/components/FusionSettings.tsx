@@ -72,8 +72,8 @@ export function FusionSettings() {
   return (
     <>
       <h3 className="settings-section-title">自有 Fusion</h3>
-      <p className="page-note">在输入框的模型菜单选择 Fusion；已有会话也可在空闲时切换。这里设置首次启用的默认配置，已有或暂停的 Fusion 会话保留自身配置。</p>
-      <Field label="主模型" hint="任务分析、分配和最终验收由同一主代理完成；这里的改动只影响之后首次启用 Fusion 的会话。">
+      <p className="page-note">在输入框的模型菜单选择 Fusion；已有会话也可在空闲时切换。修改配置后，Fusion 会话在下一轮发送时应用，不打断正在运行的主代理或专家。</p>
+      <Field label="主模型" hint="主代理负责任务分析、分配和最终验收；更换主模型时，下一轮发送前自动交接上下文，历史记录保留。">
         {modelRow(s.fusionMain, "main", items([s.fusionMain], (id) => set("fusionMain", id), true))}
       </Field>
       <Field label="工作模型" hint="供 Sub-Agent 执行工作任务使用；固定选择一个模型。">

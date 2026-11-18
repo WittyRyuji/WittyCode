@@ -15,6 +15,7 @@ PARAMETERS: dict[str, Any] = {
         "model": {"type": "string", "description": "Exact authorised model id."},
         "role": {"type": "string", "enum": ["worker", "light"]},
         "task": {"type": "string", "description": "Self-contained goal, constraints, dependencies, evidence and acceptance checks."},
+        "resume": {"type": "boolean", "description": "Explicitly continue an interrupted/failed owner after inspecting its workspace and evidence. Supply a new next-step task; never blindly replay unfinished work. Default false."},
     },
     "required": ["workstream", "paths", "model", "role", "task"],
 }
@@ -49,12 +50,17 @@ def parse(args: Mapping[str, Any]) -> tuple[tuple[Any, ...] | None, str]:
     scope, model, role, task = (value.strip() for value in values)
     if role not in ("worker", "light") or len(scope) > (160 if modern else 1024) or len(model) > 512 or len(task) > 50_000:
         return None, "The role or task fields are invalid or too long."
+    resume = args.get("resume", False)
+    if not isinstance(resume, bool):
+        return None, "resume must be a boolean; inspect previous evidence before explicitly continuing."
     if modern:
         paths = args.get("paths")
         if not isinstance(paths, list) or len(paths) > 128 or any(not isinstance(path, str) or not path.strip() for path in paths):
             return None, "Provide a list of concrete project-relative write paths."
-        return (scope, model, role, task, tuple(paths)), ""
-    return (scope, model, role, task), ""  # Older retained model calls remain readable; new declarations use workstreams.
+        values = (scope, model, role, task, tuple(paths))
+    else:
+        values = (scope, model, role, task)  # Keep older retained model calls readable.
+    return ((*values, resume) if modern else (*values, None, resume)) if resume else values, ""
 
 
 def parse_batch(args: Mapping[str, Any]) -> tuple[list[tuple[Any, ...]] | None, str]:

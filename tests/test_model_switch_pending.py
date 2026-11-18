@@ -33,7 +33,7 @@ def test_fusion_selection_waits_for_send_and_does_not_create_a_compact_turn(tmp_
     async def go():
         core, fake, events, _, _ = await ready_core(tmp_path)
         try:
-            core.settings.fusion_main, core.settings.fusion_workers, core.settings.fusion_light = LUNA, [SOL], SOL
+            core.settings.fusion_main, core.settings.fusion_workers, core.settings.fusion_light = SOL, [SOL], SOL
             cid, main = await conversation(core, fake, tmp_path)
             original = deepcopy(main.saved.items)
             fake.script(say("SUMMARY: inspected inventory; verify constraints next."), say("Continued once."))
@@ -41,9 +41,9 @@ def test_fusion_selection_waits_for_send_and_does_not_create_a_compact_turn(tmp_
             assert len(fake.requests) == 1, "selecting a model must not send a summary request"
             assert main._fusion is None and main.model == "gpt-6.1-sol"
             meta = core._session_meta(core._by_cid[cid])
-            assert meta["fusion"] and meta["settings"]["model"] == LUNA
-            # Changing global defaults must not silently replace a selection already made in this session.
-            core.settings.fusion_main = SOL
+            assert meta["fusion"] and meta["settings"]["model"] == SOL
+            # The Fusion preset is resolved at send time, including changes after selecting the Fusion item.
+            core.settings.fusion_main = LUNA
             assert (await core.call("session.send", {"id": cid, "text": "Continue with inventory"}))["ok"]
             await finish_turn(main)
             assert main._fusion.registry.policy.main == LUNA

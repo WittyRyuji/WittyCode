@@ -22,6 +22,7 @@ import { quitWarning } from "../src/lib/quit.ts";
 import "./usage.test.mjs";
 import "./plan.test.mjs";
 import "./rail-width.test.mjs";
+import "./agent-team.test.mjs";
 import "./turn-navigation.test.mjs";
 import "./factory.test.mjs";
 import "./fusion.test.mjs";

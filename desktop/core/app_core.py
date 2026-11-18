@@ -2022,6 +2022,7 @@ class AppCore:
             return {"ok": False, "text": "没有已保存的目标可以恢复：用 /goal 目标 设置一个新目标。"}
         if resuming and goal.rounds >= goals.ROUNDS:
             return {"ok": False, "text": "已保存目标已用完轮数：检查结果后，用 /goal 目标 明确开始新一批。"}
+        await self._refresh_fusion_settings(conv)
         previous = dict(getattr(getattr(controller, "saved", None), "goal", {}))
         if not self._checkpoint_goal(conv, goal):
             controller.saved.goal = previous
@@ -2078,12 +2079,30 @@ class AppCore:
         outcome = goals.step(goal, texts[-1] if texts else "", bool(turn.tools))
         if not outcome.prompt:
             self._stop_goal(conv, outcome.notice, finished=goals.mark_of(texts[-1] if texts else "")[0] == "done")
-        elif controller.send_prompt(outcome.prompt):
-            self._checkpoint_goal(conv, goal)
-            conv.dirty = True
-            self._schedule_flush()
         else:
-            self._stop_goal(conv, "目标先停下了：下一轮没能发出（会话不能接收消息）。")
+            def send() -> None:
+                if conv.goal is not goal or conv.cid not in self._by_cid:
+                    return
+                if controller.send_prompt(outcome.prompt):
+                    self._checkpoint_goal(conv, goal)
+                    conv.dirty = True
+                    self._schedule_flush()
+                else:
+                    self._stop_goal(conv, "目标先停下了：下一轮没能发出（会话不能接收消息）。")
+            fusion = getattr(controller, "_fusion", None)
+            if fusion is not None and fusion.pending_settings() is not None:
+                async def refresh_then_send() -> None:
+                    try:
+                        await self._refresh_fusion_settings(conv)
+                    except (asyncio.CancelledError, Exception):
+                        self._stop_goal(conv, "目标先停下了：Fusion 配置未能更新，下一轮没有发出；检查设置后可恢复目标。")
+                        return
+                    finally:
+                        conv.switch_task = None
+                    send()
+                conv.switch_task = self._spawn(refresh_then_send(), quiet=True)
+            else:
+                send()
 
     async def _m_skills_list(self, params: dict[str, Any]) -> dict[str, Any]:
         """The skills and custom commands the message box offers after a slash, for the project of a conversation (``id``) or a
@@ -2158,9 +2177,13 @@ class AppCore:
         attachments = [a for a in conv.drafts if a.id in wanted]
         controller = conv.controller
         carried = self._carried_attachments(conv)
-        problem = controller.attachment_problem(carried + tuple(attachments))
-        if problem:
-            raise AppError(problem)
+        fusion = getattr(controller, "_fusion", None)
+        changing = conv.pending_model is not None or (fusion is not None and fusion.pending_settings() is not None)
+        # A queued/new turn belongs to the destination model; steering still belongs to the running source.
+        if not changing or (controller.state is SessionState.RUNNING and params.get("how") == "steer"):
+            problem = controller.attachment_problem(carried + tuple(attachments))
+            if problem:
+                raise AppError(problem)
         # More than a message usually holds (the picked ones from an engine change count, they go with this message)
         # is the user's call: they are told by how much and asked once, nothing is refused or dropped. Only past the
         # safety ceiling (a slip, not a choice) is it refused.
@@ -2217,9 +2240,10 @@ class AppCore:
         if conv.pending_model is not None:
             await self._apply_pending_model(conv)
             controller = conv.controller
-            problem = controller.attachment_problem(self._carried_attachments(conv) + tuple(attachments))
-            if problem:
-                raise AppError(problem)
+        await self._refresh_fusion_settings(conv)
+        problem = controller.attachment_problem(self._carried_attachments(conv) + tuple(attachments))
+        if problem:
+            raise AppError(problem)
         pending = conv.pending_model
         if pending is not None:
             self._set_pending_model(conv, None)  # Persist before accepting the message; a disk failure must not invite replay.
@@ -2323,7 +2347,7 @@ class AppCore:
                 or not isinstance(agent_id, str)):
             return {"ok": False}
         try:
-            await fusion._archive(agent_id)
+            await fusion._archive(fusion.archive_source(agent_id))
         except FusionError as error:
             raise AppError("专家存档无法读取，未自动创建新专家。") from error
         if conv.controller.state is not SessionState.READY or conv.switching or conv.queue:
@@ -2395,7 +2419,7 @@ class AppCore:
         fusion = getattr(conv.controller, "_fusion", None) or getattr(conv.controller, "_paused_fusion", None)
         if fusion is not None:
             view = fusion.agents[agent_id]
-            if view.controller is None and not (view.record.status == "idle" and view.record.transferred_from and not view.record.started_at):
+            if view.controller is None and not (view.record.transferred_from and not view.record.started_at):
                 try:
                     await fusion._open(view, created=False)
                 except Exception as error:
@@ -2449,7 +2473,27 @@ class AppCore:
         if isinstance(plan, dict) and plan.get("status") == "pending":
             self._unqueue_all(conv, "计划等待确认：排队的消息没有发出，已放回输入框；请明确执行或修改计划。")
             return
+        fusion = getattr(controller, "_fusion", None)
+        if fusion is not None and fusion.pending_settings() is not None:
+            async def refresh_then_pump() -> None:
+                try:
+                    await self._refresh_fusion_settings(conv)
+                except asyncio.CancelledError:
+                    self._unqueue_all(conv, "Fusion 配置更新已停止，排队消息已放回输入框。")
+                    return
+                except Exception as error:
+                    self._unqueue_all(conv, f"Fusion 配置更新失败，排队消息已放回输入框：{error_text(error)}")
+                    return
+                finally:
+                    conv.switch_task = None
+                self._pump(conv)
+            conv.switch_task = self._spawn(refresh_then_pump(), quiet=True)
+            return
         head = conv.queue[0]
+        problem = controller.attachment_problem(self._carried_attachments(conv) + tuple(head.attachments))
+        if problem:
+            self._unqueue_all(conv, problem)
+            return
         if not controller.send_prompt(head.text, head.attachments):
             return
         self._start_title(conv, head.text)
@@ -3030,6 +3074,7 @@ class AppCore:
             return {key: tokens.to_json() for key, tokens in values.items()
                     if any(key == prefix or key.startswith(prefix + ":") for prefix in prefixes)}
         return {"owner": runtime.owner, "registry": runtime.registry.to_json(),
+                "settings": controller.saved.origin.get("fusionSettings", runtime.settings_snapshot(runtime.registry.policy)),
                 "mainTokens": runtime.main_tokens + (controller.usage.total if controller.usage is not None else 0),
                 "seen": expert_series(conv.ledger.seen), "modelSeen": expert_series(conv.ledger.model_seen)}
 
@@ -3062,14 +3107,43 @@ class AppCore:
                 registry = FusionRegistry.from_json(Path(conv.project), retained.get("registry"))
                 policy = registry.policy
                 restored = self._fusion_series(retained, registry.agents)
-            elif conv.pending_model is not None and conv.pending_model.get("policy") is not None:
-                policy = Policy.from_json(conv.pending_model["policy"])
             else:
                 policy = Policy(self.settings.fusion_main, tuple(self.settings.fusion_workers), self.settings.fusion_light,
                                 0, 0, self.settings.fusion_max_seconds, self.settings.fusion_preference, self.settings.fusion_reasoning)
         except FusionError as error:
             raise AppError("Fusion 配置不可用；请检查设置或保留的专家配置，原会话未改变。") from error
         return policy, retained, restored
+
+    async def _refresh_fusion_settings(self, conv: Conversation) -> None:
+        """Adopt the global preset at a new-turn boundary, never in a running model/tool step."""
+        from desktop.core.fusion.reasoning import configured_effort
+        fusion = getattr(conv.controller, "_fusion", None)
+        if fusion is None:
+            return
+        previous_task = conv.switch_task
+        try:
+            policy = fusion.pending_settings()
+            if policy is None:
+                return
+            if conv.controller.saved.plan.get("status") == "pending":
+                return  # Revising/approving that plan still belongs to its original main agent.
+            prepared = fusion.prepare_settings(policy)
+            info = self.chatgpt.model_info(policy.main.removeprefix("chatgpt:"))
+            settings = self._open_settings(policy.main, self._page_settings(conv))
+            effort = configured_effort(policy.reasoning, policy.main, info.efforts)
+            conv.switching, conv.switch_task = True, asyncio.current_task()
+            if policy.main != fusion.registry.policy.main:
+                await self._compact_model_switch(conv, policy.main)
+            fusion.check_budget()  # A source summary may exhaust a legacy limit or make its usage uncertain.
+            fusion.apply_settings(prepared, effort if effort is not None else settings.get("reasoning", ""))
+            await conv.controller.release_inactive_acp()
+        except ValueError as error:
+            raise AppError(f"Fusion 新配置未应用，消息没有发出；请检查模型和推理设置：{error}") from error
+        finally:
+            conv.switching, conv.switch_task = False, previous_task
+            conv.dirty = True
+            self._feed_usage(conv)
+            self._schedule_flush()
 
     async def _enable_fusion(self, conv: Conversation, carry_ids: Sequence[str] | None, over_ok: bool) -> dict[str, Any]:
         from desktop.core.fusion.registry import FusionError
@@ -3078,6 +3152,13 @@ class AppCore:
             return {"ok": True}
         self._feed_usage(conv)
         policy, retained, restored = self._fusion_selection(conv)
+        paused = getattr(conv.controller, "_paused_fusion", None)
+        prepared = None
+        if paused is not None:
+            latest = paused.pending_settings()
+            if latest is not None:
+                prepared = paused.prepare_settings(latest)
+                policy = latest
         model = policy.main.removeprefix("chatgpt:")
         if self.chatgpt is None or self.chatgpt.model_info(model) is None:
             raise AppError("Fusion 主模型当前不可用；不会自动替换模型。")
@@ -3088,7 +3169,12 @@ class AppCore:
         try:
             if conv.controller.model != model:
                 await self._compact_model_switch(conv, policy.main)
-            conv.controller.enable_fusion(policy, reasoning=settings.get("reasoning", ""), retained=retained)
+            if prepared is not None:
+                from desktop.core.fusion.reasoning import configured_effort
+                effort = configured_effort(policy.reasoning, policy.main, self.chatgpt.model_info(model).efforts)
+                paused.apply_settings(prepared, effort if effort is not None else settings.get("reasoning", ""))
+            else:
+                conv.controller.enable_fusion(policy, reasoning=settings.get("reasoning", ""), retained=retained)
         except FusionError as error:
             raise AppError("无法启用 Fusion：模型档位或保留的专家配置不可用，原会话未改变。") from error
         finally:

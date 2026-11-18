@@ -248,7 +248,11 @@ class ChatGPTController:
         if runtime.registry.policy != policy:
             raise FusionError("The retained Fusion configuration does not match this conversation.")
         configured = runtime.reasoning_for(policy.main)
-        self._set_fusion_mode(runtime, None, native_model(policy.main), configured if configured is not None else reasoning)
+        baseline = retained.get("settings", runtime.settings_snapshot(policy)) if retained is not None else None
+        if baseline is not None and not isinstance(baseline, dict):
+            raise FusionError("The retained Fusion settings snapshot is invalid.")
+        self._set_fusion_mode(runtime, None, native_model(policy.main), configured if configured is not None else reasoning,
+                              settings_snapshot=baseline)
 
     def disable_fusion(self, model: str, reasoning: str) -> None:
         from desktop.core.fusion.registry import FusionError
@@ -283,7 +287,7 @@ class ChatGPTController:
         if self._paused_fusion is not None:
             await self._paused_fusion.close()
 
-    def _set_fusion_mode(self, active: Any, paused: Any, model: str, reasoning: str | None) -> None:
+    def _set_fusion_mode(self, active: Any, paused: Any, model: str, reasoning: str | None, *, settings_snapshot: Any = None) -> None:
         before = (self._fusion, self._paused_fusion, self.requested_model, self.transcript.model, self.reasoning,
                   self.saved.model, self.saved.reasoning, self.saved.fusion, self.saved.origin, self.saved.prompt)
         runtime = active or paused
@@ -295,6 +299,17 @@ class ChatGPTController:
         if active is None:
             self.saved.fusion["enabled"] = False
         self.saved.origin = {**self.saved.origin, "fusionOwner": runtime.owner, "fusionMainTokens": runtime.main_tokens}
+        if settings_snapshot is not None:
+            self.saved.origin["fusionSettings"] = settings_snapshot
+        elif "fusionSettings" not in self.saved.origin:
+            self.saved.origin["fusionSettings"] = runtime.settings_snapshot(runtime.registry.policy)
+            if not before[7]:  # A newly enabled session may have an explicit per-session policy.
+                settings = self.manager.settings
+                self.saved.origin["fusionSettings"] = {
+                    "main": settings.fusion_main, "workers": list(settings.fusion_workers), "light": settings.fusion_light,
+                    "reasoning": dict(settings.fusion_reasoning), "preference": settings.fusion_preference,
+                    "maxSeconds": settings.fusion_max_seconds,
+                }
         self.saved.prompt = {}  # Mode instructions must also change when the underlying main model stays the same.
         try:
             self._save_now(required=True)
