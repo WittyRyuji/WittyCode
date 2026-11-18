@@ -2403,6 +2403,10 @@ class AppCore:
         out = []
         for agent in agents.values():
             model = self.catalog.find(self.catalog.page_id(conv.engine, agent.agent_model)) if agent.agent_model else None
+            child = getattr(agent, "controller", None)
+            tokens = child.usage if child is not None and child.is_open else None
+            if tokens is None:
+                tokens = conv.ledger.seen.get(f"agent:{agent.session_id}")
             out.append(
                 {
                     "id": agent.session_id,
@@ -2412,6 +2416,7 @@ class AppCore:
                     "effort": agent.agent_effort,
                     "task": agent.task,
                     "status": agent.status,
+                    "tokens": usage_json(tokens),
                     "fusionState": getattr(getattr(agent, "record", None), "status", None),
                     "fusionModel": getattr(getattr(agent, "record", None), "model", None),
                     "fusionRole": getattr(getattr(agent, "record", None), "role", None),

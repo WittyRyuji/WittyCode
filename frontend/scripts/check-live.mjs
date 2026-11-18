@@ -9,6 +9,7 @@ import { openPage } from "./cdp.mjs";
 import { fakeBackendScripts } from "./fake-backend.mjs";
 import { officeFixtures } from "./office-fixtures.mjs";
 import { checkOffice } from "./check-office.mjs";
+import { checkAgentsTeam } from "./check-agents-team.mjs";
 
 const index = pathToFileURL(resolve("dist/index.html")).href;
 /** the address Python gives the page on Windows 11: it asks for the window outline with round corners */
@@ -1003,6 +1004,8 @@ ok("…and 1 分钟前 within 30 s, with no new event from Python", true);
 const errors = page.errorTexts();
 ok("no console errors, no CSP violations", errors.length === 0, errors);
 await page.close();
+
+await checkAgentsTeam({ url: pageUrl, scripts, ok });
 
 // ------------------------------------------------------------------------------------- without Python
 const lonely = await openPage(`${index}?live=1`, { width: 1000, height: 700 });

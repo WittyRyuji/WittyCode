@@ -232,7 +232,7 @@ export interface PendingHandoff {
   to: string;
 }
 
-/** A sub-agent an engine started for the conversation: its own thread, shown in the side panel (no engine of this version starts one). */
+/** A sub-agent an engine started for the conversation: its own thread, shown in the side panel. */
 export interface AgentInfo {
   /** its thread id */
   id: string;
@@ -240,8 +240,10 @@ export interface AgentInfo {
   role: string;
   model: string;
   effort: string;
-  /** what it was asked (the first line) */
+  /** what it was asked */
   task: string;
+  /** its cumulative token usage, when reported */
+  tokens: Usage | null;
   /** `waiting`: it asks the user something (an approval), in its panel */
   status: "pending" | "working" | "waiting" | "done" | "stopped" | "failed";
   fusionState?: "idle" | "running" | "done" | "failed" | "interrupted" | "retired" | null;

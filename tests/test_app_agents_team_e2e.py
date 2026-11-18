@@ -5,7 +5,7 @@ import pytest
 from PySide6.QtCore import Qt
 
 from tests.e2e_support import open_rig
-from tests.fake_responses import call, say
+from tests.fake_responses import call, say, usage
 from tests.fakes import until
 from tests.test_app_fusion_e2e import select_fusion
 from tests.ui_support import run
@@ -13,7 +13,7 @@ from tests.ui_support import run
 pytestmark = pytest.mark.ui
 
 
-@pytest.mark.parametrize("size,with_plan", [((1500, 960), True), ((900, 800), False)])
+@pytest.mark.parametrize("size,with_plan", [((1440, 900), True), ((1100, 600), False)])
 def test_team_rail_and_agent_prompts_do_not_depend_on_a_plan(qapp, loop, tmp_path, size, with_plan):
     async def scenario():
         rig = await open_rig(tmp_path, size=size)
@@ -29,9 +29,13 @@ def test_team_rail_and_agent_prompts_do_not_depend_on_a_plan(qapp, loop, tmp_pat
             await rig.click_text(".menu-item", "询问")
             if with_plan:
                 rig.plan.script(call("todo_write", {"todos": [{"content": "检查模块", "status": "in_progress"}, {"content": "验证结果", "status": "pending"}]}))
+            brief = "Inspect the frontend.\n\n" + "\n\n".join(
+                f"Sample {i + 1}: " + "Compare the example data to the expected results and record the differences. " * 10
+                for i in range(10)
+            )
             rig.plan.script(
-                call("delegate_task", {"workstream": "Login flow", "paths": ["frontend/auth", "desktop/auth.py"], "model": "chatgpt:gpt-6-luna", "role": "worker", "task": "Inspect the frontend."}),
-                call("shell", {"command": "New-Item team-marker.txt"}),
+                call("delegate_task", {"workstream": "Login flow", "paths": ["frontend/auth", "desktop/auth.py"], "model": "chatgpt:gpt-6-luna", "role": "worker", "task": brief}),
+                call("shell", {"command": "New-Item team-marker.txt"}, used=usage(260, 35, 50)),
                 say("Frontend report."),
                 call("delegate_task", {"workstream": "Regression coverage", "paths": ["tests"], "model": "chatgpt:gpt-6-luna", "role": "worker", "task": "Inspect the tests."}, call_id="delegate-tests", item_id="fc-tests"),
                 call("ask_user", {"questions": [{"header": "Coverage", "question": "Which regression?", "options": ["Unit", "UI"]}]}),
@@ -57,7 +61,26 @@ def test_team_rail_and_agent_prompts_do_not_depend_on_a_plan(qapp, loop, tmp_pat
             assert rig.window.grab().save(str(tmp_path / f"agents-team-{size[0]}.png"))
             await rig.click(".agent-chip")
             await rig.wait_for(".agentpanel .prompt.perm")
-            assert await rig.js("document.querySelector('.agentpanel').getBoundingClientRect().width >= 400"), "the drawer has a usable width, not an implicit grid track"
+            await rig.wait_text(".agentpanel-tokens", "合计 295 Token")  # The expert is still waiting at the permission prompt.
+            await rig.wait_text(".agentpanel .agent-chip.on .agent-chip-tokens", "295 Token")
+            await rig.wait_text(".agentpanel .agentbar-tokens", "295 Token")
+            assert await rig.js("""(() => {
+                const panel = document.querySelector('.agentpanel');
+                const team = panel.querySelector('.agentbar');
+                const head = team.querySelector('.agentbar-head'), chip = team.querySelector('.agent-chip');
+                const task = panel.querySelector('.agentpanel-task-text'), run = panel.querySelector('.agentpanel-run');
+                return panel.scrollHeight <= panel.clientHeight + 1 && panel.clientWidth >= 400 &&
+                    team.clientHeight >= head.offsetHeight + chip.offsetHeight && run.clientHeight >= 160 &&
+                    task.textContent.length >= 6000 && task.scrollHeight > task.clientHeight;
+            })()"""), "a long brief leaves both inspector panes usable"
+            await rig.click(".agentpanel-task-toggle")
+            assert await rig.js("""(() => {
+                const panel = document.querySelector('.agentpanel');
+                const task = panel.querySelector('.agentpanel-task-text.expanded');
+                return task && task.scrollHeight > task.clientHeight && panel.scrollHeight <= panel.clientHeight + 1 &&
+                    panel.querySelector('.agentpanel-run').clientHeight > 0;
+            })()""")
+            await rig.click(".agentpanel-task-toggle")
             assert not (rig.project / "team-marker.txt").exists()
             await rig.click(".agentpanel .prompt.perm .btn.primary")
             await rig.wait_for(".agentpanel .prompt.perm", 0)

@@ -6,11 +6,12 @@ import asyncio
 import pytest
 
 from desktop.core.app_core import AppError
+from desktop.core.cache import Cache
 from desktop.core.chatgpt.errors import ChatGPTError
 from desktop.core.fusion.registry import Policy
 from tests.app_support import ready_core
 from tests.chatgpt_support import finish_turn, make_engine
-from tests.fake_responses import FakeResponses, call, say
+from tests.fake_responses import FakeResponses, call, say, usage
 from tests.fakes import until
 
 
@@ -72,6 +73,51 @@ def test_reopening_restores_the_same_expert_and_its_history(tmp_path):
                 assert "Remember this module." in str(fake.requests[4]["input"])
             finally:
                 await engine.close_all()
+    asyncio.run(go())
+
+
+def test_agents_json_uses_live_then_persisted_expert_tokens(tmp_path):
+    async def go():
+        cache = Cache(tmp_path / "cache")
+        project = str(tmp_path / "proj")
+        core, model, _, _, _ = await ready_core(tmp_path, cache=cache)
+        try:
+            cid = (await core.call("session.new", {"projectId": project}))["id"]
+            await until(lambda: cid in core._by_cid and core._by_cid[cid].controller.state.value == "ready")
+            conv = core._by_cid[cid]
+            main = conv.controller
+            main.enable_fusion(Policy("chatgpt:gpt-6.1-sol", ("chatgpt:gpt-6-luna",), "chatgpt:gpt-6-luna", 3))
+            raw = usage(260, 35, cached=50)
+            raw["input_tokens_details"]["cache_write_tokens"] = 20
+            model.script(call("delegate_task", {"scope": "src", "model": "chatgpt:gpt-6-luna", "role": "worker", "task": "Check a sample."}),
+                         [("hold", "expert"), *say("Sample checked.", used=raw)], say("Reviewed."))
+            await core.call("session.send", {"id": cid, "text": "Check the sample"})
+            await until(lambda: len(model.requests) == 2)
+            expert = next(iter(main.agents.values()))
+            assert expert.controller.is_open and core._agents_json(conv)[0]["tokens"] is None
+            model.release("expert")
+            await finish_turn(main)
+            expected = {"input": 190, "output": 35, "cacheWrite": 20, "cacheRead": 50}
+            key = f"agent:{expert.session_id}"
+            seen = conv.ledger.seen.pop(key, None)
+            assert expert.controller.is_open and core._agents_json(conv)[0]["tokens"] == expected
+            if seen is not None:
+                conv.ledger.seen[key] = seen
+            row = core._row_of(conv)
+        finally:
+            model.release("expert")
+            await core.shutdown()
+
+        again, _, _, _, _ = await ready_core(tmp_path, cache=cache)
+        try:
+            cid = (await again.call("session.openSaved", {"projectId": project, "id": row}))["id"]
+            conv = again._by_cid[cid]
+            await until(lambda: conv.controller.state.value == "ready")
+            assert conv.controller.agents[expert.session_id].controller is None
+            assert conv.ledger.seen[key].to_json() == expected
+            assert again._agents_json(conv)[0]["tokens"] == expected
+        finally:
+            await again.shutdown()
     asyncio.run(go())
 
 

@@ -320,6 +320,7 @@ function fakeBackend(config) {
     speed: c.speed ?? null,
     context: c.context,
     handoff: c.handoff,
+    agents: c.agents ?? [],
   });
   /** AppCore._flush: only the keys that changed since the last time */
   function flush(c) {
@@ -675,6 +676,13 @@ function fakeBackend(config) {
       return null;
     },
     "session.reconnect": () => null,
+    "agents.watch": (p) => {
+      const c = conversation(p.id);
+      if (!c.agents?.some((agent) => agent.id === p.agentId)) throw new Error("这个子任务已经不在了。");
+      emit("agentTurns", { id: c.cid, agentId: p.agentId, all: true, turns: c.agentRuns?.[p.agentId] ?? [] });
+      return { ok: true };
+    },
+    "agents.unwatch": () => ({ ok: true }),
     "session.compact": (p) => {
       conversation(p.id);
       return { ok: true, text: "已压缩：对话约 120K，压缩到约 18K。" };
