@@ -611,6 +611,9 @@ class ChatGPTController:
         routing = self._fusion if self._fusion is not None and self._fusion.gate("route") else None
         self._tools.route_submitter = routing.submit_route if routing is not None else None
         self._tools.route_guard = routing.route_guard if routing is not None else None
+        mapping = self._fusion if self._fusion is not None and self._fusion.map_enabled else None
+        self._tools.map_chooser = mapping.choose_map_location if mapping is not None else None
+        self._tools.map_updater = mapping.update_map_entry if mapping is not None else None
         self._tools.read_only_brief = self._fusion_read_only
         return self._tools
 
@@ -925,6 +928,8 @@ class ChatGPTController:
             if self._fusion is not None:
                 await self._fusion.sample_metrics(turn, start=True)
                 await self._fusion.retain_plan_route()
+                if not plan:
+                    await self._fusion.prepare_map_choice()
             if tuple(notes) != self._prompt_notes:
                 self._prompt_notes = tuple(notes)
                 for note in notes:
@@ -955,11 +960,13 @@ class ChatGPTController:
             fusion = self._fusion
             verdict = fusion.acceptance_verdict() if fusion is not None and not plan else None
             unrated = fusion.unrated_records() if fusion is not None else ()
-            if verdict is not None or unrated:
-                # One continuation per turn at most: missing verification and missing ratings are asked for together.
+            if fusion is not None and (verdict is not None or unrated or not plan and fusion.has_map_writes):
+                # Keep verification, ratings and map descriptions in the same continuation.
                 asks = [verdict.continuation()] if verdict is not None and verdict.missing else []
                 if unrated:
                     asks.append(fusion.rating_request(unrated))
+                if not plan and (map_request := await fusion.map_description_request()):
+                    asks.append(map_request)
                 if asks and end.reason == "done" and end.steps < self.turn_step_limit():
                     continuation = "\n\n".join(asks)
                     loop.observer.history_grew([{"type": "message", "role": "developer", "content": [{"type": "input_text", "text": continuation}]}])
@@ -975,6 +982,8 @@ class ChatGPTController:
                     if verdict.missing:
                         self.transcript.add_notice("Fusion：本轮工作未验证；缺少检查：" + ", ".join(verdict.missing) + "。")
                     await fusion.retain_verdict(verdict)
+                if not plan:
+                    await fusion.finish_map_turn(verdict)
                 await fusion.settle_main_ratings()
             if tools.connections is not None:
                 try:

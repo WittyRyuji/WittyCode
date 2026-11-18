@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS ratings (
 CREATE INDEX IF NOT EXISTS ratings_record ON ratings(record_id);
 CREATE INDEX IF NOT EXISTS ratings_session ON ratings(session);
 CREATE TABLE IF NOT EXISTS counters (name TEXT PRIMARY KEY, value INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
 # Positions preserve repeated identical pages as well as the order of different pages.
 _SELECT = """
@@ -233,6 +234,23 @@ class Drive:
             # All body writers and removers share the SQLite writer lock, even across processes.
             db.execute("BEGIN IMMEDIATE")
             yield db
+
+    def meta(self, key: str) -> str | None:
+        with self._connect() as db:
+            row = db.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return row[0] if row is not None else None
+
+    def set_meta(self, key: str, value: str) -> None:
+        with self._write() as db:
+            db.execute("INSERT INTO meta VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, value))
+
+    def supersede_map(self, key: str) -> None:
+        with self._write() as db:
+            db.execute("UPDATE records SET status = 'superseded' WHERE kind = 'map' AND key = ? AND status = 'active'", (key,))
+
+    def refresh_map_fingerprint(self, key: str, fingerprint: str) -> None:
+        with self._write() as db:
+            db.execute("UPDATE records SET fingerprint = ? WHERE kind = 'map' AND key = ? AND status = 'active'", (fingerprint, key))
 
     def _folder(self, session: str) -> Path:
         _session_id(session)

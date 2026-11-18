@@ -79,6 +79,19 @@ ROUTE_DECLARATION: dict[str, Any] = {
     "description": "Choose a destination and verification depth before editing or delegating writes.",
     "parameters": ROUTE_PARAMETERS,
 }
+CHOOSE_MAP_DECLARATION: dict[str, Any] = {
+    "name": "choose_map_location",
+    "description": "Before the first writing delegation, ask the user where this project's map should live. Does not ask again once chosen.",
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+}
+UPDATE_MAP_DECLARATION: dict[str, Any] = {
+    "name": "update_map_entry",
+    "description": "Refine one map module (responsibility and implementation, not tests or pitfalls); use module 'traits' for engineering traits.",
+    "parameters": {"type": "object", "properties": {
+        "module": {"type": "string"}, "paths": {"type": "array", "items": {"type": "string"}},
+        "role": {"type": "string"}, "method": {"type": "string"}, "traits": {"type": "string"},
+    }, "required": ["module"], "additionalProperties": False},
+}
 RATE_PARAMETERS: dict[str, Any] = {
     "type": "object",
     "properties": {"ratings": REPORT_PARAMETERS["properties"]["ratings"]},

@@ -82,6 +82,8 @@ class HarnessTools:
         self.record_reader: Callable[[str], Awaitable[Outcome]] | None = None
         self.report_submitter: Callable[[Mapping[str, Any]], Outcome] | None = None
         self.route_submitter: Callable[[Mapping[str, Any]], Awaitable[Outcome]] | None = None
+        self.map_chooser: Callable[[Call], Awaitable[Outcome]] | None = None
+        self.map_updater: Callable[[Mapping[str, Any]], Awaitable[Outcome]] | None = None
         self.route_guard: Callable[[str, tuple[str, ...]], str] | None = None
         self.rating_submitter: Callable[[Mapping[str, Any]], Awaitable[Outcome]] | None = None
         self.strict_context = False
@@ -126,6 +128,10 @@ class HarnessTools:
             declared.append(dict(fusion_tools.ROUTE_DECLARATION))
         if self.rating_submitter is not None:
             declared.append(dict(fusion_tools.RATE_DECLARATION))
+        if self.map_chooser is not None:
+            declared.append(dict(fusion_tools.CHOOSE_MAP_DECLARATION))
+        if self.map_updater is not None:
+            declared.append(dict(fusion_tools.UPDATE_MAP_DECLARATION))
         for name, (_, tool) in self._mcp.items():
             declared.append({"name": name, "description": tool.description, "parameters": tool.input_schema})
         return [item for item in declared if not self.identity_refusal(item["name"])] if self.identity_tools is not None else declared
@@ -164,7 +170,9 @@ class HarnessTools:
                 or (name == fusion_tools.READ_RECORD and self.record_reader is not None)
                 or (name == fusion_tools.SUBMIT_REPORT and self.report_submitter is not None)
                 or (name == fusion_tools.SUBMIT_ROUTE and self.route_submitter is not None)
-                or (name == fusion_tools.RATE_RECORDS and self.rating_submitter is not None))
+                or (name == fusion_tools.RATE_RECORDS and self.rating_submitter is not None)
+                or (name == fusion_tools.CHOOSE_MAP and self.map_chooser is not None)
+                or (name == fusion_tools.UPDATE_MAP and self.map_updater is not None))
 
     def _identity_check(self, call: Call) -> Verdict | None:
         reason = self.identity_refusal(call.name)
@@ -216,6 +224,11 @@ class HarnessTools:
             return Verdict(ALLOW) if self.report_submitter is not None else Verdict(DENY, "No active expert report.")
         if call.name == fusion_tools.RATE_RECORDS:  # (a judgement on retained data: nothing in the workspace changes)
             return Verdict(ALLOW) if self.rating_submitter is not None else Verdict(DENY, "Fusion Drive is unavailable.")
+        if call.name in (fusion_tools.CHOOSE_MAP, fusion_tools.UPDATE_MAP):
+            if plan:
+                return Verdict(DENY, PLAN_REFUSAL)
+            enabled = self.map_chooser if call.name == fusion_tools.CHOOSE_MAP else self.map_updater
+            return Verdict(ALLOW) if enabled is not None else Verdict(DENY, "No active Fusion project map.")
         if call.name == fusion_tools.SUBMIT_ROUTE:
             if plan:
                 return Verdict(DENY, PLAN_REFUSAL)
@@ -302,6 +315,16 @@ class HarnessTools:
         return outcome
 
     async def _run(self, call: Call) -> Outcome:
+        if call.name == fusion_tools.CHOOSE_MAP:
+            verdict = self.check(call)
+            if verdict.verdict != ALLOW or self.map_chooser is None:
+                return Outcome(verdict.reason, True)
+            return await self.map_chooser(call)
+        if call.name == fusion_tools.UPDATE_MAP:
+            verdict = self.check(call)
+            if verdict.verdict != ALLOW or self.map_updater is None:
+                return Outcome(verdict.reason, True)
+            return await self.map_updater(call.args)
         if call.name == fusion_tools.SUBMIT_ROUTE:
             verdict = self.check(call)
             if verdict.verdict != ALLOW or self.route_submitter is None:

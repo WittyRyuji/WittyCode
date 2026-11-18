@@ -362,14 +362,19 @@ def write(project: Path, project_map: ProjectMap) -> Path:
     return target
 
 
-def read(project: Path) -> ProjectMap | None:
-    """The current file is authoritative; an absent, unreadable or invalid file has no map."""
+def read(project: Path, *, strict: bool = False) -> ProjectMap | None:
+    """Return no map for a missing file; optionally distinguish invalid or unreadable files."""
     path = project / _FILENAME
-    if not stat.S_ISREG(_mode(path)):
-        return None
     try:
+        info = path.lstat()
+        if _linked(info) or not stat.S_ISREG(info.st_mode):
+            raise OSError("The project map is not a regular file.")
         return parse(path.read_text(encoding="utf-8-sig"))
+    except FileNotFoundError:
+        return None
     except (OSError, ValueError):
+        if strict:
+            raise
         return None
 
 
@@ -406,6 +411,24 @@ def touch(project_map: ProjectMap, workstream: str, paths: Sequence[str]) -> tup
             entries = tuple(replace(item, paths=item.paths + wanted) if item is entry else item for item in project_map.entries)
             return replace(project_map, entries=entries), (workstream,)
     return replace(project_map, entries=(*project_map.entries, MapEntry(workstream, wanted))), (workstream,)
+
+
+def update(project_map: ProjectMap, module: str, *, paths: Sequence[str] | None = None, role: str | None = None,
+           method: str | None = None, traits: str | None = None) -> ProjectMap:
+    """Replace just the named module (or the project-wide traits)."""
+    if module in ("traits", _TRAITS):
+        if traits is None or any(value is not None for value in (paths, role, method)):
+            raise ValueError("Provide only traits for the project-wide traits entry.")
+        return replace(project_map, traits=traits)
+    if traits is not None:
+        raise ValueError("Use module 'traits' to update project-wide traits.")
+    old = next((entry for entry in project_map.entries if entry.module == module), None)
+    base = old or MapEntry(module, ())
+    entry = replace(base, paths=tuple(dict.fromkeys(map(_relative, paths))) if paths is not None else base.paths,
+                    role=base.role if role is None else role, method=base.method if method is None else method)
+    entries = (tuple(entry if item is old else item for item in project_map.entries) if old is not None
+               else (*project_map.entries, entry))
+    return replace(project_map, entries=entries)
 
 
 def needs_review(entry: MapEntry, changed: Sequence[str]) -> bool:

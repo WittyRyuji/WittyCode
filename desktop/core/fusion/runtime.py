@@ -13,9 +13,11 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, fields, replace
 from functools import cached_property
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from weakref import WeakValueDictionary
 
-from desktop.core.fusion import gates, identity, inject, metrics
+from desktop.core.fusion import gates, identity, inject, map as project_map, metrics
 from desktop.core.fusion.drive.fingerprint import Manifest, _GitError, _head, changed_since, fingerprint, workspace_kind
 from desktop.core.fusion.drive.retention import Retention
 from desktop.core.fusion.drive.store import Drive, DriveError, Record
@@ -25,7 +27,8 @@ from desktop.core.fusion.protocol import (
 )
 from desktop.core.fusion.reasoning import configured_effort
 from desktop.core.fusion.registry import Expert, FusionError, FusionRegistry, Policy
-from desktop.core.harness.loop import Outcome, clip_tokens
+from desktop.core.harness import asking
+from desktop.core.harness.loop import Call, Outcome, clip_tokens
 from desktop.core.memory import recall
 from desktop.core.session_state import SessionState
 from desktop.core.transcript import TextBlockView, Transcript
@@ -237,6 +240,12 @@ class TaskMeasurement:
     drive_before: dict | None = None
 
 
+_MAP_LOCKS: WeakValueDictionary[Path, asyncio.Lock] = WeakValueDictionary()
+_MAP_PROJECT = "写进项目目录（.witty_map.md）"
+_MAP_CHOICE_REQUIRED = "Call choose_map_location before delegating writing work in this project."
+_MAP_ERRORS = (DriveError, OSError, sqlite3.Error, ValueError)
+
+
 class FusionRuntime:
     def __init__(self, parent: ChatGPTController, registry: FusionRegistry, *, owner: str | None = None, main_tokens: int | None = None) -> None:
         self.parent = parent
@@ -257,6 +266,9 @@ class FusionRuntime:
         self._delegations: set[asyncio.Task[Any]] = set()
         self._closing = False
         self._drive_warned = False
+        self._map_write_paths: set[str] = set()
+        self._map_file_written = False
+        self._map_choice_missing = False
 
     def gate(self, name: str) -> bool:
         """A runtime that is not attached to an application (restored for inspection only) has every gate off."""
@@ -318,6 +330,8 @@ class FusionRuntime:
         return metrics.summary(self.registry.task_metrics)
 
     def start_route_turn(self) -> None:
+        self._map_write_paths.clear()
+        self._map_file_written = False
         self.route_turn = RouteTurn() if self.gate("route") else None
         if self.route_turn is not None and self.parent.saved.plan.get("status") == "approved":
             self.route_turn.route = Route("split", "Taken from the approved plan.", "runner")
@@ -326,6 +340,8 @@ class FusionRuntime:
                 self.measurement.recorder.route(self.route_turn.route.destination)
 
     def route_guard(self, action: str, workstreams: tuple[str, ...]) -> str:
+        if action == "delegate" and self._map_choice_missing and self.map_enabled:
+            return _MAP_CHOICE_REQUIRED
         turn = self.route_turn
         if not self.gate("route") or turn is not None and turn.from_plan:
             return ""
@@ -405,6 +421,8 @@ class FusionRuntime:
                 return None
             route, from_plan = turn.writing_route, turn.writing_from_plan
         paths = {os.path.normcase(path).replace("\\", "/") for work in writes for path in work.paths}
+        if self._map_file_written:
+            paths.add(".witty_map.md")  # An authorized program-managed write is not expert scope drift.
         changed = (os.path.normcase(path).replace("\\", "/") for path in turn.changes)
         out_of_scope = any(not any(name == path or name.startswith(path + "/") for path in paths) for name in changed)
         status = next((work.report_status for work in writes if work.identity == "Coder" and work.report_status not in ("", "done")), "")
@@ -447,6 +465,173 @@ class FusionRuntime:
     @cached_property
     def drive(self) -> Drive:
         return Drive(self.parent.manager.root.parent / "fusion-drive", self.parent.project or None, self.owner)
+
+    @property
+    def map_enabled(self) -> bool:
+        return self.drive_enabled and self.gate("map") and bool(self.parent.project)
+
+    def _map_lock(self) -> asyncio.Lock:
+        return _MAP_LOCKS.setdefault(self.parent.project, asyncio.Lock())
+
+    async def choose_map_location(self, call: Call) -> Outcome:
+        if call.args:
+            return Outcome("choose_map_location takes no arguments.", True)
+        async with self._map_lock():
+            try:
+                location = await asyncio.to_thread(lambda: self.drive.meta("map_location"))
+                if location is None:
+                    questions, _ = asking.parse({"questions": [{
+                        "header": "项目地图", "question": "项目地图要写进项目目录，还是只保存在本机？",
+                        "options": [_MAP_PROJECT, "只保存在本机"], "multi_select": False,
+                    }]})
+                    answers = await self.parent._ask_questions(call, questions)
+                    location = "project" if answers and asking.answer_text(answers[0]) == _MAP_PROJECT else "local"
+                    await asyncio.to_thread(self.drive.set_meta, "map_location", location)
+                self._map_choice_missing = False
+                if await asyncio.to_thread(self.drive.meta, "workspace_kind") is None:
+                    kind = await asyncio.to_thread(workspace_kind, self.parent.project)
+                    await asyncio.to_thread(self.drive.set_meta, "workspace_kind", kind)
+                current = await self._load_map(location)
+                if current is None:
+                    current = await asyncio.to_thread(project_map.initial, self.parent.project)
+                    await self._save_map(location, None, current)
+            except _MAP_ERRORS:
+                self._drive_notice()
+                return Outcome("The project map is unavailable; delegation can continue without it.", True)
+        return Outcome(f"Project map location: {location}.\n{project_map.digest(current)}\nRefine individual entries with update_map_entry.")
+
+    def _store_map(self, before: project_map.ProjectMap | None, current: project_map.ProjectMap, text: str) -> None:
+        drive, project = self.drive, self.parent.project
+        old = {entry.module: entry for entry in before.entries} if before is not None else {}
+        entries = {entry.module: entry for entry in current.entries}
+        statuses = json.loads(drive.meta("map_status") or "{}")
+        for module, entry in entries.items():
+            if old.get(module) != entry:
+                stamp = fingerprint(project, entry.paths)
+                drive.put("map", f"map:{module}", project_map.entry_text(entry), paths=entry.paths, fingerprint=stamp)
+                statuses[module] = "unverified"
+        for removed in old.keys() - entries.keys():
+            drive.supersede_map(f"map:{removed}")
+            statuses.pop(removed, None)
+        if (before.traits if before is not None else "") != current.traits:
+            if current.traits:
+                drive.put("map", "map:traits", project_map.traits_text(current), fingerprint=fingerprint(project, ()))
+            else:
+                drive.supersede_map("map:traits")
+        drive.set_meta("map_status", json.dumps(statuses, ensure_ascii=False))
+        drive.set_meta("map", text)
+
+    async def _save_map(self, location: str, before: project_map.ProjectMap | None, current: project_map.ProjectMap) -> None:
+        text = project_map.render(current)
+        if location == "project":
+            try:
+                await asyncio.to_thread(project_map.write, self.parent.project, current)
+                self._map_file_written = True
+            except (OSError, ValueError):
+                self._drive_notice()
+        await asyncio.to_thread(self._store_map, before, current, text)
+
+    async def _load_map(self, location: str) -> project_map.ProjectMap | None:
+        saved = await asyncio.to_thread(self.drive.meta, "map")
+        current = project_map.parse(saved) if saved is not None else None
+        if location == "project":
+            try:
+                actual = await asyncio.to_thread(project_map.read, self.parent.project, strict=True)
+            except (OSError, ValueError):
+                self._drive_notice()
+            else:
+                if actual is not None and actual != current:
+                    await self._save_map("local", current, actual)  # Do not rewrite the user's file when importing it.
+                    current = actual
+        return current
+
+    async def update_map_entry(self, args: Mapping[str, Any]) -> Outcome:
+        module = args.get("module")
+        changes = {key: value for key, value in args.items() if key != "module"}
+        if not isinstance(module, str) or not module.strip() or not changes or changes.keys() - {"paths", "role", "method", "traits"}:
+            return Outcome("Provide a module and at least one of paths, role, method or traits.", True)
+        for key, value in changes.items():
+            if key == "paths":
+                if not isinstance(value, list) or not all(isinstance(path, str) for path in value):
+                    return Outcome("Map paths must be an array of project-relative strings.", True)
+            elif not isinstance(value, str):
+                return Outcome(f"Map {key} must be text.", True)
+        async with self._map_lock():
+            try:
+                location = await asyncio.to_thread(lambda: self.drive.meta("map_location"))
+                if location is None or (current := await self._load_map(location)) is None:
+                    return Outcome("Call choose_map_location before updating the project map.", True)
+                try:
+                    updated = project_map.update(current, module.strip(), **changes)
+                    project_map.render(updated)
+                except ValueError as error:
+                    return Outcome(str(error), True)
+                if updated != current:
+                    await self._save_map(location, current, updated)
+            except _MAP_ERRORS:
+                self._drive_notice()
+                return Outcome("The project map could not be updated.", True)
+        return Outcome(f"Updated project map entry: {module.strip()}.")
+
+    async def _sync_map_for_delegate(self, workstream: str, paths: tuple[str, ...]) -> None:
+        async with self._map_lock():
+            try:
+                location = await asyncio.to_thread(lambda: self.drive.meta("map_location"))
+                if location is not None and (current := await self._load_map(location)) is not None and paths:
+                    updated, _ = project_map.touch(current, workstream, paths)
+                    if updated != current:
+                        await self._save_map(location, current, updated)
+            except _MAP_ERRORS:
+                self._drive_notice()
+
+    @property
+    def has_map_writes(self) -> bool:
+        return self.map_enabled and bool(self._map_write_paths)
+
+    async def map_description_request(self) -> str:
+        if not self.has_map_writes:
+            return ""
+        async with self._map_lock():
+            try:
+                location = await asyncio.to_thread(self.drive.meta, "map_location")
+                current = await self._load_map(location) if location is not None else None
+            except _MAP_ERRORS:
+                self._drive_notice()
+                return ""
+        modules = [entry.module for entry in project_map.entries_for(current, tuple(self._map_write_paths))
+                   if not entry.role.strip() or not entry.method.strip()] if current is not None else []
+        return ("Describe the involved project map modules with update_map_entry: " + ", ".join(modules)
+                + ". Give one or two sentences each on responsibility and implementation, not verification or pitfalls.") if modules else ""
+
+    def _refresh_map(self, entries: tuple[project_map.MapEntry, ...], status: str) -> None:
+        statuses = json.loads(self.drive.meta("map_status") or "{}")
+        for entry in entries:
+            self.drive.refresh_map_fingerprint(f"map:{entry.module}", fingerprint(self.parent.project, entry.paths))
+            statuses[entry.module] = status
+        self.drive.set_meta("map_status", json.dumps(statuses, ensure_ascii=False))
+
+    async def finish_map_turn(self, verdict: AcceptanceVerdict | None) -> None:
+        if not self.has_map_writes:
+            return
+        async with self._map_lock():
+            try:
+                location = await asyncio.to_thread(self.drive.meta, "map_location")
+                current = await self._load_map(location) if location is not None else None
+                if current is not None:
+                    entries = project_map.entries_for(current, tuple(self._map_write_paths))
+                    if entries:
+                        status = "verified" if verdict is not None and not verdict.missing else "review"
+                        await asyncio.to_thread(self._refresh_map, entries, status)
+            except _MAP_ERRORS:
+                self._drive_notice()
+
+    async def prepare_map_choice(self) -> None:
+        self._map_choice_missing = False
+        if self.map_enabled:
+            try:
+                self._map_choice_missing = await asyncio.to_thread(lambda: self.drive.meta("map_location")) is None
+            except _MAP_ERRORS:
+                self._drive_notice()
 
     def _drive_notice(self) -> None:
         if not self._drive_warned:
@@ -1034,8 +1219,10 @@ class FusionRuntime:
             return Outcome(PLAN_REFUSAL, True)
         route_turn = self.route_turn
         writes = brief is None or brief_writes(brief)
-        if writes and (refusal := self.route_guard("delegate", (scope,))):
-            return Outcome(refusal, True)
+        if writes:
+            await self.prepare_map_choice()
+            if refusal := self.route_guard("delegate", (scope,)):
+                return Outcome(refusal, True)
         native = native_model(model)
         if self.parent.manager.model_info(native) is None:
             return Outcome("The requested expert model is unavailable; no fallback was selected.", True)
@@ -1100,6 +1287,8 @@ class FusionRuntime:
         try:
             if writes and route_turn is not None and route_turn.workspace is not None:
                 await asyncio.shield(route_turn.workspace)  # Parallel writers must all wait for the same baseline.
+            if self.map_enabled:
+                await self._sync_map_for_delegate(scope, write_paths if writes else ())
             if self.drive_enabled:
                 # A cancelled waiter must still close a brief written by the worker thread.
                 brief_write = asyncio.create_task(self._retain_record("brief", expert, task, write_paths))
@@ -1148,6 +1337,8 @@ class FusionRuntime:
             if not child.send_prompt(prompt, packed_context=pack is not None):
                 raise FusionError("The expert session is not ready.")
             started = True
+            if writes and self.map_enabled:
+                self._map_write_paths.update(write_paths)
             seconds = self.registry.policy.max_seconds
             if brief is not None:
                 seconds = min(seconds, brief.budget.get("seconds", seconds))

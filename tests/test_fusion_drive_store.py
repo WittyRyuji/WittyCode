@@ -22,6 +22,17 @@ def _db_path(root, project):
     return root / key / "drive.sqlite"
 
 
+def test_meta_is_shared_by_sessions_of_only_the_same_project(tmp_path):
+    root, project = tmp_path / "drive", tmp_path / "project"
+    first, second = Drive(root, project, "first"), Drive(root, project, "second")
+    other = Drive(root, tmp_path / "other", "first")
+    assert first.meta("map_location") is None
+    first.set_meta("map_location", "project")
+    assert second.meta("map_location") == "project" and other.meta("map_location") is None
+    second.set_meta("map_location", "local")
+    assert Drive(root, project, "third").meta("map_location") == "local"
+
+
 def test_clips_summary_pages_body_and_masks_before_storage(tmp_path):
     root, project = tmp_path / "drive", tmp_path / "project"
     drive = Drive(root, project, "test")
