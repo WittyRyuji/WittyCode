@@ -9,6 +9,7 @@ import shlex
 import sys
 from pathlib import Path
 
+from desktop.core.fusion.acp_server import PREFIX
 from tests.fake_devin import HOME, Fake, RpcError
 
 
@@ -68,7 +69,8 @@ class GuardedFake(Fake):
         try:
             current = text.rsplit("Current request:\n", 1)[-1]
             match = re.search(r"\[fusion-([a-z-]+)\]", current)
-            summary = "Do not call any tools. Return only the summary." in text
+            summary = "--agent-type" in sys.argv and sys.argv[sys.argv.index("--agent-type") + 1] == "summarizer"
+            assert summary == ("Do not call any tools. Return only the summary." in text)
             action = "summary" if summary else match[1] if match else "report"
             tool, arguments = "", {}
             if action == "write":
@@ -104,14 +106,28 @@ class GuardedFake(Fake):
                 assert repeated["result"] == original
                 changed = await self.mcp(sid, "tools/call", {"name": "create_file", "arguments": {"file_path": "forbidden.txt", "content": "not run"}}, identifier)
                 assert "error" in changed
-            elif action == "native":
-                self.tool(sid, "native", "Attempted native write", "edit", {"file_path": "forbidden.txt"}, "write")
+            elif action in ("native", "unknown-bridge"):
+                self.update(sid, {"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": "Private reasoning"}})
+                name = "write" if action == "native" else PREFIX + "unregistered"
+                self.tool(sid, name + ":0#1", "Attempted unguarded write", "edit", {"file_path": "forbidden.txt"}, name)
                 await turn["cancel"].wait()
                 stop = "cancelled"
+                return
             elif action == "slow":
                 await turn["cancel"].wait()
                 stop = "cancelled"
             if tool:
+                name = PREFIX + tool
+                # Exercise notifications and approvals as well as actual MCP dispatch. Tool IDs can carry the name
+                # even when the provider does not attach inferenceToolName to every ACP message.
+                call = {"toolCallId": name + ":0#1", "title": "Private MCP call", "kind": "other"}
+                if os.environ.get("FAKE_FUSION_BRIDGE_NOTICE") != "id-only":
+                    call["_meta"] = {"cognition.ai/inferenceToolName": name}
+                self.update(sid, {"sessionUpdate": "tool_call", **call})
+                answer = await self.ask("session/request_permission", {"sessionId": sid, "toolCall": call, "options": [
+                    {"optionId": "always", "kind": "allow_always"}, {"optionId": "once", "kind": "allow_once"},
+                ]})
+                assert answer == {"outcome": {"outcome": "selected", "optionId": "once"}}, answer
                 result = await self.mcp(sid, "tools/call", {"name": tool, "arguments": arguments})
                 answer = json.dumps(result)
             else:

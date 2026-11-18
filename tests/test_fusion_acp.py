@@ -40,7 +40,7 @@ def test_own_main_can_delegate_to_acp_and_forward_approval_and_restore_context(t
     from tests.fusion_acp_support import make_guarded_engine
 
     async def go():
-        harness = make_guarded_engine(tmp_path)
+        harness = make_guarded_engine(tmp_path, FAKE_FUSION_BRIDGE_NOTICE="id-only")
         core, model, _, _, _ = await ready_core(tmp_path, devin_engine=harness.engine)
         try:
             await until(lambda: any(item["source"] == "devin" for item in core.catalog.models), timeout=20)
@@ -110,7 +110,7 @@ def test_acp_main_delegates_to_either_runner_and_keeps_one_conversation(tmp_path
     asyncio.run(go())
 
 
-@pytest.mark.parametrize("action", ["native", "read"])
+@pytest.mark.parametrize("action", ["native", "unknown-bridge", "read"])
 def test_acp_cannot_bypass_protected_paths_or_use_native_tools(tmp_path, action):
     from tests.fusion_acp_support import make_guarded_engine
 
@@ -132,8 +132,9 @@ def test_acp_cannot_bypass_protected_paths_or_use_native_tools(tmp_path, action)
                 (tmp_path / "proj" / "evidence.txt").write_text("PRIVATE_TEST_EVIDENCE", encoding="utf-8")
             assert main.send_prompt(f"[fusion-{action}] Inspect")
             await finish_turn(main, timeout=30)
-            if action == "native":
-                assert main.saved.turns[-1].status == "failed" and "native tool" in main.saved.turns[-1].error
+            if action in ("native", "unknown-bridge"):
+                assert main.saved.turns[-1].status == "failed" and "guarded bridge" in main.saved.turns[-1].error
+                assert not (tmp_path / "proj" / "forbidden.txt").exists()
             else:
                 outputs = [item["output"] for item in main.saved.items if item.get("type") == "function_call_output"]
                 assert outputs and all("PRIVATE_TEST_EVIDENCE" not in item for item in outputs)
@@ -209,6 +210,46 @@ def test_acp_main_preserves_full_evidence_and_context_across_runner_changes(tmp_
             assert reopened._outputs.read(reference) == retained
             assert reopened.saved.origin["fusionAcp"]["session"] == refreshed_native
             assert any(item["session"] == native for item in reopened.saved.origin["fusionAcpHistory"])
+        finally:
+            await core.shutdown()
+    asyncio.run(go())
+
+
+def test_fusion_preset_switch_recovers_after_a_blocked_native_turn(tmp_path):
+    from copy import deepcopy
+
+    from tests.fusion_acp_support import make_guarded_engine
+
+    async def go():
+        harness = make_guarded_engine(tmp_path)
+        core, model, _, _, _ = await ready_core(tmp_path, devin_engine=harness.engine)
+        try:
+            await until(lambda: any(item["source"] == "devin" for item in core.catalog.models), timeout=20)
+            core.settings.fusion_main = core.settings.fusion_light = "devin:swe-2-high"
+            core.settings.fusion_workers = ["chatgpt:gpt-6-luna"]
+            cid = (await core.call("session.new", {"projectId": str(tmp_path / "proj"), "fusion": True}))["id"]
+            main = core._by_cid[cid].controller
+            assert main.send_prompt("[fusion-native] Check the workspace")
+            await finish_turn(main)
+            native = main.saved.origin["fusionAcp"]["session"]
+            original = deepcopy(main.saved.items)
+            assert main.saved.turns[-1].status == "failed" and original[-1]["type"] == "reasoning"
+            await core.call("settings.set", {"key": "fusionMain", "value": "chatgpt:gpt-6-luna"})
+            assert main.model == "devin:swe-2-high"
+            model.script(say("Continued on the new main model."))
+            assert (await core.call("session.send", {"id": cid, "text": "Continue without replaying"}))["ok"]
+            await finish_turn(main)
+            assert len(main.transcript.turns) == 2 and main.saved.items[:len(original)] == original
+            assert main.saved.compaction["upto"] == len(original)
+            assert main.saved.origin["fusionAcpHistory"][-1]["session"] == native
+            assert len(model.requests) == 1 and model.requests[0]["model"] == "gpt-6-luna"
+            assert "ACP summary:" in str(model.requests[0]["input"])
+            assert "Private reasoning" not in str(model.requests[0]["input"])
+            requests = [[json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+                        for path in (tmp_path / "guarded").glob("summary-*/received.jsonl")]
+            summary = [item for group in requests for item in group if item.get("method") == "session/prompt"]
+            assert len(summary) == 1 and "Check the workspace" in str(summary[0]["params"]["prompt"])
+            assert "Private reasoning" not in str(summary[0]["params"]["prompt"])
         finally:
             await core.shutdown()
     asyncio.run(go())

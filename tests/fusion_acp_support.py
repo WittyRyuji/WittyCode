@@ -19,7 +19,7 @@ def make_guarded_engine(tmp_path, **options):
         env = dict(env or {})
         env["FAKE_DEVIN_HOME"] = str(tmp_path / "guarded" / Path(cwd).name)
         config = binary.command[binary.command.index("--config") + 1]
-        argv = [sys.executable, "-m", "tests.fake_fusion_acp", "--config", config]
+        argv = [sys.executable, "-m", "tests.fake_fusion_acp", "--config", config, *handlers.pop("acp_args", ())]
         client = AcpClient(argv, env=env, cwd=cwd, **handlers)
         harness.clients.append(client)
         return client

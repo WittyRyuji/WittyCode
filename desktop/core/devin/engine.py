@@ -72,9 +72,9 @@ Locate = Callable[[str | None], DevinBinary | None]
 ClientFactory = Callable[..., AcpClient]
 
 
-def default_client_factory(binary: DevinBinary, **handlers: Any) -> AcpClient:
+def default_client_factory(binary: DevinBinary, *, acp_args: tuple[str, ...] = (), **handlers: Any) -> AcpClient:
     """``devin acp`` over stdio, with the given ``on_*`` handlers."""
-    return AcpClient(binary.argv("acp"), **handlers)
+    return AcpClient(binary.argv("acp", *acp_args), **handlers)
 
 
 @dataclass(frozen=True, slots=True)

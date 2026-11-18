@@ -1118,8 +1118,7 @@ class ChatGPTController:
                                        for_switch=True, switch_window=window)
             record = self.saved.compaction
             if not done or not record or record.get("upto") != len(self.saved.items):
-                raise ChatGPTError("上下文压缩未完成，原模型和历史保留；请重试发送。", code="compaction")
-            self._save_now(required=True)
+                raise ChatGPTError("交接摘要未能覆盖历史或放入目标窗口；原模型和历史保留，消息未发送。", code="compaction")
             return str(record["summary"])
         finally:
             self._turn, self._turn_task = None, previous_task
@@ -1275,7 +1274,7 @@ class ChatGPTController:
         that cannot be written raises instead of being replaced by the digest."""
         model = self.running_model
         window = self.manager.model_window(model)
-        if self._tools is not None and self.saved.prompt.get("current"):
+        if not for_switch and self._tools is not None and self.saved.prompt.get("current"):
             fixed = compact.fixed_tokens(self.saved.prompt["current"], self._tools.declarations(), self.manager.shape)
         # (refused although the estimate said it fits: aim well below what was refused; no window known: below the estimate)
         target = min(window, int(estimate * 0.7)) if window and overflow else (window or int(estimate * 0.7))
@@ -1340,6 +1339,7 @@ class ChatGPTController:
                 turn=len(history) if manual else synthetic + self._turn_start - start,
                 on_usage=used,
                 whole=manual,
+                handoff=for_switch,
                 fallback=False,
                 continuity=continuity,
                 rebase=True,
@@ -1366,24 +1366,35 @@ class ChatGPTController:
             }
             if continuity:
                 entry["continuity"] = continuity
-            if not compact.boundary_ok(self.saved.items, upto) or compact.view_of(self.saved.items, entry) != result.view:
-                # (the view and the log disagree: kept, this summary would give the next turn a different conversation,
-                # or one with a tool result whose call is gone)
+            if ((for_switch and upto != len(self.saved.items))
+                    or not compact.boundary_ok(self.saved.items, upto, after_turn=for_switch)
+                    or compact.view_of(self.saved.items, entry) != result.view):
+                # Do not publish a partial handoff or a view that does not match the durable log.
                 log.error("a compaction of the conversation %s does not match its log (upto %d); not kept", self.session_id, upto)
                 entry = None
         if entry is None:
             if must_fit:
                 raise self._too_big(model, window, result, estimate, fixed, overflow)
             return False
+        previous_used = self.saved.context_used
         self.saved.compaction = entry
-        if self.saved.prompt.get("current"):
+        self.saved.context_used = 0
+        if for_switch:
+            try:
+                self._save_now(required=True)
+            except BaseException:
+                self.saved.compaction, self.saved.context_used = record, previous_used
+                raise
+        elif self.saved.prompt.get("current"):
             self.saved.prompt["instructions"] = self.saved.prompt["current"]
         history[:] = result.view
-        self.saved.context_used = 0
         self._publish_context(replace(self.context, used=None, compacted=True))
-        self.transcript.add_notice(self._compaction_notice(result, model, window, overflow, manual))
+        notice = ("已为模型切换压缩上下文；完整历史和执行证据仍保留。" if for_switch
+                  else self._compaction_notice(result, model, window, overflow, manual))
+        self.transcript.add_notice(notice)
         log.info("compacted the conversation %s: ~%d -> ~%d tokens%s", self.session_id, result.before, result.after, " (digest only)" if result.mechanical else "")
-        self._save_soon()
+        if not for_switch:
+            self._save_soon()
         self._changed()
         return True
 

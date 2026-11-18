@@ -71,6 +71,55 @@ def test_source_summary_precedes_model_commit_and_target_gets_fresh_rules_and_re
     asyncio.run(go())
 
 
+@pytest.mark.parametrize("save_fails", [False, True])
+def test_switch_into_fusion_archives_an_unanswered_tail_only_after_saving_summary(tmp_path, monkeypatch, save_fails):
+    from desktop.core.transcript import NoticeBlock
+
+    async def go():
+        core, fake, _, _, engine = await ready_core(tmp_path)
+        try:
+            core.settings.fusion_main, core.settings.fusion_workers, core.settings.fusion_light = LUNA, [SOL], SOL
+            cid = (await core.call("session.new", {"projectId": str(tmp_path / "proj")}))["id"]
+            conv = core._by_cid[cid]
+            main = conv.controller
+            fake.script(say("Original evidence."))
+            await core.call("session.send", {"id": cid, "text": "Inspect the module"})
+            await finish_turn(main)
+            # Old sessions may end with a user message whose turn never produced an answer.
+            main.saved.items.append({"type": "message", "role": "user", "content": [
+                {"type": "input_text", "text": "UNANSWERED_OLD_REQUEST"},
+            ]})
+            original = deepcopy(main.saved.items)
+            turns = list(main.transcript.turns)
+            if save_fails:
+                def fail_save(saved):
+                    raise OSError("Test disk failure")
+                monkeypatch.setattr(engine.sessions, "save", fail_save)
+            fake.script(say("SAFE_HANDOFF: earlier request remains unanswered."), say("Continued from the handoff."))
+            assert (await choose(core, cid, "fusion"))["ok"]
+            if save_fails:
+                with pytest.raises(AppError, match="保存失败"):
+                    await core.call("session.send", {"id": cid, "text": "New request"})
+                assert main.saved.items == original and not main.saved.compaction
+                assert conv.pending_model["model"] == "fusion" and main._fusion is None
+                assert main.transcript.turns == turns and len(fake.requests) == 2
+                assert not any(isinstance(block, NoticeBlock) and "已为模型切换压缩" in block.text
+                               for turn in main.transcript.turns for block in turn.blocks)
+            else:
+                assert (await core.call("session.send", {"id": cid, "text": "New request"}))["ok"]
+                await finish_turn(main)
+                assert main.saved.items[:len(original)] == original
+                assert main.saved.compaction["upto"] == len(original)
+                assert main._fusion is not None and len(main.transcript.turns) == 2
+                assert [request["model"] for request in fake.requests] == ["gpt-6.1-sol", "gpt-6.1-sol", "gpt-6-luna"]
+                assert "SAFE_HANDOFF" in str(fake.requests[-1]["input"])
+                assert "UNANSWERED_OLD_REQUEST" not in str(fake.requests[-1]["input"])
+            assert "UNANSWERED_OLD_REQUEST" in str(fake.requests[1]["input"])
+        finally:
+            await core.shutdown()
+    asyncio.run(go())
+
+
 @pytest.mark.parametrize("outcome", ["failure", "empty", "cancel"])
 def test_summary_failure_or_stop_keeps_original_model_history_and_mode(tmp_path, outcome):
     async def go():

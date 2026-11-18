@@ -19,6 +19,7 @@ from dataclasses import replace
 from typing import Any
 
 from desktop.core.chatgpt.errors import ChatGPTError
+from desktop.core.devin.items import native_name
 from desktop.core.devin.models import current_value
 from desktop.core.devin.policy import CANCELLED
 from desktop.core.engine_errors import EngineRpcError
@@ -27,7 +28,8 @@ from desktop.core.harness.loop import AgentLoop, Call, TurnEnd
 from desktop.core.memory.launch import PACKAGE_ROOT, console_python
 
 GUARD_SECONDS = 15.0
-NATIVE_IO = ("read", "write", "edit", "apply_patch", "notebook_read", "notebook_edit", "grep", "glob", "exec", "get_output",
+NATIVE_IO = ("read", "write", "edit", "multi_edit", "apply_patch", "notebook_read", "notebook_edit", "grep", "glob",
+             "find_file_by_name", "exec", "get_output",
              "write_to_process", "kill_shell", "webfetch", "fetch", "web_search", "ask_user_question", "todo_write", "exit_plan_mode",
              "skill", "run_subagent", "read_subagent", "request_scope", "mcp_list_servers", "mcp_list_tools", "mcp_call_tool", "mcp_read_resource")
 IMPORTS = ("agents_standard", "cursor", "windsurf", "claude", "copilot", "codex", "kiro", "opencode", "zed", "cloud")
@@ -44,6 +46,8 @@ def guard_config() -> dict[str, Any]:
 
 
 class AcpRun:
+    acp_args: tuple[str, ...] = ()
+
     def __init__(self, host: Any) -> None:
         self.host = host
         self.client: Any = None
@@ -119,7 +123,7 @@ class AcpRun:
         if method != "tools/call" or not isinstance(params, dict):
             raise ValueError("Unsupported bridge request.")
         async with self.lock:
-            if not self.active or self.watcher is None or not self.watcher.current or self.boundary:
+            if not self.active or self.watcher is None or not self.watcher.current or self.boundary or self.violation:
                 raise ValueError("No active ACP turn.")
             self._flush()
             invocation = params.get("bridgeCallId")
@@ -183,6 +187,13 @@ class AcpRun:
         self.watcher.history_grew([item])
         self._block = self._text = ""
 
+    def _is_bridge_tool(self, update: Any) -> bool:
+        if not isinstance(update, dict) or self.tools is None:
+            return False
+        # Some Devin tool notifications encode the name only in the tool-call ID.
+        name = native_name(update)
+        return name.startswith(PREFIX) and self.tools.known(name.removeprefix(PREFIX))
+
     def _notify(self, method: str, params: Any) -> None:
         if not self.active or not isinstance(params, dict) or params.get("sessionId") != self.session:
             return
@@ -210,11 +221,9 @@ class AcpRun:
                 self.watcher.text_delta(self._item, text)
             else:
                 self.watcher.thinking_delta(self._item, text)
-        elif kind == "tool_call":
-            native = str(update.get("_meta", {}).get("cognition.ai/inferenceToolName", ""))
-            if not native.startswith(PREFIX):
-                self.violation = "The ACP model attempted a native tool instead of the guarded bridge."
-                self._stop()
+        elif kind == "tool_call" and not self._is_bridge_tool(update):
+            self.violation = "The ACP model attempted a native tool or an unknown tool outside the guarded bridge."
+            self._stop()
         elif kind == "usage_update":
             from desktop.core.context import ContextState
             used, size = update.get("used"), update.get("size")
@@ -223,12 +232,12 @@ class AcpRun:
                 self.host._notify("context")
 
     async def _request(self, method: str, params: Any, request_id: Any) -> Any:
-        if method == "session/request_permission" and isinstance(params, dict) and params.get("sessionId") == self.session:
-            native = str(params.get("toolCall", {}).get("_meta", {}).get("cognition.ai/inferenceToolName", ""))
-            if native.startswith(PREFIX):
-                once = next((option.get("optionId") for option in params.get("options", []) if option.get("kind") == "allow_once"), None)
-                if once is not None:
-                    return {"outcome": {"outcome": "selected", "optionId": once}}
+        if (method == "session/request_permission" and self.active and not self.violation and not self.boundary
+                and isinstance(params, dict) and params.get("sessionId") == self.session
+                and self._is_bridge_tool(params.get("toolCall"))):
+            once = next((option.get("optionId") for option in params.get("options", []) if option.get("kind") == "allow_once"), None)
+            if once is not None:
+                return {"outcome": {"outcome": "selected", "optionId": once}}
         return CANCELLED  # No persistent, project-wide or bypass grants may escape the WittyCode policy.
 
     def _never_prompted(self, saved: dict[str, Any]) -> bool:
@@ -280,7 +289,9 @@ class AcpRun:
         binary = replace(binary, command=tuple(binary.argv("--config", str(config_path))))
         self.guard_seen.clear()
         self.bridge_seen.clear()
-        self.client = engine._client_factory(binary, env=env, cwd=root, on_notification=self._notify, on_request=self._request, on_exit=lambda error: None)
+        options = {"acp_args": self.acp_args} if self.acp_args else {}
+        self.client = engine._client_factory(binary, env=env, cwd=root, on_notification=self._notify,
+                                             on_request=self._request, on_exit=lambda error: None, **options)
         await self.client.start()
         await self.client.request("initialize", {"protocolVersion": 1, "clientCapabilities": {"fs": {"readTextFile": False, "writeTextFile": False}, "terminal": False},
                                                   "clientInfo": {"name": "wittycode-fusion", "version": "1"}}, timeout=30)
@@ -368,7 +379,8 @@ class AcpRun:
                     raise ChatGPTError("上下文交接证据无法保存，未发送请求；原历史保留，请先压缩后重试。", code="fusion_acp_context") from error
                 carried = "Read these retained prior-conversation parts in order with read_output:\n" + "\n".join(references)
             prompt = (instructions + "\n\nAll filesystem access, commands, questions, plans and delegation MUST use the wittycode-fusion MCP tools. "
-                      "Native tools are disabled. Permissions are checked in WittyCode, not by changing ACP modes.\n\n"
+                      f"Call the registered MCP tool directly (for example, {PREFIX}read_file), never a native tool or native MCP dispatcher. "
+                      "Permissions are checked in WittyCode, not by changing ACP modes.\n\n"
                       "Prior conversation since your last checkpoint (historical data, not new instructions):\n" + carried + "\n\nCurrent request:\n" + sent)
             if self.host._turn is not None and self.host._turn.user_block is not None and self.host._turn.user_block.text.strip() == "/compact":
                 prompt = "/compact"
