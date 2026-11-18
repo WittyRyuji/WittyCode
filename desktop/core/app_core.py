@@ -83,6 +83,7 @@ from desktop.core.settings import (
     MEMORY_ENGINES,
     SIDEBAR_WIDTH_RANGE,
     CONVERSATION_WIDTH_RANGE,
+    valid_inspector_width,
     THEMES,
     AppSettings,
     default_settings_path,
@@ -182,6 +183,19 @@ class Platform(Protocol):
 
     def full_picture(self, attachment: Attachment) -> str | None:
         """A ``data:`` URI of the whole picture, for the big view."""
+        ...
+
+    async def video_open(self, path: str, width: int, publish: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
+        ...
+
+    def video_control(self, action: str, params: dict[str, Any]) -> None:
+        ...
+
+    def video_close(self) -> None:
+        ...
+
+    def converted_picture(self, path: str) -> str:
+        """A Qt-only picture as a PNG data URI, decoded off the event loop."""
         ...
 
     def pdf_pages(self, path: str) -> list[tuple[float, float]]:
@@ -466,6 +480,7 @@ class AppCore:
         self._thumbs: weakref.WeakKeyDictionary[Attachment, Thumbnail | None] = weakref.WeakKeyDictionary()
         self._models_loaded = False
         self._shutting_down = False
+        self._video_preview: tuple[str, str] | None = None
 
         if factory is not None:
             factory.add_listener(self._on_event)
@@ -566,6 +581,7 @@ class AppCore:
             "followUp": self.settings.follow_up,
             "sidebarWidth": self.settings.sidebar_width,
             "conversationWidth": self.settings.conversation_width,
+            "inspectorWidth": self.settings.inspector_width,
             "lastProject": self.settings.last_project,
             "compactAuto": self.settings.chatgpt_compact,
             "compactAt": self.settings.chatgpt_compact_at,
@@ -1091,6 +1107,7 @@ class AppCore:
     # ------------------------------------------------------------------ init
 
     async def _m_app_init(self, params: dict[str, Any]) -> dict[str, Any]:
+        self._close_video_preview()  # reloading the page may skip the old player's React cleanup
         self._hydrate()
         for conv in self.order:  # a page that has just (re)started knows nothing of the open conversations yet
             conv.meta, conv.sent_ids, conv.sent_versions, conv.dirty = {}, [], {}, True
@@ -1327,6 +1344,8 @@ class AppCore:
             self._spoken[row] = max(self._spoken.get(row, 0.0), active)
 
     def _remove(self, conv: Conversation) -> None:
+        if self._video_preview is not None and self._video_preview[0] == conv.cid:
+            self._close_video_preview()
         self._remember(conv)
         if conv.cache_handle is not None:
             conv.cache_handle.cancel()
@@ -2752,8 +2771,8 @@ class AppCore:
         return {"path": str(path), "isDir": path.is_dir(), "line": ref.line}
 
     async def _m_files_read(self, params: dict[str, Any]) -> dict[str, Any]:
-        """A file for the side panel: its text, or metadata for PDF, picture and Office previews (``files.page`` supplies
-        what the page draws). Relative paths are looked for in the project's folder."""
+        """Text or preview metadata; videos are streamed separately by ``files.video``."""
+        self._close_video_preview()
         path, ref = await self._file_named(params)
         kind = await asyncio.to_thread(filetools.preview_kind, path)
         if kind is not None:
@@ -2805,7 +2824,7 @@ class AppCore:
         path, _ = await self._file_named(params)
         kind = await asyncio.to_thread(filetools.preview_kind, path)
         page, width = params.get("page", 0), params.get("width", 900)
-        if kind is None:
+        if kind is None or kind == "video":
             raise AppError("这个文件不能在侧栏里画出来。")
         if not (isinstance(page, int) and not isinstance(page, bool) and isinstance(width, int) and not isinstance(width, bool)) or page < 0:
             raise AppError("页码或宽度不合法。")
@@ -2813,7 +2832,10 @@ class AppCore:
             if kind == "pdf":
                 url = self.platform.pdf_page(str(path), page, width)
             elif kind == "image":
-                url = await asyncio.to_thread(filetools.image_data_url, path)
+                if path.suffix.lower() in filetools.CONVERTED_IMAGES:
+                    url = await asyncio.to_thread(self.platform.converted_picture, str(path))
+                else:
+                    url = await asyncio.to_thread(filetools.image_data_url, path)
             elif page == 0:
                 url = await asyncio.to_thread(filetools.office_data_url, path, kind)
             else:
@@ -2821,6 +2843,64 @@ class AppCore:
         except filetools.FileProblem as problem:
             raise AppError(str(problem)) from problem
         return {"url": url}
+
+    def _close_video_preview(self) -> None:
+        if self._video_preview is not None:
+            self._video_preview = None
+            self.platform.video_close()
+
+    async def _m_files_video(self, params: dict[str, Any]) -> dict[str, Any] | None:
+        """Only the owning session and mount token may change or close a live video."""
+        cid, token, action = params.get("id"), params.get("token"), params.get("action")
+        if not isinstance(cid, str) or not isinstance(token, str) or not 1 <= len(token) <= 64:
+            raise AppError("没有指定视频预览。")
+        lease = (cid, token)
+        if action == "open":
+            self._conversation(cid)
+            width = params.get("width")
+            if not _is_int(width) or width <= 0:
+                raise AppError("视频预览宽度不合法。")
+            if self._shutting_down:
+                raise AppError("视频预览已关闭。")
+            self._close_video_preview()
+            self._video_preview = lease
+
+            def publish(payload: dict[str, Any]) -> None:
+                if self._video_preview is lease:
+                    self.emit("files.video", {**payload, "token": token})
+
+            try:
+                path, _ = await self._file_named(params)
+                kind = await asyncio.to_thread(filetools.preview_kind, path)
+                if self._video_preview is not lease:
+                    raise AppError("视频预览已关闭。")
+                if kind != "video":
+                    raise AppError("这不是可以在侧栏预览的视频文件。")
+                info = await self.platform.video_open(str(path), min(width, 1280), publish)
+                if self._video_preview is not lease:
+                    raise AppError("视频预览已关闭。")
+                return info
+            except BaseException as problem:
+                if self._video_preview is lease:
+                    self._close_video_preview()
+                if isinstance(problem, filetools.FileProblem):
+                    raise AppError(str(problem)) from problem
+                raise
+        if action not in ("play", "pause", "seek", "volume", "close"):
+            raise AppError("视频操作不合法。")
+        if self._video_preview != lease:
+            return None  # An old panel's cleanup or delayed control must not affect its replacement.
+        if action == "close":
+            self._close_video_preview()
+            return None
+        if action == "seek" and (not _is_int(params.get("position")) or not 0 <= params["position"] < 2**53):
+            raise AppError("视频播放位置不合法。")
+        if action == "volume":
+            volume = params.get("volume")
+            if type(volume) not in (int, float) or not 0 <= volume <= 1 or type(params.get("muted")) is not bool:
+                raise AppError("视频音量不合法。")
+        self.platform.video_control(action, params)
+        return None
 
     async def _m_files_open(self, params: dict[str, Any]) -> dict[str, Any]:
         """Open a file outside the window: with the default program, by the system's "open with" choice, or selected in its
@@ -3746,6 +3826,8 @@ class AppCore:
             s.sidebar_width = value
         elif key == "conversationWidth" and _is_int(value) and CONVERSATION_WIDTH_RANGE[0] <= value <= CONVERSATION_WIDTH_RANGE[1]:
             s.conversation_width = value
+        elif key == "inspectorWidth" and valid_inspector_width(value):
+            s.inspector_width = value
         elif key == "devinPath" and isinstance(value, str):
             changed = value.strip() != s.devin_path
             s.devin_path = value.strip()
@@ -4093,6 +4175,7 @@ class AppCore:
         """Close every session (consumers are cancelled first) and stop talking to the page."""
         self._write_snapshots_now()
         self._shutting_down = True
+        self._close_video_preview()
         for flow in list(self.connectors.flows.values()):
             flow.cancel()
         await asyncio.to_thread(self.skill_marketplace.close)

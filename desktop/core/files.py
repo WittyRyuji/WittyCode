@@ -42,8 +42,16 @@ PREVIEW_IMAGES = {
     ".bmp": "image/bmp",
     ".svg": "image/svg+xml",
     ".ico": "image/x-icon",
+    ".cur": "image/x-icon",
+    ".apng": "image/apng",
+    ".avif": "image/avif",
+    ".jfif": "image/jpeg",
+    ".jpe": "image/jpeg",
 }
-"""The pictures the side panel shows, with the type the page needs to draw them (an SVG in an ``<img>`` runs no script)."""
+"""Pictures the page draws directly (an SVG in an ``<img>`` runs no script)."""
+CONVERTED_IMAGES = frozenset(".tif .tiff .tga .pbm .pgm .ppm .xbm .xpm .icns .wbmp .svgz".split())
+_UNSUPPORTED_IMAGES = frozenset(".heic .heif .heics .heifs .hif .dng .cr2 .cr3 .nef .arw .raw .psd .eps .jxl .jp2 .j2k .dds .exr".split())
+PREVIEW_VIDEOS = frozenset(".mp4 .m4v .mov .webm .mkv .avi .wmv .mpg .mpeg .ogv .3gp .ts .m2ts".split())
 PREVIEW_IMAGE_BYTES = 25_000_000
 PREVIEW_PDF_BYTES = 80_000_000
 PREVIEW_OFFICE_BYTES = 30_000_000
@@ -140,15 +148,33 @@ def is_runnable(path: Path) -> bool:
     return path.suffix.lower() in RUNNABLE
 
 
+def transport_stream_header(header: bytes) -> bool:
+    """MPEG transport packets: sync bytes at consecutive 188/192/204-byte packet boundaries."""
+    return any(
+        header[offset] == header[offset + stride] == header[offset + 2 * stride] == 0x47
+        for stride in (188, 192, 204)
+        for offset in range(min(stride, len(header) - 2 * stride))
+    )
+
+
 def preview_kind(path: Path) -> str | None:
-    """The kind the panel draws instead of reading as text (by suffix; never a folder)."""
+    """The kind the panel draws instead of reading as text (never a folder)."""
     suffix = path.suffix.lower()
     if path.is_dir():
         return None
     if suffix == ".pdf":
         return "pdf"
-    if suffix in PREVIEW_IMAGES:
+    if suffix in PREVIEW_IMAGES or suffix in CONVERTED_IMAGES:
         return "image"
+    if suffix == ".ts":
+        # .ts also names TypeScript source. Only treat a transport-stream signature as video.
+        try:
+            with path.open("rb") as handle:
+                return "video" if transport_stream_header(handle.read(1024)) else None
+        except OSError:
+            return None
+    if suffix in PREVIEW_VIDEOS:
+        return "video"
     return _OFFICE_TYPES.get(suffix)
 
 
@@ -163,18 +189,27 @@ def preview_size(path: Path, kind: str) -> int:
     except OSError as error:
         raise FileProblem(f"读不了这个文件：{error.strerror or error}。") from error
     limit = {"pdf": PREVIEW_PDF_BYTES, "image": PREVIEW_IMAGE_BYTES}.get(kind, PREVIEW_OFFICE_BYTES)
-    if size > limit:
+    if kind != "video" and size > limit:
         raise _too_large(size)
     return size
 
 
-def image_data_url(path: Path) -> str:
-    """The picture as a ``data:`` URI for an ``<img>`` of the page. Raises ``FileProblem``."""
+def image_bytes(path: Path) -> bytes:
+    """Read a bounded picture even if the file grows after the size check."""
     preview_size(path, "image")
     try:
-        data = path.read_bytes()
+        with path.open("rb") as handle:
+            data = handle.read(PREVIEW_IMAGE_BYTES + 1)
     except OSError as error:
         raise FileProblem(f"读不了这个文件：{error.strerror or error}。") from error
+    if len(data) > PREVIEW_IMAGE_BYTES:
+        raise _too_large(len(data))
+    return data
+
+
+def image_data_url(path: Path) -> str:
+    """Send native pictures unchanged so animated images keep all of their frames."""
+    data = image_bytes(path)
     return f"data:{PREVIEW_IMAGES[path.suffix.lower()]};base64,{base64.b64encode(data).decode('ascii')}"
 
 
@@ -261,6 +296,8 @@ def read_for_panel(path: Path, *, limit: int = PANEL_BYTES) -> PanelFile:
     if path.is_dir():
         raise FileProblem("这是文件夹，不是文件：可以在文件夹中显示它。")
     suffix = path.suffix.lower()
+    if suffix in _UNSUPPORTED_IMAGES:
+        raise FileProblem(f"{suffix.upper()} 图片不能在侧栏里预览：用默认程序打开。")
     if suffix in _LEGACY_OFFICE:
         raise FileProblem(f"旧版 Office 格式（{suffix}）不能在侧栏里预览：用默认程序打开，或另存为 {_LEGACY_OFFICE[suffix]}。")
     try:

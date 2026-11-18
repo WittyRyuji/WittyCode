@@ -23,6 +23,7 @@ import "./usage.test.mjs";
 import "./plan.test.mjs";
 import "./rail-width.test.mjs";
 import "./agent-team.test.mjs";
+import "./dragon-sprites.test.mjs";
 import "./turn-navigation.test.mjs";
 import "./factory.test.mjs";
 import "./fusion.test.mjs";
@@ -33,6 +34,7 @@ import "./turn-delta.test.ts";
 import "./starmap.test.mjs";
 import "./skill-icons.test.mjs";
 import "./office.test.mjs";
+import "./media.test.mjs";
 
 test("API windows use exact specifications, preserve overrides and require unknown limits", () => {
   const model = { id: "gpt-6.1-sol", displayName: "demo", images: true, reasoning: "max" };

@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import type { ApiProvider, AttachmentView, Engine, FileView, MemoryState, ModelChoice, ProviderDraft, Session, SessionSettings, SkillItem, SwitchBlock, Turn } from "./types";
-import type { FollowUp, FusionSettingKey, HandoffChoice, QuestionAnswer, SavedRow, SettingValue, SoundKey, SoundKind } from "./protocol";
+import type { FollowUp, FusionSettingKey, HandoffChoice, QuestionAnswer, SavedRow, SettingValue, SoundKey, SoundKind, VideoCommand, VideoInfo, VideoUpdate } from "./protocol";
 import {
   API_PROVIDERS,
   CHATGPT_ACCOUNT,
@@ -163,6 +163,8 @@ export interface Store extends LiveData {
   refreshPlanUsage: () => void;
   /** Preview data as a `data:` URI; null on failure unless the caller wants the bridge's error. */
   filePage: (ref: string, page: number, width: number, reportError?: boolean) => Promise<string | null>;
+  fileVideo: (command: VideoCommand) => Promise<VideoInfo | null>;
+  watchVideo: (token: string, receive: (event: VideoUpdate) => void) => () => void;
   closeFile: () => void;
   copyPath: (ref: string) => void;
   /** the menu of a path (right click) */
@@ -249,6 +251,7 @@ export interface Store extends LiveData {
   /** while the splitter is dragged; `commit` once it is let go (the live app then saves it) */
   setSidebarWidth: (px: number, commit?: boolean) => void;
   setConversationWidth: (px: number, commit?: boolean) => void;
+  setInspectorWidth: (px: number) => void;
   setSidebarOpen: (open: boolean) => void;
   setReviewOpen: (open: boolean) => void;
   setDragging: (v: boolean) => void;
@@ -306,6 +309,7 @@ function mockData(): LiveData {
     followUp: "queue",
     sidebarWidth: 288,
     conversationWidth: 280,
+    inspectorWidth: 0,
     memoryEnabled: true,
     memoryRecall: true,
     memoryCapture: true,
@@ -608,6 +612,8 @@ export const useStore = create<Store>((set, get) => ({
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="595" height="842"><rect width="595" height="842" fill="#fff"/><text x="40" y="80" font-size="28" fill="#333" font-family="sans-serif">${label}</text></svg>`;
     return `data:image/svg+xml;base64,${btoa(svg)}`;
   },
+  fileVideo: async () => null,
+  watchVideo: () => () => {},
   closeFile: () => set({ filePanel: null }),
   copyPath: (ref) => get().say(`（演示）已复制路径：${ref}`),
   showPathMenu: (ref, x, y) => set({ pathMenu: { ref, x, y } }),
@@ -809,6 +815,7 @@ export const useStore = create<Store>((set, get) => ({
   setDevinPath: (devinPath) => set({ devinPath }),
   setSidebarWidth: (sidebarWidth) => set({ sidebarWidth }),
   setConversationWidth: (conversationWidth) => set({ conversationWidth }),
+  setInspectorWidth: (inspectorWidth) => set({ inspectorWidth }),
   setSidebarOpen: (sidebarOpen) => set({ sidebarOpen }),
   setReviewOpen: (reviewOpen) => set({ reviewOpen }),
   setDragging: (dragging) => set({ dragging }),

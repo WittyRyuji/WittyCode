@@ -321,7 +321,7 @@ export interface Session {
  *  asked for one at a time, `files.page`); pictures and Office files get their bytes from `files.page`. */
 export type OfficeKind = "word" | "sheet" | "slides";
 export interface FileView {
-  kind: "text" | "pdf" | "image" | OfficeKind;
+  kind: "text" | "pdf" | "image" | "video" | OfficeKind;
   pages: { w: number; h: number }[];
   path: string;
   name: string;

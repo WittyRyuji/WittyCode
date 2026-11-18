@@ -11,6 +11,7 @@ import { Composer } from "./components/Composer";
 import { StatusBar } from "./components/StatusBar";
 import { PlanPanel } from "./components/PlanPanel";
 import { ConversationRail } from "./components/ConversationRail";
+import { InspectorSplitter } from "./components/InspectorSplitter";
 import { ChatGPTWelcome, DialogHost, DropOverlay, EmptyPage, LightboxHost } from "./components/Overlays";
 import { ReviewBar, WIDTHS } from "./components/Review";
 import { TitleBar } from "./components/TitleBar";
@@ -282,6 +283,7 @@ export default function App() {
             <Main />
             <AgentPanel />
             <FilePanel />
+            {agentOpen && <InspectorSplitter />}
             <StatusBar />
           </div>
         </div>

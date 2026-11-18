@@ -216,6 +216,15 @@ function fakeBackend(config) {
     workingLabel: "",
   });
 
+  let video = null;
+  const videoFrame = (color) => {
+    const canvas = document.createElement("canvas");
+    canvas.width = 96; canvas.height = 54;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = color; ctx.fillRect(0, 0, 96, 54);
+    ctx.fillStyle = "#fff"; ctx.fillRect(15, 15, 48, 24);
+    return canvas.toDataURL("image/jpeg");
+  };
   let releaseInit;
   const initReady = new Promise((resolve) => { releaseInit = resolve; if (!config.initHold) resolve(); });
   const S = {
@@ -658,7 +667,7 @@ function fakeBackend(config) {
       const row = S.saved.find((r) => r.id === p.id);
       const c = open(p.projectId, row?.engine === "devin" ? "devin:swe-2-high" : "api:gw:claude-haiku-5-5", { title: p.title || row?.title || "（无标题）", savedId: p.id, nativeId: p.id });
       // Python sends the restored history before the conversation's first session event
-      c.turns = [{ id: nid("t"), status: "done", seconds: 4.2, blocks: [{ kind: "user", id: nid("b"), text: "上次的问题" }, { kind: "text", id: nid("b"), markdown: "上次的回答，见 `docs/notes.md:5`，另有 `docs/report.pdf`、`docs/long.pdf`、`docs/broken.pdf` 和 `shots/ui.png`。" + (config.office ? " 样例：`sample.docx`、`sample.xlsx`、`sample.pptx`。安全测试：`hostile.docx`、`hostile.xlsx`、`hostile.pptx`。" : ""), streaming: false }], prompts: [] }];
+      c.turns = [{ id: nid("t"), status: "done", seconds: 4.2, blocks: [{ kind: "user", id: nid("b"), text: "上次的问题" }, { kind: "text", id: nid("b"), markdown: "上次的回答，见 `docs/notes.md:5`，另有 `docs/report.pdf`、`docs/long.pdf`、`docs/broken.pdf` 和 `shots/ui.png`。" + (config.office ? " 样例：`sample.docx`、`sample.xlsx`、`sample.pptx`。安全测试：`hostile.docx`、`hostile.xlsx`、`hostile.pptx`。" : "") + (config.pictures ? " 图片：`sample.gif`、`sample.apng`、`sample.webp`。" : "") + (config.video ? " 视频：`sample.mp4`、`sample.webm`、`broken.mov`。" : ""), streaming: false }], prompts: [] }];
       later(20, () => emitTurns(c, c.turns));
       return { id: c.cid };
     },
@@ -917,6 +926,7 @@ function fakeBackend(config) {
       else if (p.key === "maxOpen" && Number.isInteger(v) && v >= 1 && v <= 16) s.maxOpen = v;
       else if (p.key === "maxSteps" && Number.isSafeInteger(v) && v >= 1) s.maxSteps = v;
       else if (p.key === "sidebarWidth" && Number.isInteger(v) && v >= 220 && v <= 440) s.sidebarWidth = v;
+      else if (p.key === "inspectorWidth" && Number.isInteger(v) && (v === 0 || v >= 340 && v <= 4000)) s.inspectorWidth = v;
       else if (p.key === "devinPath" && typeof v === "string") s.devinPath = v.trim();
       else if (p.key === "memoryEnabled" && typeof v === "boolean") s.memoryEnabled = v;
       else if (p.key === "memoryRecall" && typeof v === "boolean") s.memoryRecall = v;
@@ -1064,29 +1074,49 @@ function fakeBackend(config) {
     "shell.openExternal": () => null,
     "files.resolve": (p) => ({ path: `D:\\Work\\demo-project\\${String(p.path).replace(/:\d+(-\d+)?$/, "").replace(/\//g, "\\")}`, isDir: false, line: null }),
     "files.read": (p) => {
+      video = null;
       if (/missing/.test(p.path)) throw new Error("找不到这个文件：" + p.path);
       const name = p.path.split("/").pop();
-      const office = config.office?.[name];
-      const preview = office?.kind ?? (/\.pdf$/i.test(p.path) ? "pdf" : /\.(png|jpe?g|svg)$/i.test(p.path) ? "image" : null);
+      const media = config.office?.[name] ?? config.pictures?.[name];
+      const preview = media?.kind ?? (/\.(mp4|webm|mov)$/i.test(name) ? "video" : /\.pdf$/i.test(p.path) ? "pdf" : /\.(png|jpe?g|svg)$/i.test(p.path) ? "image" : null);
       if (preview) {
         const pages = preview === "pdf" ? Array.from({ length: /long/.test(p.path) ? 40 : 5 }, (_, i) => ({ w: 595, h: i === 2 ? 595 : 842 })) : [];
-        return { kind: preview, pages, path: "D:\\Work\\demo-project\\" + name, name, dir: "D:\\Work\\demo-project", text: "", size: office?.size ?? 183400, lines: 0, encoding: "", truncated: false, markdown: false, line: null, lineEnd: null };
+        return { kind: preview, pages, path: "D:\\Work\\demo-project\\" + name, name, dir: "D:\\Work\\demo-project", text: "", size: media?.size ?? 183400, lines: 0, encoding: "", truncated: false, markdown: false, line: null, lineEnd: null };
       }
       const range = /:(\d+)(?:-(\d+))?$/.exec(p.path);
       const text = Array.from({ length: 12 }, (_, i) => (i === 0 ? "# 笔记" : `第 ${i + 1} 行`)).join("\n");
       return { kind: "text", pages: [], path: "D:\\Work\\demo-project\\docs\\notes.md", name: "notes.md", dir: "D:\\Work\\demo-project\\docs", text, size: text.length, lines: 12, encoding: "UTF-8", truncated: false, markdown: true, line: range ? Number(range[1]) : null, lineEnd: range?.[2] ? Number(range[2]) : null };
     },
     "files.page": (p) => {
-      const office = config.office?.[p.path.split("/").pop()];
-      if (office) {
+      const name = p.path.split("/").pop();
+      const preview = config.office?.[name] ?? config.pictures?.[name];
+      if (preview) {
         if (p.page !== 0) throw new Error("页码不合法。");
-        return { url: office.url };
+        return { url: preview.url };
       }
       if (/broken/.test(p.path) && p.page === 1) throw new Error("这一页画不出来。");
       const w = /\.pdf$/i.test(p.path) ? 595 : 320;
       const h = /\.pdf$/i.test(p.path) ? (p.page === 2 ? 595 : 842) : 200;
       const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}"><rect width="${w}" height="${h}" fill="#fff"/><text x="30" y="60" font-size="28" fill="#222" font-family="sans-serif">page ${p.page + 1} @${p.width}</text></svg>`;
       return { url: "data:image/svg+xml;base64," + btoa(svg) };
+    },
+    "files.video": (p) => {
+      if (p.action === "open") {
+        if (p.path === "broken.mov") throw new Error("这个视频无法解码：用默认程序打开。");
+        video = { token: p.token, position: 0, playing: false, ended: false };
+        return { duration: 42000, width: 96, height: 54, videoCodec: "H264", audioCodec: "AAC", hasAudio: true, seekable: true,
+          frame: videoFrame(p.path === "sample.mp4" ? "#35719f" : "#987126") };
+      }
+      if (video?.token !== p.token) return null;
+      if (p.action === "close") video = null;
+      else if (p.action === "play" || p.action === "pause") {
+        video.playing = p.action === "play";
+        emit("files.video", { ...video, ...(video.playing ? { url: videoFrame("#4c8c47"), position: 1000 } : {}) });
+      } else if (p.action === "seek") {
+        video.position = p.position;
+        emit("files.video", { ...video, url: videoFrame("#8c477a") });
+      }
+      return null;
     },
     "files.open": () => ({ ok: true }),
   };

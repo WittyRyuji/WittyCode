@@ -49,6 +49,7 @@ export interface LiveData {
   followUp: FollowUp;
   sidebarWidth: number;
   conversationWidth: number;
+  inspectorWidth: number;
   /** the shared memory is given to new and resumed conversations of these engines (master switch, engines) */
   memoryEnabled: boolean;
   /** each message goes with the notes that bear on it */
@@ -84,7 +85,7 @@ export interface LiveData {
   /** the sub-agent open in the side panel (of a conversation, by its thread id) and its run */
   agentPanel: { sessionId: string; agentId: string } | null;
   agentTurns: Turn[];
-  /** the text file open in the side panel (it takes the place of the sub-agent's) */
+  /** The file inspector replaces the sub-agent's; video frames go directly to the mounted player, never into this state. */
   filePanel: FilePanelState | null;
   /** the menu of a file path in the conversation (right click): which path, and where */
   pathMenu: { ref: string; x: number; y: number } | null;
@@ -139,6 +140,7 @@ export function emptyLiveData(theme: ThemeChoice = "system", fontScale: FontScal
     followUp: "queue",
     sidebarWidth: 288,
     conversationWidth: 280,
+    inspectorWidth: 0,
     memoryEnabled: true,
     memoryRecall: true,
     memoryCapture: true,
@@ -235,6 +237,7 @@ export function settingsFields(v: SettingsView): Partial<LiveData> {
     followUp: v.followUp ?? "queue",
     sidebarWidth: v.sidebarWidth,
     conversationWidth: v.conversationWidth ?? 280,
+    inspectorWidth: v.inspectorWidth ?? 0,
     memoryEnabled: v.memoryEnabled ?? true,
     memoryRecall: v.memoryRecall ?? true,
     memoryCapture: v.memoryCapture ?? true,

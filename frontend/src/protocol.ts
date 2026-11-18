@@ -67,6 +67,7 @@ export interface SettingsView {
   followUp: FollowUp;
   sidebarWidth: number;
   conversationWidth?: number;
+  inspectorWidth?: number;
   /** the shared memory is given to new and resumed conversations (master switch), of these engines */
   memoryEnabled: boolean;
   /** each message goes with the notes that bear on it (the application's own hook before sending) */
@@ -95,7 +96,7 @@ export interface SettingsView {
 export type FollowUp = "queue" | "steer";
 export type Language = "auto" | "zh-CN" | "en";
 export type FusionSettingKey = "fusionMain" | "fusionWorkers" | "fusionLight" | "fusionReasoning" | "fusionPreference" | "fusionMaxSeconds";
-export type SettingKey = "theme" | "fontScale" | "followUp" | "maxOpen" | "maxSteps" | "sidebarWidth" | "conversationWidth" | "devinPath" | "memoryEnabled" | "memoryRecall" | "memoryCapture" | "memoryCurate" | "memoryEngines" | "compactAuto" | "compactAt" | "thinkChinese" | "answerLanguage" | "thinkingLanguage" | "soundEnabled" | SoundKey | FusionSettingKey;
+export type SettingKey = "theme" | "fontScale" | "followUp" | "maxOpen" | "maxSteps" | "sidebarWidth" | "conversationWidth" | "inspectorWidth" | "devinPath" | "memoryEnabled" | "memoryRecall" | "memoryCapture" | "memoryCurate" | "memoryEngines" | "compactAuto" | "compactAt" | "thinkChinese" | "answerLanguage" | "thinkingLanguage" | "soundEnabled" | SoundKey | FusionSettingKey;
 export type SoundKind = "question" | "complete" | "error";
 export type SoundKey = "soundQuestion" | "soundComplete" | "soundError";
 export type SettingValue = string | number | boolean | string[] | Record<string, string>;
@@ -275,6 +276,31 @@ export interface RulesDocument { path: string; text: string; revision: string; e
 
 export interface FactoryState { cli: "found" | "missing"; cliPath: string; path: string; enabled: boolean }
 
+export type VideoCommand = { id: string; token: string } & (
+  { action: "open"; path: string; width: number } |
+  { action: "play" | "pause" | "close" } |
+  { action: "seek"; position: number } |
+  { action: "volume"; volume: number; muted: boolean }
+);
+export interface VideoInfo {
+  duration: number;
+  width: number;
+  height: number;
+  videoCodec: string;
+  audioCodec: string;
+  hasAudio: boolean;
+  seekable: boolean;
+  frame: string;
+}
+export interface VideoUpdate {
+  token: string;
+  position: number;
+  playing: boolean;
+  ended: boolean;
+  url?: string;
+  error?: string;
+}
+
 export interface Calls {
   "connectors.list": { params: None; result: ConnectorView[] };
   "connectors.configure": { params: { provider: ConnectorId; config: Partial<ConnectorConfig> }; result: ConnectorView[] };
@@ -345,6 +371,8 @@ export interface Calls {
   /** A PDF page (`page` from 0, drawn `width` pixels wide), or the bytes of a picture or Office file (page 0), as a
    *  `data:` URI. An error is one sentence for the user. */
   "files.page": { params: { id: string; path: string; page: number; width: number }; result: { url: string } };
+  /** Open a local video paused on its first JPEG; the token identifies this mount and guards subsequent controls. */
+  "files.video": { params: VideoCommand; result: VideoInfo | null };
   /** open it outside the window: `default` program (a program or script is only shown in its folder: `shown`, `message`),
    *  the system's `choose` dialog, or `reveal` in its folder */
   "files.open": { params: { id: string; path: string; how: "default" | "choose" | "reveal" }; result: { ok: boolean; shown?: boolean; message?: string } };
@@ -439,6 +467,8 @@ export interface Calls {
 export type Method = keyof Calls;
 
 export interface Events {
+  /** Throttled JPEG frames and playback state (milliseconds); delivered directly to the video component. */
+  "files.video": VideoUpdate;
   /** a status bar message */
   notice: { text: string };
   /** the open conversations in tab order; `select`: show this one (a conversation the page just opened) */

@@ -42,6 +42,11 @@ FOLLOW_UPS = ("queue", "steer")
 to the running turn now. Ctrl+Enter does the other one."""
 SIDEBAR_WIDTH_RANGE = (220, 440)
 CONVERSATION_WIDTH_RANGE = (240, 600)
+INSPECTOR_WIDTH_RANGE = (340, 4000)
+
+
+def valid_inspector_width(value: object) -> bool:
+    return type(value) is int and (value == 0 or INSPECTOR_WIDTH_RANGE[0] <= value <= INSPECTOR_WIDTH_RANGE[1])
 MAX_OPEN_SESSIONS_RANGE = (1, 16)
 DEFAULT_MAX_OPEN_SESSIONS = 4
 DEFAULT_MAX_STEPS = 80
@@ -84,6 +89,8 @@ class AppSettings:
     """One of ``FOLLOW_UPS``: what Enter does while a turn is running."""
     sidebar_width: int = 288
     conversation_width: int = 280
+    inspector_width: int = 0
+    """The file and Sub-Agent inspector column in pixels; zero follows the window width."""
     default_model: str = ""
     """Model id for new sessions; empty: the first model of the menu."""
     reasoning_effort: str = ""
@@ -369,6 +376,7 @@ def settings_from_dict(raw: object) -> AppSettings:
         follow_up=text("follow_up", FOLLOW_UPS),
         sidebar_width=sidebar,
         conversation_width=conversation,
+        inspector_width=raw["inspector_width"] if valid_inspector_width(raw.get("inspector_width")) else defaults.inspector_width,
         default_model=text("default_model"),
         reasoning_effort=text("reasoning_effort"),
         devin_autonomy=text("devin_autonomy", DEVIN_PERMISSIONS),

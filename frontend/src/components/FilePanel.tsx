@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { messageOf } from "../lib/errors";
 import { AppWindow, ClipboardCopy, ExternalLink, FileText, FolderOpen, Loader2, X } from "lucide-react";
 import { currentSession, useStore } from "../store";
 import type { FileView } from "../types";
 import { highlight } from "../lib/highlight";
 import { Markdown } from "./blocks/Markdown";
 import { OfficePreview } from "./OfficePreview";
+import { MediaPreview } from "./MediaPreview";
 import { Menu, type MenuItem } from "./ui";
 
 /** Height of one line of the code view: the highlight of the named lines is placed by it. */
@@ -118,24 +120,22 @@ function Pdf({ file, fileRef }: { file: FileView; fileRef: string }) {
 }
 
 /** A picture: fitted to the panel, a click shows it at its own size. */
-function Picture({ file, fileRef }: { file: FileView; fileRef: string }) {
+function Picture({ file, fileRef, renderError }: { file: FileView; fileRef: string; renderError: (message: string) => ReactNode }) {
   const filePage = useStore((s) => s.filePage);
   const [url, setUrl] = useState<string | null | undefined>(undefined);
+  const [error, setError] = useState("");
   const [actual, setActual] = useState(false);
   useEffect(() => {
     let current = true;
-    setUrl(undefined);
-    setActual(false);
-    void filePage(fileRef, 0, 0).then((u) => current && setUrl(u));
-    return () => {
-      current = false;
-    };
-  }, [file.path, fileRef, filePage]);
+    void filePage(fileRef, 0, 0, true).then((u) => current && setUrl(u), (e) => current && setError(messageOf(e)));
+    return () => { current = false; };
+  }, [fileRef, filePage]);
+  const unreadable = "这张图片不能在侧栏里预览：用默认程序打开。";
+  if (error || url === null) return renderError(error || unreadable);
   if (url === undefined) return <div className="fp-state"><Loader2 size={15} className="spin" /> 正在读取…</div>;
-  if (url === null) return <div className="fp-state">这张图片画不出来：用默认程序打开。</div>;
   return (
     <div className={`fp-picture${actual ? " actual" : ""}`}>
-      <img src={url} alt={file.name} draggable={false} onClick={() => setActual(!actual)} title={actual ? "点击适应窗口" : "点击看原始大小"} />
+      <img src={url} alt={file.name} draggable={false} onError={() => setError(unreadable)} onClick={() => setActual(!actual)} title={actual ? "点击适应窗口" : "点击看原始大小"} />
     </div>
   );
 }
@@ -201,7 +201,7 @@ export function FilePanel() {
           <X size={15} />
         </button>
       </header>
-      {file && !office && (
+      {file && !office && kind !== "video" && (
         <div className="fp-facts">
           <span>
             {file.kind === "pdf" ? `${file.pages.length.toLocaleString()} 页 · ${size(file.size)}` : file.kind === "image" ? size(file.size) : `${file.lines.toLocaleString()} 行 · ${size(file.size)} · ${file.encoding}`}
@@ -228,8 +228,9 @@ export function FilePanel() {
         )}
         {panel.status === "error" && renderError(panel.error ?? "读不了这个文件。")}
         {office && file && <OfficePreview key={`${panel.sessionId}:${panel.ref}:${file.path}`} kind={office} fileRef={panel.ref} size={size(file.size)} renderError={renderError} />}
+        {file?.kind === "video" && <MediaPreview key={`${panel.sessionId}:${panel.ref}:${file.path}`} sessionId={panel.sessionId} fileRef={panel.ref} size={size(file.size)} renderError={renderError} />}
         {file?.kind === "pdf" && <Pdf key={file.path} file={file} fileRef={panel.ref} />}
-        {file?.kind === "image" && <Picture file={file} fileRef={panel.ref} />}
+        {file?.kind === "image" && <Picture key={`${panel.sessionId}:${panel.ref}:${file.path}`} file={file} fileRef={panel.ref} renderError={renderError} />}
         {file?.kind === "text" && (file.markdown && !source ? <div className="fp-doc"><Markdown source={file.text} /></div> : <Code file={file} />)}
       </div>
     </aside>

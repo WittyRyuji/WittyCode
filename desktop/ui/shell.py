@@ -227,6 +227,7 @@ class QtPlatform:
         self.window = window
         self.close_requested: Callable[[], None] = lambda: None
         self._pdf: Any = None
+        self._video: Any = None
         self._sound: Any = None
         self._media: Any = None
 
@@ -324,7 +325,34 @@ class QtPlatform:
     def pdf_page(self, path: str, page: int, width: int) -> str:
         return self._pdf_reader().page_image(path, page, width)
 
+    def converted_picture(self, path: str) -> str:
+        from desktop.ui.imageview import picture_png
+
+        return picture_png(path)
+
+    async def video_open(self, path: str, width: int, publish: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
+        from desktop.ui.videoview import VideoView
+
+        self.video_close()
+        player = self._video = VideoView(self.window, width, publish)
+        try:
+            return await player.load(path)
+        except BaseException:
+            if self._video is player:
+                self.video_close()
+            raise
+
+    def video_control(self, action: str, params: dict[str, Any]) -> None:
+        if self._video is not None:
+            self._video.control(action, params)
+
+    def video_close(self) -> None:
+        player, self._video = self._video, None
+        if player is not None:
+            player.close()
+
     def release_documents(self) -> None:
+        self.video_close()
         if self._pdf is not None:
             self._pdf.close()
             self._pdf = None

@@ -8,7 +8,7 @@ import { applyEvent, applyInit, chatgptView, clampCompactAt, selectWhenKnown, se
 import { QWebChannelTransport, type Transport } from "./transport";
 import { messageOf } from "./lib/errors";
 import type { ApiProvider, AttachmentView, ProviderDraft } from "./types";
-import type { AttachmentsResult, FileUpload, HandoffChoice, SendOver, SettingKey, SettingValue } from "./protocol";
+import type { AttachmentsResult, FileUpload, HandoffChoice, SendOver, SettingKey, SettingValue, VideoUpdate } from "./protocol";
 
 /** Python does not even look at a file above this (core/attachments.py MAX_SOURCE_BYTES), so it is not read here either. */
 export const MAX_FILE_BYTES = 64 * 1024 * 1024;
@@ -58,7 +58,14 @@ export async function installLive(transport: Transport): Promise<void> {
   }
 }
 
+const videoViews = new Map<string, (frame: VideoUpdate) => void>();
+
 function onEvent(name: string, payload: unknown): void {
+  if (name === "files.video") {
+    const frame = payload as VideoUpdate;
+    videoViews.get(frame.token)?.(frame);
+    return;
+  }
   const { patch, effects } = applyEvent(get(), name, payload);
   if (Object.keys(patch).length) set(patch);
   for (const effect of effects) {
@@ -284,6 +291,11 @@ function liveActions(): Partial<Store> {
         return null;
       }
     },
+    fileVideo: (params) => liveCall("files.video", params),
+    watchVideo: (token, receive) => {
+      videoViews.set(token, receive);
+      return () => { if (videoViews.get(token) === receive) videoViews.delete(token); };
+    },
     closeFile: () => set({ filePanel: null }),
     copyPath: async (ref) => {
       const id = get().currentId;
@@ -463,6 +475,10 @@ function liveActions(): Partial<Store> {
     setConversationWidth: (px, commit = false) => {
       set({ conversationWidth: px });
       if (commit) void setting("conversationWidth", Math.round(px));
+    },
+    setInspectorWidth: (px) => {
+      set({ inspectorWidth: px });
+      void setting("inspectorWidth", px);
     },
 
     saveProvider: async (draft) => {
