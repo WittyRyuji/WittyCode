@@ -120,7 +120,7 @@ class AppSettings:
     sound_question: str = ""
     sound_complete: str = ""
     sound_error: str = ""
-    """Local WAV paths; empty means the corresponding bundled sound (resolved for display by ``core/sounds``)."""
+    """Local PCM WAV or MP3 paths; empty means the corresponding bundled sound (resolved for display by ``core/sounds``)."""
     mode: str = "auto"
     projects: list[str] = field(default_factory=list)
     max_open_sessions: int = DEFAULT_MAX_OPEN_SESSIONS

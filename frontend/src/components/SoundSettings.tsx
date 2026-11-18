@@ -12,7 +12,7 @@ export function SoundSettings() {
   const s = useStore();
   return (
     <section className="sound-settings" aria-label="提示音设置">
-      <Field label="提示音" hint="问题、完成和错误使用不同声音。关闭后全部静音；下面仍显示当前文件路径。支持本机 PCM WAV 文件。">
+      <Field label="提示音" hint="问题、完成和错误使用不同声音。关闭后全部静音；下面仍显示当前文件路径。支持本机 PCM WAV 和 MP3 文件。">
         <Switch on={s.soundEnabled} onChange={s.setSoundEnabled} label="提示音总开关" />
       </Field>
       {SOUNDS.map(({ kind, key, label, hint }) => (

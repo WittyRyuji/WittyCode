@@ -228,21 +228,39 @@ class QtPlatform:
         self.close_requested: Callable[[], None] = lambda: None
         self._pdf: Any = None
         self._sound: Any = None
+        self._media: Any = None
 
     def play_sound(self, path: str) -> None:
+        self.stop_sound()
+        source = QUrl.fromLocalFile(path)
+        if Path(path).suffix.lower() == ".mp3":
+            from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+
+            if self._media is None:
+                output = QAudioOutput(self.window)
+                output.setVolume(0.7)
+                self._media = QMediaPlayer(self.window)
+                self._media.setAudioOutput(output)
+            self._media.setSource(source)
+            self._media.play()
+            return
+
         from PySide6.QtMultimedia import QSoundEffect
 
         if self._sound is None:
             self._sound = QSoundEffect(self.window)
             self._sound.setLoopCount(1)
             self._sound.setVolume(0.7)
-        self._sound.stop()
-        self._sound.setSource(QUrl.fromLocalFile(path))
+        self._sound.setSource(source)
         self._sound.play()
 
     def stop_sound(self) -> None:
         if self._sound is not None:
             self._sound.stop()
+        if self._media is not None:
+            # Clearing the source stops playback and unloads the stream. Qt's FFmpeg backend can hang when
+            # immediately stopping a replay of the same still-loaded source.
+            self._media.setSource(QUrl())
 
     # ---- dialogs
     def _ask(self, dialog: QFileDialog) -> asyncio.Future[list[str]]:
@@ -265,7 +283,7 @@ class QtPlatform:
         return await self._ask(dialog)
 
     async def pick_sound(self, start: str) -> str | None:
-        dialog = QFileDialog(self.window, "选择提示音", start, "PCM WAV 声音 (*.wav)")
+        dialog = QFileDialog(self.window, "选择提示音", start, "提示音 (*.wav *.mp3)")
         dialog.setFileMode(QFileDialog.FileMode.ExistingFile)
         paths = await self._ask(dialog)
         return paths[0] if paths else None
