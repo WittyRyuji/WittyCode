@@ -33,6 +33,18 @@ def test_meta_is_shared_by_sessions_of_only_the_same_project(tmp_path):
     assert Drive(root, project, "third").meta("map_location") == "local"
 
 
+def test_clean_rechecks_open_records_before_dropping_any_pages_of_a_session(tmp_path):
+    project = tmp_path / "project"
+    drive, peer = Drive(tmp_path, project, "owner"), Drive(tmp_path, project, "peer")
+    record = peer.put("run", "result", "Keep the run while work is open.", body="Run log.")
+    brief = peer.put("brief", "task", "Pending task.", body="Task brief.")
+    assert not next(item for item in drive.sessions() if item.session == "peer").open
+    peer.set_open(brief.id, True)  # It became active after the caller selected it.
+    drive.clean(["peer"])
+    assert peer.get(record.id) == record and peer.read(record.pointers[0]) == "Run log."
+    assert peer.get(brief.id).open and peer.read(brief.pointers[0]) == "Task brief."
+
+
 def test_clips_summary_pages_body_and_masks_before_storage(tmp_path):
     root, project = tmp_path / "drive", tmp_path / "project"
     drive = Drive(root, project, "test")
@@ -84,6 +96,8 @@ def test_pointer_owner_is_project_local_and_prefers_the_local_revision(tmp_path)
     pointer, = old.pointers
     assert one.owner_of(pointer) == current.id and two.owner_of(pointer) == peer.id
     assert three.owner_of(pointer) == peer.id
+    assert one.read_for_session(pointer, shared=False) == ("Same page", current.id)
+    assert three.read_for_session(pointer, shared=False) == ("Same page", peer.id)
     assert Drive(tmp_path, tmp_path / "unrelated", "one").owner_of(pointer) is None
     assert one.owner_of("../page") is None and one.owner_of("d-" + "0" * 64) is None
     two.delete_session("two")
@@ -320,6 +334,7 @@ def test_clean_keeps_summaries_and_reclaims_database_space(tmp_path):
     assert old.sessions()[0].bytes == 0
     with pytest.raises(DriveError, match="cleaned"):
         old.read(map_entry.pointers[0])
+    recent.set_open(peer.id, False)
     old.clean(["recent"])
     with pytest.raises(DriveError, match="cleaned"):
         old.read(task.pointers[0])

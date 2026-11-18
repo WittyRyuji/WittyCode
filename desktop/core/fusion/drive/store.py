@@ -320,22 +320,38 @@ class Drive:
             db.execute("UPDATE records SET open = ? WHERE id = ?", (bool(open), record_id))
 
     def read(self, pointer: str) -> str:
-        """Read one verified page, warning if any live reference is suspect."""
+        """Read one verified page for project-local maintenance."""
+        return self._read_page_record(pointer, shared=None)[0]
+
+    def read_for_session(self, pointer: str, *, shared: bool) -> tuple[str, str]:
+        """Resolve a readable reference once, returning its verified page and rating ID."""
+        return self._read_page_record(pointer, shared=shared)
+
+    def _read_page_record(self, pointer: str, *, shared: bool | None) -> tuple[str, str]:
         if not isinstance(pointer, str) or not _POINTER.fullmatch(pointer):
             raise DriveError("Unknown Drive page.")
         with self._connect() as db, db:
             db.execute("BEGIN")
-            rows = db.execute("SELECT DISTINCT session, status FROM pages JOIN records ON id = record_id "
-                              "WHERE available = 1 AND pointer = ?", (pointer,)).fetchall()
+            rows = db.execute("SELECT id, session, status, kind FROM pages JOIN records ON id = record_id "
+                              "WHERE available = 1 AND pointer = ? ORDER BY (session = ?) DESC, created DESC, records.rowid DESC",
+                              (pointer, self._session)).fetchall()
             if not rows:
                 known = db.execute("SELECT 1 FROM pages WHERE pointer = ? LIMIT 1", (pointer,)).fetchone()
                 raise DriveError("Drive page was cleaned." if known else "Unknown Drive page.")
+        if shared is not None:
+            rows = [row for row in rows if row["session"] == self._session or row["kind"] == "map"
+                    or (shared and row["kind"] in FACT_KINDS)]
+            if not rows:
+                raise DriveError("This Drive record belongs to another conversation" + ("." if shared else " and sharing is off."))
         warning = _WARNING if any(row["status"] == "suspect" for row in rows) else ""
-        for session in dict.fromkeys(row["session"] for row in rows):
+        owners: dict[str, str] = {}
+        for row in rows:
+            owners.setdefault(row["session"], row["id"])
+        for session, record_id in owners.items():
             try:
                 data = _read_page(self._page_path(session, pointer))
                 if len(data) <= _MAX_PAGE_BYTES and _pointer(data) == pointer:
-                    return warning + data.decode("utf-8")
+                    return warning + data.decode("utf-8"), record_id
             except (OSError, UnicodeError, DriveError):
                 continue
         raise DriveError("Drive page is missing or failed its integrity check.")
@@ -464,7 +480,12 @@ class Drive:
             _session_id(session)
         before = self.usage()
         with self._write() as db:
+            collation = "NOCASE" if os.name == "nt" else "BINARY"
             for session in selected:
+                # A task can start while the user is looking at the cleanup question.
+                if db.execute(f"SELECT 1 FROM records WHERE session = ? COLLATE {collation} AND open = 1 LIMIT 1",
+                              (session,)).fetchone():
+                    continue
                 db.execute("UPDATE records SET status = 'cleaned' WHERE session = ? AND scope = 'session'", (session,))
                 self._drop_session_pages(db, session)
         with self._connect() as db:

@@ -24,7 +24,6 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any
 
 from desktop.core.fusion import tools as fusion_tools
-from desktop.core.fusion.protocol import Brief
 from desktop.core.harness import asking, plan_approval
 from desktop.core.harness.loop import ALLOW, ASK, DENY, Call, Outcome, Verdict
 from desktop.core.harness.mcp import McpClient, McpTool
@@ -76,7 +75,7 @@ class HarnessTools:
         self.asker = asker
         self.plan_submitter: Callable[[str], None] | None = None
         self.fusion_runner: Callable[..., Awaitable[Outcome]] | None = None
-        self.fusion_brief_runner: Callable[[Brief], Awaitable[Outcome]] | None = None
+        self.fusion_brief_runner: Callable[..., Awaitable[Outcome]] | None = None
         self.identity_tools: frozenset[str] | None = None
         self.read_only_brief = False
         self.record_reader: Callable[[str], Awaitable[Outcome]] | None = None
@@ -349,7 +348,7 @@ class HarnessTools:
             values, problem = fusion_tools.parse_batch(call.args, structured=structured)
             if problem or values is None:
                 return Outcome(problem, True)
-            tasks = [asyncio.create_task(runner(*args)) for args in values]
+            tasks = [asyncio.create_task(runner(*args, tool_call=call)) for args in values]
             try:
                 results = await asyncio.gather(*tasks)
             except BaseException:
@@ -363,7 +362,7 @@ class HarnessTools:
             values, problem = fusion_tools.parse_delegation(call.args, structured=structured)
             if problem or values is None:
                 return Outcome(problem, True)
-            return await runner(*values)
+            return await runner(*values, tool_call=call)
         if call.name == plan_approval.NAME and self.plan and self.plan_submitter is not None:
             text, problem = plan_approval.parse(call.args)
             if problem:
