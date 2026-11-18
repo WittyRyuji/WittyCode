@@ -4,17 +4,22 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 import re
 import sqlite3
+import time
+import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass, field, fields, replace
+from dataclasses import asdict, dataclass, field, fields, replace
 from functools import cached_property
 from typing import TYPE_CHECKING, Any
 
 from desktop.core.fusion import gates, identity
-from desktop.core.fusion.drive.fingerprint import fingerprint
+from desktop.core.fusion.drive.fingerprint import Manifest, _GitError, _head, changed_since, fingerprint, workspace_kind
 from desktop.core.fusion.drive.store import Drive, DriveError, Record
-from desktop.core.fusion.protocol import REPORT_TOKENS, Brief, Report, parse_report, settle_ratings
+from desktop.core.fusion.protocol import (
+    REPORT_TOKENS, Brief, Report, Route, brief_writes, checks_after, parse_report, parse_route, risk_signals, route_refusal, settle_ratings,
+)
 from desktop.core.fusion.reasoning import configured_effort
 from desktop.core.fusion.registry import Expert, FusionError, FusionRegistry, Policy
 from desktop.core.harness.loop import Outcome, clip_tokens
@@ -119,6 +124,85 @@ class ReportRun:
         return replace(report, ratings=ratings), True, unrated
 
 
+@dataclass(frozen=True, slots=True)
+class WorkspaceStart:
+    manifest: Manifest
+    commit: str = ""
+    dirty: frozenset[str] = frozenset()
+
+    @classmethod
+    def capture(cls, project: Path) -> WorkspaceStart | None:
+        try:
+            manifest = Manifest.scan(project)
+            if manifest.truncated:
+                return None
+            if workspace_kind(project) == "git":
+                commit = _head(project)
+                dirty = changed_since(project, commit) if commit else None
+                return cls(manifest, commit, frozenset(dirty)) if dirty is not None else None
+            return cls(manifest)
+        except (_GitError, OSError):
+            return None
+
+    def changed(self, project: Path) -> set[str]:
+        try:
+            current = Manifest.scan(project, previous=self.manifest)
+            if current.truncated:
+                return set()
+            changed = set(Manifest.changed(self.manifest, current))
+            if not self.commit:
+                return changed
+            paths = changed_since(project, self.commit)
+            if paths is None:
+                return set()
+            # Git reports old dirty paths too. Only count those if their worktree contents changed again.
+            return set(paths) - self.dirty | changed & self.dirty
+        except OSError:
+            return set()
+
+
+@dataclass(frozen=True, slots=True)
+class DelegationResult:
+    label: str
+    identity: str
+    paths: tuple[str, ...]
+    started: float
+    finished: float
+    status: str
+    report_status: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class AcceptanceVerdict:
+    route: Route
+    from_plan: bool
+    checks: tuple[str, ...]
+    missing: tuple[str, ...]
+    signals: tuple[str, ...]
+    skip_reason: str = ""
+
+    def continuation(self) -> str:
+        names = ", ".join(self.missing)
+        return (f"Fusion verification is incomplete. Missing checks: {names}. Delegate the missing checks, or use submit_route "
+                "with verification self_check and explain why nothing can be run. Do not report completion without verification.")
+
+
+@dataclass(slots=True)
+class RouteTurn:
+    key: str = field(default_factory=lambda: uuid.uuid4().hex)
+    route: Route | None = None
+    from_plan: bool = False
+    workstreams: set[str] = field(default_factory=set)
+    latest_finished: float = 0.0
+    reroute_due: bool = False
+    submitted_at: float = 0.0
+    writing_route: Route | None = None
+    writing_from_plan: bool = False
+    workspace: asyncio.Task[WorkspaceStart | None] | None = None
+    changes: set[str] = field(default_factory=set)
+    delegations: list[DelegationResult] = field(default_factory=list)
+
+
 class FusionRuntime:
     def __init__(self, parent: ChatGPTController, registry: FusionRegistry, *, owner: str | None = None, main_tokens: int | None = None) -> None:
         self.parent = parent
@@ -131,6 +215,7 @@ class FusionRuntime:
         self.agents = {key: ExpertView(expert) for key, expert in registry.agents.items()}
         self._active: dict[str, tuple[ChatGPTController, Tokens | None]] = {}
         self.report_runs: dict[str, ReportRun] = {}
+        self.route_turn: RouteTurn | None = None
         self._delegations: set[asyncio.Task[Any]] = set()
         self._closing = False
         self._drive_warned = False
@@ -139,6 +224,107 @@ class FusionRuntime:
         """A runtime that is not attached to an application (restored for inspection only) has every gate off."""
         settings = getattr(getattr(self.parent, "manager", None), "settings", None)
         return settings is not None and gates.enabled(settings, name)
+
+    def start_route_turn(self) -> None:
+        self.route_turn = RouteTurn() if self.gate("route") else None
+        if self.route_turn is not None and self.parent.saved.plan.get("status") == "approved":
+            self.route_turn.route = Route("split", "Taken from the approved plan.", "runner")
+            self.route_turn.from_plan = True
+
+    def route_guard(self, action: str, workstreams: tuple[str, ...]) -> str:
+        turn = self.route_turn
+        if not self.gate("route") or turn is not None and turn.from_plan:
+            return ""
+        route = turn.route if turn is not None else None
+        if action == "exec":
+            return route_refusal(None, "edit") if route is None else ""
+        names = set(name.casefold() for name in workstreams)
+        return route_refusal(route, action, workstreams=len(names | (turn.workstreams if turn is not None else set())))
+
+    async def _retain_turn_record(self, kind: str, turn: RouteTurn, summary: str, data: Mapping[str, Any]) -> None:
+        if self.drive_enabled:
+            body = json.dumps(data, ensure_ascii=False)
+            try:
+                await asyncio.to_thread(lambda: self.drive.put(kind, f"{kind}:{turn.key}", summary, body=body))
+            except (DriveError, OSError, sqlite3.Error, ValueError):
+                self._drive_notice()
+
+    async def _retain_route(self, turn: RouteTurn, route: Route) -> None:
+        await self._retain_turn_record("route", turn, f"{route.destination} [{route.verification}]: {route.reason}",
+                                       {**asdict(route), "source": "plan" if turn.from_plan else "submitted"})
+
+    async def retain_plan_route(self) -> None:
+        turn = self.route_turn
+        if turn is not None and turn.from_plan and turn.route is not None:
+            await self._retain_route(turn, turn.route)
+
+    async def submit_route(self, args: Mapping[str, Any]) -> Outcome:
+        turn = self.route_turn
+        if turn is None or self.parent._turn is None or not self.gate("route"):
+            return Outcome("There is no active Fusion route turn.", True)
+        route, problem = parse_route(args)
+        if route is None:
+            return Outcome(problem, True)
+        if turn.reroute_due:
+            self.registry.misroutes += 1
+            try:
+                self._checkpoint()
+            except BaseException:
+                self.registry.misroutes -= 1
+                raise
+            turn.reroute_due = False
+        turn.route, turn.from_plan = route, False
+        turn.submitted_at = time.time()
+        turn.workstreams.clear()
+        await self._retain_route(turn, route)
+        return Outcome(f"Route accepted: {route.destination} ({route.verification}).")
+
+    def acceptance_enabled(self) -> bool:
+        return all(self.gate(name) for name in ("acceptance", "route", "brief", "report"))
+
+    async def _observe_delegation(self, turn: RouteTurn, expert: Expert, paths: tuple[str, ...], report: Report | None) -> None:
+        if expert.finished_at is None:
+            return
+        turn.delegations.append(DelegationResult(expert.label, expert.identity, paths, expert.started_at, expert.finished_at,
+                                                 expert.status, report.status if report is not None else ""))
+        if turn.workspace is not None and (start := await asyncio.shield(turn.workspace)) is not None:
+            turn.changes.update(await asyncio.to_thread(start.changed, self.parent.project))
+
+    def acceptance_verdict(self) -> AcceptanceVerdict | None:
+        turn = self.route_turn
+        if turn is None or turn.route is None or not self.acceptance_enabled():
+            return None
+        writes = [work for work in turn.delegations if work.paths]
+        if not writes:
+            return None
+        last_write = max(work.finished for work in writes)
+        route = turn.route
+        skip = route.reason if route.verification == "self_check" and turn.submitted_at >= last_write else ""
+        from_plan = turn.from_plan
+        if route.destination == "self" and not skip:
+            # A re-route for future work doesn't erase checks already owed for delegated writes.
+            if turn.writing_route is None or turn.writing_route.destination == "self":
+                return None
+            route, from_plan = turn.writing_route, turn.writing_from_plan
+        paths = {os.path.normcase(path).replace("\\", "/") for work in writes for path in work.paths}
+        changed = (os.path.normcase(path).replace("\\", "/") for path in turn.changes)
+        out_of_scope = any(not any(name == path or name.startswith(path + "/") for path in paths) for name in changed)
+        status = next((work.report_status for work in writes if work.identity == "Coder" and work.report_status not in ("", "done")), "")
+        runners = [work for work in turn.delegations if work.identity == "Runner" and work.report_status]
+        repaired = any(runner.report_status != "done" and any(work.identity == "Coder" and work.started >= runner.finished for work in writes)
+                       for runner in runners)
+        signals = risk_signals(status=status, observer_reported=False, out_of_scope=out_of_scope, repaired=repaired)
+        checks = tuple(check for check, identity_name in (("runner", "Runner"), ("sampler", "QualitySampler"))
+                       if any(work.identity == identity_name and work.report_status and work.finished > last_write for work in turn.delegations))
+        missing = () if skip else tuple(check for check in checks_after(route, signals) if check not in checks)
+        return AcceptanceVerdict(route, from_plan, checks, missing, signals, skip)
+
+    async def retain_verdict(self, verdict: AcceptanceVerdict) -> None:
+        turn = self.route_turn
+        if turn is not None:
+            status = "unverified" if verdict.missing else "verified"
+            await self._retain_turn_record("verdict", turn, f"{status}: {verdict.route.destination} [{verdict.route.verification}]",
+                                           {**asdict(verdict), "status": status})
 
     @property
     def brief_enabled(self) -> bool:
@@ -406,6 +592,7 @@ class FusionRuntime:
         # The source-model summary may report usage (or uncertainty) after preparation. Never roll that evidence back.
         prepared.calls, prepared.tokens = self.registry.calls, self.registry.tokens
         prepared.unmetered, prepared.had_unknown = self.registry.unmetered, self.registry.had_unknown
+        prepared.misroutes = self.registry.misroutes
         self.registry = prepared
         self.agents = {key: ExpertView(record, self.agents[key].controller if key in self.agents else None)
                        for key, record in prepared.agents.items()}
@@ -619,6 +806,10 @@ class FusionRuntime:
             return Outcome("The Fusion session is inactive or closing; no expert was started.", True)
         if (self.parent._turn_mode or self.parent.mode) == "spec":
             return Outcome(PLAN_REFUSAL, True)
+        route_turn = self.route_turn
+        writes = brief is None or brief_writes(brief)
+        if writes and (refusal := self.route_guard("delegate", (scope,))):
+            return Outcome(refusal, True)
         native = native_model(model)
         if self.parent.manager.model_info(native) is None:
             return Outcome("The requested expert model is unavailable; no fallback was selected.", True)
@@ -646,6 +837,13 @@ class FusionRuntime:
             if not isinstance(error, FusionError):
                 raise
             return Outcome(str(error), True)
+        observing = route_turn is not None and self.acceptance_enabled()
+        if writes and route_turn is not None:
+            route_turn.workstreams.add(scope.casefold())
+            if observing:
+                route_turn.writing_route, route_turn.writing_from_plan = route_turn.route, route_turn.from_plan
+                if route_turn.workspace is None:
+                    route_turn.workspace = asyncio.create_task(asyncio.to_thread(WorkspaceStart.capture, self.parent.project))
         created = expert.id not in known or transferred_new
         view = self.agents.setdefault(expert.id, ExpertView(expert))
         running = asyncio.current_task()
@@ -670,6 +868,8 @@ class FusionRuntime:
             delta = after if before is None else (after.since(before) if after is not None else None)
             return delta.total if delta is not None else None
         try:
+            if writes and route_turn is not None and route_turn.workspace is not None:
+                await asyncio.shield(route_turn.workspace)  # Parallel writers must all wait for the same baseline.
             if self.drive_enabled:
                 # A cancelled waiter must still close a brief written by the worker thread.
                 brief_write = asyncio.create_task(self._retain_record("brief", expert, task, write_paths))
@@ -801,6 +1001,10 @@ class FusionRuntime:
             outcome = Outcome(message, True)
             return outcome
         finally:
+            if route_turn is not None and expert.finished_at is not None and expert.finished_at >= route_turn.latest_finished:
+                route_turn.latest_finished = expert.finished_at
+                route_turn.reroute_due = (expert.status in ("failed", "interrupted") or
+                                          structured_report is not None and structured_report.status in ("blocked", "needs_context"))
             try:
                 if brief_write is not None and (stored_brief := await brief_write) is not None:
                     try:
@@ -816,6 +1020,8 @@ class FusionRuntime:
                                 outcome.output += f"\nFusion Drive report {retained.id}: {', '.join(retained.pointers)}"
                     finally:
                         await self._close_brief(stored_brief)
+                if observing and started and route_turn is not None:
+                    await self._observe_delegation(route_turn, expert, write_paths, structured_report)
             finally:
                 if reporting is not None and self.report_runs.get(expert.id) is reporting:
                     del self.report_runs[expert.id]

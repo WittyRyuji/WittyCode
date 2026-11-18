@@ -3,7 +3,7 @@ import pytest
 
 from desktop.core.fusion.protocol import (
     BRIEF_PARAMETERS, DELEGATE_DECLARATION, REPORT_DECLARATION, REPORT_PARAMETERS, REPORT_TOKENS,
-    ROUTE_DECLARATION, ROUTE_PARAMETERS, Route, checks_after, parse_brief, parse_report, parse_route,
+    ROUTE_DECLARATION, ROUTE_PARAMETERS, Route, brief_writes, checks_after, parse_brief, parse_report, parse_route,
     required_checks, risk_signals, route_refusal, settle_ratings,
 )
 from desktop.core.harness.compact import estimate_text
@@ -196,6 +196,13 @@ def test_settle_ratings_keeps_explicit_zero_and_counts_defaulted_records_once():
     assert settle_ratings(ratings, ()) == ({}, 0)
 
 
+@pytest.mark.parametrize("changes, writes", [({}, True), ({"read_only": True, "paths": []}, False),
+                                           ({"identity": "Runner", "paths": []}, False)])
+def test_only_declared_structured_writes_reserve_a_workstream(changes, writes):
+    brief, problem = parse_brief({**BRIEF, **changes})
+    assert brief is not None and not problem and brief_writes(brief) is writes
+
+
 def test_valid_route():
     route, problem = parse_route({**ROUTE, "reason": " One coherent change. "})
     assert route == Route("coder", "One coherent change.", "runner") and not problem
@@ -241,7 +248,8 @@ def test_required_checks(verification, checks):
 
 
 @pytest.mark.parametrize("changes, signals", [
-    ({}, ()), ({"status": "concerns"}, ("concerns",)), ({"status": "blocked"}, ()),
+    ({}, ()), ({"status": "concerns"}, ("concerns",)), ({"status": "blocked"}, ("concerns",)),
+    ({"status": "needs_context"}, ("concerns",)), ({"status": ""}, ()),
     ({"observer_reported": True}, ("observer_reported",)), ({"out_of_scope": True}, ("out_of_scope",)),
     ({"repaired": True}, ("repaired",)),
     ({"status": "concerns", "observer_reported": True, "out_of_scope": True, "repaired": True},

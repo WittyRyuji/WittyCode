@@ -81,6 +81,8 @@ class HarnessTools:
         self.read_only_brief = False
         self.record_reader: Callable[[str], Awaitable[Outcome]] | None = None
         self.report_submitter: Callable[[Mapping[str, Any]], Outcome] | None = None
+        self.route_submitter: Callable[[Mapping[str, Any]], Awaitable[Outcome]] | None = None
+        self.route_guard: Callable[[str, tuple[str, ...]], str] | None = None
         self.strict_context = False
         self.permission_parent: HarnessTools | None = None
         """Fusion experts use the main session's live level and grants, without sharing their own approvals back."""
@@ -119,6 +121,8 @@ class HarnessTools:
             declared.append(dict(fusion_tools.READ_RECORD_DECLARATION))
         if self.report_submitter is not None:
             declared.append(dict(fusion_tools.REPORT_DECLARATION))
+        if self.route_submitter is not None:
+            declared.append(dict(fusion_tools.ROUTE_DECLARATION))
         for name, (_, tool) in self._mcp.items():
             declared.append({"name": name, "description": tool.description, "parameters": tool.input_schema})
         return [item for item in declared if not self.identity_refusal(item["name"])] if self.identity_tools is not None else declared
@@ -155,7 +159,8 @@ class HarnessTools:
                 or (name == plan_approval.NAME and self.plan_submitter is not None)
                 or (name in (fusion_tools.NAME, fusion_tools.BATCH_NAME) and (self.fusion_runner is not None or self.fusion_brief_runner is not None))
                 or (name == fusion_tools.READ_RECORD and self.record_reader is not None)
-                or (name == fusion_tools.SUBMIT_REPORT and self.report_submitter is not None))
+                or (name == fusion_tools.SUBMIT_REPORT and self.report_submitter is not None)
+                or (name == fusion_tools.SUBMIT_ROUTE and self.route_submitter is not None))
 
     def _identity_check(self, call: Call) -> Verdict | None:
         reason = self.identity_refusal(call.name)
@@ -169,10 +174,26 @@ class HarnessTools:
             return verdict
         return None
 
+    def _route_check(self, call: Call) -> str:
+        guard = self.route_guard
+        if guard is None or self.plan or self.permission_parent is not None and self.permission_parent.plan:
+            return ""
+        if call.name in (fusion_tools.NAME, fusion_tools.BATCH_NAME):
+            workstreams = fusion_tools.writing_workstreams(call.name, call.args, structured=self.fusion_brief_runner is not None)
+            return guard("delegate", workstreams) if workstreams else ""
+        spec = self.registry.get(call.name)
+        if spec is not None and spec.kind in ("edit", "exec"):
+            refusal = guard(spec.kind, ())
+            if refusal and (spec.kind == "edit" or self._planned(spec, call).verdict != ALLOW):
+                return refusal
+        return ""
+
     def check(self, call: Call) -> Verdict:
         identity = self._identity_check(call)
         if identity is not None:
             return identity
+        if refusal := self._route_check(call):
+            return Verdict(DENY, refusal)
         parent = self.permission_parent
         plan = self.plan or parent is not None and parent.plan
         level = parent.level if parent is not None else self.level
@@ -189,6 +210,10 @@ class HarnessTools:
             return Verdict(ALLOW) if self.record_reader is not None else Verdict(DENY, "Fusion Drive is unavailable.")
         if call.name == fusion_tools.SUBMIT_REPORT:
             return Verdict(ALLOW) if self.report_submitter is not None else Verdict(DENY, "No active expert report.")
+        if call.name == fusion_tools.SUBMIT_ROUTE:
+            if plan:
+                return Verdict(DENY, PLAN_REFUSAL)
+            return Verdict(ALLOW) if self.route_submitter is not None else Verdict(DENY, "No active Fusion route.")
         spec = self.registry.get(call.name)
         if spec is not None:
             if plan:
@@ -253,6 +278,8 @@ class HarnessTools:
         identity = self._identity_check(call)
         if identity is not None and identity.verdict == DENY:
             return Outcome(f"Refused: {identity.reason}", True)
+        if refusal := self._route_check(call):
+            return Outcome(f"Refused: {refusal}", True)
         if self.connections is not None:
             from desktop.core.connections import ConnectionError
             try:
@@ -269,6 +296,11 @@ class HarnessTools:
         return outcome
 
     async def _run(self, call: Call) -> Outcome:
+        if call.name == fusion_tools.SUBMIT_ROUTE:
+            verdict = self.check(call)
+            if verdict.verdict != ALLOW or self.route_submitter is None:
+                return Outcome(verdict.reason, True)
+            return await self.route_submitter(call.args)
         if call.name == fusion_tools.SUBMIT_REPORT:
             return self.report_submitter(call.args) if self.report_submitter is not None else Outcome("No active expert report.", True)
         if call.name == fusion_tools.READ_RECORD:

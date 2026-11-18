@@ -110,6 +110,7 @@ class FusionRegistry:
     tokens: int = 0
     unmetered: bool = False
     had_unknown: bool = False
+    misroutes: int = 0
 
     def __post_init__(self) -> None:
         self.project = Path(self.project).resolve(strict=False)
@@ -258,7 +259,8 @@ class FusionRegistry:
 
     def to_json(self) -> dict[str, Any]:
         return {"version": 2, "policy": self.policy.to_json(), "agents": [agent.to_json() for agent in self.agents.values()],
-                "calls": self.calls, "tokens": self.tokens, "unmetered": self.unmetered, "hadUnknown": self.had_unknown}
+                "calls": self.calls, "tokens": self.tokens, "unmetered": self.unmetered, "hadUnknown": self.had_unknown,
+                "misroutes": self.misroutes}
 
     @classmethod
     def from_json(cls, project: Path, raw: Any) -> FusionRegistry:
@@ -270,7 +272,11 @@ class FusionRegistry:
                 or not isinstance(tokens, int) or tokens < 0 or not isinstance(unmetered, bool) or not isinstance(had_unknown, bool)
                 or (unmetered and not had_unknown)):
             raise FusionError("The Fusion budget state is invalid.")
-        result = cls(project, Policy.from_json(raw.get("policy")), calls=calls, tokens=tokens, unmetered=unmetered, had_unknown=had_unknown)
+        misroutes = raw.get("misroutes", 0)
+        if type(misroutes) is not int or misroutes < 0:
+            raise FusionError("The Fusion misroute count is invalid.")
+        result = cls(project, Policy.from_json(raw.get("policy")), calls=calls, tokens=tokens, unmetered=unmetered,
+                     had_unknown=had_unknown, misroutes=misroutes)
         for item in raw["agents"]:
             if not isinstance(item, Mapping):
                 raise FusionError("The expert record is invalid.")

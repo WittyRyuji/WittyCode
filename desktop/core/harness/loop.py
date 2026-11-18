@@ -362,12 +362,12 @@ class AgentLoop:
             self._floor = 0
         return replaced
 
-    async def run(self, history: list[dict[str, Any]]) -> TurnEnd:
+    async def run(self, history: list[dict[str, Any]], *, steps_used: int = 0) -> TurnEnd:
         """Run steps on ``history`` (which already ends with the user's message) until the turn is over. ``history`` is
         extended in place; the exception ``asyncio.CancelledError`` leaves it valid (see the module docstring). Before a
         request the observer may shorten ``history`` (``Observer.prepare``)."""
         incomplete = ""
-        step = 0
+        step = steps_used
         recovered_empty = False
         # A callable lets the app apply a saved change to an already running turn, without interrupting a request or tool.
         while step < (self.max_steps() if callable(self.max_steps) else self.max_steps):

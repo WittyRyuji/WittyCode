@@ -4,7 +4,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from desktop.core.fusion.protocol import BRIEF_PARAMETERS, DELEGATE_DECLARATION, REPORT_DECLARATION, parse_brief
+from desktop.core.fusion.protocol import BRIEF_PARAMETERS, DELEGATE_DECLARATION, REPORT_DECLARATION, ROUTE_DECLARATION, brief_writes, parse_brief
 
 NAME = "delegate_task"
 BATCH_NAME = "delegate_tasks"
@@ -47,6 +47,7 @@ BRIEF_BATCH_DECLARATION = {**BATCH_DECLARATION, "parameters": {"type": "object",
 }, "required": ["tasks"]}}
 
 SUBMIT_REPORT = REPORT_DECLARATION["name"]
+SUBMIT_ROUTE = ROUTE_DECLARATION["name"]
 READ_RECORD = "read_record"
 READ_RECORD_DECLARATION: dict[str, Any] = {
     "name": READ_RECORD,
@@ -85,6 +86,17 @@ def parse_delegation(args: Mapping[str, Any], *, structured: bool) -> tuple[tupl
     if brief is None and all(field in args for field in ("model", "role", "task")):
         problem += " Required brief fields: " + ", ".join(BRIEF_PARAMETERS["required"]) + "."
     return ((brief,) if brief is not None else None), problem
+
+
+def writing_workstreams(name: str, args: Mapping[str, Any], *, structured: bool) -> tuple[str, ...]:
+    if name == BATCH_NAME:
+        tasks, _ = parse_batch(args, structured=structured)
+    else:
+        task, _ = parse_delegation(args, structured=structured)
+        tasks = [task] if task is not None else None
+    if not structured:
+        return tuple(task[0] for task in tasks or ())
+    return tuple(task[0].workstream for task in tasks or () if brief_writes(task[0]))
 
 
 def parse_batch(args: Mapping[str, Any], *, structured: bool = False) -> tuple[list[tuple[Any, ...]] | None, str]:

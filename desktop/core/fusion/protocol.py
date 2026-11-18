@@ -261,13 +261,18 @@ def route_refusal(route: Route | None, action: str, *, workstreams: int = 0) -> 
     return ""
 
 
+def brief_writes(brief: Brief) -> bool:
+    """Only a structured delegation with declared write paths reserves writing work."""
+    return not brief.read_only and bool(brief.paths)
+
+
 def required_checks(route: Route) -> tuple[str, ...]:
     return _CHECKS[route.verification]
 
 
 def risk_signals(*, status: str, observer_reported: bool, out_of_scope: bool, repaired: bool) -> tuple[str, ...]:
     """A repair is a fix after a failed acceptance check, not an ordinary iteration."""
-    return tuple(name for name, present in (("concerns", status == "concerns"), ("observer_reported", observer_reported),
+    return tuple(name for name, present in (("concerns", status in ("concerns", "needs_context", "blocked")), ("observer_reported", observer_reported),
                                             ("out_of_scope", out_of_scope), ("repaired", repaired)) if present)
 
 

@@ -24,7 +24,7 @@ from desktop.core.devin.models import current_value
 from desktop.core.devin.policy import CANCELLED
 from desktop.core.engine_errors import EngineRpcError
 from desktop.core.fusion.acp_server import ADDRESS, AUTH, MCP_CALL, MCP_LIST, MCP_WRAPPERS, PREFIX, SERVER, private_mcp_name
-from desktop.core.fusion.tools import READ_RECORD, SUBMIT_REPORT
+from desktop.core.fusion.tools import READ_RECORD, SUBMIT_REPORT, SUBMIT_ROUTE
 from desktop.core.harness.loop import AgentLoop, Call, TurnEnd
 from desktop.core.memory.launch import PACKAGE_ROOT, console_python
 
@@ -176,7 +176,7 @@ class AcpRun:
                 self.boundary = reason
                 self._stop()
             reply = {"content": [{"type": "text", "text": result["output"]}]}
-            if name in (READ_RECORD, SUBMIT_REPORT) and self.host.saved.tools.get(ident, {}).get("status") == "error":
+            if name in (READ_RECORD, SUBMIT_REPORT, SUBMIT_ROUTE) and self.host.saved.tools.get(ident, {}).get("status") == "error":
                 reply["isError"] = True
             self._replies[invocation] = (signature, reply)
             return reply
@@ -349,13 +349,14 @@ class AcpRun:
                 raise ChatGPTError("Devin 未确认加载 Fusion 执行前保护；未发送模型请求。请检查 Hook/Python 启动配置及 CLI 兼容性。", code="fusion_acp_guard") from None
             raise ChatGPTError("Fusion ACP 工具桥未就绪；未发送模型请求。请检查 Python/MCP 启动配置。", code="fusion_acp_bridge") from None
 
-    async def run(self, tools: Any, watcher: Any, history: list[dict[str, Any]], sent: str, attachments: Any, instructions: str) -> TurnEnd:
+    async def run(self, tools: Any, watcher: Any, history: list[dict[str, Any]], sent: str, attachments: Any, instructions: str,
+                  *, steps_used: int = 0) -> TurnEnd:
         from desktop.core.devin.items import prompt_blocks
         from desktop.core.usage import Tokens
         from desktop.core.chatgpt.responses import Usage
         self.tools, self.watcher, self.history = tools, watcher, history
         self.loop = AgentLoop(None, tools, watcher, model=self.host.model, reasoning=None, instructions=instructions)
-        self.steps, self.boundary, self.violation = 0, "", ""
+        self.steps, self.boundary, self.violation = steps_used, "", ""
         self.reported = False
         self._usage.clear()
         requested = False
