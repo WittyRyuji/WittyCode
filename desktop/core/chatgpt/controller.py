@@ -1802,7 +1802,9 @@ class _Watch(Observer):
     def _compact_at(self, window: int) -> int:
         """Where the user wants the conversation compacted: their percent of the window (read at every request)."""
         settings = self.ctl.manager.settings
-        return int((self.ctl._economic_window(window) or window) * settings.chatgpt_compact_at / 100)
+        identity = self.ctl._fusion_identity  # (a Fusion identity file may set its own point: design section 7)
+        percent = identity.compact_at if identity is not None and identity.compact_at else settings.chatgpt_compact_at
+        return int((self.ctl._economic_window(window) or window) * percent / 100)
 
     def tool_room(self, estimate: int, step: int) -> int | None:
         if not self.current:

@@ -250,6 +250,24 @@ def test_user_identity_override_is_loaded_once_and_bad_file_noticed(tmp_path):
     asyncio.run(go())
 
 
+def test_identity_file_sets_its_own_compaction_point(tmp_path):
+    from types import SimpleNamespace
+
+    from desktop.core.chatgpt.controller import _Watch
+
+    (_identity_folder() / "Coder.md").write_text("---\nname: Coder\ncompact_at: 40\n---\nImplement the brief.", encoding="utf-8")
+
+    async def go():
+        async with _fusion(tmp_path) as (main, fake):
+            await _turn(main, fake, call("delegate_task", _brief(), call_id="delegate"), say("Done."), say("Reviewed."))
+            child = next(iter(main.agents.values())).controller
+            point = lambda controller: _Watch._compact_at(SimpleNamespace(ctl=controller), 100_000)  # noqa: E731
+            share = main.manager.settings.chatgpt_compact_at
+            assert share != 40 and point(main) == 100_000 * share // 100
+            assert point(child) == 40_000
+    asyncio.run(go())
+
+
 def test_drive_retains_rendered_brief_with_the_expert_label(tmp_path):
     async def go():
         async with _fusion(tmp_path, active=("brief", "drive")) as (main, fake):
