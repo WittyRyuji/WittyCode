@@ -25,7 +25,7 @@ def test_unlimited_calls_and_preference_round_trip(tmp_path):
         registry.finish(expert.id, status="done", tokens=None)
     restored = FusionRegistry.from_json(tmp_path, json.loads(json.dumps(registry.to_json())))
     assert restored.policy.preference == 75 and restored.calls == 10
-    parent = SimpleNamespace(saved=SimpleNamespace(plan={}, goal={}))
+    parent = SimpleNamespace(session_id="fusion-preference", saved=SimpleNamespace(origin={}, plan={}, goal={}))
     snapshot = json.loads(FusionRuntime(parent, restored).context_snapshot())
     assert snapshot["max_calls"] is None and snapshot["max_tokens"] is None
     restored.begin(expert.id)  # unknown usage does not impose a hidden budget
@@ -40,7 +40,7 @@ def test_unlimited_calls_and_preference_round_trip(tmp_path):
 @pytest.mark.parametrize(("preference", "cost", "efficiency"), [(0, "1.50", "0.50"), (50, "1.00", "1.00"), (100, "0.50", "1.50")])
 def test_preference_weights_are_guidance_to_the_main_agent(tmp_path, preference, cost, efficiency):
     policy = Policy("chatgpt:main", ("chatgpt:worker",), "chatgpt:small", 0, 0, 60, preference)
-    runtime = FusionRuntime(None, FusionRegistry(tmp_path, policy))
+    runtime = FusionRuntime(None, FusionRegistry(tmp_path, policy), owner="fusion-instructions", main_tokens=0)
     instructions = runtime.instructions()
     assert f"cost x{cost}" in instructions and f"efficiency x{efficiency}" in instructions
     assert "not prices" in instructions and "Decide the number of calls" in instructions
@@ -51,7 +51,7 @@ def test_invalid_saved_preferences_do_not_become_instructions():
         assert settings_from_dict({"fusion_preference": value}).fusion_preference == 50
 
 
-def test_new_sessions_snapshot_preference_and_ignore_legacy_default_budgets(tmp_path):
+def test_sessions_refresh_preference_at_send_and_ignore_legacy_default_budgets(tmp_path):
     async def go():
         core, model, _, _, _ = await ready_core(tmp_path)
         try:
@@ -71,18 +71,19 @@ def test_new_sessions_snapshot_preference_and_ignore_legacy_default_budgets(tmp_
             policy = main._fusion.registry.policy
             assert (policy.max_calls, policy.max_tokens, policy.preference) == (0, 0, 80)
             await core.call("settings.set", {"key": "fusionPreference", "value": 10})
+            assert main._fusion.registry.policy.preference == 80 and not model.requests
             model.script(say("Done."))
             await core.call("session.send", {"id": cid, "text": "Inspect"})
             await finish_turn(main)
             instructions = model.requests[0]["instructions"]
-            assert "0.70" in instructions and "1.30" in instructions
+            assert "1.40" in instructions and "0.60" in instructions
             assert "light" in instructions.lower() and "worker" in instructions.lower()
-            assert main._fusion.registry.policy.preference == 80
+            assert main._fusion.registry.policy.preference == 10
             native = main.session_id
             await main.close()
             reopened = await main.manager.open_saved(tmp_path / "proj", native)
-            assert reopened._fusion.registry.policy.preference == 80
-            assert "0.70" in reopened._fusion.instructions()
+            assert reopened._fusion.registry.policy.preference == 10
+            assert "1.40" in reopened._fusion.instructions()
         finally:
             await core.shutdown()
     asyncio.run(go())

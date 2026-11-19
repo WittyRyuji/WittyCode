@@ -108,12 +108,22 @@ def test_a_real_offline_npx_stdio_server_can_be_imported_and_tested(rig, monkeyp
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows MCP process-tree cleanup")
-def test_a_timed_out_launcher_does_not_leave_its_own_server_child_running(tmp_path):
+@pytest.mark.parametrize("slow_killer", [False, True])
+def test_a_timed_out_launcher_does_not_leave_its_own_server_child_running(tmp_path, monkeypatch, slow_killer):
     from desktop.core.harness.mcp import McpClient, McpError
     from tests.test_harness_shell import pid_alive, wait_gone
 
     peer, record = tmp_path / "launcher.py", tmp_path / "child.pid"
     peer.write_text("import pathlib, subprocess, sys, time\nchild = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(20)'], creationflags=0x08000000)\npathlib.Path(sys.argv[1]).write_text(str(child.pid))\ntime.sleep(20)\n", encoding="utf-8")
+
+    if slow_killer:
+        create = asyncio.create_subprocess_exec
+        async def delayed_tree_cleanup(*args, **kwargs):
+            if str(args[0]).lower().endswith("taskkill.exe"):
+                # Exercise slow enumeration without relying on this machine's process count or load.
+                args = (sys.executable, "-c", "import subprocess, sys, time; time.sleep(3.2); sys.exit(subprocess.run(sys.argv[1:]).returncode)", *args)
+            return await create(*args, **kwargs)
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", delayed_tree_cleanup)
 
     async def scenario():
         client = McpClient("timed-launcher", sys.executable, [str(peer), str(record)])

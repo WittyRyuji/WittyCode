@@ -4,13 +4,13 @@ import type { FollowUp } from "../protocol";
 import { currentSession, landingProjectId, settingsForModel, useStore } from "../store";
 import { MODES, effortLabel, permissionsFor, reasoningChoices } from "../lib/vocab";
 import { engineOfSource, sourceLabel, sourceTag } from "../lib/models";
+import { fusionEffort } from "../lib/fusionReasoning";
 import { CHATGPT_USAGE_URL, chatgptReady } from "../lib/chatgpt";
 import { LIVE } from "../mode";
 import { commandNamed, fromSkills, parseSlash, suggestions, unavailable, type Scene, type SlashCommand } from "../lib/commands";
 import type { Engine, Session, SessionSettings } from "../types";
 import { AttachmentCard } from "./Attachments";
 import { buildModelMenu, type ModelMenuInput } from "./modelMenu";
-import { fusionChoices, fusionDisabledReason } from "./fusionModels";
 import { QueueStrip } from "./QueueStrip";
 import { PlanApproval } from "./PlanApproval";
 import { MenuButton, Tip, type MenuItem } from "./ui";
@@ -78,49 +78,19 @@ function Controls({ values, disabled, fixedModel, fusion, live, onChoose }: { va
           onChatGPTLogin: (forceConsent) => void chatgptLogin({ forceConsent }),
         })}
       />
-      <Chip
+      {!fusion?.selected && <Chip
         label="推理"
         bare
         extra="chip-reasoning"
         value={noReasoning ? "—" : shown(effortLabel(reasoning))}
-        disabled={disabled || noReasoning || (!!fusion?.selected && !live)}
-        title={fusion?.selected && !live ? "在 Fusion 设置中调整各模型的思考等级" : noReasoning ? "这个模型没有推理档位" : "推理强度"}
+        disabled={disabled || noReasoning}
+        title={noReasoning ? "这个模型没有推理档位" : "推理强度"}
         items={pick("reasoning", reasoningChoices(model), reasoning)}
-      />
+      />}
       <Chip label="权限" bare extra="chip-permission" title="权限：不经询问能做多少事" value={shown(levels.find((r) => r.value === values.autonomy)?.label ?? values.autonomy)} disabled={disabled} items={pick("autonomy", levels)} />
       <Chip label="模式" extra="chip-mode" value={shown(MODES.find((r) => r.value === values.mode)?.label ?? values.mode)} disabled={disabled} items={pick("mode", MODES)} />
     </div>
   );
-}
-
-function FusionMain({ session }: { session: Session }) {
-  const models = useStore((s) => s.models);
-  const hidden = useStore((s) => s.hiddenModels);
-  const open = useStore((s) => s.openDialog);
-  const change = useStore((s) => s.changeFusionMain);
-  const current = session.settings.model;
-  const items: MenuItem[] = fusionChoices(models, hidden, true).filter((model) => model.id !== current)
-    .map((model) => ({ id: model.id, label: model.label, description: fusionDisabledReason(model, true), disabled: model.disabled, onSelect: () => open({
-      title: `更换主模型为 ${model.label}？`, body: "确认后保留同一主代理、上下文、专家与会话配置，后续消息使用新模型；不会自动启动任务，也不改变新会话默认设置。",
-      confirmLabel: "更换主模型", noEnter: true, onConfirm: () => change(session.id, model.id),
-    }) }));
-  if (!items.length) return null;
-  return <MenuButton className="linkbtn" disabled={session.mark !== "ready" || !!session.pendingPlan} items={items} up minWidth={240} title={session.pendingPlan ? "请先处理待审批计划" : "明确更换本会话的主模型"}>更换主模型…</MenuButton>;
-}
-
-function FusionAuthorize({ session }: { session: Session }) {
-  const models = useStore((s) => s.models);
-  const hidden = useStore((s) => s.hiddenModels);
-  const open = useStore((s) => s.openDialog);
-  const authorize = useStore((s) => s.authorizeFusionModel);
-  const workers = session.fusionPolicy?.workers ?? [];
-  const items: MenuItem[] = fusionChoices(models, hidden, true).filter((model) => !workers.includes(model.id))
-    .map((model) => ({ id: model.id, label: model.label, description: fusionDisabledReason(model), disabled: model.disabled, onSelect: () => open({
-      title: `授权 ${model.label}？`, body: "确认后，主代理可以在本会话的权限内自动把工作分配给此模型；不会启动任务，也不改变新会话默认设置。",
-      confirmLabel: "授权模型", noEnter: true, onConfirm: () => authorize(session.id, model.id),
-    }) }));
-  if (!items.length) return null;
-  return <MenuButton className="linkbtn" disabled={session.mark !== "ready"} items={items} up minWidth={240}>授权模型…</MenuButton>;
 }
 
 function FusionBudget({ session }: { session: Session }) {
@@ -255,9 +225,11 @@ export function Composer() {
       : READY_PLACEHOLDER
     : dead
       ? "连接已断开，重新连接后才能继续。"
-      : running
-        ? runningPlaceholder(followUp)
-        : READY_PLACEHOLDER;
+      : session.preparing
+        ? "正在交接，可先写下一条…"
+        : running
+          ? runningPlaceholder(followUp)
+          : READY_PLACEHOLDER;
 
   useEffect(() => {
     const el = area.current;
@@ -323,8 +295,8 @@ export function Composer() {
     }
     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
-      // Ctrl+Enter does the other one of the two things a message typed during a turn can do.
-      send(session.id, e.ctrlKey || e.metaKey ? otherHow(followUp) : followUp);
+      // A handoff has not started the model turn; keep a new draft rather than pretending to steer or queue it.
+      if (!session.preparing) send(session.id, e.ctrlKey || e.metaKey ? otherHow(followUp) : followUp);
     } else if (e.key === "Escape" && running) {
       e.preventDefault();
       stop(session.id);
@@ -340,9 +312,10 @@ export function Composer() {
   };
 
   const baseValues = session?.settings ?? landing.settings ?? defaults;
+  const mainEffort = fusionEffort(fusionReasoning, "main", fusionMain);
   const values = !session && landing.fusion ? {
     ...settingsForModel(models, baseValues, fusionMain).settings,
-    ...(fusionReasoning[fusionMain] ? { reasoning: fusionReasoning[fusionMain] } : {}),
+    ...(mainEffort ? { reasoning: mainEffort } : {}),
   } : baseValues;
   const fusionSelected = session ? !!session.fusion : !!landing.fusion;
   const chipsDisabled = !!session && dead;
@@ -454,10 +427,10 @@ export function Composer() {
           <Controls
             values={values}
             disabled={chipsDisabled || (!session && landing.starting)}
-            fixedModel={!!session?.fusion}
-            fusion={{ selected: fusionSelected, disabled: !!session,
-              description: session ? "仅新会话可选择 Fusion" : fusionReady ? `主模型：${models.find((m) => m.id === fusionMain)?.label ?? fusionMain}` : "先配置主模型、工作模型和轻量模型",
-              onSelect: () => fusionReady ? setLandingFusion(true) : openSettings("fusion"),
+            fixedModel={!!session?.fusion && (session.mark !== "ready" || !!session.pendingPlan || !!session.queued?.length || !!session.goal)}
+            fusion={{ selected: fusionSelected, disabled: !!session && (session.mark !== "ready" || !!session.pendingPlan || !!session.queued?.length || !!session.goal),
+              onSelect: () => session ? void choose("model", "fusion") : fusionReady ? setLandingFusion(true) : openSettings("fusion"),
+              onConfigure: () => openSettings("fusion"),
             }}
             live={session ? { running, fresh: session.turns.length === 0, engine: session.engine } : null}
             onChoose={(field, value) => {
@@ -469,7 +442,7 @@ export function Composer() {
           <div className="bar-actions">
           {running ? (
             <>
-              {hasContent &&
+              {hasContent && !session?.preparing &&
                 [otherHow(followUp), followUp].map((how) => (
                   <Tip key={how} text={`${HOW[how].what}${how === followUp ? "（Enter）" : "（Ctrl+Enter）"}`} side="top">
                     <button type="button" className={`send how${how === followUp ? "" : " alt"}`} onClick={() => session && send(session.id, how)} aria-label={HOW[how].label}>
@@ -494,7 +467,7 @@ export function Composer() {
       {(!session || session.fusion || (dead && session) || (session?.handoff && !running) || onPlan) && (
         <div className={`hint${session?.handoff && !running ? " handoff" : ""}`}>
           {!session && <ProjectChip disabled={landing.starting} />}
-          {session?.fusion && <><FusionMain session={session} /><FusionBudget session={session} /><FusionAuthorize session={session} /></>}
+          {session?.fusion && <FusionBudget session={session} />}
           {session && dead ? (
             <span className="hint-text">
               连接已断开 ·{" "}

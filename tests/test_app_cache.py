@@ -6,10 +6,14 @@ moment to open (``tests/fake_devin.py`` with ``FAKE_DEVIN_OPEN_DELAY``)."""
 from __future__ import annotations
 
 import asyncio
+import threading
+
+import pytest
 
 from desktop.core.cache import Cache
+from desktop.core.fusion.registry import FusionRegistry, Policy
 from desktop.core.session_state import SessionState
-from tests.app_support import MODEL, make_core, ready_core
+from tests.app_support import MODEL, OTHER_MODEL, make_core, ready_core, save_conversation
 from tests.devin_support import make_engine as make_devin
 from tests.fake_responses import say
 from tests.fakes import until
@@ -73,6 +77,77 @@ def test_a_cache_that_is_not_there_changes_nothing(tmp_path):
         init = await core.call("app.init")
         assert init["sessions"] == {} and init["models"] == []
         await core.shutdown()
+
+    run(scenario())
+
+
+@pytest.mark.parametrize(("mode", "preview"), [
+    ("active", False), ("active", True), ("ordinary", False), ("ordinary", True), ("stale-index", True),
+])
+def test_saved_fusion_flag_is_used_only_until_the_archive_is_restored(tmp_path, monkeypatch, mode, preview):
+    async def scenario():
+        cache = Cache(tmp_path / "cache") if preview else None
+        core, _, events, _, engine = await ready_core(tmp_path, cache=cache)
+        entered, release = threading.Event(), threading.Event()
+        opening = None
+        try:
+            project = (tmp_path / "proj").resolve()
+            native = "stored"
+            row = save_conversation(engine, project, native, "Saved conversation")
+            saved = engine.sessions.load(native)
+            indexed_fusion = mode != "ordinary"
+            if indexed_fusion:
+                saved.fusion = FusionRegistry(project, Policy(MODEL, (OTHER_MODEL,), OTHER_MODEL, max_calls=0)).to_json()
+                engine.sessions.save(saved)
+            await core.call("project.refresh")
+            assert core._saved_sessions_json()[row]["fusion"] is indexed_fusion
+            if mode == "stale-index":
+                # Another window paused Fusion after this window listed the session.
+                saved.fusion["enabled"] = False
+                engine.sessions.save(saved)
+            if cache is not None:
+                meta = {"settings": {"model": OTHER_MODEL, "mode": "auto"}}
+                if not indexed_fusion:
+                    meta["fusion"] = True  # An older preview must not override the row's mode or model.
+                cache.save_session(row, {"engine": "chatgpt", "native": native, "project": str(project),
+                                         "turns": [{"id": "preview"}], "meta": meta})
+
+            load = engine.sessions.load
+
+            def slow_load(key):
+                if key == native:
+                    entered.set()
+                    assert release.wait(15), "the test did not release the archive read"
+                return load(key)
+
+            monkeypatch.setattr(engine.sessions, "load", slow_load)
+            opening = asyncio.create_task(core.call("session.openSaved", {"id": row, "projectId": str(project)}))
+            await until(entered.is_set)
+            (conv,) = core.order
+            assert conv.controller.state is SessionState.OPENING
+            assert conv.preview is preview
+            core._flush(conv)
+            assert sessions_of(events)[conv.cid]["settings"]["model"] == MODEL
+            await core.call("app.init")  # resends complete metadata to a page that reloaded mid-connection
+            core._flush(conv)
+            patches = [event["patch"] for event in events.of("session") if event["id"] == conv.cid]
+            assert len(patches) >= (3 if preview else 2)
+            assert all((patch["mark"], patch["fusion"], patch["settings"]["model"]) == ("opening", indexed_fusion, MODEL)
+                       for patch in patches if "mark" in patch)
+
+            release.set()
+            assert await opening == {"id": conv.cid}
+            core._flush(conv)
+            current = sessions_of(events)[conv.cid]
+            assert current["mark"] == "ready" and current["fusion"] is (mode == "active")
+            assert current["settings"]["model"] == MODEL
+        finally:
+            release.set()
+            try:
+                if opening is not None:
+                    await opening
+            finally:
+                await core.shutdown()
 
     run(scenario())
 

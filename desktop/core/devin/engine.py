@@ -4,11 +4,11 @@ loop (``core/chatgpt``).
 One long-lived ``devin acp`` process serves everything: the model list, the session list and every open session (every
 notification and request carries ``sessionId``; two sessions at once on one connection were exercised on the real
 program). The price: if the process dies, every open Devin session is DEAD at once; each comes back with ``reconnect`` (a
-new process, ``session/load``). The process starts on first use (``connection``) and lives until ``close_all``.
+new process, ``session/load``). Metadata queries release the process when no session uses it; open sessions keep it alive.
 
 The account is the CLI's own: ``devin auth status`` says whether it is signed in (and as whom), ``devin auth login`` is its
-browser sign-in, ``devin auth logout`` ends it. The tokens stay in Devin's ``credentials.toml``; the same sign-in serves the
-Devin desktop app and the CLI.
+interactive sign-in, ``devin auth logout`` ends it. The tokens stay in Devin's ``credentials.toml``. A desktop sign-in does
+not necessarily authenticate this CLI; never read or copy the desktop's credentials to work around that.
 
 No Qt here: async methods for a qasync loop, listeners like the other engines' (``cb(controller, kind)``), plus
 ``add_account_listener(cb(account_json))`` for sign-in and sign-out.
@@ -25,7 +25,8 @@ import sys
 import tempfile
 import time
 import webbrowser
-from collections.abc import Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -71,9 +72,9 @@ Locate = Callable[[str | None], DevinBinary | None]
 ClientFactory = Callable[..., AcpClient]
 
 
-def default_client_factory(binary: DevinBinary, **handlers: Any) -> AcpClient:
+def default_client_factory(binary: DevinBinary, *, acp_args: tuple[str, ...] = (), **handlers: Any) -> AcpClient:
     """``devin acp`` over stdio, with the given ``on_*`` handlers."""
-    return AcpClient(binary.argv("acp"), **handlers)
+    return AcpClient(binary.argv("acp", *acp_args), **handlers)
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,6 +180,7 @@ class DevinEngine:
         self._retired: list[AcpClient] = []
         """Processes that were let go (the path changed, they died): ``close_all`` sees to it that each is really gone."""
         self._client_lock = asyncio.Lock()
+        self._connection_users = 0
         self._binary: DevinBinary | None = None
         self._binary_for: str | None = None
         self._located = False
@@ -187,7 +189,10 @@ class DevinEngine:
         self._windows: dict[str, int] = {}
         self._status: DevinStatus | None = None
         self._status_at = 0.0
+        self._account_lock = asyncio.Lock()
+        self._login_lock = asyncio.Lock()
         self._login: _Login | None = None
+        self._closing = False
         self._tasks: set[asyncio.Task[Any]] = set()
 
     # ------------------------------------------------------------------ listeners
@@ -200,6 +205,8 @@ class DevinEngine:
             self._listeners.remove(callback)
 
     def _notify(self, controller: DevinController, kind: str) -> None:
+        if kind == "state" and controller.state in (SessionState.CLOSED, SessionState.DEAD):
+            self._spawn(self.release_idle())
         for callback in list(self._listeners):
             try:
                 callback(controller, kind)
@@ -297,6 +304,32 @@ class DevinEngine:
             self._client = client
             return client
 
+    @asynccontextmanager
+    async def keep_connection(self) -> AsyncIterator[None]:
+        """Keep an in-flight metadata query or side question alive, without starting a process."""
+        self._connection_users += 1
+        try:
+            yield
+        finally:
+            self._connection_users -= 1
+            await self.release_idle()
+
+    @asynccontextmanager
+    async def _metadata_connection(self) -> AsyncIterator[AcpClient]:
+        async with self.keep_connection():
+            yield await self.connection()
+
+    async def release_idle(self) -> None:
+        """Release our unused process (and its Windows executable lock), never an open session's connection."""
+        async with self._client_lock:
+            if self._connection_users or self.open_controllers():
+                return
+            client, self._client = self._client, None
+            if client is not None:
+                self._retired.append(client)  # Shutdown can retry cleanup if this task is cancelled.
+                await client.close()
+                self._retired.remove(client)
+
     def _lost(self, client: AcpClient | None, error: Any) -> None:
         log.warning("devin acp exited: %s %s", error, getattr(error, "stderr", "")[-500:])
         if self._client is client:
@@ -331,12 +364,11 @@ class DevinEngine:
         if binary is None:
             raise DevinNotFoundError()
         options: dict[str, Any] = {"creationflags": CREATE_NO_WINDOW} if sys.platform == "win32" else {}
-        process = await asyncio.create_subprocess_exec(
-            *binary.argv(*arguments),
+        process = await self._start_process(
+            binary.argv(*arguments),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            env=self._cli_env,
             **options,
         )
         try:
@@ -350,12 +382,29 @@ class DevinEngine:
             raise
         return process.returncode or 0, out.decode("utf-8", "replace")
 
+    async def _start_process(self, argv: list[str], **options: Any) -> asyncio.subprocess.Process:
+        # Windows can launch the child before create_subprocess_exec returns. Cancellation must still acquire it.
+        starting = asyncio.create_task(asyncio.create_subprocess_exec(*argv, env=self._cli_env, **options))
+        try:
+            return await asyncio.shield(starting)
+        except asyncio.CancelledError:
+            with contextlib.suppress(Exception):
+                await self._reap(await starting)
+            raise
+
     @staticmethod
     async def _reap(process: asyncio.subprocess.Process) -> None:
-        with contextlib.suppress(ProcessLookupError, OSError):
-            process.kill()
-        with contextlib.suppress(asyncio.TimeoutError, Exception):
-            await asyncio.wait_for(process.wait(), 5.0)
+        if process.returncode is None:
+            with contextlib.suppress(ProcessLookupError, OSError):
+                process.kill()
+        transport = process._transport
+        transport.close()  # Disconnect pipes even if a descendant inherited an output handle.
+        await asyncio.wait_for(process.wait(), 5.0)
+        # Process.wait() may return as soon as returncode is known, before the pipe callbacks have run.
+        async def disconnected() -> None:
+            while transport._loop is not None:
+                await asyncio.sleep(0.01)
+        await asyncio.wait_for(disconnected(), 5.0)
 
     # ------------------------------------------------------------------ the account
 
@@ -368,12 +417,18 @@ class DevinEngine:
         binary = await self.binary()
         if binary is None:
             return account_json(None)
-        try:
-            code, text = await self._cli("auth", "status")
-        except DevinError as error:
-            return account_json(binary, self._status, signing_in=self._login is not None, error=friendly_failure(error))
-        self._status = parse_status(text) if code == 0 else DevinStatus()
-        self._status_at = self._clock()
+        async with self._account_lock:
+            try:
+                code, text = await self._cli("auth", "status")
+                if code != 0:
+                    raise DevinProcessError("Devin CLI could not check authentication", exit_code=code)
+            except DevinError as error:
+                return account_json(binary, self._status, signing_in=self._login is not None, error=friendly_failure(error))
+            status = parse_status(text)
+            if status != self._status:
+                self._models = None  # A guest model list must not survive a newly authenticated CLI account.
+            self._status = status
+            self._status_at = self._clock()
         return account_json(binary, self._status, signing_in=self._login is not None)
 
     async def ensure_signed_in(self) -> None:
@@ -385,71 +440,57 @@ class DevinEngine:
             raise DevinSignedOutError()
 
     async def login(self) -> dict[str, Any]:
-        """Sign in with the CLI's browser flow (``devin auth login`` opens the browser itself and ends when it is done);
-        returns the account once signed in, cancelled or timed out (5 min)."""
-        current = self._login
+        """Use the CLI's interactive login picker, not a hidden process with closed stdin.
+
+        On Windows the CLI needs a real console for its browser/manual/enterprise choice. The application never handles
+        tokens or claims a browser opened before the CLI has even selected a login method.
+        """
+        async with self._login_lock:
+            current = self._login
+            if current is None:
+                account = await self.account()
+                if account.get("auth") == "signed-in":
+                    self._emit_account(account)
+                    return account
+                binary = await self.binary()
+                if binary is None:
+                    raise DevinNotFoundError()
+                options: dict[str, Any] = {"creationflags": subprocess.CREATE_NEW_CONSOLE} if sys.platform == "win32" else {}
+                # No redirected standard handles: the native picker must receive real console input.
+                process = await self._start_process(binary.argv("auth", "login"), stdin=None, stdout=None, stderr=None, **options)
+                attempt = _Login(process)
+                self._login = attempt
+                self._emit_account(self.cached_account())
         if current is not None:
-            with contextlib.suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(asyncio.shield(current.done), self.login_timeout)
+            await asyncio.shield(current.done)
             return await self.account()
-        binary = await self.binary()
-        if binary is None:
-            raise DevinNotFoundError()
-        options: dict[str, Any] = {"creationflags": CREATE_NO_WINDOW} if sys.platform == "win32" else {}
-        process = await asyncio.create_subprocess_exec(
-            *binary.argv("auth", "login"),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            env=self._cli_env,
-            **options,
-        )
-        attempt = _Login(process)
-        self._login = attempt
-        self._emit_account(self.cached_account())
-        output = self._spawn(self._drain(process))
-        self._spawn(self._watch(attempt))
+        error = ""
         try:
             try:
-                await asyncio.wait_for(asyncio.shield(attempt.done), self.login_timeout)
+                code = await asyncio.wait_for(process.wait(), self.login_timeout)
+                if code:
+                    error = "Devin 登录窗口已关闭，但 CLI 尚未完成登录。请重试。"
             except asyncio.TimeoutError:
-                await self._stop(attempt)
+                error = "Devin CLI 登录超时，请重试。"
         finally:
-            if self._login is attempt:
-                self._login = None
-            # (the pipe is read to its end before it is let go: a transport dropped open is closed late, by the collector)
-            with contextlib.suppress(asyncio.TimeoutError, Exception):
-                await asyncio.wait_for(output, 2.0)
-            output.cancel()
+            # Keep ownership until termination AND pipe/handle disconnection, including cancellation by shutdown.
+            await self._stop(attempt)
+        if self._closing:
+            return self.cached_account()
         account = await self.account()
+        if account.get("auth") != "signed-in" and error:
+            account["error"] = error
+        if account.get("auth") == "signed-in":
+            self._models = None
+            await self.release_idle()
         self._emit_account(account)
         return account
 
-    @staticmethod
-    async def _drain(process: asyncio.subprocess.Process) -> None:
-        """The CLI waits for nobody to read what it prints, but a full pipe would stop it."""
-        if process.stdout is not None:
-            with contextlib.suppress(Exception):
-                while await process.stdout.read(4096):
-                    pass
-
-    @staticmethod
-    async def _watch(attempt: _Login) -> None:
-        attempt.finish(await attempt.process.wait())
-
     async def _stop(self, attempt: _Login) -> None:
+        await self._reap(attempt.process)
         if self._login is attempt:
             self._login = None
-        process = attempt.process
-        if process.returncode is None:
-            with contextlib.suppress(ProcessLookupError, OSError):
-                process.terminate()
-            try:
-                await asyncio.wait_for(process.wait(), 5.0)
-            except asyncio.TimeoutError:
-                with contextlib.suppress(ProcessLookupError, OSError):
-                    process.kill()
-        attempt.finish(None)
+        attempt.finish(attempt.process.returncode)
 
     async def cancel_login(self) -> dict[str, Any]:
         attempt = self._login
@@ -484,29 +525,30 @@ class DevinEngine:
         They come from a scratch session (made and deleted again): its ``model`` select lists them, and choosing each one
         in turn shows that model's ``thought_level`` select (about 60 ms each)."""
         async with self._models_lock:
+            await self.ensure_signed_in()
             if self._models is None or refresh:
-                client = await self.connection()
-                created = await client.request("session/new", {"cwd": self._scratch(), "mcpServers": []}, timeout=NEW_SESSION_SECONDS)
-                created = created if isinstance(created, Mapping) else {}
-                session_id = str(created.get("sessionId") or "")
-                entries = model_entries(created.get("configOptions"))
-                levels: dict[str, tuple[tuple[str, ...], str]] = {}
-                try:
-                    for model_id, _, _ in entries:
-                        try:
-                            after = await client.request(
-                                "session/set_config_option",
-                                {"sessionId": session_id, "configId": "model", "value": model_id},
-                                timeout=REQUEST_SECONDS,
-                            )
-                        except DevinRpcError:
-                            continue
-                        levels[model_id] = thought_levels(after.get("configOptions") if isinstance(after, Mapping) else None)
-                finally:
-                    if session_id:
-                        with contextlib.suppress(DevinError):
-                            await client.request("session/delete", {"sessionId": session_id}, timeout=REQUEST_SECONDS)
-                self._models = build_models(entries, levels, await self._cli_models())
+                async with self._metadata_connection() as client:
+                    created = await client.request("session/new", {"cwd": self._scratch(), "mcpServers": []}, timeout=NEW_SESSION_SECONDS)
+                    created = created if isinstance(created, Mapping) else {}
+                    session_id = str(created.get("sessionId") or "")
+                    entries = model_entries(created.get("configOptions"))
+                    levels: dict[str, tuple[tuple[str, ...], str]] = {}
+                    try:
+                        for model_id, _, _ in entries:
+                            try:
+                                after = await client.request(
+                                    "session/set_config_option",
+                                    {"sessionId": session_id, "configId": "model", "value": model_id},
+                                    timeout=REQUEST_SECONDS,
+                                )
+                            except DevinRpcError:
+                                continue
+                            levels[model_id] = thought_levels(after.get("configOptions") if isinstance(after, Mapping) else None)
+                    finally:
+                        if session_id:
+                            with contextlib.suppress(DevinError):
+                                await client.request("session/delete", {"sessionId": session_id}, timeout=REQUEST_SECONDS)
+                    self._models = build_models(entries, levels, await self._cli_models())
             return [self._with_window(model) for model in self._models]
 
     async def _cli_models(self) -> dict[str, Any]:
@@ -552,16 +594,16 @@ class DevinEngine:
         folder = normalize_folder(project)
         found: dict[str, DevinSavedSession] = {}
         try:
-            client = await self.connection()
-            for variant in cwd_variants(folder):
-                result = await client.request("session/list", {"cwd": variant}, timeout=REQUEST_SECONDS)
-                for raw in (result.get("sessions") if isinstance(result, Mapping) else None) or ():
-                    if not isinstance(raw, Mapping) or not raw.get("sessionId"):
-                        continue
-                    meta = raw.get("_meta") if isinstance(raw.get("_meta"), Mapping) else {}
-                    if meta.get("cognition.ai/hasUserMessages") is False:
-                        continue  # (made and never used: a scratch session, or one that was opened and left)
-                    found.setdefault(str(raw["sessionId"]), saved_session(raw))
+            async with self._metadata_connection() as client:
+                for variant in cwd_variants(folder):
+                    result = await client.request("session/list", {"cwd": variant}, timeout=REQUEST_SECONDS)
+                    for raw in (result.get("sessions") if isinstance(result, Mapping) else None) or ():
+                        if not isinstance(raw, Mapping) or not raw.get("sessionId"):
+                            continue
+                        meta = raw.get("_meta") if isinstance(raw.get("_meta"), Mapping) else {}
+                        if meta.get("cognition.ai/hasUserMessages") is False:
+                            continue  # (made and never used: a scratch session, or one that was opened and left)
+                        found.setdefault(str(raw["sessionId"]), saved_session(raw))
         except Exception as error:
             log.info("listing devin sessions failed: %s", error)
             if not found:
@@ -639,6 +681,7 @@ class DevinEngine:
 
     async def close_all(self, timeout: float = 20.0) -> None:
         """Close every session, then the process."""
+        self._closing = True
         controllers = list(self.controllers)
         if controllers:
             with contextlib.suppress(asyncio.TimeoutError):

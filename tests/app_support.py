@@ -34,6 +34,10 @@ class FakePlatform:
         self.shown_paths: list[str] = []
         self.calls: list[str] = []
         self.pdf_requests: list[tuple[str, int, int]] = []
+        self.video_requests: list[tuple[str, int]] = []
+        self.video_controls: list[tuple[str, dict[str, Any]]] = []
+        self.video_publish = None
+        self.video_closes = 0
         self.maximized = False
         self.sound: str | None = None
         self.played_sounds: list[str] = []
@@ -102,6 +106,24 @@ class FakePlatform:
     def pdf_page(self, path: str, page: int, width: int) -> str:
         self.pdf_requests.append((Path(path).name, page, width))
         return f"data:image/png;base64,PAGE{page}W{width}"
+
+    async def video_open(self, path: str, width: int, publish) -> dict[str, Any]:
+        self.video_requests.append((Path(path).name, width))
+        if Path(path).name.startswith("broken"):
+            raise FileProblem("这个视频无法解码：用默认程序打开。")
+        self.video_publish = publish
+        return {"duration": 21000, "width": 640, "height": 480, "videoCodec": "H264", "audioCodec": "AAC", "hasAudio": True, "seekable": True, "frame": "data:image/jpeg;base64,FRAME"}
+
+    def video_control(self, action: str, params: dict[str, Any]) -> None:
+        self.video_controls.append((action, params))
+
+    def video_close(self) -> None:
+        self.video_publish = None
+        self.video_closes += 1
+
+    def converted_picture(self, path: str) -> str:
+        self.calls.append(f"picture:{Path(path).name}")
+        return "data:image/png;base64,CONVERTED"
 
     def window_minimize(self) -> None:
         self.calls.append("minimize")

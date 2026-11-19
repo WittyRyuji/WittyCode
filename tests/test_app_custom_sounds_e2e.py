@@ -9,7 +9,7 @@ import wave
 
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtMultimedia import QSoundEffect
+from PySide6.QtMultimedia import QMediaPlayer, QSoundEffect
 
 from tests.e2e_support import open_rig
 from tests.fake_responses import call, fail, say
@@ -27,19 +27,22 @@ def custom_wav(path):
         audio.writeframes(frames)
 
 
-@pytest.mark.parametrize("kind,label", [("question", "问题"), ("complete", "完成"), ("error", "错误")])
-def test_selecting_during_a_turn_changes_both_preview_and_automatic_notification(qapp, loop, tmp_path, monkeypatch, kind, label):
+@pytest.mark.parametrize("kind,label,suffix", [
+    ("question", "问题", "wav"), ("complete", "完成", "wav"), ("error", "错误", "wav"), ("complete", "完成", "mp3"),
+])
+def test_selecting_during_a_turn_changes_both_preview_and_automatic_notification(qapp, loop, tmp_path, monkeypatch, mp3_frame, kind, label, suffix):
     async def scenario():
         rig = await open_rig(tmp_path)
         try:
             played = []
-            play = QSoundEffect.play
+            player_type = QMediaPlayer if suffix == "mp3" else QSoundEffect
+            play = player_type.play
 
-            def record(effect):
-                played.append(Path(effect.source().toLocalFile()))
-                play(effect)  # The shared Qt fixture mutes real playback, not the notification code.
+            def record(player):
+                played.append(Path(player.source().toLocalFile()))
+                play(player)  # The shared Qt fixture mutes real playback, not the notification code.
 
-            monkeypatch.setattr(QSoundEffect, "play", record)
+            monkeypatch.setattr(player_type, "play", record)
             model = await new_conversation(rig)
             answer = {
                 "question": call("ask_user", {"questions": [{"question": "Which layout?", "options": ["Compact", "Wide"]}]}),
@@ -49,8 +52,11 @@ def test_selecting_during_a_turn_changes_both_preview_and_automatic_notification
             model.next(answer)
             await rig.send("Wait, then finish the demo task.")
             await rig.wait_for(".tab.current .dot-running")
-            custom = tmp_path / f"custom-{kind}.wav"
-            custom_wav(custom)
+            custom = tmp_path / f"custom-{kind}.{suffix}"
+            if suffix == "mp3":
+                custom.write_bytes(mp3_frame * 20)
+            else:
+                custom_wav(custom)
 
             async def choose(_start):
                 return str(custom)
@@ -64,15 +70,23 @@ def test_selecting_during_a_turn_changes_both_preview_and_automatic_notification
             await rig.click(f'[aria-label="试听{label}提示音"]')
             await wait_for(lambda: len(played) == 1)
             assert played == [custom]
-            player = rig.window.platform._sound
-            await wait_for(lambda: player.status() is QSoundEffect.Status.Ready and not player.isPlaying())
+            if suffix == "mp3":
+                player = rig.window.platform._media
+                await wait_for(lambda: player.mediaStatus() == QMediaPlayer.MediaStatus.EndOfMedia)
+            else:
+                player = rig.window.platform._sound
+                await wait_for(lambda: player.status() is QSoundEffect.Status.Ready and not player.isPlaying())
             await rig.press("Escape")
             model.go()
             await wait_for(lambda: len(played) == 2)
             assert played == [custom, custom], "the live notification must use the same chosen file as the preview"
             assert Path(player.source().toLocalFile()) == custom
-            await wait_for(lambda: player.status() is QSoundEffect.Status.Ready)
-            assert player.isMuted()
+            if suffix == "mp3":
+                await wait_for(lambda: player.mediaStatus() == QMediaPlayer.MediaStatus.EndOfMedia)
+                assert player.error() == QMediaPlayer.Error.NoError and player.audioOutput().isMuted()
+            else:
+                await wait_for(lambda: player.status() is QSoundEffect.Status.Ready)
+                assert player.isMuted()
         finally:
             await rig.finish()
 

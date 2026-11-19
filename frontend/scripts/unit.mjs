@@ -21,13 +21,20 @@ import { COMMANDS, commandNamed, fromSkills, parseSlash, suggestions, unavailabl
 import { quitWarning } from "../src/lib/quit.ts";
 import "./usage.test.mjs";
 import "./plan.test.mjs";
+import "./rail-width.test.mjs";
+import "./agent-team.test.mjs";
+import "./dragon-sprites.test.mjs";
 import "./turn-navigation.test.mjs";
 import "./factory.test.mjs";
 import "./fusion.test.mjs";
 import "./reasoning-args.test.mjs";
 import "./qwebchannel.test.mjs";
+import "./transport.test.mjs";
 import "./turn-delta.test.ts";
 import "./starmap.test.mjs";
+import "./skill-icons.test.mjs";
+import "./office.test.mjs";
+import "./media.test.mjs";
 
 test("API windows use exact specifications, preserve overrides and require unknown limits", () => {
   const model = { id: "gpt-6.1-sol", displayName: "demo", images: true, reasoning: "max" };
@@ -295,6 +302,29 @@ test("session: messages queued while connecting or running are shown in order, a
   assert.deepEqual(s.sessions.c1.queued.map((m) => m.id), ["q2"], "one withdrawn or sent: the rest stay");
   s = play(s, ["session", { id: "c1", patch: { id: "c1", queued: [] } }]).state;
   assert.equal(s.sessions.c1.queued, undefined);
+});
+
+test("a handoff takes only the submitted draft and puts it back before newer text on failure", () => {
+  let s = withConversation();
+  const file = { id: "sent", kind: "text", name: "sent.txt" };
+  const added = { id: "new", kind: "text", name: "new.txt" };
+  const preparing = { id: "q1", text: "  first draft  ", attachments: [file] };
+  s.sessions.c1 = { ...s.sessions.c1, draft: preparing.text, attachments: [file, added] };
+  const acceptance = ["session", { id: "c1", patch: { preparing, mark: "running" } }];
+  s = play(s, acceptance).state;
+  assert.equal(s.sessions.c1.draft, "");
+  assert.deepEqual(s.sessions.c1.attachments, [added]);
+  assert.equal(s.sessions.c1.turns.length, 0, "the preview is not a recorded turn");
+  assert.equal(s.sessions.c1.preparing, preparing);
+  s.sessions.c1 = { ...s.sessions.c1, draft: preparing.text };
+  s = play(s, acceptance).state;
+  assert.equal(s.sessions.c1.draft, preparing.text, "a repeated metadata patch does not consume the next draft");
+  s.sessions.c1 = { ...s.sessions.c1, draft: "second draft" };
+  s = play(s, ["restore", { id: "c1", text: preparing.text, attachments: [file, added] }]).state;
+  s = play(s, ["session", { id: "c1", patch: { preparing: null, mark: "ready" } }]).state;
+  assert.equal(s.sessions.c1.preparing, undefined);
+  assert.equal(s.sessions.c1.draft, "  first draft  \n\nsecond draft");
+  assert.deepEqual(s.sessions.c1.attachments, [file, added]);
 });
 
 test("a steer in a running turn is a user block marked steer, dashed (pending) until the engine has taken it in", () => {

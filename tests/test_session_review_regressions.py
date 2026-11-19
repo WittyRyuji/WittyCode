@@ -6,7 +6,7 @@ import asyncio
 
 from tests.app_support import ready_core
 from tests.fakes import until
-from tests.test_app_core import devin_core, idle, new_session, talk
+from tests.test_app_core import ask_to_switch, devin_core, idle, new_session, talk
 from tests.test_factory import engine_for
 
 
@@ -57,7 +57,7 @@ def test_the_final_handoff_is_saved_when_the_target_window_is_learned_after_open
             async def learned(*args):
                 return 1_000_000
             monkeypatch.setattr(core, "_window_of", learned)
-            await core.call("session.choose", {"id": cid, "field": "model", "value": "devin:swe-2-high"})
+            await ask_to_switch(core, cid)
             conv = core._by_cid[cid]
             saved = core.history.load(core._row_of(conv))
             assert conv.controller.handoff.carried == 2

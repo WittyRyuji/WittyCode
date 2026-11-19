@@ -7,6 +7,10 @@ import { pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { openPage } from "./cdp.mjs";
 import { fakeBackendScripts } from "./fake-backend.mjs";
+import { officeFixtures } from "./office-fixtures.mjs";
+import { checkOffice } from "./check-office.mjs";
+import { checkInspector, checkPictures, checkVideo, pictureFixtures } from "./check-media.mjs";
+import { checkAgentsTeam } from "./check-agents-team.mjs";
 
 const index = pathToFileURL(resolve("dist/index.html")).href;
 /** the address Python gives the page on Windows 11: it asks for the window outline with round corners */
@@ -22,7 +26,7 @@ const READY = "!!document.querySelector('.tab.current .dot-ready')";
 const MOCK = ["File operations task", "重构 session_manager", "订单库存查询改批量", "React 迁移方案", "demo@example.com", "OpenRouter", "Ollama（本机）", "inventory-api", "（演示）", "设计审阅"];
 const CTRL = 2;
 
-const { scripts, client } = fakeBackendScripts({ initHold: true, carryFiles: 1 });
+const { scripts, client } = fakeBackendScripts({ initHold: true, carryFiles: 1, office: await officeFixtures(), pictures: pictureFixtures(), video: true });
 console.log(`QWebChannel client: ${client}`);
 const page = await openPage(pageUrl, { init: scripts, width: 1440, height: 900 });
 
@@ -509,7 +513,7 @@ ok("a saved row opens through session.openSaved", isDeepStrictEqual(await lastCa
 await page.waitFor("document.querySelector('.tab.current')?.textContent.includes('整理发布说明') && document.querySelectorAll('.main .transcript').length === 1 && document.querySelector('.transcript')?.textContent.includes('上次的回答')", 3000);
 ok("its tab is shown with the restored history", await js("document.querySelector('.transcript').textContent.includes('上次的回答')"));
 // a path in the restored answer: the page asks Python for the file (files.*), nothing else reads the disk
-ok("the paths in the answer are links", (await js("[...document.querySelectorAll('.text .pathref')].map(e => e.textContent).join()")) === "docs/notes.md:5,docs/report.pdf,docs/long.pdf,docs/broken.pdf,shots/ui.png");
+ok("the paths in the answer are links", (await js("[...document.querySelectorAll('.text .pathref')].map(e => e.textContent).join()")) === "docs/notes.md:5,docs/report.pdf,docs/long.pdf,docs/broken.pdf,shots/ui.png,sample.docx,sample.xlsx,sample.pptx,hostile.docx,hostile.xlsx,hostile.pptx,sample.gif,sample.apng,sample.webp,sample.mp4,sample.webm,broken.mov");
 await page.click(".text .pathref");
 await waitCalls("files.read");
 const readCall = await lastCall("files.read");
@@ -574,6 +578,11 @@ ok("a picture is shown fitted in the panel", await js("(() => { const i = docume
 await page.click(".fp-picture img");
 ok("a click shows it at its own size", await js("document.querySelector('.fp-picture').classList.contains('actual')"));
 ok("no console errors (file previews)", page.consoleErrors().length === 0, page.consoleErrors());
+await page.key("Escape");
+await checkOffice({ page, ok, clickText, calls, lastCall, waitCalls });
+await checkPictures({ page, ok, clickText });
+await checkInspector({ page, ok, clickText, calls });
+await checkVideo({ page, ok, clickText, calls });
 await page.key("Escape");
 ok("one more tab, and its saved row became the open one", (await js("document.querySelectorAll('.tab').length")) === tabsBefore + 1 && (await js("[...document.querySelectorAll('.srow')].filter(r => r.textContent.includes('整理发布说明')).length")) === 1);
 await page.waitFor(READY, 3000);
@@ -999,6 +1008,8 @@ ok("…and 1 分钟前 within 30 s, with no new event from Python", true);
 const errors = page.errorTexts();
 ok("no console errors, no CSP violations", errors.length === 0, errors);
 await page.close();
+
+await checkAgentsTeam({ url: pageUrl, scripts, ok });
 
 // ------------------------------------------------------------------------------------- without Python
 const lonely = await openPage(`${index}?live=1`, { width: 1000, height: 700 });

@@ -8,7 +8,7 @@ import { applyEvent, applyInit, chatgptView, clampCompactAt, selectWhenKnown, se
 import { QWebChannelTransport, type Transport } from "./transport";
 import { messageOf } from "./lib/errors";
 import type { ApiProvider, AttachmentView, ProviderDraft } from "./types";
-import type { AttachmentsResult, FileUpload, HandoffChoice, SendOver, SettingKey, SettingValue } from "./protocol";
+import type { AttachmentsResult, FileUpload, HandoffChoice, SendOver, SettingKey, SettingValue, VideoUpdate } from "./protocol";
 
 /** Python does not even look at a file above this (core/attachments.py MAX_SOURCE_BYTES), so it is not read here either. */
 export const MAX_FILE_BYTES = 64 * 1024 * 1024;
@@ -58,7 +58,14 @@ export async function installLive(transport: Transport): Promise<void> {
   }
 }
 
+const videoViews = new Map<string, (frame: VideoUpdate) => void>();
+
 function onEvent(name: string, payload: unknown): void {
+  if (name === "files.video") {
+    const frame = payload as VideoUpdate;
+    videoViews.get(frame.token)?.(frame);
+    return;
+  }
   const { patch, effects } = applyEvent(get(), name, payload);
   if (Object.keys(patch).length) set(patch);
   for (const effect of effects) {
@@ -71,8 +78,8 @@ function onEvent(name: string, payload: unknown): void {
  *  else does nothing. */
 function guardLinks(): void {
   const follow = (event: MouseEvent) => {
-    const link = event.target instanceof Element ? event.target.closest("a[href]") : null;
-    if (!link) return;
+    const link = event.composedPath().find((node) => node instanceof Element && node.matches("a[href]"));
+    if (!(link instanceof Element)) return;
     event.preventDefault();
     if (event.type === "auxclick" && event.button !== 1) return;
     const url = link.getAttribute("href") ?? "";
@@ -121,7 +128,7 @@ async function setting(key: SettingKey, value: SettingValue): Promise<void> {
 /** Changing the engine of a conversation that has attachments: which of them go along is the user's call, one by one
  *  (Python changes nothing until it is told which). Cancel (or Esc) leaves the conversation where it is. */
 function askWhichAttachments(id: string, model: string, choice: HandoffChoice): void {
-  const label = get().models.find((m) => m.id === model)?.label ?? model;
+  const label = model === "fusion" ? "Fusion" : get().models.find((m) => m.id === model)?.label ?? model;
   const n = choice.attachments.length;
   get().openDialog({
     title: `带哪些附件去 ${label}？`,
@@ -254,13 +261,14 @@ function liveActions(): Partial<Store> {
       }
       // The panel opens at once with what is being asked for; the file replaces the wait (or the sentence says why not).
       const watched = get().agentPanel;
-      set({ agentPanel: null, agentTurns: [], filePanel: { sessionId: id, ref, status: "loading" } });
+      const request = { sessionId: id, ref, status: "loading" } as const;
+      set({ agentPanel: null, agentTurns: [], filePanel: request });
       if (watched) void attempt(liveCall("agents.unwatch", { id: watched.sessionId }));
       try {
         const file = await liveCall("files.read", { id, path: ref });
-        if (get().filePanel?.ref === ref) set({ filePanel: { sessionId: id, ref, status: "ready", file } });
+        if (get().filePanel === request) set({ filePanel: { sessionId: id, ref, status: "ready", file } });
       } catch (error) {
-        if (get().filePanel?.ref === ref) set({ filePanel: { sessionId: id, ref, status: "error", error: messageOf(error) } });
+        if (get().filePanel === request) set({ filePanel: { sessionId: id, ref, status: "error", error: messageOf(error) } });
       }
     },
     refreshPlanUsage: async () => {
@@ -273,14 +281,20 @@ function liveActions(): Partial<Store> {
         /* the figures stay as they were; the badge says why it has none */
       }
     },
-    filePage: async (ref, page, width) => {
+    filePage: async (ref, page, width, reportError) => {
       const id = get().currentId;
       if (!id) return null;
       try {
         return (await liveCall("files.page", { id, path: ref, page, width })).url;
-      } catch {
+      } catch (error) {
+        if (reportError) throw error;
         return null;
       }
+    },
+    fileVideo: (params) => liveCall("files.video", params),
+    watchVideo: (token, receive) => {
+      videoViews.set(token, receive);
+      return () => { if (videoViews.get(token) === receive) videoViews.delete(token); };
     },
     closeFile: () => set({ filePanel: null }),
     copyPath: async (ref) => {
@@ -380,7 +394,7 @@ function liveActions(): Partial<Store> {
           const r = await attempt(
             liveCall("session.send", { id, text, attachmentIds, ...(confirmOver ? { confirmOver } : {}), ...(running ? { how: how ?? get().followUp } : {}) }),
           );
-          if (r === FAILED) return;
+          if (r === FAILED || r.prepared) return; // The handoff acceptance event already moved the draft into the timeline.
           if (!r.ok && r.over) return askToSendOver(r.over, () => void submit(true));
           // What was typed while the message was on its way stays.
           get().patchSession(id, (x) => ({ ...x, draft: x.draft === text ? "" : x.draft, attachments: x.attachments.filter((a) => !attachmentIds.includes(a.id)) }));
@@ -457,6 +471,14 @@ function liveActions(): Partial<Store> {
     setSidebarWidth: (px, commit = false) => {
       set({ sidebarWidth: px });
       if (commit) void setting("sidebarWidth", Math.round(px));
+    },
+    setConversationWidth: (px, commit = false) => {
+      set({ conversationWidth: px });
+      if (commit) void setting("conversationWidth", Math.round(px));
+    },
+    setInspectorWidth: (px) => {
+      set({ inspectorWidth: px });
+      void setting("inspectorWidth", px);
     },
 
     saveProvider: async (draft) => {

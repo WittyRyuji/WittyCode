@@ -120,6 +120,7 @@ class ToolContext:
     read_files: dict[str, str] = field(default_factory=dict)
     read_encodings: dict[str, str] = field(default_factory=dict)
     """Content fingerprints read or written by this conversation; shared by per-call context copies."""
+    supports_images: bool = False
 
 
 @dataclass
@@ -128,6 +129,7 @@ class ToolResult:
     is_error: bool = False
     diffs: tuple[FileDiff, ...] = ()
     data: dict[str, Any] = field(default_factory=dict)  # the page's ToolItem input, i.e. ``ui_input``'s result
+    images: list[dict[str, str]] = field(default_factory=list)  # media_type and base64 data
 
 
 Handler = Callable[[dict[str, Any], ToolContext], "ToolResult | Awaitable[ToolResult]"]

@@ -2,4 +2,4 @@
 
 from desktop import _pyguard  # noqa: F401  (must stay first: aborts unless Python 3.11.x)
 
-__version__ = "0.2.1"
+__version__ = "0.3.0"

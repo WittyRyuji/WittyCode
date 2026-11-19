@@ -76,6 +76,8 @@ class Handoff:
     """How many attached files' text went along (inside the carried messages)."""
     attachments: tuple[Attachment, ...] = ()
     """Pictures and PDF files that go out as attachments of the first message (the user picked them)."""
+    summary: str = ""
+    """Source-model summary, kept separately so a not-yet-sent handoff can be forwarded without nesting envelopes."""
 
     @property
     def empty(self) -> bool:

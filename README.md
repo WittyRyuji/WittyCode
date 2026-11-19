@@ -6,88 +6,68 @@ English | [简体中文](README.zh-CN.md) | [Wiki](https://deepwiki.com/WittyRyu
 [![CodeQL](https://github.com/WittyRyuji/WittyCode/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/WittyRyuji/WittyCode/actions/workflows/codeql.yml)
 [![Ask DeepWiki](docs/badges/deepwiki.svg)](https://deepwiki.com/WittyRyuji/WittyCode)
 
-A coding-agent desktop app for Windows, with its own agent loop: the answer comes first, tool calls fold into one line.
+WittyCode is a Windows desktop app for working with coding agents. Use WittyCode's own agent loop with your ChatGPT account or API provider, or choose **Fusion** to have a main agent coordinate a team on the same project. Tool calls fold into summaries so the conversation stays readable.
 
-![After a turn: the tool calls folded into one summary line, the answer up front](docs/screenshots/readme-conversation.png)
+![A WittyCode conversation with tool calls folded into a summary](docs/screenshots/readme-conversation.png)
 
-- **Its own agent loop**: WittyCode calls the model itself — with your ChatGPT plan ("Sign in with ChatGPT") or your own API providers — and runs file, search and shell tools behind three permission levels. Long conversations are compacted, failed requests retried.
-- **One window for every model**: ChatGPT Plan, API providers (OpenAI, Anthropic, OpenAI-compatible endpoints such as DeepSeek / OpenRouter / Ollama, and AWS Bedrock), and optionally Devin or Factory CLI. An ordinary conversation can move to another model midway; the earlier text goes along.
-- **Fusion and Plan**: the own main agent can delegate to reusable module experts; Plan waits for explicit approval of the current proposal before execution. See the [Fusion guide](docs/fusion.md) (Chinese) for configuration, budgets and limits.
-- **Asks while it works**: approvals and questions show up as cards, one answer per line; messages typed while a turn runs are queued or given to the running turn (steer).
-- **Slash commands and skills**: `/compact`, `/plan`, `/goal <goal>`; your skills and custom commands from `.wittycode/` (and the folders other agent apps use).
-- **Shared memory**: one set of local notes every engine reads and writes; notes and conversations can be imported from other apps.
-- **Local first**: conversations, memory and cache stay on your machine. No telemetry.
+## What you can do
 
-Settings → **Connections** manages local Codex-format Skills, Plugins, command Hooks and stdio MCP with an import preview and explicit trust. See the [connection guide](docs/connections.md) (Chinese) for supported formats and limits.
+- **Work in one conversation across models.** WittyHarness handles tools, permission prompts, retries, and context compaction. Switch models without losing the conversation's visible history; the handoff carries relevant context, and you choose which attachments cross engines. View context and token usage and choose which models appear in the picker.
+- **Plan before editing.** In Plan mode, WittyHarness and Fusion explore read-only. Work starts only after you approve the current proposal. During a run, answer questions and permission requests in cards, queue a follow-up, or steer where the engine supports it. Use `/plan`, `/goal <goal>`, `/compact`, and installed skills from the composer.
+- **Open files without leaving the conversation.** Click a project-relative path, including a line reference, to open the resizable preview. It handles source code, Markdown, PDF, images (including animated GIFs), common videos such as MP4 and WebM with supported codecs, and `.docx`, `.xlsx`, and `.pptx` (simplified slides). Paste, drop, or pick files to attach. A vision-capable model can also see supported images read with `read_file`; preview support does not mean a file can be sent as an attachment.
+- **Keep projects and memory local.** Organize conversations by project, import supported conversations and notes from other apps, and share searchable project or global memory across supported engines. Set defaults for new conversations, edit global and project rules, and choose WAV or MP3 sounds for questions, completion, and errors, or mute notifications.
+- **Manage extensions in Settings.** Preview and confirm imports of supported local Skills, Plugins, command Hooks, and MCP configurations. Add stdio or Streamable HTTP MCP servers, or browse skills from the public OpenAI and Anthropic repositories. The built-in test-cleanup hook covers tests run through its managed entry point. GitHub and Google Workspace connectors are available only in builds configured with the publisher's OAuth client IDs. See the [Connections guide](docs/connections.md) and [Settings guide](docs/settings-plugins.md).
 
-See the [Roadmap](ROADMAP.md) for what comes next.
+### Fusion and Agents Team
 
-## Engines
+Select **Fusion** in the composer and configure the main, work, and lightweight models and their reasoning levels in Settings. With the default routing gates enabled, multi-step edits go to a **Coder**. **Runner** and **QualitySampler** handle checks and review without edit tools. Coders can reuse their workstream context, and independent assignments with non-overlapping write scopes can run in parallel. The main agent checks the results and flags work if required verification is missing.
 
-| Engine | What it needs |
-| --- | --- |
-| ChatGPT Plan | A ChatGPT account; nothing else to install |
-| API Provider | An API key, or AWS credentials for Bedrock |
-| Devin (optional) | The Devin CLI or the Devin desktop app |
-| Factory (optional) | Factory CLI, signed in separately; no Factory SDK |
+The **Agents Team** panel shows a zoomable, animated task graph and pixel dragons that reflect each agent's state. Select an agent to inspect its brief, activity, evidence, and reported token usage. **Fusion Drive** keeps task briefs, reports, and evidence in a local project store. You can choose to keep the project map local or write it to `.witty_map.md` in the project. See the [Fusion guide](docs/fusion.md) for setup, compatibility, and limits.
 
-WittyCode itself depends on no other agent program. An engine that is not set up just has no models in the menu.
+## Get started
 
-## Getting started
+**Windows 10/11 x64 · Alpha · Chinese interface.** When a build is available on [GitHub Releases](https://github.com/WittyRyuji/WittyCode/releases), download the `WittyCode-<version>-win-x64.zip` and its `.sha256`, verify the checksum, then unzip and run `WittyCode.exe`. The ZIP includes Python and the runtime dependencies. Builds are not code-signed yet. There is no in-app updater; download new builds manually.
 
-**Release**: download `WittyCode-<version>-win-x64.zip` from [Releases](https://github.com/WittyRyuji/WittyCode/releases), check it against the `.sha256` file, unzip it and run `WittyCode.exe`. Python and every dependency are inside. The app is not code-signed yet, so SmartScreen may say "unknown publisher".
-
-**From source** (Windows 10/11, Python 3.11.x, Node.js 24):
+**Run from source** with Python **3.11.9** and Node.js **24.20.0**. The feature list describes the development source; `main` and any tagged downloads may not include all of it. Use `git switch dev` after cloning to follow the current development branch.
 
 ```powershell
-git clone https://github.com/WittyRyuji/WittyCode.git; cd WittyCode
+git clone https://github.com/WittyRyuji/WittyCode.git
+cd WittyCode
 py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt -c constraints.txt
-cd frontend; npm ci; npm run build:app; cd ..
+cd frontend
+npm ci
+npm run build:app
+cd ..
 .\.venv\Scripts\python.exe -m desktop
 ```
 
-First run: add a project folder → Settings › Accounts & models → **Continue with ChatGPT** (or add an API provider) → `Ctrl+N`.
+Add a project folder, then open **Settings → Accounts & Models** and choose a model source:
 
-- Shortcuts: `Ctrl+N` new conversation, `Ctrl+L` message box, `Ctrl+B` sidebar, `Ctrl+O` add project, `Ctrl+,` settings, `F5` refresh, `Ctrl+Q` quit.
-- Command line: `--project DIR`, `--settings FILE`, `--debug`.
-- Data lives in `%APPDATA%\WittyCode\`.
-
-The interface is in Chinese for now; an English interface is on the [Roadmap](ROADMAP.md).
-
-## Layout
-
-| Path | What |
+| Source | What you need |
 | --- | --- |
-| `desktop/ui/` | Entry point, the frameless window, the QWebChannel bridge |
-| `desktop/core/` | Back end, no Qt: `app_core.py`; the own loop in `chatgpt/`, `harness/`, `llm/`; optional `devin/` and `factory.py` engines; `connections.py` for local extensions |
-| `desktop/core/memory/`, `desktop/core/importers/` | Shared memory; importing from other apps |
-| `frontend/` | The page: React + TypeScript + Vite, built into one file |
-| `tests/` | Automated tests (no model is called) |
-| `scripts/` | Release build and checks |
-| `docs/` | Documentation (Chinese) |
+| ChatGPT Plan | Sign in with your ChatGPT account; no separate CLI required |
+| API provider | OpenAI, Anthropic, an OpenAI-compatible endpoint (e.g. DeepSeek, OpenRouter, or Ollama), or AWS credentials for Bedrock |
+| Devin (optional) | Devin CLI or desktop app; use a compatible ACP setup for Fusion |
+| Factory (optional) | Factory CLI signed in separately; no Factory SDK required |
 
-The page and the back end talk over a single QWebChannel; every engine offers `AppCore` the same interface. The project uses only Python and React (TypeScript).
+Press `Ctrl+N` to start a conversation. `Ctrl+O` adds a project, `Ctrl+L` focuses the composer, `Ctrl+B` toggles the sidebar, and `Ctrl+,` opens Settings. From the command line, use `--project DIR`, `--settings FILE`, or `--debug`. See the [usage guide](docs/usage-details.md), including how to try the app with a recording instead of a model.
 
-## Development
+**Data and permissions:** WittyCode keeps its own conversation and memory data locally in `%APPDATA%\WittyCode\` by default and has no telemetry. Model providers and connectors still receive the inputs you send them. Tool permissions and write scopes are **not an OS sandbox**. Review commands and extensions before allowing them to run; do not use full access in an untrusted repository. Bedrock and Factory are not yet verified end to end against real accounts.
+
+## Release notes and development
+
+[GitHub Releases](https://github.com/WittyRyuji/WittyCode/releases) is where versioned downloads and release notes appear. Pushing a `v*` tag that matches `pyproject.toml` triggers the [Release workflow](.github/workflows/release.yml). If validation and packaging succeed, it publishes the Windows ZIP and checksum, with build provenance. It uses `docs/releases/<tag>.md` when present or asks GitHub to generate the notes. Ordinary pushes update the branch, not the Releases page.
+
+The app uses Python and a React/TypeScript frontend connected over Qt WebChannel. See the [project overview](docs/project.md) for the layout, the [development guide](docs/development.md) for builds and tests, the [roadmap](ROADMAP.md) for planned work, and [CONTRIBUTING.md](CONTRIBUTING.md) or [SECURITY.md](SECURITY.md) to get involved or report a vulnerability.
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt -c constraints.txt
 .\.venv\Scripts\python.exe scripts/check_ci.py --clean
-# Whole-window tests run separately, locally (build the page first):
-.\.venv\Scripts\python.exe scripts/check_ci.py --part windows
+.\.venv\Scripts\python.exe scripts/check_ci.py --clean --part windows
 ```
 
-Use Python 3.11.9 and Node 24.20.0, matching CI. The clean entry installs pinned dependencies in an isolated copy and runs the same checks as CI and releases, including Qt’s real QWebChannel client. The whole-window suites run the real React page in Qt and remain local-only. See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request, and [SECURITY.md](SECURITY.md) to report a vulnerability.
-
-Release build: `cd frontend; npm run build:app; cd ..`, then `.\.venv\Scripts\python.exe scripts\build_release.py`; the zip is in `dist\`. Tagged releases are built by GitHub Actions.
-
-## Status
-
-- Alpha. Windows 10/11 x64 only.
-- **The agent loop is not a sandbox**: permissions are decided from resolved paths and command text, with no OS-level isolation. Use the `ask` level in repositories you do not trust, never `full`. A sandbox is on the [Roadmap](ROADMAP.md).
-- Bedrock has not yet completed a real request against an AWS account (the signing was checked against botocore).
+The first command runs the CI checks in an isolated copy. The second runs the whole-window Qt suites, which are not part of CI. Neither calls a model.
 
 ## License
 
-[Apache License 2.0](LICENSE), © 2026 NiuXiao@WittyLoong Studio (see [`NOTICE`](NOTICE)). Third-party software in the release keeps its own license, listed in `THIRD_PARTY_NOTICES.txt` and `licenses/` inside the zip; PySide6 / Qt is used under LGPL-3.0 as separate, replaceable DLLs.
+[Apache License 2.0](LICENSE), © 2026 NiuXiao@WittyLoong Studio (see [NOTICE](NOTICE)). Third-party software keeps its own license; the ZIP includes `THIRD_PARTY_NOTICES.txt` and `licenses/`. PySide6 / Qt is distributed as separate, replaceable DLLs under LGPL-3.0.

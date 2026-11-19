@@ -30,6 +30,7 @@ PROTOCOL_VERSION = "2025-06-18"
 START_SECONDS = 30.0
 CALL_SECONDS = 120.0
 CLOSE_SECONDS = 3.0
+TREE_CLOSE_SECONDS = 10.0  # Windows process-tree enumeration can outlast the server's graceful-exit allowance.
 LINE_LIMIT = 1 << 24
 
 
@@ -227,7 +228,7 @@ class McpClient:
                             creationflags=CREATE_NO_WINDOW,
                         )
                         try:
-                            await asyncio.wait_for(killer.wait(), CLOSE_SECONDS)
+                            await asyncio.wait_for(killer.wait(), TREE_CLOSE_SECONDS)
                         finally:
                             if killer.returncode is None:
                                 killer.kill()

@@ -51,17 +51,22 @@ for (const [theme, width] of [["light", 1500], ["dark", 900]]) {
     await page.waitFor("!!document.querySelector('.turn-preview')");
     assert((await page.eval("document.querySelector('.turn-preview').textContent")).includes("检查第 1 项布局"));
     assert(await page.eval("['.turn-marker', '.turn-marker > span', '.turn-preview'].every(s => parseFloat(getComputedStyle(document.querySelector(s)).borderRadius) === 0) && getComputedStyle(document.querySelector('.turn-preview')).boxShadow.includes('3px 3px 0px')"), "navigation uses square marks and the app's hard-shadow preview");
+    await page.eval("window.__navigationScrollEnded = false; document.querySelector('.scroller').addEventListener('scrollend', () => { window.__navigationScrollEnded = true; })");
     await page.click(".turn-marker", 0);
-    await page.waitFor("document.querySelector('.scroller').scrollTop < 2");
+    await page.waitFor("document.querySelector('.scroller').scrollTop < 2 && window.__navigationScrollEnded");
     assert(await page.eval("!!document.querySelector('.jump') && document.querySelector('.turn-marker').getAttribute('aria-current') === 'step'"));
     assert(await page.eval("(() => { const s = getComputedStyle(document.querySelector('.jump')); return parseFloat(s.borderRadius) === 0 && s.borderTopWidth === '2px' && s.boxShadow.includes('3px 3px 0px'); })()"), "jump to latest keeps the original square action button");
+    await page.eval("window.__navigationScrollEnded = false");
     await page.key("ArrowDown");
-    await page.waitFor("(() => { const s = document.querySelector('.scroller').getBoundingClientRect(), t = document.querySelectorAll('.transcript > .turn')[1].getBoundingClientRect(); return Math.abs(t.top - s.top - 28) < 2; })()");
+    // The alignment tolerance can match the penultimate animation frame. Save the settled position, not that sample.
+    await page.waitFor("window.__navigationScrollEnded && (() => { const s = document.querySelector('.scroller').getBoundingClientRect(), t = document.querySelectorAll('.transcript > .turn')[1].getBoundingClientRect(); return Math.abs(t.top - s.top - 28) < 2; })()");
     assert.equal(await page.eval("document.activeElement.dataset.turnId"), "turn-1");
     const historicalTop = await page.eval("document.querySelector('.scroller').scrollTop");
     await page.click('.tab', 1);
     await page.click('.tab', 0);
     await page.waitFor("document.querySelectorAll('.turn-marker').length === 6");
+    // Marker nodes can mount before the saved scroll position is applied on the layout/resize frame.
+    await page.waitFor(`Math.abs(document.querySelector('.scroller').scrollTop - ${historicalTop}) < 2`);
     assert(Math.abs(await page.eval("document.querySelector('.scroller').scrollTop") - historicalTop) < 2, "each session restores its historical reading position");
     assert.equal(await page.eval("document.querySelector('.turn-marker[aria-current=step]')?.dataset.turnId"), "turn-1");
     await fillDraft("继续输入多行，不抢历史位置。\n".repeat(10));

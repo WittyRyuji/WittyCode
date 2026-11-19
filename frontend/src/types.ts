@@ -232,7 +232,7 @@ export interface PendingHandoff {
   to: string;
 }
 
-/** A sub-agent an engine started for the conversation: its own thread, shown in the side panel (no engine of this version starts one). */
+/** A sub-agent an engine started for the conversation: its own thread, shown in the side panel. */
 export interface AgentInfo {
   /** its thread id */
   id: string;
@@ -240,13 +240,17 @@ export interface AgentInfo {
   role: string;
   model: string;
   effort: string;
-  /** what it was asked (the first line) */
+  /** what it was asked */
   task: string;
+  /** its cumulative token usage, when reported */
+  tokens: Usage | null;
   /** `waiting`: it asks the user something (an approval), in its panel */
   status: "pending" | "working" | "waiting" | "done" | "stopped" | "failed";
   fusionState?: "idle" | "running" | "done" | "failed" | "interrupted" | "retired" | null;
   fusionModel?: string | null;
   fusionRole?: "worker" | "light" | null;
+  /** The actual Fusion assignment (e.g. Coder), independent of the model pool above. */
+  fusionIdentity?: string | null;
   startedAt: number;
   finishedAt: number | null;
 }
@@ -306,6 +310,8 @@ export interface Session {
   /** messages typed while the session was connecting or a turn was running: shown, and sent by Python one turn at a time,
    *  in order, each when the one before it is over */
   queued?: QueuedMessage[];
+  /** Submitted and visible in the timeline, but not yet sent to the destination model. */
+  preparing?: QueuedMessage;
   /** A complete plan waiting for an explicit decision, owned by the current conversation. */
   pendingPlan?: { id: string; text: string; warning?: string } | null;
   /** the goal (`/goal`) the conversation is working toward ("" or absent: none) */
@@ -314,9 +320,10 @@ export interface Session {
 
 /** A file shown in the side panel (what `files.read` answers). `line` / `lineEnd`: the lines the reference named.
  *  `kind`: a text file comes with its `text`; a PDF with the size of each page in points (the pages are drawn by Python and
- *  asked for one at a time, `files.page`); a picture with nothing more (`files.page` sends it). */
+ *  asked for one at a time, `files.page`); pictures and Office files get their bytes from `files.page`. */
+export type OfficeKind = "word" | "sheet" | "slides";
 export interface FileView {
-  kind: "text" | "pdf" | "image";
+  kind: "text" | "pdf" | "image" | "video" | OfficeKind;
   pages: { w: number; h: number }[];
   path: string;
   name: string;

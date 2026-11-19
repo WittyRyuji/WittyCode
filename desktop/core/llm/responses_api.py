@@ -19,7 +19,7 @@ def responses_body(request: Mapping[str, Any], route: Route) -> dict[str, Any]:
     body = dict(request)
     body.pop("wc_reasoning_effort", None)
     body["model"] = route.model
-    body["input"] = for_responses(body.get("input") or ())
+    body["input"] = for_responses(body.get("input") or (), supports_images=route.supports_images)
     reasoning = body.get("reasoning")
     if not (isinstance(reasoning, Mapping) and reasoning.get("effort")):
         body.pop("reasoning", None)

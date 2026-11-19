@@ -216,14 +216,14 @@ def history_item(item: Mapping[str, Any]) -> dict[str, Any] | None:
     return copy.deepcopy(dict(item)) if item.get("type") else None
 
 
-def for_responses(items: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+def for_responses(items: Sequence[Mapping[str, Any]], *, supports_images: bool = True) -> list[dict[str, Any]]:
     """The history as the Responses API takes it: a ``reasoning`` item that another API's adapter wrote (``wc_*``, no encrypted
     content) means nothing to it and is left out. The request the loop builds keeps those items (the adapters of the other APIs
     read them from it); whoever sends it to a Responses endpoint passes it through here."""
-    from desktop.core.harness.history import replayable
+    from desktop.core.harness.history import replayable, with_tool_picture_messages
 
     sent: list[dict[str, Any]] = []
-    for item in replayable(items):
+    for item in with_tool_picture_messages(replayable(items), supports_images):
         if item.get("type") == "reasoning" and not item.get("encrypted_content"):
             continue
         sent.append({key: value for key, value in item.items() if not key.startswith("wc_")})

@@ -23,7 +23,7 @@ from desktop.core.context_envelope import strip, wrap
 from desktop.core.devin.rpc import AcpClient
 from desktop.core.engine_errors import EngineRpcError
 from desktop.core.engine_items import split_handoff
-from desktop.core.hooks import Hooks, PromptEvent
+from desktop.core.hooks import Hooks, PromptContext, PromptEvent
 from desktop.core.prompts import ActionView, OptionView, QuestionView, OPTION_LABELS, UNSUPPORTED_OPTIONS
 from desktop.core.session_state import LiveSettings, SessionState, SESSION_STATE_LABELS, SteerOutcome
 from desktop.core.settings import normalize_folder
@@ -387,8 +387,9 @@ class FactoryController:
         return None
 
     def _message(self, text, attachments):
-        hook = self.manager.hooks.prompt(PromptEvent(self.engine, self.project, text, first=not any(t.status is TurnStatus.DONE and t.user_block for t in self.transcript.turns[:-1])))
-        preface = self.manager.memory.brief_for(self.engine, self.project) if self.manager.memory is not None and hook and not self.transcript.turns[:-1] else ""
+        summary = getattr(self, "_switch_summary", False)
+        hook = PromptContext() if summary else self.manager.hooks.prompt(PromptEvent(self.engine, self.project, text, first=not any(t.status is TurnStatus.DONE and t.user_block for t in self.transcript.turns[:-1])))
+        preface = self.manager.memory.brief_for(self.engine, self.project) if not summary and self.manager.memory is not None and hook and not self.transcript.turns[:-1] else ""
         if self.handoff is not None:
             attachments = tuple(self.handoff.attachments) + tuple(attachments)
             text = self.handoff.prefix + "\n\n" + text
@@ -416,7 +417,7 @@ class FactoryController:
         self.used_at = self.active_at = time.time()
         self._turn_model, self._turn_usage = self.model, self._usage
         handoff = (self.handoff.carried, self.handoff.truncated) if self.handoff is not None else None
-        self.transcript.start_turn(text, attachments, handoff=handoff)
+        self.transcript.start_turn("/compact" if getattr(self, "_switch_summary", False) else text, attachments, handoff=handoff)
         self._changed("state")
         self._spawn(self._send(text, attachments))
         return True
@@ -459,7 +460,7 @@ class FactoryController:
 
     async def _request(self, method, params, request_id):
         params = _mapping(params)
-        if self._close_requested or not self.busy:
+        if self._close_requested or not self.busy or getattr(self, "_switch_summary", False):
             return {"selectedOption": "cancel"} if method == "droid.request_permission" else {"cancelled": True, "answers": []}
         if method == "droid.request_permission":
             ids, actions = [], []

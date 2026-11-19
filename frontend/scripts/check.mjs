@@ -303,7 +303,7 @@ ok("the Context tooltip has no word about a compaction line", await page.eval("(
 await page.mouse("mouseMoved", 5, 5, { button: "none", clickCount: 0 });
 const tabsBefore = await page.eval("document.querySelectorAll('.tab').length");
 await page.click(".controls .chip", 0);
-ok("the model menu has ChatGPT Plan, Devin and API groups, and nothing else", await page.eval("(() => { const h = [...document.querySelectorAll('.menu-head > span:first-child')].map(e => e.textContent); return h[0] === 'CHATGPT PLAN' && h[1] === 'DEVIN' && h.length >= 3 && h.slice(2).every(x => x.startsWith('API · ')); })()"));
+ok("the model menu has WittyCode, ChatGPT Plan, Devin and API groups", await page.eval("(() => { const h = [...document.querySelectorAll('.menu-head > span:first-child')].map(e => e.textContent); return h[0] === 'WittyCode' && h[1] === 'CHATGPT PLAN' && h[2] === 'DEVIN' && h.length >= 4 && h.slice(3).every(x => x.startsWith('API · ')); })()"));
 ok("Devin's models are offered without repeating a handover explanation on every row", await page.eval("(() => { const t = document.querySelector('.menu').textContent; return !t.includes('之前的文字会交接') && ['SWE-2', 'Claude Opus 5.5', 'GPT-6 Sol', 'GLM-5.2 High'].every(n => t.includes(n)); })()"));
 ok("adding a provider and managing accounts stay visible at the bottom", await page.eval("(() => { const p = document.querySelector('.menu-pinned').getBoundingClientRect(); const m = document.querySelector('.menu').getBoundingClientRect(); return p.bottom <= m.bottom + 1 && p.top >= m.top && [...document.querySelectorAll('.menu-pinned .menu-label')].map(e => e.textContent).join() === '添加 API Provider…,管理账号与模型…'; })()"));
 ok("the plan's own models carry no such note", await page.eval("![...document.querySelectorAll('.menu-item')].some(e => e.textContent.includes('GPT-6-Astra') && e.textContent.includes('交接'))"));
@@ -438,10 +438,10 @@ ok("an empty session moved to a Devin model takes that engine's levels: Code and
 await page.close();
 
 page = await openPage(`${index}?scene=done&settings=providers&devin=signed-out&theme=dark&review=0`);
-ok("Devin starts signed out, with a sign-in button", await page.eval("document.querySelector('.pcard:nth-child(2)').textContent.includes('Devin 账号') && document.querySelector('.pcard:nth-child(2) .pstate.off')?.textContent.includes('未登录') && document.querySelector('.pcard:nth-child(2) .btn.primary').textContent.trim() === '登录 Devin'"));
+ok("Devin starts signed out, with a sign-in button", await page.eval("document.querySelector('.pcard:nth-child(2)').textContent.includes('Devin 账号') && document.querySelector('.pcard:nth-child(2) .pstate.off')?.textContent.includes('未登录') && document.querySelector('.pcard:nth-child(2) .btn.primary').textContent.trim() === '登录 Devin CLI'"));
 await page.click(".pcard:nth-child(2) .btn.primary");
-await page.waitFor("document.querySelector('.pcard:nth-child(2)').textContent.includes('正在等你在浏览器里完成登录')", 2000);
-ok("signing in shows that the browser is open, with a cancel button", await page.eval("document.querySelector('.pcard:nth-child(2) .pcard-actions .btn').textContent.trim() === '取消'"));
+await page.waitFor("document.querySelector('.pcard:nth-child(2)').textContent.includes('正在等待 Devin CLI 完成登录')", 2000);
+ok("signing in waits for the native CLI login, with a cancel button", await page.eval("document.querySelector('.pcard:nth-child(2) .pcard-actions .btn').textContent.trim() === '取消'"));
 await page.click(".pcard:nth-child(2) .pcard-actions .btn");
 await page.waitFor("document.querySelector('.pcard:nth-child(2)').textContent.includes('未登录')", 2000);
 await page.click(".pcard:nth-child(2) .btn.primary");
@@ -984,6 +984,10 @@ await clickText(".menu-item", "跳到最新消息");
 await page.wait(800);
 ok("跳到最新消息 in the app menu goes to the end too", await page.eval("(() => { const s = document.querySelector('.scroller'); return s.scrollHeight - s.scrollTop - s.clientHeight < 48 && !document.querySelector('.jump'); })()"));
 ok("nothing was blocked by the Content-Security-Policy (long answer, pictures, fonts)", page.cspViolations().length === 0);
+await page.click(".chip-model");
+await clickText(".menu-item", "Fusion");
+await page.waitFor("document.body.textContent.includes('真实应用中可在会话空闲时切换 Fusion')", 4000);
+ok("the design page explains Fusion switching instead of treating it as a provider model id", true);
 
 const errors = page.consoleErrors();
 ok("no console errors", errors.length === 0);

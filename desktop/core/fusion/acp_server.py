@@ -15,6 +15,26 @@ ADDRESS = "WITTYCODE_FUSION_ADDRESS"
 AUTH = "WITTYCODE_FUSION_AUTH"
 SERVER = "wittycode-fusion"
 PREFIX = "mcp__" + SERVER + "__"
+MCP_LIST = "mcp_list_tools"
+MCP_CALL = "mcp_call_tool"
+MCP_WRAPPERS = (MCP_LIST, MCP_CALL)
+
+
+def private_mcp_name(name: Any, arguments: Any) -> str:
+    """Resolve only an explicitly targeted private MCP discovery or invocation."""
+    if not isinstance(name, str):
+        return ""
+    if name.startswith(PREFIX):
+        return name
+    if not isinstance(arguments, dict) or arguments.get("server_name") != SERVER:
+        return ""
+    if name == MCP_LIST and arguments.keys() == {"server_name"}:
+        return MCP_LIST
+    if name == MCP_CALL and arguments.keys() == {"server_name", "tool_name", "arguments"}:
+        tool = arguments["tool_name"]
+        if isinstance(tool, str) and isinstance(arguments["arguments"], dict):
+            return PREFIX + tool
+    return ""
 
 
 def request(method: str, params: Any = None) -> Any:
@@ -36,8 +56,10 @@ def hook(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
     if event == "SessionStart":
         request("guard", {"event": event})
         return {}, 0
-    if event == "PreToolUse" and str(payload.get("tool_name", "")).startswith(PREFIX):
-        return {}, 0  # The bridge applies the actual, current session policy before every operation.
+    if event == "PreToolUse":
+        name, arguments = payload.get("tool_name"), payload.get("tool_input")
+        if private_mcp_name(name, arguments) and request("guard", {"event": event, "name": name, "input": arguments}).get("allowed") is True:
+            return {}, 0  # Execution and user approval still happen in the host's MCP bridge.
     return {"decision": "block", "reason": "Fusion tools must run through WittyCode's permission bridge."}, 2
 
 
@@ -59,6 +81,7 @@ def main() -> int:
                 continue
             method, params = message.get("method"), message.get("params", {})
             if method == "initialize":
+                request("tools/list")  # Verify inherited bridge access before advertising a usable MCP server.
                 result = {"protocolVersion": params.get("protocolVersion", "2025-11-25"), "capabilities": {"tools": {}},
                           "serverInfo": {"name": SERVER, "version": "1.0.0"},
                           "instructions": "Use only these WittyCode tools. Native tools are disabled. Follow the current Fusion task and permissions."}

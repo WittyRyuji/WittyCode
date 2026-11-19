@@ -1,9 +1,9 @@
 """Hooks of the application itself: the places where WittyCode stands between the user and each engine's conversation.
 
 Droid, Codex and Devin each have hooks of their own (files in their configuration, run by the engine); these are the
-application's, the same for all three, and need nothing written to any engine's configuration. For now one place has a
-hook, the one before a message is sent: a hook may add context for the model (``PromptContext``). The shared memory is the
-first to use it (``core/memory/launch.py``): it finds the notes that bear on the message.
+application's, the same for all three, and need nothing written to any engine's configuration. A prompt hook may add
+context for the model (``PromptContext``). The managed-test prompt hook directs each session to use its own foreground
+runner; only that runner owns its completion and cleanup (``core/test_runs.py``).
 
 A hook never stops a message from going out: one that raises is logged and left out.
 """
@@ -47,12 +47,55 @@ class PromptContext:
 PromptHook = Callable[[PromptEvent], "PromptContext | None"]
 
 
+def managed_test_prompt(_event: PromptEvent) -> PromptContext:
+    from desktop.core.memory.launch import console_python
+    from desktop.core import test_runs
+
+    def quote(value: str) -> str:
+        return "'" + value.replace("'", "''") + "'"
+
+    runner = f"& {quote(console_python())} {quote(str(Path(test_runs.__file__).resolve()))} -- "
+    return PromptContext(text=(
+        "If you run tests, use the built-in managed test runner from this session's project root "
+        f"(PowerShell: {runner}<executable> <args>), or a project test entry point that already manages its own run. "
+        "Keep test processes in the foreground. Put disposable files in WITTYCODE_TEST_WORK and only selected evidence "
+        "in WITTYCODE_TEST_EVIDENCE. Each session, thread, and delegated agent runs and cleans up only its own tests. "
+        "Do not run another session inside this runner, pass it another run's directory, or clean up for a parent, child "
+        "or sibling agent. Never scan or delete pre-existing files or session history. Report cleanup failures."
+    ))
+
+
+@dataclass(frozen=True, slots=True)
+class BuiltinPromptHook:
+    """A client hook that is both runnable and visible in the settings catalog."""
+
+    id: str
+    name: str
+    description: str
+    handler: PromptHook
+
+    def __call__(self, event: PromptEvent) -> PromptContext | None:
+        return self.handler(event)
+
+
+MANAGED_TEST_HOOK = BuiltinPromptHook(
+    id="wittycode.test-cleanup",
+    name="测试收尾",
+    description="要求每个会话使用独立的测试入口，只清理本次测试的临时文件，保留证据和结论。不会代其他会话或子代理清理。",
+    handler=managed_test_prompt,
+)
+
+
 class Hooks:
     def __init__(self) -> None:
         self._prompt: list[PromptHook] = []
 
     def on_prompt(self, hook: PromptHook) -> None:
         self._prompt.append(hook)
+
+    def builtin_prompt_hooks(self) -> list[dict[str, str]]:
+        return [{"id": hook.id, "name": hook.name, "description": hook.description}
+                for hook in self._prompt if isinstance(hook, BuiltinPromptHook)]
 
     def prompt(self, event: PromptEvent) -> PromptContext:
         """What every hook adds to this message, joined."""

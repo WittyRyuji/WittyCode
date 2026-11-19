@@ -10,8 +10,10 @@ import time
 import pytest
 
 from desktop.core.app_core import AppError
+from desktop.core.cache import Cache
+from desktop.core.fusion.registry import FusionRegistry, Policy
 from desktop.core.session_state import SessionLimitError, SessionState
-from tests.app_support import MODEL, OTHER_MODEL, ready_core, save_conversation
+from tests.app_support import MODEL, OTHER_MODEL, make_core, ready_core, save_conversation
 from tests.devin_support import make_engine as make_devin
 from tests.fake_responses import call, fail, say
 from tests.fakes import until
@@ -49,9 +51,9 @@ async def new_session(core, events, project, **more):
 async def talk(core, plan, cid, text, answer="ok"):
     """One finished turn: ``text`` is sent, the model answers ``answer``."""
     plan.script(say(answer))
-    turns = len(core._by_cid[cid].controller.transcript.turns)
+    users = sum(turn.user_block is not None for turn in core._by_cid[cid].controller.transcript.turns)
     await core.call("session.send", {"id": cid, "text": text})
-    await until(lambda: len(core._by_cid[cid].controller.transcript.turns) == turns + 1)
+    await until(lambda: sum(turn.user_block is not None for turn in core._by_cid[cid].controller.transcript.turns) == users + 1)
     await idle(core, cid)
 
 
@@ -206,6 +208,47 @@ def listed(events):
     return events.last("sidebar")["projects"][0]["sessionIds"]
 
 
+def test_sidebar_refreshes_legacy_fusion_rows_and_hydrates_the_refreshed_cache(tmp_path):
+    async def scenario():
+        cache = Cache(tmp_path / "cache")
+        core, _, events, _, engine = make_core(tmp_path, cache=cache)
+        try:
+            (folder,) = core.settings.projects
+            project = tmp_path / "proj"
+            core.settings.fusion_main = MODEL  # Having Fusion configured does not make ordinary sessions Fusion.
+            save_conversation(engine, project, "ordinary", "Ordinary")
+            for native in ("active", "paused"):
+                save_conversation(engine, project, native, native)
+                saved = engine.sessions.load(native)
+                saved.fusion = FusionRegistry(project, Policy(MODEL, (OTHER_MODEL,), OTHER_MODEL, max_calls=0)).to_json()
+                if native == "paused":
+                    saved.fusion["enabled"] = False
+                engine.sessions.save(saved)
+            cache.save_index({"rows": {folder: [
+                {"id": "cg:active", "native": "active", "engine": "chatgpt", "title": "active", "model": MODEL, "modified": time.time()},
+            ]}})
+            init = await core.call("app.init")
+            assert set(init["sessions"]) == {"cg:active"}, "a legacy cache still shows its known rows immediately"
+            assert init["sessions"]["cg:active"]["fusion"] is False
+            await until(lambda: events.of("sidebar") and len(events.last("sidebar")["sessions"]) == 3)
+            expected = {"cg:ordinary": (False, MODEL), "cg:active": (True, MODEL), "cg:paused": (False, MODEL)}
+
+            def flags(payload):
+                return {row_id: (row["fusion"], row["settings"]["model"]) for row_id, row in payload["sessions"].items()}
+
+            assert flags(events.last("sidebar")) == expected
+        finally:
+            await core.shutdown()
+
+        again, _, _, _, _ = make_core(tmp_path, cache=cache)
+        try:
+            assert flags(await again.call("app.init")) == expected, "the refreshed flag survives a restart"
+        finally:
+            await again.shutdown()
+
+    run(scenario())
+
+
 def test_the_sidebar_lists_saved_sessions_and_shows_an_open_one_once(tmp_path):
     async def scenario():
         core, _, events, _, _ = await ready_core(tmp_path, projects=False)
@@ -225,7 +268,7 @@ def test_the_sidebar_lists_saved_sessions_and_shows_an_open_one_once(tmp_path):
     run(scenario())
 
 
-def test_a_session_is_archived_listed_apart_and_brought_back(tmp_path):
+def test_a_session_is_archived_listed_apart_and_brought_back(tmp_path, monkeypatch):
     async def scenario():
         core, _, events, _, _ = await ready_core(tmp_path, projects=False)
         proj, side = await three_saved(core, events, tmp_path)
@@ -237,7 +280,11 @@ def test_a_session_is_archived_listed_apart_and_brought_back(tmp_path):
         assert [row["id"] for row in side["archived"]] == ["cg:mid"] and side["archived"][0]["title"] == "Middle"
         assert core.settings.archived_sessions["cg:mid"] >= before, "when it was archived, in ms"
         assert [row["id"] for row in (await core.call("app.init"))["archived"]] == ["cg:mid"], "a reloaded page is told too"
-        await core.call("session.archive", {"id": "cg:old"})
+        # Two async calls can share the same Windows clock tick; make the intended chronology explicit.
+        later = (core.settings.archived_sessions["cg:mid"] + 100) / 1000
+        with monkeypatch.context() as clock:
+            clock.setattr(time, "time", lambda: later)
+            await core.call("session.archive", {"id": "cg:old"})
         assert [row["id"] for row in events.last("sidebar")["archived"]] == ["cg:old", "cg:mid"], "the one archived last first"
         await core._reload_project(str(proj.resolve()))
         core._emit_sidebar()
@@ -787,7 +834,17 @@ async def send_with_files(core, plan, cid, text, files):
 
 
 async def ask_to_switch(core, cid, *, model="devin:swe-2-high", **more):
-    return await core.call("session.choose", {"id": cid, "field": "model", "value": model, **more})
+    """Exercise attachment negotiation and the handoff phase without an extra user turn.
+
+    The menu now only saves intent. Real select/send behavior is covered by test_model_switch_pending and the menu e2e.
+    """
+    result = await core.call("session.choose", {"id": cid, "field": "model", "value": model, **more})
+    conv = core._by_cid[cid]
+    if result.get("ok") and conv.pending_model is not None:
+        result = await core._apply_pending_model(conv)
+        core._set_pending_model(conv, None)
+        core._flush(conv)
+    return result
 
 
 def prompt_blocks(harness):
@@ -799,6 +856,7 @@ def test_changing_engine_continues_the_same_conversation_with_the_text_handed_ov
         core, plan, events, _, harness = await devin_core(tmp_path)
         cid = await new_session(core, events, tmp_path / "proj")
         await talk(core, plan, cid, "What does context.py do?", "It reads the context size.")
+        plan.script(say("What does context.py do? It reads the context size."))
         events.clear()
 
         result = await ask_to_switch(core, cid)

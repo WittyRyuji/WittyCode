@@ -1,8 +1,8 @@
 """One validation entry point for local clean checkouts, CI and releases (no model calls).
 
-Run with --clean locally to copy only versioned/non-ignored files into sandbox, install the pinned dependencies in an
-isolated venv, and execute exactly the same checks as the GitHub jobs. Existing build output and node_modules are never
-copied. Test temporary folders stay outside the repository so Git/AGENTS discovery matches the CI runner.
+Run with --clean locally to copy only versioned/non-ignored files into a disposable checkout, install the pinned
+dependencies in an isolated venv, and execute exactly the same checks as the GitHub jobs. Existing build output and
+node_modules are never copied. Test temporary folders stay outside the repository for correct Git/AGENTS discovery.
 """
 
 from __future__ import annotations
@@ -19,6 +19,10 @@ import time
 PYTHON_VERSION = (3, 11, 9)
 NODE_VERSION = "v24.20.0"
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from desktop.core.test_runs import ManagedTestRun
 
 
 def commands(part: str, python: str = sys.executable, root: Path = ROOT) -> list[tuple[str, list[str]]]:
@@ -72,27 +76,26 @@ def main() -> int:
         if node != NODE_VERSION:
             raise RuntimeError(f"Use Node {NODE_VERSION}, matching CI (found {node})")
     root, python = ROOT, sys.executable
-    env = dict(os.environ)
-    env.update(PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
-    if options.clean:
-        destination = ROOT / "sandbox" / f"ci-clean-{time.time_ns()}"
-        root = destination / "repo"
-        clean_copy(ROOT, root)
-        run(["git", "init", "--quiet", str(root)], ROOT, env)
-        run([sys.executable, "-m", "venv", str(destination / "venv")], ROOT, env)
-        python = str(destination / "venv" / "Scripts" / "python.exe")
-        run([python, "-m", "pip", "install", "-r", "requirements-dev.txt", "-c", "constraints.txt"], root, env)
-        print("Clean checkout:", root, flush=True)
-    env["WITTYCODE_TEST_PYTHON"] = python
-    env["WITTYCODE_REQUIRE_QT"] = "1"
-    env["WITTYCODE_SETTINGS"] = str(root / "sandbox" / "ci-profile" / "settings.json")
-    started = time.monotonic()
-    for folder, argv in commands(options.part, python, root):
-        run(argv, root / folder, env)
-    result = {"part": options.part, "clean": options.clean, "seconds": round(time.monotonic() - started, 2), "exit_code": 0}
-    (root / "sandbox").mkdir(exist_ok=True)
-    (root / "sandbox" / "ci-result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
-    print("PASS", json.dumps(result), flush=True)
+    with ManagedTestRun(ROOT, part=options.part, clean=options.clean) as managed:
+        env = {**os.environ, **managed.environment(), "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
+        if options.clean:
+            destination = managed.work
+            root = destination / "repo"
+            clean_copy(ROOT, root)
+            run(["git", "init", "--quiet", str(root)], ROOT, env)
+            run([sys.executable, "-m", "venv", str(destination / "venv")], ROOT, env)
+            python = str(destination / "venv" / "Scripts" / "python.exe")
+            run([python, "-m", "pip", "install", "-r", "requirements-dev.txt", "-c", "constraints.txt"], root, env)
+            print("Clean checkout:", root, flush=True)
+        env["WITTYCODE_TEST_PYTHON"] = python
+        env["WITTYCODE_REQUIRE_QT"] = "1"
+        env["WITTYCODE_SETTINGS"] = str(managed.work / "ci-profile" / "settings.json")
+        for folder, argv in commands(options.part, python, root):
+            if argv[1:3] == ["-m", "pytest"]:
+                # Outside both checkouts; skip pytest's numbered nesting to stay clear of Windows path limits.
+                argv = [*argv, "--basetemp", str(managed.work / "p")]
+            run(argv, root / folder, env)
+    print("PASS", json.dumps({"part": options.part, "clean": options.clean}), flush=True)
     return 0
 
 

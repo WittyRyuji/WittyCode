@@ -52,7 +52,7 @@ from desktop.core.chatgpt.responses import (
 )
 
 from desktop.core.harness.compact import estimate_item, estimate_items, estimate_text, fixed_tokens, is_overflow
-from desktop.core.harness.history import replayable
+from desktop.core.harness.history import prune_tool_images, replayable
 
 log = logging.getLogger("desktop.harness")
 
@@ -107,6 +107,7 @@ class Outcome:
     """The user said no (or the turn was stopped): shown as cancelled rather than failed."""
     reference: str = ""
     """Immutable full output, retained separately from the model preview."""
+    images: list[dict[str, str]] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,9 +187,9 @@ class Observer:
         (``OUTPUT_LIMIT``)."""
         return None
 
-    def finish_requested(self) -> bool:
-        """A tool has requested a safe turn boundary, such as a submitted plan."""
-        return False
+    def finish_requested(self) -> str:
+        """The tool-driven end reason (e.g. plan or report), or empty if the turn should continue."""
+        return ""
 
     def retry_allowed(self) -> bool:
         """Whether an unmetered failure may be retried automatically."""
@@ -213,7 +214,7 @@ Stream = Callable[[dict[str, Any]], AsyncIterator[Any]]
 @dataclass(slots=True)
 class TurnEnd:
     reason: str
-    """``done`` | ``incomplete`` | ``step_limit``."""
+    """``done`` | ``incomplete`` | ``step_limit`` | ``plan`` | ``report``."""
     detail: str = ""
     steps: int = 0
 
@@ -362,12 +363,12 @@ class AgentLoop:
             self._floor = 0
         return replaced
 
-    async def run(self, history: list[dict[str, Any]]) -> TurnEnd:
+    async def run(self, history: list[dict[str, Any]], *, steps_used: int = 0) -> TurnEnd:
         """Run steps on ``history`` (which already ends with the user's message) until the turn is over. ``history`` is
         extended in place; the exception ``asyncio.CancelledError`` leaves it valid (see the module docstring). Before a
         request the observer may shorten ``history`` (``Observer.prepare``)."""
         incomplete = ""
-        step = 0
+        step = steps_used
         recovered_empty = False
         # A callable lets the app apply a saved change to an already running turn, without interrupting a request or tool.
         while step < (self.max_steps() if callable(self.max_steps) else self.max_steps):
@@ -393,8 +394,8 @@ class AgentLoop:
             await self._run_calls(history, calls, incomplete=bool(incomplete))
             if incomplete:
                 return TurnEnd("incomplete", incomplete, step)
-            if self.observer.finish_requested():
-                return TurnEnd("plan", steps=step)
+            if reason := self.observer.finish_requested():
+                return TurnEnd(reason, steps=step)
         return TurnEnd("step_limit", steps=step)
 
     # ------------------------------------------------------------------ a step
@@ -566,6 +567,7 @@ class AgentLoop:
         notified: set[int] = set()
         tasks: list[asyncio.Task[Any]] = []
         safe = getattr(self.tools, "parallel_safe", lambda call: False)
+        group = getattr(self.tools, "parallel_group", lambda call: "safe" if safe(call) else "")
 
         async def commit(index: int, call: Call, outcome: Outcome) -> None:
             nonlocal room, released
@@ -585,6 +587,8 @@ class AgentLoop:
                 clip = clip_read_output if call.name == "read_file" and not outcome.is_error else clip_tokens
                 output = clip(output, budget)
             item = call_output(call.call_id, output + reference_note)
+            if outcome.images:
+                item["wc_images"] = outcome.images
             if outcome.reference:
                 item["wc_output_ref"] = outcome.reference
             if room is not None:
@@ -593,6 +597,13 @@ class AgentLoop:
                 if fits:
                     released += max(0, quota - used)  # Redistribute genuinely short results, not line-rounding slack.
             history.append(item)
+            if outcome.images:
+                first = prune_tool_images(history)
+                if first is not None:
+                    # An eviction can change a prefix whose size was measured before the latest tool step.
+                    if self._measured is not None and first < self._measured[0]:
+                        self._measured = None
+                    self._floor = 0
             answered.add(call.call_id)
             self.observer.history_grew([item])
 
@@ -606,9 +617,11 @@ class AgentLoop:
                     for position in range(index, len(calls)):
                         await commit(position, calls[position], Outcome("Not run: the model response was incomplete.", True, cancelled=True))
                     break
-                if self.observer.finish_requested():
+                if reason := self.observer.finish_requested():
+                    message = ("Not run: Observer paused the expert." if reason == "observer" else
+                               f"Not run: this turn ended after the {reason} was submitted.")
                     for position in range(index, len(calls)):
-                        await commit(position, calls[position], Outcome("Not run: this turn ended after the plan was submitted.", True, cancelled=True))
+                        await commit(position, calls[position], Outcome(message, True, cancelled=True))
                     break
                 if getattr(self.tools, "strict_context", False):
                     check = getattr(self.observer, "before_tools", None)
@@ -617,8 +630,9 @@ class AgentLoop:
                             await commit(position, calls[position], Outcome("Not run: session rules changed; review the updated context before retrying.", True, cancelled=True))
                         break
                 end = index + 1
-                if safe(calls[index]):
-                    while end < min(index + MAX_PARALLEL_READS, len(calls)) and safe(calls[end]):
+                category = group(calls[index])
+                if category:
+                    while end < min(index + MAX_PARALLEL_READS, len(calls)) and group(calls[end]) == category:
                         end += 1
                 tasks = [asyncio.create_task(execute(position)) for position in range(index, end)]
                 await asyncio.gather(*tasks)
@@ -682,6 +696,9 @@ class AgentLoop:
         if call.problem:
             return Outcome(call.problem, True)
         if not self.tools.known(call.name):
+            refusal = getattr(self.tools, "identity_refusal", None)
+            if refusal is not None and (reason := refusal(call.name)):
+                return Outcome(f"Refused: {reason}", True)
             return Outcome(f"There is no tool named {call.name!r}. Use one of: {', '.join(d['name'] for d in self.tools.declarations())}.", True)
         verdict = self.tools.check(call)
         if verdict.verdict == DENY:

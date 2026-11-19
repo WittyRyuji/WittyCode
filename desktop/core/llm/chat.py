@@ -35,6 +35,7 @@ from desktop.core.chatgpt.responses import (
     TextDone,
     Usage,
 )
+from desktop.core.harness.history import with_tool_picture_messages
 from desktop.core.llm.wire import Route, apply_reasoning_args, declared_functions, images_of, load_json, sse_data, text_of, usage_of
 
 log = logging.getLogger("desktop.llm")
@@ -54,7 +55,7 @@ def _replay_arguments(raw: Any) -> str:
     return raw if isinstance(value, dict) else "{}"
 
 
-def chat_messages(instructions: str, items: Sequence[Mapping[str, Any]], origin: str) -> list[dict[str, Any]]:
+def chat_messages(instructions: str, items: Sequence[Mapping[str, Any]], origin: str, *, supports_images: bool = True) -> list[dict[str, Any]]:
     """The conversation as ``messages``. ``origin`` decides whose thoughts go back (those the same host wrote)."""
     messages: list[dict[str, Any]] = [{"role": "system", "content": instructions}] if instructions else []
     open_assistant: dict[str, Any] | None = None
@@ -70,7 +71,7 @@ def chat_messages(instructions: str, items: Sequence[Mapping[str, Any]], origin:
             messages.append(open_assistant)
         return open_assistant
 
-    for item in items:
+    for item in with_tool_picture_messages(items, supports_images):
         kind = item.get("type")
         if kind == "reasoning":
             if item.get("wc_reasoning") and item.get("wc_origin") == origin:
@@ -107,7 +108,7 @@ def chat_body(request: Mapping[str, Any], route: Route) -> dict[str, Any]:
     """The JSON body for the route, from the loop's request."""
     body: dict[str, Any] = {
         "model": route.model,
-        "messages": chat_messages(str(request.get("instructions") or ""), request.get("input") or (), route.origin),
+        "messages": chat_messages(str(request.get("instructions") or ""), request.get("input") or (), route.origin, supports_images=route.supports_images),
         "stream": True,
         "stream_options": {"include_usage": True},
     }

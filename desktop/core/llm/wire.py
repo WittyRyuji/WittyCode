@@ -36,6 +36,7 @@ class Route:
     """The thought budget (tokens) of an entry that turned extended thinking on itself (``enableThinking``); ``None``: the level decides."""
     reasoning_args: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
     """Per-effort top-level body overrides, before extra_args; a null field removes that field."""
+    supports_images: bool = True
 
     @property
     def origin(self) -> str:

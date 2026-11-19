@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ListTodo } from "lucide-react";
+import { ListTodo, UsersRound } from "lucide-react";
 import { currentSession, useStore } from "./store";
 import { latestPlan } from "./lib/plan";
 import { Sidebar } from "./components/Sidebar";
@@ -10,6 +10,8 @@ import { FilePanel, PathMenuHost } from "./components/FilePanel";
 import { Composer } from "./components/Composer";
 import { StatusBar } from "./components/StatusBar";
 import { PlanPanel } from "./components/PlanPanel";
+import { ConversationRail } from "./components/ConversationRail";
+import { InspectorSplitter } from "./components/InspectorSplitter";
 import { ChatGPTWelcome, DialogHost, DropOverlay, EmptyPage, LightboxHost } from "./components/Overlays";
 import { ReviewBar, WIDTHS } from "./components/Review";
 import { TitleBar } from "./components/TitleBar";
@@ -51,6 +53,18 @@ function Main() {
   const plan = useMemo(() => latestPlan(session?.turns ?? []), [session?.turns]);
   const [closedPlans, setClosedPlans] = useState<Set<string>>(() => new Set());
   const planOpen = !!session && !!plan && !inspectorOpen && !closedPlans.has(session.id);
+  const [closedTeams, setClosedTeams] = useState<Set<string>>(() => new Set());
+  const agents = session?.agents ?? [];
+  const teamOpen = !!session && agents.length > 0 && !inspectorOpen && !closedTeams.has(session.id);
+  const setTeamOpen = (open: boolean) => {
+    if (!session) return;
+    setClosedTeams((previous) => {
+      const next = new Set(previous);
+      if (open) next.delete(session.id);
+      else next.add(session.id);
+      return next;
+    });
+  };
   const setPlanOpen = (open: boolean) => {
     if (!session) return;
     setClosedPlans((previous) => {
@@ -100,15 +114,24 @@ function Main() {
             <span className="num">{plan.completed}/{plan.steps.length}</span>
           </button>
         )}
+        {agents.length > 0 && !inspectorOpen && (
+          <button type="button" className={`plan-toggle agents-toggle${teamOpen ? " open" : ""}`} aria-label={teamOpen ? "关闭 Agents Team" : "打开 Agents Team"} aria-expanded={teamOpen} aria-controls={teamOpen ? "conversation-team" : undefined} onClick={() => setTeamOpen(!teamOpen)}>
+            <UsersRound size={16} aria-hidden />
+            <span>Agents</span>
+            <span className="num">{agents.length}</span>
+          </button>
+        )}
       </Tabs>
       <div className="conversation-body">
         <div className="conversation-column">
           {/* keyed: Python numbers turns and blocks per conversation, so two conversations share ids */}
           {session ? <Transcript key={session.id} session={session} positions={readingPositions.current} /> : <EmptyPage />}
-          {session && <AgentBar session={session} />}
           <Composer />
         </div>
-        {planOpen && plan && <PlanPanel key={`plan:${session.id}`} plan={plan} onClose={() => setPlanOpen(false)} />}
+        {(planOpen || teamOpen) && <ConversationRail>
+          {planOpen && plan && <PlanPanel key={`plan:${session.id}`} plan={plan} onClose={() => setPlanOpen(false)} />}
+          {teamOpen && <div id="conversation-team"><AgentBar session={session} onClose={() => setTeamOpen(false)} /></div>}
+        </ConversationRail>}
       </div>
       <DropOverlay />
     </main>
@@ -243,8 +266,8 @@ export default function App() {
           <TitleBar />
           {/* The sidebar never takes more than a third of a narrow window. */}
           <div
-            className="app"
-            style={{ "--side-w": `min(${sideW}px, 36%)`, gridTemplateColumns: `${sidebarOpen ? "var(--side-w)" : "0"} minmax(0, 1fr)${agentOpen ? " minmax(340px, 42%)" : ""}` } as React.CSSProperties}
+            className={`app${agentOpen ? " inspecting" : ""}`}
+            style={{ "--side-w": `min(${sideW}px, 36%)`, "--sidebar-column": sidebarOpen ? "var(--side-w)" : "0" } as React.CSSProperties}
           >
             {sidebarOpen ? <Sidebar /> : <div />}
             {sidebarOpen && (
@@ -260,6 +283,7 @@ export default function App() {
             <Main />
             <AgentPanel />
             <FilePanel />
+            {agentOpen && <InspectorSplitter />}
             <StatusBar />
           </div>
         </div>
