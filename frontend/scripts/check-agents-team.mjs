@@ -55,6 +55,16 @@ export function agentFlowColours() {
     transparentCanvas: [".react-flow", ".react-flow__background"].every((selector) => style(selector).backgroundColor === "rgba(0, 0, 0, 0)") };
 }
 
+const setMotion = (page, value) => page.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value }] });
+const flowIsMoving = `(() => {
+  const graph = document.querySelector('#conversation-team .agent-flow');
+  const working = graph?.querySelector('.agent-flow-edge.working');
+  const waiting = graph?.querySelector('.agent-flow-edge.waiting .agent-flow-wire');
+  const running = (node) => node?.getAnimations().some((a) => a.playState === 'running');
+  return matchMedia('(prefers-reduced-motion: no-preference)').matches &&
+    working?.querySelectorAll('animateMotion').length === 2 && running(working.querySelector('.agent-flow-signal')) && running(waiting);
+})()`;
+
 async function checkFlow(page, theme, label, ok) {
   const js = page.eval;
   await page.waitFor(`document.querySelectorAll('#conversation-team .agent-flow-edge').length === ${agents.length} && document.documentElement.dataset.theme === '${theme}'`);
@@ -101,6 +111,7 @@ async function checkFlow(page, theme, label, ok) {
   ok(label("every main and expert portrait has a sharp square border around its full centered 48×48 sprite"),
     portraits.length === agents.length + 1 && portraits.every((portrait) => portrait.fits), portraits);
 
+  await page.waitFor(flowIsMoving);
   const colours = await js(`(${agentFlowColours.toString()})()`);
   ok(label("theme surfaces and labels match; state edges and rings have at least 3:1 contrast"), colours.transparentCanvas &&
     (theme === "light" ? colours.luminance > 0.85 : colours.luminance < 0.08) && colours.labelContrast >= 4.5 && colours.modelContrast >= 4.5 &&
@@ -115,22 +126,19 @@ async function checkFlow(page, theme, label, ok) {
     const points = commands.map(([, n]) => n.slice(-2));
     return sharp && points.length >= 4 && points.every(([x, y], i) => i === 0 || Math.abs(x - points[i - 1][0]) < 0.01 || Math.abs(y - points[i - 1][1]) < 0.01);
   }), wires.slice(0, 3));
-  ok(label("working edges move, waiting edges pulse, and done edges stay still"), await js(`(() => {
-    const $ = (s) => document.querySelector(s);
-    return $('.agent-flow-edge.working .agent-flow-signal').getAnimations().some((a) => a.playState === 'running') &&
-      $('.agent-flow-edge.working').querySelectorAll('animateMotion').length === 2 &&
-      $('.agent-flow-edge.waiting .agent-flow-wire').getAnimations().some((a) => a.playState === 'running') &&
-      $('.agent-flow-edge.done .agent-flow-wire').getAnimations().length === 0 && !$('.agent-flow-edge.done animateMotion');
+  ok(label("working edges move, waiting edges pulse, and done edges stay still"), await js(`(${flowIsMoving}) && (() => {
+    const done = document.querySelector('#conversation-team .agent-flow-edge.done');
+    return done.querySelector('.agent-flow-wire').getAnimations().length === 0 && !done.querySelector('animateMotion');
   })()`));
-  await page.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
+  await setMotion(page, "reduce");
   await page.waitFor("matchMedia('(prefers-reduced-motion: reduce)').matches && !document.querySelector('.agent-flow animateMotion')");
   ok(label("reduced motion removes moving particles and freezes wires and sprites"), await js(`(() => {
     const rail = document.querySelector('#conversation-team');
     return rail.querySelectorAll('.dragon-sprite.playing').length > 0 && rail.getAnimations({ subtree: true }).length === 0 &&
       [...rail.querySelectorAll('.dragon-sprite.playing')].every((sprite) => getComputedStyle(sprite).backgroundPosition === '0px 0px');
   })()`));
-  await page.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "no-preference" }] });
-  await page.waitFor("!!document.querySelector('.agent-flow animateMotion')");
+  await setMotion(page, "no-preference");
+  await page.waitFor(flowIsMoving);
 
   const viewport = () => js(`(() => {
     const rail = document.querySelector('.conversation-rail-content');
@@ -184,6 +192,8 @@ export async function checkAgentsTeam({ url, scripts, ok }) {
         run: run.clientHeight, runScroll: run.scrollHeight, overlay: getComputedStyle(panel).position === 'absolute' };
     })()`);
     try {
+      // Headless runners can inherit the host's reduced-motion setting; start every viewport in the same mode.
+      await setMotion(page, "no-preference");
       await js("__fake.releaseInit()");
       await page.waitFor("!!document.querySelector('.srow')");
       await page.click(".srow");
