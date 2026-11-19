@@ -95,7 +95,8 @@ def new_repo(folder: Path, name: str = "a.txt", *init: str) -> Path:
 def add_submodule(repo: Path, tmp_path: Path) -> Path:
     """A ``git submodule add`` of a local repository: its Git folder lies in ``.git/modules/sub``."""
     source = new_repo(tmp_path / "source", "s.txt")
-    git(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", source.as_posix(), "sub")
+    # Using the file transport avoids local clone hardlinks, whose read-only Git objects block Windows test cleanup.
+    git(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", source.resolve().as_uri(), "sub")
     git(repo, "commit", "-qm", "with a submodule")
     return repo / "sub"
 

@@ -4,6 +4,7 @@ English | [简体中文](README.zh-CN.md) | [Wiki](https://deepwiki.com/WittyRyu
 
 [![CI](https://github.com/WittyRyuji/WittyCode/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/WittyRyuji/WittyCode/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/WittyRyuji/WittyCode/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/WittyRyuji/WittyCode/actions/workflows/codeql.yml)
+[![Ask DeepWiki](docs/badges/deepwiki.svg)](https://deepwiki.com/WittyRyuji/WittyCode)
 
 WittyCode is a Windows desktop app for working with coding agents. Use WittyCode's own agent loop with your ChatGPT account or API provider, or choose **Fusion** to have a main agent coordinate a team on the same project. Tool calls fold into summaries so the conversation stays readable.
 

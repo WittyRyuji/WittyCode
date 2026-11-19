@@ -4,6 +4,7 @@
 
 [![CI](https://github.com/WittyRyuji/WittyCode/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/WittyRyuji/WittyCode/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/WittyRyuji/WittyCode/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/WittyRyuji/WittyCode/actions/workflows/codeql.yml)
+[![Ask DeepWiki](docs/badges/deepwiki.svg)](https://deepwiki.com/WittyRyuji/WittyCode)
 
 WittyCode 是 Windows 上的编程代理桌面应用。可以用 ChatGPT 账号或自己的 API 接入自带的代理循环，也可以选择 **Fusion**，由主代理协调一组专家在同一个项目里工作。工具调用折叠成摘要，不打断对话阅读。
 
