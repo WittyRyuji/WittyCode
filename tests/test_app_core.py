@@ -10,8 +10,10 @@ import time
 import pytest
 
 from desktop.core.app_core import AppError
+from desktop.core.cache import Cache
+from desktop.core.fusion.registry import FusionRegistry, Policy
 from desktop.core.session_state import SessionLimitError, SessionState
-from tests.app_support import MODEL, OTHER_MODEL, ready_core, save_conversation
+from tests.app_support import MODEL, OTHER_MODEL, make_core, ready_core, save_conversation
 from tests.devin_support import make_engine as make_devin
 from tests.fake_responses import call, fail, say
 from tests.fakes import until
@@ -204,6 +206,47 @@ async def three_saved(core, events, tmp_path):
 
 def listed(events):
     return events.last("sidebar")["projects"][0]["sessionIds"]
+
+
+def test_sidebar_refreshes_legacy_fusion_rows_and_hydrates_the_refreshed_cache(tmp_path):
+    async def scenario():
+        cache = Cache(tmp_path / "cache")
+        core, _, events, _, engine = make_core(tmp_path, cache=cache)
+        try:
+            (folder,) = core.settings.projects
+            project = tmp_path / "proj"
+            core.settings.fusion_main = MODEL  # Having Fusion configured does not make ordinary sessions Fusion.
+            save_conversation(engine, project, "ordinary", "Ordinary")
+            for native in ("active", "paused"):
+                save_conversation(engine, project, native, native)
+                saved = engine.sessions.load(native)
+                saved.fusion = FusionRegistry(project, Policy(MODEL, (OTHER_MODEL,), OTHER_MODEL, max_calls=0)).to_json()
+                if native == "paused":
+                    saved.fusion["enabled"] = False
+                engine.sessions.save(saved)
+            cache.save_index({"rows": {folder: [
+                {"id": "cg:active", "native": "active", "engine": "chatgpt", "title": "active", "model": MODEL, "modified": time.time()},
+            ]}})
+            init = await core.call("app.init")
+            assert set(init["sessions"]) == {"cg:active"}, "a legacy cache still shows its known rows immediately"
+            assert init["sessions"]["cg:active"]["fusion"] is False
+            await until(lambda: events.of("sidebar") and len(events.last("sidebar")["sessions"]) == 3)
+            expected = {"cg:ordinary": (False, MODEL), "cg:active": (True, MODEL), "cg:paused": (False, MODEL)}
+
+            def flags(payload):
+                return {row_id: (row["fusion"], row["settings"]["model"]) for row_id, row in payload["sessions"].items()}
+
+            assert flags(events.last("sidebar")) == expected
+        finally:
+            await core.shutdown()
+
+        again, _, _, _, _ = make_core(tmp_path, cache=cache)
+        try:
+            assert flags(await again.call("app.init")) == expected, "the refreshed flag survives a restart"
+        finally:
+            await again.shutdown()
+
+    run(scenario())
 
 
 def test_the_sidebar_lists_saved_sessions_and_shows_an_open_one_once(tmp_path):

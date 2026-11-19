@@ -142,7 +142,8 @@ export interface SavedRow {
   modified: string;
   modifiedAt: number;
   engine: Engine;
-  /** `model` is "" here: a saved row does not know its model */
+  fusion?: boolean;
+  /** `model` is empty if the saved row does not know its model. */
   settings: SessionSettings;
   usage: null;
   context: ContextState;

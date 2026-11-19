@@ -304,6 +304,7 @@ class SavedRow:
     model: str = ""
     """The page's id of the model, where the engine's list of conversations says which one it was on (the own loop's does)."""
     created: datetime | None = None
+    fusion: bool = False
 
 
 def _aware(stamp: datetime | None) -> datetime:
@@ -318,7 +319,7 @@ def json_copy(value: Any) -> Any:
 
 
 def _row_to_cache(row: SavedRow) -> dict[str, Any]:
-    return {"id": row.id, "native": row.native, "engine": row.engine, "title": row.title, "modified": row.modified.timestamp(), "count": row.count, "model": row.model, "created": row.created.timestamp() if row.created else None}
+    return {"id": row.id, "native": row.native, "engine": row.engine, "title": row.title, "modified": row.modified.timestamp(), "count": row.count, "model": row.model, "created": row.created.timestamp() if row.created else None, "fusion": row.fusion}
 
 
 def _row_from_cache(raw: Any) -> SavedRow | None:
@@ -332,6 +333,7 @@ def _row_from_cache(raw: Any) -> SavedRow | None:
             int(raw.get("count") or 0),
             str(raw.get("model") or ""),
             datetime.fromtimestamp(float(raw["created"]), timezone.utc) if raw.get("created") else None,
+            fusion=raw.get("fusion") is True,
         )
     except (KeyError, TypeError, ValueError, OSError, OverflowError, AttributeError):
         return None
@@ -704,6 +706,7 @@ class AppCore:
             "modified": format_relative(saved.modified),
             "modifiedAt": int(saved.modified.timestamp() * 1000),
             "engine": saved.engine,
+            "fusion": saved.fusion,
             "settings": {"model": saved.model, "reasoning": "", "autonomy": "", "mode": "auto"},
             "usage": None,
             "context": {"used": None, "window": 0, "model": "", "compacted": False},
@@ -769,7 +772,7 @@ class AppCore:
                     stamp = datetime.fromtimestamp(item.modified_at, timezone.utc)
                     page_model = self.catalog.page_id("chatgpt", item.model) if item.model and self.catalog is not None else ""
                     created = datetime.fromtimestamp(item.created_at, timezone.utc)
-                    rows.append(SavedRow(chatgpt_row, item.id, "chatgpt", item.title or "", self._latest(chatgpt_row, stamp), item.messages, page_model, created))
+                    rows.append(SavedRow(chatgpt_row, item.id, "chatgpt", item.title or "", self._latest(chatgpt_row, stamp), item.messages, page_model, created, fusion=item.fusion))
         # A just-switched segment may have no native messages yet, or its CLI may currently be unavailable.
         for head in set(self.settings.session_links.values()):
             if self._resolve_row(head) != head or any(row.id == head for row in rows):
@@ -785,7 +788,7 @@ class AppCore:
                 earlier = next((row for row in rows if self._resolve_row(row.id) == head), None)
                 if earlier is not None:
                     prefix, native = head.split(":", 1)
-                    rows.append(dataclasses.replace(earlier, id=head, native=native, engine={"cg": "chatgpt", "dv": "devin", "fy": "factory"}[prefix], model=""))
+                    rows.append(dataclasses.replace(earlier, id=head, native=native, engine={"cg": "chatgpt", "dv": "devin", "fy": "factory"}[prefix], model="", fusion=False))
         self._saved[normalize_folder(folder)] = rows
         self._remember_rows(folder, rows)
         self._schedule_sidebar(folder)

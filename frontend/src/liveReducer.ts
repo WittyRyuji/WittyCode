@@ -202,6 +202,7 @@ export function savedSession(row: SavedRow): Session {
     modified: row.modified,
     modifiedAt: row.modifiedAt,
     engine: row.engine,
+    fusion: row.fusion === true,
     turns: [],
     usage: null,
     context: row.context,

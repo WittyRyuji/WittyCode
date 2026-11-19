@@ -123,6 +123,7 @@ class SavedRow:
     model: str = ""
     """The model the conversation was last on (empty in an index written before it was kept)."""
     created_at: float = 0.0
+    fusion: bool = False
 
 
 def diff_to_json(diff: FileDiff) -> dict[str, Any]:
@@ -528,6 +529,7 @@ class SessionStore:
                 SavedRow(
                     session_id, str(raw.get("project") or ""), str(raw.get("title") or ""), float(raw.get("modified_at") or 0.0),
                     int(raw.get("messages") or 0), str(raw.get("model") or ""), float(raw.get("created_at") or 0.0),
+                    fusion=raw.get("fusion") is True,
                 )
             )
         rows.sort(key=lambda row: row.modified_at, reverse=True)
@@ -538,6 +540,7 @@ class SessionStore:
     @staticmethod
     def _row_json(session: SavedSession) -> dict[str, Any]:
         row = {"project": session.project, "title": session.title, "created_at": session.created_at, "modified_at": session.modified_at, "messages": session.messages, "model": session.model}
+        row["fusion"] = bool(session.fusion) and session.fusion.get("enabled", True) is True
         if session.origin.get("app") == "fusion":
             row["fusion_expert"] = True
         return row
@@ -554,8 +557,8 @@ class SessionStore:
         return self._rebuild()
 
     def _consistent(self, index: Mapping[str, Any]) -> bool:
-        if any(isinstance(row, Mapping) and "created_at" not in row for row in index.values()):
-            return False  # rebuild old indices from the archives' real creation times, not their latest activity
+        if any(not isinstance(row, Mapping) or "created_at" not in row or not isinstance(row.get("fusion"), bool) for row in index.values()):
+            return False  # old indices lack creation times or the active Fusion flag; rebuild the cache once
         folder = self.root / SESSIONS
         try:
             names = {entry.stem for entry in folder.glob("*.json")}

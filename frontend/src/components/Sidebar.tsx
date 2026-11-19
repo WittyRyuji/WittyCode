@@ -36,10 +36,9 @@ function SessionRow({ session, current, onMenu, dragging }: { session: Session; 
   const models = useStore((s) => s.models);
   const providers = useStore((s) => s.providers);
   const open = !!session.mark;
-  // Sessions say where they run: "已打开 · 刚刚 · Devin". A saved row of the own loop that does not know its model cannot
-  // tell the plan from an API provider, so it says nothing.
+  // Fusion identifies the conversation, not its main model's source. Normal rows still say where they run, if known.
   const source = findModel(models, session.settings.model)?.source ?? (session.engine === "devin" ? "devin" : "");
-  const from = source ? sourceLabel(source, providers) : "";
+  const from = session.fusion === true ? "WittyFusion" : source ? sourceLabel(source, providers) : "";
   // Measured from this moment, not from the last tick: a row that has just arrived is never a tick behind.
   const when = session.modifiedAt ? formatRelative(session.modifiedAt, Date.now()) : session.modified;
   const sub = [open ? MARK_TEXT[session.mark!] : "", when, from].filter(Boolean).join(" · ");

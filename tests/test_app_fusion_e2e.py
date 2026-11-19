@@ -193,6 +193,9 @@ def test_devin_fusion_main_and_plan_through_the_real_page(qapp, loop, tmp_path):
             main = rig.core.order[0].controller
             await until(lambda: main.state.value == "ready")
             assert main.model == "devin:swe-2-high" and not rig.plan.requests
+            open_sidebar = ".srow.open .ssub"
+            await rig.wait_text(open_sidebar, "WittyFusion")
+            assert (await rig.text(open_sidebar)).split(" · ")[-1] == "WittyFusion"
             await rig.core.call("session.choose", {"id": rig.core.order[0].cid, "field": "mode", "value": "spec"})
             await rig.send("[fusion-plan] Propose a plan")
             await rig.wait_for(".plan-approval", timeout=30)
@@ -201,6 +204,14 @@ def test_devin_fusion_main_and_plan_through_the_real_page(qapp, loop, tmp_path):
             await rig.click_text(".plan-approval button", "执行方案")
             await until(lambda: main.state.value == "ready" and main.saved.plan.get("status") == "approved", timeout=30)
             assert main.saved.plan["execution"] == "started" and not rig.plan.requests
+            await rig.core.call("session.close", {"id": rig.core.order[0].cid})
+            row_id = f"cg:{main.session_id}"
+            await until(lambda: row_id in rig.core._saved_sessions_json())
+            saved = rig.core._saved_sessions_json()[row_id]
+            assert saved["fusion"] is True and saved["settings"]["model"] == "devin:swe-2-high"
+            saved_sidebar = f'.srow:not(.open)[data-session-id="{row_id}"] .ssub'
+            await rig.wait_for(saved_sidebar)
+            assert (await rig.text(saved_sidebar)).split(" · ")[-1] == "WittyFusion"
         finally:
             await rig.finish()
     run(loop, scenario())
