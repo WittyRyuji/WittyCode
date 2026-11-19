@@ -15,7 +15,7 @@ from collections.abc import AsyncIterator, Mapping
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 
-from desktop.core.chatgpt.errors import ChatGPTError
+from desktop.core.chatgpt.errors import ChatGPTError, RequestNotSent
 from desktop.core.chatgpt.http import HttpClient, stream_idle_timeout
 from desktop.core.chatgpt.models import ChatGPTModel
 from desktop.core.chatgpt.responses import Event, read_events
@@ -152,7 +152,7 @@ class ApiBackend:
         try:
             return await asyncio.to_thread(build)
         except ProviderError as error:
-            raise ChatGPTError(str(error), code="api") from error
+            raise RequestNotSent(str(error), code="api") from error
 
     async def stream(self, request: dict[str, Any]) -> AsyncIterator[Event]:
         """Ask the model of the request: its body for the provider's wire format, and the events of the answer."""
@@ -189,7 +189,7 @@ class ApiBackend:
             plan = await asyncio.to_thread(self.providers.bedrock_plan, spec)
             user_headers = await asyncio.to_thread(self.providers.api_headers, spec)
         except ProviderError as error:
-            raise ChatGPTError(str(error), code="api") from error
+            raise RequestNotSent(str(error), code="api") from error
         kind = spec.kind
         mantle = kind == "openai"
         base = plan.base_url.rstrip("/") if plan.base_url else (f"https://bedrock-mantle.{plan.region}.api.aws/v1" if mantle else bedrock.endpoint(plan.region))

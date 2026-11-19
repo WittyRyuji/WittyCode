@@ -67,6 +67,9 @@ def test_configure_and_start_fusion_with_a_local_fake(qapp, loop, tmp_path):
             await rig.send("请检查模块")
             await rig.wait_text(".chip-model .chip-v", "Fusion")
             await rig.wait_text(".transcript", "主代理已检查报告")
+            await rig.wait_text(".tab-title", "会话主题摘要")
+            await rig.wait_text(".srow.open .stitle", "会话主题摘要")
+            assert "会话主题摘要" not in await rig.text(".transcript")
             await rig.wait_for(".agent-history-toggle")
             await rig.click(".agent-history-toggle")
             await rig.wait_text(".agent-chip", "src")
@@ -104,6 +107,12 @@ def test_configure_and_start_fusion_with_a_local_fake(qapp, loop, tmp_path):
             assert (main._fusion.registry.policy.max_calls, main._fusion.registry.policy.max_tokens, main._fusion.registry.policy.preference) == (0, 0, 100)
             assert "cost x0.50" in rig.plan.requests[0]["instructions"] and "efficiency x1.50" in rig.plan.requests[0]["instructions"]
             assert len(rig.plan.requests) == 3
+            await rig.click(".tab.current .tab-x")
+            await rig.wait_text(".srow:not(.open) .stitle", "会话主题摘要")
+            await rig.click_text(".srow:not(.open)", "会话主题摘要")
+            await rig.wait_text(".tab-title", "会话主题摘要")
+            await rig.wait_text(".transcript", "主代理已检查报告")
+            assert len(rig.plan.fake.title_requests) == 1
         finally:
             await rig.finish()
     run(loop, scenario())

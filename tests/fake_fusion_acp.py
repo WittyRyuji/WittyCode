@@ -9,7 +9,8 @@ import shlex
 import sys
 from pathlib import Path
 
-from desktop.core.fusion.acp_server import MCP_CALL, MCP_LIST, PREFIX, SERVER
+from desktop.core.fusion.acp_server import MCP_CALL, MCP_LIST, MCP_WRAPPERS, PREFIX, SERVER
+from desktop.core.session_title import SYSTEM as TITLE_SYSTEM
 from tests.fake_devin import HOME, Fake, RpcError
 
 
@@ -48,7 +49,9 @@ class GuardedFake(Fake):
                                                      stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE)
         self.bridges[sid] = child
         await self.mcp(sid, "initialize", {"protocolVersion": "2025-11-25"})
-        await self.mcp(sid, "tools/list", {})
+        manifest = (await self.mcp(sid, "tools/list", {}))["result"]["tools"]
+        if "--agent-type" in sys.argv:
+            assert not manifest and set(MCP_WRAPPERS) <= set(self.config()["permissions"]["deny"])
 
     async def mcp(self, sid, method, params, identifier=None):
         self.ids += 1
@@ -87,6 +90,10 @@ class GuardedFake(Fake):
             match = re.search(r"\[fusion-([a-z-]+)\]", current)
             summary = "--agent-type" in sys.argv and sys.argv[sys.argv.index("--agent-type") + 1] == "summarizer"
             assert summary == ("Do not call any tools. Return only the summary." in text)
+            title = summary and text.startswith(TITLE_SYSTEM)
+            if title:
+                code, result = await self.run_hook(sid, "PreToolUse", tool_name=PREFIX + "read_file", tool_input={})
+                assert code == 2 and result["decision"] == "block"
             action = "summary" if summary else match[1] if match else "report"
             tool, arguments = "", {}
             if action == "write":
@@ -147,6 +154,8 @@ class GuardedFake(Fake):
                     await self.approve_tool(sid, PREFIX + tool, arguments)
                 result = await self.mcp(sid, "tools/call", {"name": tool, "arguments": arguments})
                 answer = json.dumps(result)
+            elif title:
+                answer = "库存事务与去重"
             else:
                 answer = "ACP summary: earlier work and evidence are retained; continue from the checkpoint." if summary else "ACP report."
             self.update(sid, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": answer}})

@@ -188,6 +188,7 @@ class ChatGPTController:
     _save_failed: bool = False
     _checkpoint_written: bool = False
     _fusion: Any = None
+    _pending_fusion_title: tuple[str, Any, Callable[[], bool]] | None = None
     _paused_fusion: Any = None
     _fusion_parent: Any = None
     _fusion_identity: Identity | None = None
@@ -465,8 +466,12 @@ class ChatGPTController:
         if saved.fusion:
             from desktop.core.fusion.registry import FusionError, FusionRegistry
             from desktop.core.fusion.runtime import FusionRuntime, native_model
+            from desktop.core.fusion.title import ATTEMPT
             try:
                 registry = FusionRegistry.from_json(self.project, saved.fusion)
+                if saved.origin.get(ATTEMPT) == "pending":
+                    saved.origin[ATTEMPT] = "attempted"
+                    registry.unmetered = registry.had_unknown = True
                 enabled = saved.fusion.get("enabled", True)
                 if (not isinstance(enabled, bool) or self._fusion_parent is not None
                         or enabled and native_model(registry.policy.main) != self.model):
@@ -827,6 +832,7 @@ class ChatGPTController:
                 self.saved.plan = previous
                 raise
         self._proposed_plan = ""
+        self._pending_fusion_title = None
         self.used_at = self.active_at = time.time()
         self.state = SessionState.RUNNING
         self.stop_hook_blocked = False
@@ -868,7 +874,20 @@ class ChatGPTController:
         return not (self._fusion_identity is not None and self._fusion_identity.name in ("Runner", "Observer")
                     and parent_fusion is not None and parent_fusion.brief_enabled and parent_fusion.gate("inject"))
 
+    @property
+    def fusion_title_attempted(self) -> bool:
+        from desktop.core.fusion.title import ATTEMPT
+        return ATTEMPT in self.saved.origin
+
+    def title_after_turn(self, question: str, allowed: Callable[[], bool]) -> None:
+        from desktop.core.fusion.title import source
+        try:
+            self._pending_fusion_title = (question, source(self, self.running_model), allowed)
+        except Exception as error:
+            log.info("Could not identify the Fusion title source: %s", type(error).__name__)
+
     async def _run_turn(self, turn: Turn, sent: str, attachments: Sequence[Attachment]) -> None:
+        title, self._pending_fusion_title = self._pending_fusion_title, None
         failure: BaseException | None = None
         end = None
         loop: AgentLoop | None = None
@@ -1051,8 +1070,18 @@ class ChatGPTController:
         self._release_steers()
         self.transcript.finish_turn(turn, TurnStatus.DONE)
         self._record_turn({"step_limit": "limit", "incomplete": "incomplete"}.get(end.reason, "done"), note=note)
-        self._end_turn(turn)
-        self.refresh_context()
+        try:
+            if title is not None and self._fusion is not None and end.reason in ("done", "plan"):
+                from desktop.core.fusion.title import generate
+                question, account, allowed = title
+                self._fusion.finish_metrics(turn)  # Naming spend is not part of the main task's metrics.
+                # Keep the request slot until naming settles, so a queued turn cannot spend the same budget.
+                await generate(self, turn, question, model, account, allowed)
+        except Exception as error:
+            log.info("Could not save a Fusion title: %s", type(error).__name__)
+        finally:
+            self._end_turn(turn)
+            self.refresh_context()
 
     def _turn_failed(self, turn: Turn, error: BaseException) -> None:
         if isinstance(error, ChatGPTError):
@@ -1125,7 +1154,7 @@ class ChatGPTController:
         if attachments and not text:
             text = DEFAULT_PROMPT
         turn = self._turn
-        if self.state is not SessionState.RUNNING or turn is None:
+        if self.state is not SessionState.RUNNING or turn is None or turn.status is not TurnStatus.RUNNING:
             return SteerOutcome(False, over=True)
         if not text:
             return SteerOutcome(False, message="没有内容")
@@ -1171,7 +1200,7 @@ class ChatGPTController:
         if done is not None and self._turn is turn:
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(done.wait(), INTERRUPT_GRACE_SECONDS)
-        if self._turn is turn:
+        if self._turn is turn and turn.status is TurnStatus.RUNNING:
             log.warning("the turn did not end within %.0f s of the stop request", INTERRUPT_GRACE_SECONDS)
             self._release_steers()  # (the loop never took them: back to the user, not into the next turn)
             self.transcript.abort_turn("停止超时：这里先停止显示。")

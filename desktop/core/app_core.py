@@ -1183,7 +1183,9 @@ class AppCore:
                 prepend_history(controller.transcript, prefix, self._row_of(conv))
         conv.dirty = True
         self._session_activity(conv)
-        if kind == "state":
+        if kind == "fusion_title":
+            self._remember_auto_title(conv, self._row_of(conv), controller.title)
+        elif kind == "state":
             self._schedule_sidebar(conv.project, reload=controller.state is SessionState.READY)
             if conv.preview and controller.state is SessionState.DEAD:
                 self.say(f"{controller.last_error}；仍显示本地缓存，可以重新连接。")
@@ -2059,7 +2061,8 @@ class AppCore:
             conv.goal = None
             self._checkpoint_goal(conv, goals.Goal.from_json(previous))
             return {"ok": False, "text": "现在不能发送：会话没有就绪。"}
-        self._start_title(conv, goal.text)
+        if not resuming or getattr(controller, "_fusion", None) is None:
+            self._start_title(conv, goal.text)
         controller.transcript.add_notice(
             f"目标已{'恢复' if resuming else '设定'}：{goal.text}\n模型会一轮轮做下去，每轮都把目标交给它对照结果判断，最多 {goals.ROUNDS} 轮；完成或需要你时会停下，点「停止」随时结束。"
         )
@@ -2147,8 +2150,18 @@ class AppCore:
     # ------------------------------------------------------------------ messages
 
     def _start_title(self, conv: Conversation, question: str) -> None:
-        # A side request cannot reserve the shared Fusion budget while the main request is running.
-        if getattr(conv.controller, "_fusion", None) is not None:
+        controller = conv.controller
+        if getattr(controller, "_fusion", None) is not None:
+            row = self._row_of(conv)
+
+            def unnamed() -> bool:
+                return (not self._shutting_down and self._by_cid.get(conv.cid) is conv and conv.controller is controller
+                        and row not in self.settings.session_titles and row not in self.settings.session_auto_titles
+                        and controller.title in ("", "新会话", "（无标题）"))
+
+            if unnamed() and question.strip() and not controller.fusion_title_attempted:
+                # Only name from this send: old text may belong to another model or account, even in the same tab.
+                controller.title_after_turn(question, unnamed)
             return
         if conv.title_started or sum(t.user_block is not None for t in conv.controller.transcript.turns) != 1:
             return
@@ -2180,7 +2193,9 @@ class AppCore:
         title = session_title.clean(answer)
         if title is None or self._shutting_down:
             return  # Keep a neutral title on failure; never pretend the first sentence was an LLM summary.
-        row = self._resolve_row(row)
+        self._remember_auto_title(conv, self._resolve_row(row), title)
+
+    def _remember_auto_title(self, conv: Conversation, row: str, title: str) -> None:
         self.settings.session_auto_titles[row] = title
         self._save()
         if conv.cid in self._by_cid:

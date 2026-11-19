@@ -20,7 +20,8 @@ class AcpSummary(AcpRun):
     acp_args = ("--agent-type", "summarizer")
     tool_free = True
 
-    def __init__(self, manager):
+    def __init__(self, manager, *, before_prompt=None):
+        self.before_prompt = before_prompt
         host = SimpleNamespace(manager=manager, session_id="summary-" + uuid.uuid4().hex,
                                saved=SimpleNamespace(origin={}, items=[], turns=[]), _turn=None,
                                _save_now=lambda **_: None)
@@ -66,6 +67,8 @@ class AcpSummary(AcpRun):
                 if current_value(options.get("configOptions"), "thought_level") != effort:
                     raise ChatGPTError("ACP 未确认摘要思考档位，未切换。", code="compaction")
             prompt = request.get("instructions", "") + "\n\nDo not call any tools. Return only the summary.\n\n" + "\n\n".join(render_parts(request.get("input", [])))
+            if self.before_prompt is not None and not self.before_prompt():
+                return
             self.summary_active = True
             yield Started()
             result = await self.client.request("session/prompt", {
