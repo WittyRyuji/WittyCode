@@ -72,6 +72,35 @@ async function checkFlow(page, theme, label, ok) {
     Math.abs(layout.width - layout.available) <= 1 && Math.abs(layout.height - await js("innerHeight / 4")) <= 1 &&
     layout.nodes === agents.length + 1 && layout.edges === agents.length, layout);
 
+  const portraits = await js(`(() => {
+    const graph = document.querySelector('#conversation-team .agent-flow');
+    const zoom = new DOMMatrixReadOnly(getComputedStyle(graph.querySelector('.react-flow__viewport')).transform).a;
+    const near = (a, b) => Math.abs(a - b) < 0.01;
+    return [...graph.querySelectorAll('.react-flow__node')].map((node) => {
+      const id = node.dataset.id;
+      const rings = node.querySelectorAll('.agent-flow-ring');
+      const ring = rings[0];
+      const sprite = ring?.querySelector('.dragon-sprite');
+      if (rings.length !== 1 || !sprite) return { id, rings: rings.length, hasSprite: !!sprite };
+      const style = getComputedStyle(ring), image = getComputedStyle(sprite);
+      const box = ring.getBoundingClientRect(), frame = sprite.getBoundingClientRect();
+      const boxSize = [box.width / zoom, box.height / zoom], frameSize = [frame.width / zoom, frame.height / zoom];
+      const radii = ['TopLeft', 'TopRight', 'BottomRight', 'BottomLeft'].map((corner) => style['border' + corner + 'Radius']);
+      const border = ['Top', 'Right', 'Bottom', 'Left'].map((side) => parseFloat(style['border' + side + 'Width']));
+      const clearance = [frame.top - box.top, box.right - frame.right, box.bottom - frame.bottom, frame.left - box.left]
+        .map((gap, i) => gap / zoom - border[i]);
+      const unclipped = style.overflowX === 'visible' && style.overflowY === 'visible' && style.clipPath === 'none' && image.clipPath === 'none';
+      // Animation shifts the strip, so the same full 48×48 frame fits at every step.
+      const sheetWidth = 48 * Number(image.getPropertyValue('--dragon-frames'));
+      const fullFrame = image.backgroundImage !== 'none' && image.backgroundSize === sheetWidth + 'px 48px' && frameSize.every((size) => near(size, 48));
+      const fits = near(boxSize[0], boxSize[1]) && radii.every((r) => r === '0px') && border.every((w) => w > 0) && unclipped && fullFrame &&
+        clearance.every((gap) => gap >= -0.01) && near(clearance[0], clearance[2]) && near(clearance[1], clearance[3]);
+      return { id, fits, boxSize, frameSize, radii, border, clearance, unclipped, backgroundSize: image.backgroundSize };
+    });
+  })()`);
+  ok(label("every main and expert portrait has a sharp square border around its full centered 48×48 sprite"),
+    portraits.length === agents.length + 1 && portraits.every((portrait) => portrait.fits), portraits);
+
   const colours = await js(`(${agentFlowColours.toString()})()`);
   ok(label("theme surfaces and labels match; state edges and rings have at least 3:1 contrast"), colours.transparentCanvas &&
     (theme === "light" ? colours.luminance > 0.85 : colours.luminance < 0.08) && colours.labelContrast >= 4.5 && colours.modelContrast >= 4.5 &&
