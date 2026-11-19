@@ -49,10 +49,12 @@ export async function checkOffice({ page, ok, clickText, calls, lastCall, waitCa
   ok("Only the approved Word link goes to the same Python openExternal bridge as Markdown", (await calls("shell.openExternal")).length === linkCount + 1 && (await lastCall("shell.openExternal")).url === "https://example.com/office-demo");
   await open("hostile.xlsx");
   await checkSheet();
-  ok("Hostile Excel cells stay literal; formulas only show their saved value, and links never render", await js(`(() => { const grid = document.querySelector('.fp-grid'); const cells = [...grid.querySelectorAll('td')].map(el => el.textContent); return [${JSON.stringify(LITERAL)}, '=1+1', '5'].every(t => cells.includes(t)) && !grid.querySelector('a,img,script'); })()`));
+  const sheet = await js("(() => { const grid = document.querySelector('.fp-grid'); return { cells: [...grid.querySelectorAll('td')].map(el => el.textContent), activeContent: !!grid.querySelector('a,img,script') }; })()");
+  ok("Hostile Excel cells stay literal; formulas only show their saved value, and links never render", [LITERAL, "=1+1", "5"].every(text => sheet.cells.includes(text)) && !sheet.activeContent);
   await open("hostile.pptx");
   await checkSlides();
-  ok("Hostile PowerPoint shows literal text and ignores both external and URL-like internal image relationships", await js(`(() => { const slides = document.querySelector('.fp-slides'); return slides.textContent.includes(${JSON.stringify(LITERAL)}) && slides.textContent.includes('=1+1') && slides.querySelectorAll('img').length === 1 && !slides.querySelector('a,script'); })()`));
+  const slides = await js("(() => { const deck = document.querySelector('.fp-slides'); return { text: deck.textContent, images: deck.querySelectorAll('img').length, activeContent: !!deck.querySelector('a,script') }; })()");
+  ok("Hostile PowerPoint shows literal text and ignores both external and URL-like internal image relationships", slides.text.includes(LITERAL) && slides.text.includes("=1+1") && slides.images === 1 && !slides.activeContent);
   const observed = page.events.slice(start);
   const network = observed.filter(e => e.method === "Network.requestWillBeSent" && /^https?:/i.test(e.params.request.url)).map(e => e.params.request.url);
   ok("Office preview documents do not execute, navigate, violate CSP, or request the network", await js("!window.officePreviewMarker") && await js("location.href") === startHref && !observed.some(e => e.method === "Page.frameNavigated") && page.cspViolations().length === csp && network.length === 0, { network, errors: page.errorTexts() });
