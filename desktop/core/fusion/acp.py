@@ -57,6 +57,7 @@ class AcpRun:
     def __init__(self, host: Any) -> None:
         self.host = host
         self.client: Any = None
+        self.account: str | None = None  # Source of this process, which may span multiple main prompts.
         self.server: asyncio.Server | None = None
         self.credential = secrets.token_urlsafe(32)
         self.guard_seen = asyncio.Event()
@@ -309,6 +310,7 @@ class AcpRun:
         self.guard_seen.clear()
         self.bridge_seen.clear()
         options = {"acp_args": self.acp_args} if self.acp_args else {}
+        self.account = engine.cached_account().get("email")
         self.client = engine._client_factory(binary, env=env, cwd=root, on_notification=self._notify,
                                              on_request=self._request, on_exit=lambda error: None, **options)
         await self.client.start()
@@ -419,6 +421,7 @@ class AcpRun:
                 prompt = "/compact"
             saved["promptAttempted"] = True
             self.host._save_now(required=True)  # Persist uncertainty before a request could reach the native agent.
+            self.host._check_fusion_title_source(native_account=self.account)
             self.active = True
             requested = True
             result = await self.client.request("session/prompt", {"sessionId": self.session, "prompt": prompt_blocks(prompt, attachments)}, timeout=None)

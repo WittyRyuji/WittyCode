@@ -191,6 +191,7 @@ class ChatGPTController:
     _first_prompt_retained: bool = False
     _fusion: Any = None
     _pending_fusion_title: tuple[str, Any, Callable[[], bool]] | None = None
+    _fusion_title_task: asyncio.Task[None] | None = None
     _paused_fusion: Any = None
     _fusion_parent: Any = None
     _fusion_identity: Identity | None = None
@@ -663,12 +664,16 @@ class ChatGPTController:
         await asyncio.shield(self._close_task)
 
     async def _do_close(self) -> None:
+        title_task = self._cancel_fusion_title()
         task = self._turn_task
         if task is not None and not task.done():
             self._expire_pending()
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await asyncio.wait_for(asyncio.shield(task), INTERRUPT_GRACE_SECONDS)
+        if title_task is not None:
+            # Settle usage and release the independent transport before releasing the archive lock.
+            await asyncio.gather(title_task, return_exceptions=True)
         runtime = self._fusion or self._paused_fusion
         if runtime is not None:
             await runtime.close()
@@ -890,15 +895,65 @@ class ChatGPTController:
         from desktop.core.fusion.title import ATTEMPT
         return ATTEMPT in self.saved.origin
 
-    def title_after_turn(self, question: str, allowed: Callable[[], bool]) -> None:
+    @property
+    def fusion_title_running(self) -> bool:
+        return self._fusion_title_task is not None and not self._fusion_title_task.done()
+
+    def prepare_fusion_title(self, question: str, allowed: Callable[[], bool]) -> None:
         from desktop.core.fusion.title import source
+        if self._live() is None or self.fusion_title_running:
+            return
         try:
-            self._pending_fusion_title = (question, source(self, self.running_model), allowed)
+            if (account := source(self, self.running_model)) is not None:
+                self._pending_fusion_title = (question, account, allowed)
         except Exception as error:
             log.info("Could not identify the Fusion title source: %s", type(error).__name__)
 
+    def _check_fusion_title_source(self, *, native_account: str | None = None) -> None:
+        """Do not name under the selection at send time if the main transport picked up another source."""
+        candidate = self._pending_fusion_title
+        if candidate is None:
+            return
+        from desktop.core.fusion.title import source
+        model = self.running_model
+        try:
+            if (source(self, model) == candidate[1]
+                    and (not model.startswith("devin:") or native_account == candidate[1][1])):
+                return
+        except Exception as error:
+            log.info("Could not verify the Fusion title source: %s", type(error).__name__)
+        self._pending_fusion_title = None
+
+    def _model_progress(self) -> None:
+        # A native ACP prompt can already be streaming or waiting on a bridge tool before session/prompt returns.
+        self._keep_first_prompt()
+        self._start_parallel_fusion_title()
+
+    def _start_parallel_fusion_title(self) -> None:
+        candidate, fusion = self._pending_fusion_title, self._fusion
+        if (candidate is None or fusion is None or fusion.registry.policy.max_tokens or not self.history_ready
+                or self._close_requested or self._turn is None or self._turn.stopping):
+            return
+        self._pending_fusion_title = None
+        self._fusion_title_task = self._spawn(self._generate_fusion_title(candidate, self.running_model))
+
+    def _cancel_fusion_title(self) -> asyncio.Task[None] | None:
+        task = self._fusion_title_task
+        if task is not None and not task.done():
+            if not task.cancelling():
+                task.cancel()
+            return task
+        return None
+
+    async def _generate_fusion_title(self, candidate: tuple[str, Any, Callable[[], bool]], model: str) -> None:
+        from desktop.core.fusion.title import generate
+        try:
+            question, account, allowed = candidate
+            await generate(self, question, model, account, allowed)
+        except Exception as error:
+            log.info("Could not save a Fusion title: %s", type(error).__name__)
+
     async def _run_turn(self, turn: Turn, sent: str, attachments: Sequence[Attachment]) -> None:
-        title, self._pending_fusion_title = self._pending_fusion_title, None
         failure: BaseException | None = None
         end = None
         loop: AgentLoop | None = None
@@ -1084,14 +1139,14 @@ class ChatGPTController:
         self.transcript.finish_turn(turn, TurnStatus.DONE)
         self._record_turn({"step_limit": "limit", "incomplete": "incomplete"}.get(end.reason, "done"), note=note)
         try:
-            if title is not None and self._fusion is not None and end.reason in ("done", "plan"):
-                from desktop.core.fusion.title import generate
-                question, account, allowed = title
-                self._fusion.finish_metrics(turn)  # Naming spend is not part of the main task's metrics.
-                # Keep the request slot until naming settles, so a queued turn cannot spend the same budget.
-                await generate(self, turn, question, model, account, allowed)
-        except Exception as error:
-            log.info("Could not save a Fusion title: %s", type(error).__name__)
+            if self._pending_fusion_title is not None and self._fusion is not None and end.reason in ("done", "plan"):
+                self._keep_first_prompt()
+                if self._fusion.registry.policy.max_tokens:
+                    # With a finite budget, keep the original reservation: the next turn waits for title usage.
+                    self._fusion.finish_metrics(turn)
+                    await self._generate_fusion_title(self._pending_fusion_title, model)
+                else:
+                    self._start_parallel_fusion_title()  # A successful prompt need not emit a progress event.
         finally:
             self._end_turn(turn)
             self.refresh_context()
@@ -1106,6 +1161,7 @@ class ChatGPTController:
             except BaseException:
                 self.saved.origin.pop(FIRST_PROMPT, None)
                 raise
+        self._check_fusion_title_source()
         started = False
         try:
             async with contextlib.aclosing(self.manager.stream(request)) as events:
@@ -1190,6 +1246,7 @@ class ChatGPTController:
     def _end_turn(self, turn: Turn) -> None:
         if self._turn is not turn:
             return
+        self._pending_fusion_title = None
         self._keep_first_prompt()  # stopped after dispatch, or finished without a separate response event
         if (not self._checkpoint_written and self.saved.turns and self.saved.turns[-1].start == self._turn_start):
             # Stopped during local setup, before a request could reach the model.
@@ -1271,6 +1328,7 @@ class ChatGPTController:
         if self.state is not SessionState.RUNNING or turn is None:
             return
         self.transcript.mark_stopping()
+        self._cancel_fusion_title()
         self._changed()
         self._expire_pending()
         if self._context is not None:
@@ -1666,8 +1724,10 @@ class ChatGPTController:
         if self._save_handle is not None:
             self._save_now()
 
-    def _save_now(self, *, required: bool = False) -> bool:
-        if self._save_handle is not None:
+    def _save_now(self, *, required: bool = False, title_only: bool = False) -> bool:
+        if title_only and not self._checkpoint_written:
+            return False  # The side request must never create the conversation.
+        if not title_only and self._save_handle is not None:
             self._save_handle.cancel()
             self._save_handle = None
         if not self._checkpoint_written and FIRST_PROMPT not in self.saved.origin:
@@ -1680,6 +1740,9 @@ class ChatGPTController:
         try:
             self.manager.sessions.save(self._snapshot())
         except OSError as error:
+            if title_only:
+                log.warning("could not checkpoint the optional Fusion title", exc_info=True)
+                return False
             if not self._checkpoint_written:
                 self.saved.origin.pop(FIRST_PROMPT, None)
             log.warning("could not save the conversation", exc_info=True)
@@ -1811,27 +1874,36 @@ class _Watch(Observer):
     def text_delta(self, item_id: str, text: str) -> None:
         if self._turn is not None:
             self.ctl.transcript.append_text(self._turn, item_id, 0, text)
+            if text.strip():
+                self.ctl._model_progress()
             self.ctl._changed()
 
     def text_done(self, item_id: str, text: str) -> None:
         if self._turn is not None:
             self.ctl.transcript.end_text(self._turn, item_id, 0, text)
+            if text.strip():
+                self.ctl._model_progress()
             self.ctl._changed()
 
     def thinking_delta(self, item_id: str, text: str) -> None:
         if self._turn is not None:
             self.ctl.transcript.append_thinking(self._turn, item_id, 0, text)
+            if text.strip():
+                self.ctl._model_progress()
             self.ctl._changed()
 
     def thinking_done(self, item_id: str, text: str) -> None:
         if self._turn is not None:
             self.ctl.transcript.end_thinking(self._turn, item_id, 0, text=text or None)
+            if text.strip():
+                self.ctl._model_progress()
             self.ctl._changed()
 
     def call_begun(self, item_id: str, call_id: str, name: str) -> None:
         if self._turn is not None:
             ui_name, _ = self.tools.display(name, {})
             self.ctl.transcript.ensure_tool(self._turn, call_id, ui_name)
+            self.ctl._model_progress()
             self.ctl._changed()
 
     def call_ready(self, call: Call) -> None:
@@ -1841,6 +1913,7 @@ class _Watch(Observer):
         ui_name, data = self.tools.display(call.name, call.args)
         tool = self.ctl.transcript.ensure_tool(turn, call.call_id, ui_name)
         self.ctl.transcript.set_tool_input(turn, tool, data, final=True)
+        self.ctl._model_progress()
         self.ctl._changed()
 
     async def ask(self, call: Call, verdict: Verdict) -> str:

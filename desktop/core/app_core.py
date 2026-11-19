@@ -2302,7 +2302,7 @@ class AppCore:
 
             if unnamed() and question.strip() and not controller.fusion_title_attempted:
                 # Only name from this send: old text may belong to another model or account, even in the same tab.
-                controller.title_after_turn(question, unnamed)
+                controller.prepare_fusion_title(question, unnamed)
             return
         turns = controller.transcript.turns
         if not conv.title_started and turns and not any(t.user_block is not None and t.id not in conv.unsent_turns for t in turns[:-1]):
@@ -2552,6 +2552,8 @@ class AppCore:
         if (fusion is None or conv.switching or conv.queue or conv.controller.state is not SessionState.READY
                 or not isinstance(unknown, bool)):
             raise AppError("会话未就绪，暂时不能调整 Fusion 预算。")
+        if conv.controller.fusion_title_running:
+            raise AppError("正在记录会话标题的用量，请稍后再调整预算。")
         try:
             fusion.update_budget(params.get("maxCalls"), params.get("maxTokens"), accept_unknown=unknown)
         except FusionError as error:

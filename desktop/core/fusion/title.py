@@ -1,4 +1,4 @@
-"""One optional, tool-free title request after the main turn has spent its budget."""
+"""One optional, tool-free title request from the accepted prompt's main source."""
 from __future__ import annotations
 
 import asyncio
@@ -13,7 +13,7 @@ from desktop.core.chatgpt.responses import CallBegun, CallDone, Finished, Starte
 from desktop.core.fusion.registry import FusionError
 from desktop.core.harness import compact
 from desktop.core.harness.diagnostics import MAX_RECORDS
-from desktop.core.transcript import Turn
+from desktop.core.usage import Tokens
 
 if TYPE_CHECKING:
     from desktop.core.chatgpt.controller import ChatGPTController
@@ -35,12 +35,17 @@ def source(controller: ChatGPTController, model: str) -> Any:
     return manager.accounts.active_id()
 
 
-async def generate(controller: ChatGPTController, turn: Turn, question: str, model: str, account: Any,
+async def generate(controller: ChatGPTController, question: str, model: str, account: Any,
                    allowed: Callable[[], bool]) -> None:
     fusion = controller._fusion
     origin = controller.saved.origin
-    if (fusion is None or fusion._active or fusion._delegations or ATTEMPT in origin or account is None
-            or not allowed() or source(controller, model) != account):
+
+    def still_allowed() -> bool:
+        return (not controller._close_requested and controller._fusion is fusion and controller.model == model
+                and allowed() and source(controller, model) == account)
+
+    if (fusion is None or not controller.history_ready or ATTEMPT in origin or not still_allowed()
+            or fusion.registry.policy.max_tokens and (fusion._active or fusion._delegations)):
         return
     items = [user_message(session_title.prompt(question))]
     try:
@@ -53,16 +58,22 @@ async def generate(controller: ChatGPTController, turn: Turn, question: str, mod
                             reasoning=controller._summary_effort(), shape=controller.manager.shape)
     if native:
         from desktop.core.fusion.summary import AcpSummary
-        stream = AcpSummary(controller.manager, before_prompt=lambda: allowed() and source(controller, model) == account).stream
+        stream = AcpSummary(controller.manager, before_prompt=still_allowed).stream
     else:
         stream = controller.manager.stream
 
     # A restart in the middle must neither repeat the model call nor assume it was free.
     origin[ATTEMPT] = "pending"
-    if not controller._save_now():
+    if not controller._save_now(title_only=True):
         origin.pop(ATTEMPT)
         return
+    # Recheck immediately before entering the stream: it captures its route before its first await.
+    if not still_allowed():
+        origin.pop(ATTEMPT)
+        controller._save_now(title_only=True)
+        return
     text, finished, tool_call, requested = "", None, False, not native
+    title = None
     try:
         async with asyncio.timeout(TIMEOUT), contextlib.aclosing(stream(request)) as events:
             async for event in events:
@@ -77,25 +88,34 @@ async def generate(controller: ChatGPTController, turn: Turn, question: str, mod
                 elif isinstance(event, Finished):
                     finished = event
                     break
+        if finished is not None and not finished.incomplete and not tool_call and still_allowed():
+            title = session_title.clean(text)
     except Exception as error:
         if isinstance(error, RequestNotSent):
             requested = False  # A proven local preparation failure cannot have consumed model tokens.
         log.info("Fusion title request did not complete: %s", type(error).__name__)
-        return
     finally:
         origin[ATTEMPT] = "attempted"
         usage = finished.usage if finished is not None else None
+        tokens = usage.tokens() if usage is not None else None
         if requested:
             if usage is not None:
+                task = controller._fusion.measurement if controller._fusion is not None else None
+                if task is not None:
+                    # The turn's measurement uses the session counter; exclude this independent request.
+                    task.main.before = (task.main.before or Tokens()).plus(tokens)
                 controller._add_usage(usage, measures_context=False, counts_speed=False, model=model)
-            controller.saved.requests.append({"kind": "title", "model": model, "usage": usage.tokens().to_json() if usage is not None else None})
+            controller.saved.requests.append({"kind": "title", "model": model, "usage": tokens.to_json() if tokens is not None else None})
             del controller.saved.requests[:-MAX_RECORDS]
             if usage is None:
                 fusion.registry.unmetered = fusion.registry.had_unknown = True
-                controller.saved.fusion = fusion.registry.to_json()
-    # The controller checkpoints the title, attempt and usage when releasing the turn's request slot.
-    if finished is not None and not finished.incomplete and not tool_call and controller._turn is turn and allowed():
-        title = session_title.clean(text)
+                if fusion in (controller._fusion, controller._paused_fusion):
+                    controller.saved.fusion.update(unmetered=True, hadUnknown=True)
+        before = controller.saved.title
         if title and title not in ("新会话", "（无标题）"):
             controller.saved.title = title
-            controller._notify("fusion_title")
+        if controller._save_now(title_only=True):
+            if controller.saved.title != before:
+                controller._notify("fusion_title")
+        else:
+            controller.saved.title = before

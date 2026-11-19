@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 
 import pytest
 
@@ -129,6 +130,37 @@ def test_optional_title_respects_names_and_budget_without_failing_the_main_turn(
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("action", ["rename", "close"])
+def test_slow_title_does_not_block_a_second_turn_or_overwrite_a_later_choice(tmp_path, action):
+    async def scenario():
+        core, plan, events, _, engine = await ready_core(tmp_path)
+        try:
+            configure(core)
+            cid = await new_session(core, events, tmp_path / "proj", fusion=True)
+            conv = core._by_cid[cid]
+            ctl = conv.controller
+            plan.fake.title_turn = [("hold", "title"), *say("库存导入")]
+            await talk(core, plan, cid, "检查库存导入")
+            await until(lambda: bool(plan.fake.title_requests))
+            await talk(core, plan, cid, "继续检查")
+            assert ctl.fusion_title_running and all(t.status is TurnStatus.DONE for t in ctl.transcript.turns)
+            if action == "rename":
+                await core.call("session.rename", {"id": cid, "title": "手动名字"})
+                plan.release("title")
+                await until(lambda: not ctl.fusion_title_running)
+                assert core._title_of(conv) == "手动名字"
+            else:
+                await core.call("session.close", {"id": cid})
+                await until(lambda: ctl.state.value == "closed")
+                assert not ctl.fusion_title_running
+            assert not engine.sessions.load(ctl.session_id).title and len(plan.fake.title_requests) == 1
+        finally:
+            plan.release("title")
+            await core.shutdown()
+
+    asyncio.run(scenario())
+
+
 def test_legacy_untitled_fusion_is_only_named_when_a_user_sends_again(tmp_path):
     async def scenario():
         core, plan, events, _, engine = await ready_core(tmp_path)
@@ -149,6 +181,7 @@ def test_legacy_untitled_fusion_is_only_named_when_a_user_sends_again(tmp_path):
             assert ctl.transcript.turns[0].user_block.text == first
             current = "核对导入事务边界"
             await talk(core, plan, cid, current)
+            await until(lambda: ctl.saved.title == plan.fake.title_answer)
             (request,) = plan.fake.title_requests
             assert request["input"][0]["content"][0]["text"] == title_prompt(current)
             assert first not in str(request["input"])
@@ -179,6 +212,7 @@ def test_legacy_devin_question_is_not_resent_to_the_new_main_for_naming(tmp_path
             assert not plan.fake.title_requests
             current = "检查事务回滚"
             await talk(core, plan, cid, current, "The new main completed the requested check.")
+            await until(lambda: ctl.saved.title == plan.fake.title_answer)
             (main,) = plan.requests
             (title,) = plan.fake.title_requests
             assert main["model"] == title["model"] == "gpt-6.1-sol"
@@ -195,19 +229,31 @@ def test_legacy_devin_question_is_not_resent_to_the_new_main_for_naming(tmp_path
 
 def test_guarded_devin_main_titles_with_the_same_native_model(tmp_path):
     async def scenario():
-        harness = make_guarded_engine(tmp_path)
+        release = tmp_path / "release-native-main"
+        harness = make_guarded_engine(tmp_path, main_release=release)
         core, plan, events, _, engine = await ready_core(tmp_path, devin_engine=harness.engine)
         try:
             model = "devin:swe-2-high"
             await until(lambda: core.catalog.find(model), timeout=20)
             configure(core, model)
             cid = await new_session(core, events, tmp_path / "proj", fusion=True)
-            await core.call("session.send", {"id": cid, "text": "请检查库存重复行和事务"})
+            conv = core._by_cid[cid]
+            ctl = conv.controller
+            await core.call("session.send", {"id": cid, "text": "[fusion-refuse] 不应对此命名"})
             await idle(core, cid)
-            ctl = core._by_cid[cid].controller
+            assert not conv.in_history and engine.sessions.load(ctl.session_id) is None
+            assert not ctl.fusion_title_attempted
+            await core.call("session.send", {"id": cid, "text": "请检查库存重复行和事务"})
+            await until(lambda: sessions_of(events)[cid].get("title") == "库存事务与去重", timeout=10)
+            assert ctl.busy and ctl._acp.active and ctl.history_ready and conv.in_history
+            assert engine.sessions.load(ctl.session_id).title == "库存事务与去重"
+            release.touch()
+            await idle(core, cid)
             saved = engine.sessions.load(ctl.session_id)
-            assert saved.title == "库存事务与去重" and len(saved.turns) == len(ctl.transcript.turns) == 1
-            assert saved.turns[0].status == "done" and "ACP report." in str(saved.items) and saved.title not in str(saved.items)
+            assert saved.title == "库存事务与去重" and len(saved.turns) == 1
+            assert [turn.status for turn in ctl.transcript.turns] == [TurnStatus.FAILED, TurnStatus.DONE]
+            assert saved.turns[0].status == "done" and "ACP report." in str(saved.items)
+            assert saved.title not in str(saved.items) and "[fusion-refuse]" not in str(saved.items)
             assert not plan.requests and not plan.fake.title_requests
             assert len([entry for entry in saved.requests if entry.get("kind") == "title" and entry["model"] == model and entry["usage"]]) == 1
             logs = {path.parent.name: [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
@@ -215,8 +261,10 @@ def test_guarded_devin_main_titles_with_the_same_native_model(tmp_path):
             assert len(logs) == 2
             (name_log,) = [log for key, log in logs.items() if key.startswith("summary-")]
             for log in logs.values():
+                # The main selects its model on both attempts; the isolated title session only runs once.
+                count = 1 if log is name_log else 2
                 assert [r["params"]["value"] for r in log if r.get("method") == "session/set_config_option"
-                        and r["params"]["configId"] == "model"] == ["swe-2-high"]
+                        and r["params"]["configId"] == "model"] == ["swe-2-high"] * count
             (prompt,) = [r["params"]["prompt"] for r in name_log if r.get("method") == "session/prompt"]
             assert len(prompt) == 1 and prompt[0]["text"].startswith(SYSTEM)
             assert "请检查库存重复行和事务" in prompt[0]["text"] and "ACP report." not in prompt[0]["text"]
@@ -228,27 +276,43 @@ def test_guarded_devin_main_titles_with_the_same_native_model(tmp_path):
 
 
 def test_api_fusion_main_uses_its_provider_without_a_plan_account(tmp_path):
-    from tests.llm_support import FakeApi
-    from tests.test_app_api import api_core, api_model_id, says
+    from tests.llm_support import FakeApi, event_stream
+    from tests.test_app_api import api_core, api_model_id, chunk, says
 
     async def scenario():
+        release = threading.Event()
         with FakeApi() as api:
             core, _, events, engine, _ = await api_core(tmp_path, api)
+
+            def main_chunks():
+                # Chunked HTTP fake: send a visible delta, but not the terminal SSE or usage until released.
+                yield f"data: {json.dumps(chunk({'content': 'Checking import transactions.'}))}\n\n".encode()
+                assert release.wait(10), "API main was not released"
+                for event in says(" Done."):
+                    data = event if isinstance(event, str) else json.dumps(event)
+                    yield f"data: {data}\n\n".encode()
             try:
                 assert engine.cached_account()["auth"] == "signed-out"
                 model = api_model_id(events)
                 configure(core, model, model)
-                api.script(says("Check import transactions."))
+                main = event_stream()
+                main.pieces = main_chunks()
+                api.script(main)
                 api.title_turn = says("Inventory import validation")
                 cid = await new_session(core, events, tmp_path / "proj", fusion=True)
-                await core.call("session.send", {"id": cid, "text": "Check duplicate inventory imports"})
-                await idle(core, cid)
                 ctl = core._by_cid[cid].controller
-                assert ctl.saved.title == "Inventory import validation" and len(ctl.saved.turns) == 1
+                await core.call("session.send", {"id": cid, "text": "Check duplicate inventory imports"})
+                await until(lambda: ctl.saved.title == "Inventory import validation")
+                assert ctl.busy and ctl.history_ready and len(ctl.saved.turns) == 1
+                assert engine.sessions.load(ctl.session_id).title == "Inventory import validation"
+                release.set()
+                await idle(core, cid)
                 (title,) = api.title_posts
                 assert title[2]["model"] == api.posts[0][2]["model"] == "deep-chat" and not title[2].get("tools")
                 assert ctl.saved.usage_models[model] == Tokens(400, 40).to_json()
+                assert ctl._fusion.registry.task_metrics[-1]["main"]["tokens"] == 220
             finally:
+                release.set()
                 await core.shutdown()
 
     asyncio.run(scenario())

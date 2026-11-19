@@ -83,6 +83,11 @@ class GuardedFake(Fake):
         await self.bridge(params["sessionId"], params)
         return result
 
+    async def m_prompt(self, request_id, params):
+        if any("[fusion-refuse]" in text for text in self.texts(params)):
+            raise RpcError(-32602, "Rejected before dispatch")
+        return await super().m_prompt(request_id, params)
+
     async def run_turn(self, sid, session, turn, text):
         stop = "end_turn"
         try:
@@ -175,6 +180,11 @@ class GuardedFake(Fake):
                 answer = "ACP summary: earlier work and evidence are retained; continue from the checkpoint." if summary else "ACP report."
             self.update(sid, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": answer}})
             self.call(sid, session, turn, 1200, 20, 400)
+            if not summary and (release := os.environ.get("FAKE_FUSION_MAIN_RELEASE")):
+                while not Path(release).exists() and not turn["cancel"].is_set():
+                    await asyncio.sleep(0.02)
+                if turn["cancel"].is_set():
+                    stop = "cancelled"
         finally:
             await self.finish(sid, session, turn, stop)
 
