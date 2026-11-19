@@ -275,7 +275,8 @@ class ChatGPTEngine:
             return
         client_id = self.accounts.active_id()
         token = await self.tokens.access_token(client_id)
-        body = {**request, "input": for_responses(request.get("input") or ())}
+        info = self.model_info(str(request.get("model") or ""))
+        body = {**request, "input": for_responses(request.get("input") or (), supports_images=info is not None and info.supports_images)}
         for attempt in range(2):
             headers = {"Authorization": f"Bearer {token}", "Accept": "text/event-stream", "originator": APP_NAME.lower()}
             lines = self.http.stream_lines("POST", f"{self.base_url}/responses", headers=headers, json_body=body, timeout=stream_idle_timeout(request))

@@ -42,6 +42,7 @@ from typing import Any
 
 from desktop.core.chatgpt.errors import is_transient
 from desktop.core.chatgpt.responses import Finished, Shape, Started, TextDone, build_request, declare_tools, user_message
+from desktop.core.harness.history import tool_images_of
 from desktop.core.harness.prompt import context_update
 
 log = logging.getLogger("desktop.harness.compact")
@@ -121,7 +122,7 @@ def estimate_item(item: Mapping[str, Any]) -> int:
     if kind == "function_call":
         return 8 + estimate_text(str(item.get("name") or "")) + estimate_text(str(item.get("arguments") or ""))
     if kind == "function_call_output":
-        return 6 + estimate_text(str(item.get("output") or ""))
+        return 6 + estimate_text(str(item.get("output") or "")) + IMAGE_TOKENS * len(tool_images_of(item))
     if kind == "reasoning":
         summary = " ".join(str(part.get("text") or "") for part in item.get("summary") or () if isinstance(part, Mapping))
         return 4 + estimate_text(summary) + len(str(item.get("encrypted_content") or "")) // 5
@@ -333,7 +334,9 @@ def render(item: Mapping[str, Any]) -> str:
         return f"ASSISTANT CALLED TOOL {name}: {args}"
     if kind == "function_call_output":
         reference = f" ({item['wc_output_ref']})" if item.get("wc_output_ref") else ""
-        return f"TOOL RESULT{reference}: {str(item.get('output') or '')}"
+        text = f"TOOL RESULT{reference}: {str(item.get('output') or '')}"
+        images = len(tool_images_of(item))
+        return text + (f"\n[{images} image(s) attached]" if images else "")
     return ""
 
 
@@ -462,6 +465,8 @@ OnRequest = Callable[[dict[str, Any], Finished | None, float, bool], None]
 
 def prefix_summary_request(base: Mapping[str, Any], items: Sequence[Mapping[str, Any]], window: int) -> dict[str, Any] | None:
     """Reuse the main Responses prefix when it fits; no experimental cache or server-compaction parameters."""
+    if any(tool_images_of(item) for item in items):
+        return None  # The text summary keeps the picture description, not the tool attachment.
     request = {**base, "input": [*items, user_message(SUMMARY_TASK + INSTRUCTIONS)], "tool_choice": "none"}
     size = estimate_items(request["input"]) + estimate_text(str(request.get("instructions") or ""))
     size += estimate_text(json.dumps(request.get("tools") or [], ensure_ascii=False))

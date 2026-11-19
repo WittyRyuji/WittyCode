@@ -32,6 +32,7 @@ from typing import Any
 
 from desktop.core.diffs import DiffLine, FileDiff
 from desktop.core.harness.compact import mend_boundary
+from desktop.core.harness.history import bounded_tool_images, prune_tool_images
 from desktop.core.settings import same_folder
 
 log = logging.getLogger("desktop.harness.store")
@@ -162,7 +163,7 @@ def _session_json(session: SavedSession) -> dict[str, Any]:
             text = clip_output(text, RETAIN_CHARS)
         return {**item, "output": text + suffix}
 
-    items = [preview(item) for item in session.items]
+    items = bounded_tool_images([preview(item) for item in session.items])
     data: dict[str, Any] = {
         "version": VERSION,
         "id": session.id,
@@ -239,6 +240,7 @@ def _session_from(raw: Any) -> SavedSession | None:
             if isinstance(t, Mapping)
         ]
         items = [item for item in raw.get("items") or () if isinstance(item, dict)]
+        prune_tool_images(items)
         return SavedSession(
             id=str(raw["id"]),
             project=str(raw.get("project") or ""),

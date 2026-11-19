@@ -114,14 +114,17 @@ class GuardedFake(Fake):
                 tool, arguments = "delegate_task", {"scope": "src", "model": "chatgpt:gpt-6-luna", "role": "worker", "task": "Review the module."}
             elif action == "delegate-acp":
                 tool, arguments = "delegate_task", {"scope": "src", "model": "devin:swe-2-high", "role": "worker", "task": "[fusion-write] Create the marker."}
-            elif action == "duplicate":
-                params = {"name": "read_file", "arguments": {"file_path": "evidence.txt"}}
-                if sid not in self.replayed:
+            elif action in ("duplicate", "picture"):
+                params = {"name": "read_file", "arguments": {"file_path": "picture.png" if action == "picture" else "evidence.txt"}}
+                key = sid, action
+                if key not in self.replayed:
                     first = await self.mcp(sid, "tools/call", params)
-                    self.replayed[sid] = (self.ids, first["result"])
-                identifier, original = self.replayed[sid]
+                    self.replayed[key] = (self.ids, first["result"])
+                identifier, original = self.replayed[key]
                 repeated = await self.mcp(sid, "tools/call", params, identifier)
                 assert repeated["result"] == original
+                if action == "picture":
+                    (HOME / "picture-replies.json").write_text(json.dumps([original, repeated["result"]]), encoding="utf-8")
                 changed = await self.mcp(sid, "tools/call", {"name": "create_file", "arguments": {"file_path": "forbidden.txt", "content": "not run"}}, identifier)
                 assert "error" in changed
             elif action in ("native", "unknown-bridge"):

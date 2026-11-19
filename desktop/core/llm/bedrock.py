@@ -107,7 +107,7 @@ def _arguments(text: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def converse_messages(items: Sequence[Mapping[str, Any]], origin: str) -> list[dict[str, Any]]:
+def converse_messages(items: Sequence[Mapping[str, Any]], origin: str, *, supports_images: bool = True) -> list[dict[str, Any]]:
     """The conversation as Converse ``messages``: alternating roles, results before words, thinking in front of its answer."""
     messages: list[dict[str, Any]] = []
 
@@ -119,9 +119,9 @@ def converse_messages(items: Sequence[Mapping[str, Any]], origin: str) -> list[d
         else:
             messages.append({"role": role, "content": list(blocks)})
 
-    from desktop.core.harness.history import replayable
+    from desktop.core.harness.history import replayable, with_tool_picture_messages
 
-    for item in replayable(items):
+    for item in with_tool_picture_messages(replayable(items), supports_images):
         kind = item.get("type")
         if kind == "reasoning":
             if item.get("wc_origin") != origin:
@@ -161,7 +161,7 @@ def converse_body(request: Mapping[str, Any], route: Route, metadata: Mapping[st
     """The JSON body of ``converse-stream`` for the route, from the loop's request."""
     model = route.model
     cache = caches(model)
-    messages = converse_messages(request.get("input") or (), route.origin)
+    messages = converse_messages(request.get("input") or (), route.origin, supports_images=route.supports_images)
     if messages and cache:
         messages[-1]["content"].append(CACHE_POINT)
     body: dict[str, Any] = {"messages": messages}

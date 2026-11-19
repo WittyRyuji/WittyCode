@@ -70,7 +70,7 @@ def route_of(spec: ApiModelSpec, key: str | None, headers: Mapping[str, str]) ->
             del sent[existing]
         sent[name] = value
     return Route(kind, spec.base_url, spec.native, sent, spec.extra_args, spec.max_output, spec.thinking,
-                 spec.reasoning_args if spec.bedrock is None else {})
+                 spec.reasoning_args if spec.bedrock is None else {}, supports_images=spec.images)
 
 
 def api_failure(error: ChatGPTError, spec: ApiModelSpec) -> ChatGPTError:
@@ -194,7 +194,7 @@ class ApiBackend:
         mantle = kind == "openai"
         base = plan.base_url.rstrip("/") if plan.base_url else (f"https://bedrock-mantle.{plan.region}.api.aws/v1" if mantle else bedrock.endpoint(plan.region))
         wire = {"anthropic": ANTHROPIC, "openai": RESPONSES}.get(kind, "converse")
-        route = Route(wire, base, spec.native, {}, spec.extra_args, spec.max_output, spec.thinking)
+        route = Route(wire, base, spec.native, {}, spec.extra_args, spec.max_output, spec.thinking, supports_images=spec.images)
         headers: dict[str, str] = {"Content-Type": "application/json", **user_headers}
         if kind == BEDROCK:
             url, body = bedrock.model_url(base, spec.native, "converse-stream"), bedrock.converse_body(request, route, plan.metadata)

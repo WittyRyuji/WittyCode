@@ -36,6 +36,7 @@ from desktop.core.chatgpt.responses import (
     TextDone,
     Usage,
 )
+from desktop.core.harness.history import bounded_tool_images, replayable, tool_images_of, tool_output_text
 from desktop.core.llm.wire import DEFAULT_MAX_OUTPUT, Route, apply_reasoning_args, count, declared_functions, images_of, load_json, split_data_url, sse_data, text_of, usage_of
 
 log = logging.getLogger("desktop.llm")
@@ -69,7 +70,7 @@ def _arguments(text: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def anthropic_messages(items: Sequence[Mapping[str, Any]], origin: str) -> list[dict[str, Any]]:
+def anthropic_messages(items: Sequence[Mapping[str, Any]], origin: str, *, supports_images: bool = True) -> list[dict[str, Any]]:
     """The conversation as ``messages``: alternating roles, results before words, the same origin's thinking in front of its answer."""
     messages: list[dict[str, Any]] = []
 
@@ -81,9 +82,7 @@ def anthropic_messages(items: Sequence[Mapping[str, Any]], origin: str) -> list[
         else:
             messages.append({"role": role, "content": list(blocks)})
 
-    from desktop.core.harness.history import replayable
-
-    for item in replayable(items):
+    for item in bounded_tool_images(replayable(items)):
         kind = item.get("type")
         if kind == "reasoning":
             if item.get("wc_origin") != origin:
@@ -98,7 +97,15 @@ def anthropic_messages(items: Sequence[Mapping[str, Any]], origin: str) -> list[
         elif kind == "function_call":
             push("assistant", [{"type": "tool_use", "id": item.get("call_id", ""), "name": item.get("name", ""), "input": _arguments(item.get("arguments"))}])
         elif kind == "function_call_output":
-            push("user", [{"type": "tool_result", "tool_use_id": item.get("call_id", ""), "content": str(item.get("output", ""))}])
+            text = tool_output_text(item, supports_images)
+            pictures = tool_images_of(item) if supports_images else []
+            content: str | list[dict[str, Any]] = text
+            if pictures:
+                content = [{"type": "text", "text": text}, *(
+                    {"type": "image", "source": {"type": "base64", "media_type": picture["media_type"], "data": picture["data"]}}
+                    for picture in pictures
+                )]
+            push("user", [{"type": "tool_result", "tool_use_id": item.get("call_id", ""), "content": content}])
         elif kind == "message":
             blocks: list[dict[str, Any]] = []
             text = text_of(item)
@@ -152,7 +159,7 @@ def thinking_fields(model: str, effort: str | None, max_tokens: int, budget: int
 def anthropic_body(request: Mapping[str, Any], route: Route) -> dict[str, Any]:
     """The JSON body for the route, from the loop's request."""
     max_tokens = route.max_output or DEFAULT_MAX_OUTPUT
-    messages = anthropic_messages(request.get("input") or (), route.origin)
+    messages = anthropic_messages(request.get("input") or (), route.origin, supports_images=route.supports_images)
     if messages:
         messages[-1]["content"][-1] = {**messages[-1]["content"][-1], "cache_control": EPHEMERAL}
     body: dict[str, Any] = {"model": route.model, "max_tokens": max_tokens, "messages": messages, "stream": True}

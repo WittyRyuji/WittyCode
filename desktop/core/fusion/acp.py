@@ -174,7 +174,10 @@ class AcpRun:
             if self.watcher.finish_requested():
                 self.boundary = "plan"
                 self._stop()
-            reply = {"content": [{"type": "text", "text": result["output"]}]}
+            content = [{"type": "text", "text": result["output"]}]
+            content.extend({"type": "image", "data": image["data"], "mimeType": image["media_type"]}
+                           for image in result.get("wc_images", ()))
+            reply = {"content": content}
             self._replies[invocation] = (signature, reply)
             return reply
 

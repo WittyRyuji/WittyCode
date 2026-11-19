@@ -316,6 +316,46 @@ def test_duplicate_mcp_delivery_does_not_reexecute_or_reuse_an_id_for_other_argu
     asyncio.run(go())
 
 
+@pytest.mark.parametrize("model,vision", [("swe-2-high", True), ("glm-5-2", False)])
+def test_picture_tool_reply_reaches_the_fake_cli_and_replays_unchanged(tmp_path, model, vision):
+    import base64
+    from tests.fusion_acp_support import make_guarded_engine
+    from tests.tool_image_support import png
+
+    async def go():
+        harness = make_guarded_engine(tmp_path)
+        core, _, _, _, _ = await ready_core(tmp_path, devin_engine=harness.engine)
+        try:
+            await until(lambda: any(item["source"] == "devin" for item in core.catalog.models), timeout=20)
+            main_model = "devin:" + model
+            core.settings.fusion_main = core.settings.fusion_light = main_model
+            core.settings.fusion_workers = [main_model]
+            cid = (await core.call("session.new", {"projectId": str(tmp_path / "proj"), "fusion": True}))["id"]
+            main = core._by_cid[cid].controller
+            assert main.model == main_model
+            data = png()
+            (tmp_path / "proj" / "picture.png").write_bytes(data)
+            assert main.send_prompt("[fusion-picture] Inspect the picture")
+            await finish_turn(main)
+            assert main.saved.turns[-1].status == "done"
+            [reply_file] = (tmp_path / "guarded").rglob("picture-replies.json")
+            first, replay = json.loads(reply_file.read_text(encoding="utf-8"))
+            assert first == replay
+            [item] = [i for i in main.saved.items if i.get("type") == "function_call_output"]
+            text, *images = first["content"]
+            assert text == {"type": "text", "text": item["output"]}
+            if vision:
+                assert "picture.png (image/png, 2 x 3 px" in text["text"]
+                assert images == [{"type": "image", "data": base64.b64encode(data).decode("ascii"), "mimeType": "image/png"}]
+                assert item["wc_images"] == [{"data": images[0]["data"], "media_type": "image/png"}]
+            else:
+                assert "current model does not support images" in text["text"]
+                assert images == [] and "wc_images" not in item
+        finally:
+            await core.shutdown()
+    asyncio.run(go())
+
+
 def test_acp_startup_keeps_the_turns_reasoning_snapshot(tmp_path, monkeypatch):
     from desktop.core.fusion.acp import AcpRun
     from tests.fusion_acp_support import make_guarded_engine

@@ -52,7 +52,7 @@ from desktop.core.chatgpt.responses import (
 )
 
 from desktop.core.harness.compact import estimate_item, estimate_items, estimate_text, fixed_tokens, is_overflow
-from desktop.core.harness.history import replayable
+from desktop.core.harness.history import prune_tool_images, replayable
 
 log = logging.getLogger("desktop.harness")
 
@@ -107,6 +107,7 @@ class Outcome:
     """The user said no (or the turn was stopped): shown as cancelled rather than failed."""
     reference: str = ""
     """Immutable full output, retained separately from the model preview."""
+    images: list[dict[str, str]] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -586,6 +587,8 @@ class AgentLoop:
                 clip = clip_read_output if call.name == "read_file" and not outcome.is_error else clip_tokens
                 output = clip(output, budget)
             item = call_output(call.call_id, output + reference_note)
+            if outcome.images:
+                item["wc_images"] = outcome.images
             if outcome.reference:
                 item["wc_output_ref"] = outcome.reference
             if room is not None:
@@ -594,6 +597,13 @@ class AgentLoop:
                 if fits:
                     released += max(0, quota - used)  # Redistribute genuinely short results, not line-rounding slack.
             history.append(item)
+            if outcome.images:
+                first = prune_tool_images(history)
+                if first is not None:
+                    # An eviction can change a prefix whose size was measured before the latest tool step.
+                    if self._measured is not None and first < self._measured[0]:
+                        self._measured = None
+                    self._floor = 0
             answered.add(call.call_id)
             self.observer.history_grew([item])
 

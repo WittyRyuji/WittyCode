@@ -239,7 +239,7 @@ class HarnessTools:
         spec = self.registry.get(call.name)
         if spec is not None:
             result = await self.registry.run(call.name, call.args, self.context)
-            return Outcome(result.output, result.is_error, tuple(result.diffs))
+            return Outcome(result.output, result.is_error, tuple(result.diffs), images=result.images)
         client, tool = self._mcp[call.name]
         result_ = await client.call(tool.name, call.args)
         return Outcome(result_.text, result_.is_error)

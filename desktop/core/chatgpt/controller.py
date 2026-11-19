@@ -47,6 +47,7 @@ from desktop.core.context import ContextState, format_tokens
 from desktop.core.context_envelope import wrap as wrap_context
 from desktop.core.handoff import Handoff
 from desktop.core.harness import asking, compact, skills
+from desktop.core.harness.history import prune_tool_images
 from desktop.core.harness.loop import INTERRUPTED, AgentLoop, Call, Observer, Outcome, Steer, TurnEnd, Verdict
 from desktop.core.harness.mcp import McpClient, McpError, McpTool, parse_tools
 from desktop.core.harness.permissions import LEVELS
@@ -567,6 +568,8 @@ class ChatGPTController:
             if isinstance(path, Path):
                 protected.append(path)
         self._context = self._context or ToolContext(self.project, threading.Event(), protected=tuple(protected), outputs=self._outputs)
+        info = self.manager.model_info(self.running_model)
+        self._context.supports_images = info is not None and info.supports_images
         names = getattr(providers, "secret_environment_names", None)
         if names is not None:
             from desktop.core.providers import ProviderError
@@ -1703,6 +1706,8 @@ class _Watch(Observer):
     def history_grew(self, items: Sequence[dict[str, Any]]) -> None:
         if self.current:
             self.ctl.saved.items.extend(items)  # (the loop works on the view; the log is what the page and the file are made of)
+            if any(item.get("wc_images") for item in items):
+                prune_tool_images(self.ctl.saved.items)  # Include the part of the log that is no longer in the view.
             self.ctl._save_soon()
 
     def fixed(self) -> int:
