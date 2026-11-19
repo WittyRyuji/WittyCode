@@ -1,11 +1,15 @@
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { openPage } from "./cdp.mjs";
 
 const firstLine = "请核对示例清单中的编号、名称与状态，并将观察到的差异记录在报告中。".repeat(8);
 const brief = [firstLine, ...Array.from({ length: 12 }, (_, i) =>
   `样例 ${i + 1}：` + "逐项检查示例数据，记下预期结果与实际结果。核对完成后，整理一份便于复查的简要记录。".repeat(14))].join("\n\n");
 const now = Date.now();
-const agents = Array.from({ length: 12 }, (_, i) => ({
-  id: `expert-${i}`, name: `检查专家 ${i + 1}`, role: "工作专家", model: "GPT-6.1-Sol", effort: "high",
+export const agents = Array.from({ length: 12 }, (_, i) => ({
+  id: `expert-${i}`, name: `检查专家 ${i + 1}`, role: "工作专家", fusionRole: "worker",
+  fusionIdentity: i === 11 ? "Observer" : [0, 1, 3, 4, 5].includes(i) ? "Coder" : "Runner",
+  model: i === 1 ? "GPT-6-Luna" : "GPT-6.1-Sol", effort: "high",
   task: i === 0 ? brief : "核对一个样例。", status: ({ 2: "waiting", 3: "failed", 4: "stopped", 5: "pending", 11: "done" })[i] ?? "working",
   startedAt: now - i, finishedAt: [3, 4, 11].includes(i) ? now - i + 100 : null,
   tokens: i === 0 ? { input: 8500, output: 1500, cacheWrite: 2000, cacheRead: 12000 }
@@ -57,6 +61,12 @@ export function agentFlowColours() {
 
 const setMotion = (page, value) => page.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value }] });
 const flow = "#conversation-team .agent-flow";
+const nestButton = (identity) => `${flow} [data-id="group:${identity}"] button`;
+const nests = ["Coder", "Runner"];
+const overviewButton = `${flow} .agent-flow-overview`;
+const closedTree = { "group:Coder": "team-main", "group:Runner": "team-main", "expert:expert-11": "team-main" };
+const fullTree = { ...closedTree, ...Object.fromEntries(agents.filter((a) => a.fusionIdentity !== "Observer")
+  .map((a) => [`expert:${a.id}`, `group:${a.fusionIdentity}`])) };
 const flowIsMoving = `(() => {
   const graph = document.querySelector('${flow}');
   const working = [...graph.querySelectorAll('.agent-flow-edge.working')];
@@ -89,7 +99,7 @@ async function flowPixels(png, { x, y, width, height }) {
   }
   ctx.resetTransform();
   ctx.fillStyle = 'red';
-  for (const node of graph.querySelectorAll('.agent-flow-character')) {
+  for (const node of graph.querySelectorAll('.agent-flow-character, .agent-flow-overview')) {
     const r = node.getBoundingClientRect();
     ctx.fillRect(r.left - x - 2, r.top - y - 2, r.width + 4, r.height + 4);
   }
@@ -109,10 +119,15 @@ async function flowPixels(png, { x, y, width, height }) {
 
 async function checkDraft(page, label, ok) {
   const js = page.eval;
+  // In the focused Runner branch, expert-7 and its working wire are actually on screen.
+  const probe = '.react-flow__edge[data-id="expert:expert-7"] .agent-flow-particle';
   await page.click("textarea.input");
   const before = await js(`(() => {
     const graph = document.querySelector('${flow}');
-    const dot = graph.querySelector('.agent-flow-particle');
+    const dot = graph.querySelector('${probe}');
+    const r = graph.getBoundingClientRect(), m = dot.getScreenCTM();
+    const { x, y } = dot.getPointAtLength(dot.getTotalLength() / 2).matrixTransform(m);
+    if (x <= r.left || x >= r.right || y <= r.top || y >= r.bottom) throw new Error('working wire is outside the draft probe');
     window.draftFlowAnimation = dot.getAnimations()[0];
     return { time: draftFlowAnimation.currentTime, sends: __fake.callsOf('session.send').length };
   })()`);
@@ -130,7 +145,7 @@ async function checkDraft(page, label, ok) {
   await page.key("Backspace", { vk: 8 });
   const after = await js(`(() => {
     const graph = document.querySelector('${flow}');
-    const animation = graph.querySelector('.agent-flow-particle').getAnimations()[0];
+    const animation = graph.querySelector('${probe}').getAnimations()[0];
     const particles = [...graph.querySelectorAll('.agent-flow-particle')];
     return { value: document.querySelector('textarea.input').value, time: animation?.currentTime, sameAnimation: animation === draftFlowAnimation,
       sends: __fake.callsOf('session.send').length, attribution: !!graph.querySelector('.react-flow__attribution') || graph.textContent.includes('React Flow'),
@@ -144,9 +159,81 @@ async function checkDraft(page, label, ok) {
     new Set(frames.filter((f) => f.dotPixels.length > 0).map((f) => f.dotPixels.join(","))).size > 1, frames);
 }
 
+async function flowTopology(page, parents) {
+  const edges = Object.entries(parents);
+  await page.waitFor(`(() => {
+    const graph = document.querySelector('${flow}');
+    return graph?.querySelectorAll('.agent-flow-wire').length === ${edges.length} && ${JSON.stringify(Object.keys(parents))}.every((dst) =>
+      graph.querySelector('.react-flow__edge[data-id=' + CSS.escape(dst) + '] .agent-flow-wire'));
+  })()`);
+  return page.eval(`(() => {
+    const graph = document.querySelector('${flow}');
+    const rect = (el) => el.getBoundingClientRect();
+    const nodes = [...graph.querySelectorAll('.react-flow__node')];
+    const rings = new Map(nodes.map((n) => [n.dataset.id, rect(n.querySelector('.agent-flow-ring'))]));
+    const boxes = nodes.map(rect);
+    const chart = rect(graph);
+    const fits = boxes.every((b) => b.left >= chart.left && b.right <= chart.right && b.top >= chart.top && b.bottom <= chart.bottom);
+    const disjoint = boxes.every((a, i) => boxes.slice(i + 1).every((b) => a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top));
+    const expected = ${JSON.stringify(edges)};
+    const wires = expected.map(([dst, src]) => {
+      const path = graph.querySelector('.react-flow__edge[data-id=' + CSS.escape(dst) + '] .agent-flow-wire');
+      const from = rings.get(src), to = rings.get(dst);
+      if (!path || !from || !to) return { src, dst, correct: false };
+      const matrix = path.getScreenCTM();
+      const start = path.getPointAtLength(0).matrixTransform(matrix), end = path.getPointAtLength(path.getTotalLength()).matrixTransform(matrix);
+      const tolerance = 5 * matrix.a + 0.3;
+      const centered = (y, box) => Math.abs(y - (box.top + box.height / 2)) < 0.5;
+      return { src, dst, correct: from.right < to.left && Math.abs(start.x - from.right) <= tolerance && Math.abs(end.x - to.left) <= tolerance &&
+        centered(start.y, from) && centered(end.y, to) };
+    });
+    return { ids: nodes.map((n) => n.dataset.id), fits, disjoint, wires,
+      correct: nodes.length === expected.length + 1 && disjoint && wires.every((e) => e.correct) };
+  })()`);
+}
+
+export function agentFlowScreen() {
+  const graph = document.querySelector('.agent-flow');
+  const rect = graph.getBoundingClientRect();
+  const chart = { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+  const zoom = new DOMMatrixReadOnly(getComputedStyle(graph.querySelector('.react-flow__viewport')).transform).a;
+  const nodes = Object.fromEntries([...graph.querySelectorAll('.react-flow__node')].map((node) => {
+    const r = node.getBoundingClientRect(), name = node.querySelector('.agent-flow-name');
+    const visible = r.left >= rect.left + 0.5 && r.right <= rect.right - 0.5 && r.top >= rect.top + 0.5 && r.bottom <= rect.bottom - 0.5;
+    return [node.dataset.id, { x: r.x + r.width / 2, y: r.y + r.height / 2, visible, name: name.textContent,
+      namePx: zoom * parseFloat(getComputedStyle(name).fontSize), focused: node.contains(document.activeElement) }];
+  }));
+  return { chart, zoom, nodes, overview: !!graph.querySelector('.agent-flow-overview') };
+}
+
+const screenOf = (page) => page.eval(`(${agentFlowScreen.toString()})()`);
+const visibleNames = (screen, identity) => [screen.nodes[`group:${identity}`], ...agents.filter((a) => a.fusionIdentity === identity)
+  .map((a) => screen.nodes[`expert:${a.id}`])].filter((node) => node?.visible);
+const readableBranch = (screen, identity) => screen.zoom >= 0.8 && screen.nodes[`group:${identity}`].visible &&
+  visibleNames(screen, identity).filter((node) => node.namePx >= 10).length >= 2;
+
+async function panToExpert(page, id) {
+  const first = await screenOf(page);
+  for (let i = 0; i < 10; i++) {
+    const { chart, nodes, zoom } = await screenOf(page);
+    const node = nodes[id];
+    if (node.visible) return { from: first, to: { chart, zoom, node } };
+    const clamp = (delta, size) => Math.max(-size * 0.7, Math.min(delta, size * 0.7));
+    const dx = clamp(chart.x + chart.width / 2 - node.x, chart.width);
+    const dy = clamp(chart.y + chart.height / 2 - node.y, chart.height);
+    const x = chart.x + (chart.width - dx) / 2, y = chart.y + (chart.height - dy) / 2;
+    await page.mouse('mousePressed', x, y, { button: 'middle', buttons: 4 });
+    await page.mouse('mouseMoved', x + dx, y + dy, { button: 'middle', buttons: 4 });
+    await page.mouse('mouseReleased', x + dx, y + dy, { button: 'middle', buttons: 0 });
+    await page.wait(60);
+  }
+  throw new Error(`could not pan to ${id}`);
+}
+
 async function checkFlow(page, theme, label, ok) {
   const js = page.eval;
-  await page.waitFor(`document.querySelectorAll('#conversation-team .agent-flow-edge').length === ${agents.length} && document.documentElement.dataset.theme === '${theme}'`);
+  await page.waitFor(`document.documentElement.dataset.theme === '${theme}'`);
+  const closed = await flowTopology(page, closedTree);
   const layout = await js(`(() => {
     const graph = document.querySelector('#conversation-team .agent-flow');
     const rail = graph.closest('.conversation-rail-content');
@@ -157,9 +244,70 @@ async function checkFlow(page, theme, label, ok) {
       width, available: rail.clientWidth - parseFloat(inset.paddingLeft) - parseFloat(inset.paddingRight), height,
       nodes: graph.querySelectorAll('.react-flow__node').length, edges: graph.querySelectorAll('.agent-flow-edge').length };
   })()`);
-  ok(label("the flow sits beneath the title, fills the rail width, uses 25% of the window and includes the whole team"), layout.underTitle && layout.aboveList &&
-    Math.abs(layout.width - layout.available) <= 1 && Math.abs(layout.height - await js("innerHeight / 4")) <= 1 &&
-    layout.nodes === agents.length + 1 && layout.edges === agents.length, layout);
+  ok(label("the flow sits beneath the title, fills the rail width and uses 25% of the window"), layout.underTitle && layout.aboveList &&
+    Math.abs(layout.width - layout.available) <= 1 && Math.abs(layout.height - await js("innerHeight / 4")) <= 1, layout);
+  const summary = await js(`(() => {
+    const graph = document.querySelector('${flow}');
+    return { nests: [...graph.querySelectorAll('.react-flow__node-nest button')].map((b) => [
+      b.querySelector('.agent-flow-name').textContent, b.querySelector('.agent-flow-model').textContent, b.getAttribute('aria-expanded'),
+    ]), singleton: graph.querySelector('[data-id="expert:expert-11"] button .agent-flow-model')?.textContent };
+  })()`);
+  ok(label("real identities fold across models, separate same-model experts and leave a singleton as a directly clickable dragon"),
+    closed.correct && closed.fits && summary.singleton === "Observer" && JSON.stringify(summary.nests) === JSON.stringify([
+      ["Coder", "5 位 · 展开 ▸", "false"], ["Runner", "6 位 · 展开 ▸", "false"],
+    ]), { closed, summary });
+
+  const img = `${nestButton("Coder")} img`;
+  const selectedImage = (mime) => `(() => { const img = document.querySelector('${img}'); return img?.complete && img.naturalWidth === 48 && img.naturalHeight === 48 && img.currentSrc.startsWith('data:image/${mime};'); })()`;
+  await page.waitFor(selectedImage("gif"));
+  await page.waitFor(flowIsMoving);
+  await setMotion(page, "reduce");
+  await page.waitFor(selectedImage("png"));
+  await page.waitFor("matchMedia('(prefers-reduced-motion: reduce)').matches && document.querySelector('#conversation-team').getAnimations({ subtree: true }).length === 0");
+  ok(label("reduced motion chooses the PNG nest, hides the dots, retains static working wires and freezes waiting wires and sprites"), await js(`(() => {
+    const rail = document.querySelector('#conversation-team');
+    const dots = [...rail.querySelectorAll('.agent-flow-particle')], signals = [...rail.querySelectorAll('.agent-flow-signal')];
+    return ${selectedImage("png")} && dots.length > 0 && dots.every((dot) => getComputedStyle(dot).display === 'none') &&
+      signals.length === dots.length && signals.every((signal) => getComputedStyle(signal).display !== 'none') &&
+      rail.querySelectorAll('.dragon-sprite.playing').length > 0 &&
+      [...rail.querySelectorAll('.dragon-sprite.playing')].every((sprite) => getComputedStyle(sprite).backgroundPosition === '0px 0px');
+  })()`));
+  await setMotion(page, "no-preference");
+  await page.waitFor(selectedImage("gif"));
+
+  const expanded = (identity, state) => `document.querySelector('${nestButton(identity)}').getAttribute('aria-expanded') === '${state}'`;
+  const watched = await js("__fake.callsOf('agents.watch').length");
+  await page.click(nestButton("Coder"));
+  await page.waitFor(expanded("Coder", true));
+  const clickedCoder = await screenOf(page);
+  await page.key(" ", { code: "Space", vk: 32 });
+  await page.waitFor(expanded("Coder", false));
+  const viaSpace = await flowTopology(page, closedTree);
+  await page.key("Enter");
+  await page.waitFor(expanded("Coder", true));
+  const coder = await screenOf(page);
+  const coderFirst = 'expert:expert-0';
+  await page.key("Tab");
+  const viaTab = await screenOf(page);
+  ok(label("Tab brings the off-canvas first expert into view without changing zoom or opening the inspector"),
+    !coder.nodes[coderFirst].visible && viaTab.nodes[coderFirst].visible && viaTab.nodes[coderFirst].focused && viaTab.zoom === coder.zoom, viaTab.nodes[coderFirst]);
+  await page.click(overviewButton);
+  const oneTree = Object.fromEntries(Object.entries(fullTree).filter(([, src]) => src !== 'group:Runner'));
+  const overview = await flowTopology(page, oneTree);
+  await page.click(nestButton("Runner"));
+  await page.waitFor(expanded("Runner", true));
+  const openTree = await flowTopology(page, fullTree);
+  const runner = await screenOf(page);
+  const branch = (screen, identity) => ({ chart: screen.chart, zoom: screen.zoom, visible: visibleNames(screen, identity).map(({ name, namePx }) => ({ name, namePx })) });
+  const metrics = { coder: branch(clickedCoder, 'Coder'), runner: branch(runner, 'Runner') };
+  ok(label("a single and then a second expanded group frame readable names and adjacent members at native viewport size"),
+    readableBranch(clickedCoder, 'Coder') && readableBranch(coder, 'Coder') && readableBranch(runner, 'Runner') && !openTree.fits &&
+    (theme !== 'dark' || (runner.chart.width === 234 && runner.chart.height === 150)), metrics);
+  console.log(label(`focus metrics ${JSON.stringify(metrics)}`));
+  ok(label("click and native Space/Enter toggle only the nests; overview fits and all opened branches have their own space and wire endpoints"),
+    viaSpace.correct && viaSpace.fits && overview.correct && overview.fits && openTree.correct &&
+    await js(`!document.querySelector('.agentpanel') && __fake.callsOf('agents.watch').length === ${watched}`), { viaSpace, overview, openTree });
+  await checkDraft(page, label, ok);
 
   const portraits = await js(`(() => {
     const graph = document.querySelector('#conversation-team .agent-flow');
@@ -169,7 +317,8 @@ async function checkFlow(page, theme, label, ok) {
       const id = node.dataset.id;
       const rings = node.querySelectorAll('.agent-flow-ring');
       const ring = rings[0];
-      const sprite = ring?.querySelector('.dragon-sprite');
+      const nest = node.matches('.react-flow__node-nest');
+      const sprite = ring?.querySelector(nest ? '.agent-flow-nest-art img' : '.dragon-sprite');
       if (rings.length !== 1 || !sprite) return { id, rings: rings.length, hasSprite: !!sprite };
       const style = getComputedStyle(ring), image = getComputedStyle(sprite);
       const box = ring.getBoundingClientRect(), frame = sprite.getBoundingClientRect();
@@ -181,14 +330,16 @@ async function checkFlow(page, theme, label, ok) {
       const unclipped = style.overflowX === 'visible' && style.overflowY === 'visible' && style.clipPath === 'none' && image.clipPath === 'none';
       // Animation shifts the strip, so the same full 48×48 frame fits at every step.
       const sheetWidth = 48 * Number(image.getPropertyValue('--dragon-frames'));
-      const fullFrame = image.backgroundImage !== 'none' && image.backgroundSize === sheetWidth + 'px 48px' && frameSize.every((size) => near(size, 48));
+      const fullAsset = nest ? sprite.naturalWidth === 48 && sprite.naturalHeight === 48 && image.imageRendering === 'pixelated'
+        : image.backgroundImage !== 'none' && image.backgroundSize === sheetWidth + 'px 48px';
+      const fullFrame = fullAsset && frameSize.every((size) => near(size, 48));
       const fits = near(boxSize[0], boxSize[1]) && radii.every((r) => r === '0px') && border.every((w) => w > 0) && unclipped && fullFrame &&
         clearance.every((gap) => gap >= -0.01) && near(clearance[0], clearance[2]) && near(clearance[1], clearance[3]);
       return { id, fits, boxSize, frameSize, radii, border, clearance, unclipped, backgroundSize: image.backgroundSize };
     });
   })()`);
-  ok(label("every main and expert portrait has a sharp square border around its full centered 48×48 sprite"),
-    portraits.length === agents.length + 1 && portraits.every((portrait) => portrait.fits), portraits);
+  ok(label("every main, nest and expert portrait has a sharp square border around its full centered 48×48 image"),
+    portraits.length === agents.length + 1 + nests.length && portraits.every((portrait) => portrait.fits), portraits);
 
   await page.waitFor(flowIsMoving);
   const colours = await js(`(${agentFlowColours.toString()})()`);
@@ -197,31 +348,26 @@ async function checkFlow(page, theme, label, ok) {
     colours.gridContrast > 1.5 && colours.particleContrast >= 3 && Object.keys(colours.edges).length === 6 &&
     Object.values(colours.edges).every((edge) => edge.contrast >= 3 && edge.ringContrast >= 3), colours);
   const wires = await js("[...document.querySelectorAll('#conversation-team .agent-flow-wire')].map((wire) => wire.getAttribute('d'))");
-  ok(label("edges are right-angled polylines, not curves"), wires.length === agents.length && wires.every((d) => {
+  ok(label("edges are right-angled polylines, not curves"), wires.length === Object.keys(fullTree).length && wires.every((d) => {
     // React Flow writes a corner of radius 0 as a quadratic whose control point is its end point: still a sharp corner.
     const commands = [...d.matchAll(/([A-Za-z])([^A-Za-z]*)/g)].map((m) => [m[1], (m[2].match(/-?\d+(?:\.\d+)?/g) ?? []).map(Number)]);
     const sharp = commands.every(([name, n]) => name === "M" || name === "L" ? n.length === 2
       : name === "Q" && n.length === 4 && Math.abs(n[0] - n[2]) < 0.01 && Math.abs(n[1] - n[3]) < 0.01);
     const points = commands.map(([, n]) => n.slice(-2));
-    return sharp && points.length >= 4 && points.every(([x, y], i) => i === 0 || Math.abs(x - points[i - 1][0]) < 0.01 || Math.abs(y - points[i - 1][1]) < 0.01);
+    // Aligned handles may only need a straight horizontal segment.
+    return sharp && points.length >= 2 && points.every(([x, y], i) => i === 0 || Math.abs(x - points[i - 1][0]) < 0.01 || Math.abs(y - points[i - 1][1]) < 0.01);
   }), wires.slice(0, 3));
   ok(label("working edges move, waiting edges pulse, and done edges stay still"), await js(`(${flowIsMoving}) && (() => {
     const done = document.querySelector('${flow} .agent-flow-edge.done');
     return done.getAnimations({ subtree: true }).length === 0 && !done.querySelector('.agent-flow-particle');
   })()`));
-  await checkDraft(page, label, ok);
-  await setMotion(page, "reduce");
-  await page.waitFor("matchMedia('(prefers-reduced-motion: reduce)').matches && document.querySelector('#conversation-team').getAnimations({ subtree: true }).length === 0");
-  ok(label("reduced motion hides the dots, retains static working wires and freezes waiting wires and sprites"), await js(`(() => {
-    const rail = document.querySelector('#conversation-team');
-    const dots = [...rail.querySelectorAll('.agent-flow-particle')], signals = [...rail.querySelectorAll('.agent-flow-signal')];
-    return dots.length > 0 && dots.every((dot) => getComputedStyle(dot).display === 'none') &&
-      signals.length === dots.length && signals.every((signal) => getComputedStyle(signal).display !== 'none') &&
-      rail.querySelectorAll('.dragon-sprite.playing').length > 0 &&
-      [...rail.querySelectorAll('.dragon-sprite.playing')].every((sprite) => getComputedStyle(sprite).backgroundPosition === '0px 0px');
-  })()`));
-  await setMotion(page, "no-preference");
-  await page.waitFor(flowIsMoving);
+  const xOut = runner.chart.x + runner.chart.width / 2, yOut = runner.chart.y + runner.chart.height / 2;
+  await page.send('Input.dispatchMouseEvent', { type: 'mouseWheel', x: xOut, y: yOut, deltaX: 0, deltaY: 240 });
+  await page.wait(200);
+  const zoomedOut = await screenOf(page);
+  ok(label('wheel zoom can go below the automatic readable scale'), zoomedOut.zoom < 0.8, { before: runner.zoom, after: zoomedOut.zoom });
+  await page.click(nestButton("Runner"));
+  await page.waitFor(expanded("Runner", false));
 
   const viewport = () => js(`(() => {
     const rail = document.querySelector('.conversation-rail-content');
@@ -256,6 +402,50 @@ const chipsHaveSprites = (selector) => `(() => {
   });
 })()`;
 
+async function checkGroupUpdates(page, patch, sessionId, label, ok) {
+  const js = page.eval;
+  const [first, second, runner, observer] = [agents[0], agents[1], agents[2], agents[11]];
+  const compact = [first, { ...second, fusionIdentity: "Runner" }, runner, observer];
+  await patch({ agents: compact });
+  const shrunk = await flowTopology(page, { "expert:expert-0": "team-main", "group:Runner": "team-main", "expert:expert-11": "team-main" });
+  await page.click(nestButton("Runner"));
+  const moved = await flowTopology(page, {
+    "expert:expert-0": "team-main", "group:Runner": "team-main", "expert:expert-11": "team-main",
+    "expert:expert-1": "group:Runner", "expert:expert-2": "group:Runner",
+  });
+  const reform = [first, second, runner, observer];
+  await patch({ agents: reform });
+  const restored = await flowTopology(page, { "group:Coder": "team-main", "expert:expert-2": "team-main", "expert:expert-11": "team-main" });
+  ok(label("identity/count updates move the same expert id; shrinking shows the singleton and re-forming starts closed"),
+    shrunk.correct && shrunk.fits && moved.correct && restored.correct && restored.fits && await js(`document.querySelector('${nestButton("Coder")}').getAttribute('aria-expanded') === 'false'`),
+    { shrunk, moved, restored });
+
+  await page.click(nestButton("Coder"));
+  await page.waitFor(`document.querySelector('${nestButton("Coder")}').getAttribute('aria-expanded') === 'true'`);
+  const otherRow = await js("[...document.querySelectorAll('.srow')].findIndex((row) => row.textContent.includes('Devin 会话'))");
+  await page.click(".srow", otherRow);
+  const lastSelected = "__fake.events.findLast(([name, payload]) => name === 'tabs' && payload.select)[1].select";
+  await page.waitFor(`${lastSelected} !== ${JSON.stringify(sessionId)} && !!document.querySelector('.tab.current .dot-ready')`);
+  const otherSession = await js(lastSelected);
+  // Same identity and member ids must still start collapsed in a different conversation.
+  await js(`__fake.patch(${JSON.stringify(otherSession)}, ${JSON.stringify({ agents: reform })})`);
+  const other = await flowTopology(page, { "group:Coder": "team-main", "expert:expert-2": "team-main", "expert:expert-11": "team-main" });
+  ok(label("an expanded nest never leaks into another session"), other.correct && other.fits &&
+    await js(`document.querySelector('${nestButton("Coder")}').getAttribute('aria-expanded') === 'false'`), other);
+
+  if (await js('innerWidth === 1440')) {
+    await js("__fake.emit('settings', { settings: { maxOpen: 4, theme: 'light', fontScale: 'md', sidebarWidth: 300, conversationWidth: 420 } })");
+    await js(`__fake.patch(${JSON.stringify(otherSession)}, ${JSON.stringify({ agents: [first, second, runner] })})`);
+    await page.waitFor(`document.querySelector('${flow}').clientWidth >= 350 && !document.querySelector('${flow} [data-id="expert:expert-11"]')`);
+    await page.click(nestButton('Coder'));
+    const wide = await flowTopology(page, { 'group:Coder': 'team-main', 'expert:expert-2': 'team-main',
+      'expert:expert-0': 'group:Coder', 'expert:expert-1': 'group:Coder' });
+    const screen = await screenOf(page);
+    ok(label('when a wider canvas can fit the open tree legibly, it still fits the whole tree'), wide.correct && wide.fits &&
+      screen.zoom >= 0.8 && !screen.overview, { zoom: screen.zoom, chart: screen.chart });
+  }
+}
+
 export async function checkAgentsTeam({ url, scripts, ok }) {
   for (const [width, height, theme] of [[1440, 900, "light"], [1100, 600, "dark"]]) {
     const page = await openPage(url, { width, height, init: scripts, hideScrollbars: false });
@@ -288,6 +478,11 @@ export async function checkAgentsTeam({ url, scripts, ok }) {
       await checkFlow(page, theme, label, ok);
       await page.click("#conversation-team .agent-history-toggle");
       ok(label("every rail chip has a labelled 32×32 pixel dragon"), await js(chipsHaveSprites("#conversation-team")));
+      await js("document.querySelector('.conversation-rail-content').scrollTop = 0");
+      const panned = await panToExpert(page, 'expert:expert-0');
+      ok(label('middle-button panning reaches an initially off-canvas expert without zooming out'),
+        !panned.from.nodes['expert:expert-0'].visible && panned.to.node.visible && panned.to.node.namePx >= 10 &&
+        panned.from.zoom === panned.to.zoom, panned.to);
       await page.click('.agent-flow button[aria-label="查看专家 检查专家 1 · 运行中"]');
       await page.waitFor("document.querySelector('.agentpanel-run')?.textContent.includes('第 14 项')");
       ok(label("clicking an expert node opens its run in the inspector, with no second chart"), await js(`
@@ -358,7 +553,9 @@ export async function checkAgentsTeam({ url, scripts, ok }) {
       await page.click(".agentpanel .agent-history-toggle");
       ok(label("every inspector chip has a labelled 32×32 pixel dragon"), await js(chipsHaveSprites(".agentpanel")));
       await page.key("Escape");
-      ok(label("Escape closes the inspector without changing the conversation rail"), await js("!document.querySelector('.agentpanel') && !!document.querySelector('#conversation-team .agent-chip') && !document.querySelector('#conversation-team .agent-chip-tokens')"));
+      ok(label("Escape closes the inspector and returns to the conversation rail"), await js("!document.querySelector('.agentpanel') && !!document.querySelector('#conversation-team .agent-chip') && !document.querySelector('#conversation-team .agent-chip-tokens')"));
+      // The inspector replaces the rail, which remounts with its disclosures closed on return.
+      if (await js(`document.querySelector('${nestButton("Coder")}')?.getAttribute('aria-expanded') === 'false'`)) await page.click(nestButton("Coder"));
       const firstEdge = `${flow} .react-flow__edge[data-id="expert:${agents[0].id}"] .agent-flow-edge`;
       await patch({ agents: [{ ...agents[0], status: "waiting" }, ...agents.slice(1)] });
       await page.waitFor(`!!document.querySelector('${firstEdge}.waiting')`);
@@ -380,9 +577,27 @@ export async function checkAgentsTeam({ url, scripts, ok }) {
       })()`);
       ok(label("typing in an idle team leaves its wires static and the draft unsent"),
         idle.value === "Unsent sample draft edi - idle edit" && idle.sends === 0 && !idle.current && idle.animatedEdges === 0, idle);
+      await checkGroupUpdates(page, patch, id, label, ok);
       ok(label("no console errors or CSP violations"), page.errorTexts().length === 0, page.errorTexts());
     } finally {
       await page.close();
     }
   }
+}
+
+// Standalone focused check: pass a freshly built index.html under the managed test runner.
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  const work = process.env.WITTYCODE_TEST_WORK;
+  if (!work || !process.argv[2]) throw new Error("Use test_runs.py -- node frontend/scripts/check-agents-team.mjs <built index.html>");
+  const url = pathToFileURL(resolve(process.argv[2])).href;
+  process.chdir(work);  // Qt client extraction and the browser profile are disposable.
+  const { fakeBackendScripts } = await import("./fake-backend.mjs");
+  const { scripts, client } = fakeBackendScripts({ initHold: true });
+  console.log(`QWebChannel client: ${client}`);
+  let failed = 0;
+  await checkAgentsTeam({ url, scripts, ok: (name, pass, detail) => {
+    if (!pass) failed++;
+    console.log(pass ? "PASS" : "FAIL", name, !pass && detail !== undefined ? `\n     got: ${JSON.stringify(detail)}` : "");
+  } });
+  if (failed) process.exitCode = 1;
 }

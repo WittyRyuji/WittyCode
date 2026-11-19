@@ -21,3 +21,25 @@ export function groupAgents(agents: AgentInfo[]) {
   history.sort((a, b) => (b.finishedAt ?? b.startedAt) - (a.finishedAt ?? a.startedAt));
   return { active, history };
 }
+
+const GROUP_STATE_ORDER: AgentInfo["status"][] = ["waiting", "working", "pending", "failed", "stopped", "done"];
+const byText = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
+
+/** Model pools and workstream names do not identify an expert's assignment. */
+export function groupAgentIdentities(agents: readonly AgentInfo[]) {
+  const groups = new Map<string, AgentInfo[]>();
+  for (const agent of agents) {
+    const identity = agent.fusionIdentity?.trim() || agent.role?.trim() || "Sub-Agent";
+    const members = groups.get(identity);
+    if (members) members.push(agent);
+    else groups.set(identity, [agent]);
+  }
+  return [...groups].sort(([a], [b]) => byText(a, b)).map(([identity, members]) => ({
+    id: `group:${identity}`, identity,
+    members: members.sort((a, b) => byText(a.id, b.id)),
+    // Prefer user attention, then activity; a failure remains visible once the group is idle.
+    status: GROUP_STATE_ORDER.find((status) => members.some((agent) => agent.status === status)) ?? "pending",
+  }));
+}
+
+export type AgentIdentityGroup = ReturnType<typeof groupAgentIdentities>[number];

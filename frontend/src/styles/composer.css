@@ -99,7 +99,7 @@
   --flow-particle: #005440;
   --flow-idle: #536174; --flow-working: #006b53; --flow-waiting: #885000;
   --flow-done: #596b7b; --flow-stopped: #62666b; --flow-failed: #a62924;
-  position: relative; isolation: isolate; width: 100%; height: clamp(150px, 25vh, 340px); margin-bottom: 10px; overflow: hidden; overscroll-behavior: contain;
+  position: relative; isolation: isolate; width: 100%; height: clamp(150px, 25vh, 340px); margin-bottom: 10px; overflow: clip; overscroll-behavior: contain;
   border: 1px solid var(--ink); background-color: var(--flow-bg);
 }
 html[data-theme="dark"] .agent-flow {
@@ -112,9 +112,11 @@ html[data-theme="dark"] .agent-flow {
 }
 .agent-flow .react-flow__pane { cursor: inherit; }
 .agent-flow .react-flow__pane.dragging { cursor: grabbing; }
+.agent-flow-overview { position: absolute; top: 5px; left: 5px; z-index: 5; padding: 2px 5px; border: 1px solid var(--flow-idle); background: var(--flow-ring); color: var(--flow-label); font-size: 11px; line-height: 1.2; }
+.agent-flow-overview:hover { background: var(--flow-hover); }
 .agent-flow .react-flow__handle { top: 25px; opacity: 0; pointer-events: none; }
-.agent-flow .react-flow__handle-left { left: 18px; }
-.agent-flow .react-flow__handle-right { right: 18px; }
+.agent-flow .react-flow__handle-left { left: calc(50% - 25px); }
+.agent-flow .react-flow__handle-right { right: calc(50% - 25px); }
 .agent-flow-node, .agent-flow-edge { --agent-wire: var(--flow-idle); }
 .agent-flow-node.working, .agent-flow-edge.working { --agent-wire: var(--flow-working); }
 .agent-flow-node.waiting, .agent-flow-edge.waiting { --agent-wire: var(--flow-waiting); }
@@ -125,6 +127,7 @@ html[data-theme="dark"] .agent-flow {
 button.agent-flow-character { pointer-events: auto; }
 button.agent-flow-character:hover, button.agent-flow-character:focus-visible { background: var(--flow-hover); outline: 1px solid var(--agent-wire); outline-offset: 1px; }
 .agent-flow-ring { display: grid; place-items: center; width: 50px; height: 50px; border: 1px solid var(--agent-wire); border-radius: 0; background: var(--flow-ring); }
+.agent-flow-nest-art, .agent-flow-nest-art img { display: block; image-rendering: pixelated; }
 .agent-flow-name, .agent-flow-model { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-flow-name { font-size: 13px; font-weight: 600; }
 .agent-flow-model { font-size: 11px; color: var(--flow-model); }

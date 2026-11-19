@@ -249,6 +249,8 @@ export interface AgentInfo {
   fusionState?: "idle" | "running" | "done" | "failed" | "interrupted" | "retired" | null;
   fusionModel?: string | null;
   fusionRole?: "worker" | "light" | null;
+  /** The actual Fusion assignment (e.g. Coder), independent of the model pool above. */
+  fusionIdentity?: string | null;
   startedAt: number;
   finishedAt: number | null;
 }

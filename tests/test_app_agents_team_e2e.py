@@ -58,6 +58,8 @@ def test_team_rail_and_agent_prompts_do_not_depend_on_a_plan(qapp, loop, tmp_pat
                 await rig.click(".agents-toggle")
                 await rig.wait_for(".conversation-rail .agentbar")
             assert await rig.js("document.documentElement.scrollWidth <= innerWidth")
+            assert not await rig.exists(".agent-flow .react-flow__node-nest")
+            assert await rig.text(".agent-flow button .agent-flow-model") == "工作专家"  # Legacy delegate_task carries only a role.
             assert rig.window.grab().save(str(tmp_path / f"agents-team-{size[0]}.png"))
             await rig.click(".agent-chip")
             await rig.wait_for(".agentpanel .prompt.perm")
@@ -124,6 +126,49 @@ def test_team_rail_and_agent_prompts_do_not_depend_on_a_plan(qapp, loop, tmp_pat
             assert await rig.js("document.querySelector('.input').value") == "Draft for the main agent"
             assert not await rig.js("document.querySelector('.agentbar').textContent.includes('子任务')")
             assert await rig.exists(".planpanel") == with_plan
+        finally:
+            await rig.finish()
+
+    run(loop, scenario())
+
+
+@pytest.mark.fusion_gates("brief")
+def test_team_receives_fusion_record_identities(qapp, loop, tmp_path):
+    async def scenario():
+        rig = await open_rig(tmp_path)
+        try:
+            model = "chatgpt:gpt-6-luna"
+            for key, value in {"fusionMain": "chatgpt:gpt-6.1-sol", "fusionWorkers": [model], "fusionLight": model}.items():
+                await rig.core.call("settings.set", {"key": key, "value": value})
+            await select_fusion(rig)
+
+            def delegate(identity, workstream):
+                return call("delegate_task", {
+                    "identity": identity, "workstream": workstream, "goal": "Check a local example.",
+                    "constraints": "Do not write files.", "acceptance": "Report the result.",
+                    "paths": [], "read_only": True, "budget": {"steps": 8},
+                }, call_id=f"delegate-{workstream}", item_id=f"fc-{workstream}")
+
+            rig.plan.script(delegate("Coder", "Inventory"), say("Inventory expert result."),
+                            delegate("Runner", "Coverage"), say("Coverage expert result."),
+                            delegate("Coder", "Login"), say("Login expert result."), say("Identity reports checked."))
+            await rig.send("Check the three examples")
+            await rig.wait_text(".conversation-column .transcript", "Identity reports checked.")
+            conv = rig.core.order[0]
+            agents = rig.core._agents_json(conv)
+            assert [(a["fusionIdentity"], a["fusionModel"]) for a in agents] == [(identity, model) for identity in ("Coder", "Runner", "Coder")]
+            graph = ".conversation-rail .agent-flow"
+            nest = f'{graph} [data-id="group:Coder"] button'
+            await rig.wait_for(nest)
+            assert await rig.text(nest + " .agent-flow-name") == "Coder"
+            assert "2 位" in await rig.text(nest + " .agent-flow-model")
+            assert await rig.text(graph + " .react-flow__node-dragon button .agent-flow-model") == "Runner"
+            assert await rig.count(graph + " .react-flow__node") == 3  # One root, one nest, one actual dragon.
+            await rig.click(nest)
+            await rig.wait_for(graph + " .react-flow__node", 5)
+            assert not await rig.exists(".agentpanel")
+            await rig.click_text(graph + " .react-flow__node-dragon button", "Coder-Login")
+            await rig.wait_text(".agentpanel-run", "Login expert result.")
         finally:
             await rig.finish()
 
