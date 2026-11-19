@@ -24,6 +24,7 @@ from desktop.core.devin.models import current_value
 from desktop.core.devin.policy import CANCELLED
 from desktop.core.engine_errors import EngineRpcError
 from desktop.core.fusion.acp_server import ADDRESS, AUTH, MCP_CALL, MCP_LIST, MCP_WRAPPERS, PREFIX, SERVER, private_mcp_name
+from desktop.core.fusion.tools import CHOOSE_MAP, RATE_RECORDS, READ_RECORD, SUBMIT_REPORT, SUBMIT_ROUTE, UPDATE_MAP
 from desktop.core.harness.loop import AgentLoop, Call, TurnEnd
 from desktop.core.memory.launch import PACKAGE_ROOT, console_python
 
@@ -147,7 +148,7 @@ class AcpRun:
             name, args = params.get("name"), params.get("arguments", {})
             if not isinstance(name, str) or not isinstance(args, dict) or not self.tools.known(name):
                 raise ValueError("Unknown Fusion tool.")
-            if self.steps >= self.host.manager.settings.max_steps:
+            if self.steps >= self.host.turn_step_limit():
                 self.boundary = "step_limit"
                 self._stop()
                 raise ValueError("The turn reached its step limit.")
@@ -171,13 +172,16 @@ class AcpRun:
                 self._stop()
                 raise
             result = next(item for item in reversed(self.history) if item.get("type") == "function_call_output" and item.get("call_id") == ident)
-            if self.watcher.finish_requested():
-                self.boundary = "plan"
+            if reason := self.watcher.finish_requested():
+                self.boundary = reason
                 self._stop()
             content = [{"type": "text", "text": result["output"]}]
             content.extend({"type": "image", "data": image["data"], "mimeType": image["media_type"]}
                            for image in result.get("wc_images", ()))
             reply = {"content": content}
+            if (name in (READ_RECORD, SUBMIT_REPORT, SUBMIT_ROUTE, RATE_RECORDS, CHOOSE_MAP, UPDATE_MAP)
+                    and self.host.saved.tools.get(ident, {}).get("status") == "error"):
+                reply["isError"] = True
             self._replies[invocation] = (signature, reply)
             return reply
 
@@ -349,13 +353,14 @@ class AcpRun:
                 raise ChatGPTError("Devin 未确认加载 Fusion 执行前保护；未发送模型请求。请检查 Hook/Python 启动配置及 CLI 兼容性。", code="fusion_acp_guard") from None
             raise ChatGPTError("Fusion ACP 工具桥未就绪；未发送模型请求。请检查 Python/MCP 启动配置。", code="fusion_acp_bridge") from None
 
-    async def run(self, tools: Any, watcher: Any, history: list[dict[str, Any]], sent: str, attachments: Any, instructions: str) -> TurnEnd:
+    async def run(self, tools: Any, watcher: Any, history: list[dict[str, Any]], sent: str, attachments: Any, instructions: str,
+                  *, steps_used: int = 0) -> TurnEnd:
         from desktop.core.devin.items import prompt_blocks
         from desktop.core.usage import Tokens
         from desktop.core.chatgpt.responses import Usage
         self.tools, self.watcher, self.history = tools, watcher, history
         self.loop = AgentLoop(None, tools, watcher, model=self.host.model, reasoning=None, instructions=instructions)
-        self.steps, self.boundary, self.violation = 0, "", ""
+        self.steps, self.boundary, self.violation = steps_used, "", ""
         self.reported = False
         self._usage.clear()
         requested = False
@@ -424,6 +429,9 @@ class AcpRun:
         finally:
             self.active = False
             self._flush()
+            if requested and fusion is not None:
+                # ACP reports whole-prompt totals, not the first native model request's input.
+                fusion.metric_request(self.host.session_id, bool(self._usage))
             if self._usage:
                 tokens = Tokens()
                 for more in self._usage.values():

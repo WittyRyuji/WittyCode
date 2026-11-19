@@ -18,6 +18,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from desktop.core.fusion.gates import GATES
 from desktop.core.fusion.reasoning import reasoning_map
 
 log = logging.getLogger("desktop.settings")
@@ -119,6 +120,14 @@ class AppSettings:
     fusion_max_calls: int = 8  # Legacy defaults are kept for settings compatibility, not applied to new sessions.
     fusion_max_tokens: int = 500_000
     fusion_max_seconds: int = 900
+    fusion_gates: dict[str, bool] = field(default_factory=dict)
+    fusion_drive_shared: bool = False
+    fusion_drive_warm: float = 0.5
+    fusion_drive_keep_days: int = 7
+    fusion_drive_qk: float = 0.6
+    fusion_drive_auto_delete: bool = False
+    fusion_drive_max_gb: float = 5.0
+    fusion_observer_judgement: bool = False
     think_chinese: bool = True
     """Legacy fallback for thinking_language when no explicit language has been saved."""
     answer_language: str = "auto"
@@ -308,6 +317,14 @@ def settings_from_dict(raw: object) -> AppSettings:
         fusion_reasoning = reasoning_map(raw.get("fusion_reasoning", {}))
     except ValueError:
         fusion_reasoning = {}
+    raw_gates = raw.get("fusion_gates")
+    fusion_gates = {name: raw_gates[name] for name in GATES if isinstance(raw_gates.get(name), bool)} if isinstance(raw_gates, dict) else {}
+
+    def fusion_float(name: str, low: float, high: float) -> float:
+        value = raw.get(name)
+        if type(value) in (int, float) and low <= value <= high:
+            return float(value)
+        return getattr(defaults, name)
 
     splitter = raw.get("splitter_sizes")
     if not (
@@ -394,6 +411,14 @@ def settings_from_dict(raw: object) -> AppSettings:
         fusion_max_calls=raw.get("fusion_max_calls") if isinstance(raw.get("fusion_max_calls"), int) and not isinstance(raw.get("fusion_max_calls"), bool) and 1 <= raw["fusion_max_calls"] <= 1000 else defaults.fusion_max_calls,
         fusion_max_tokens=raw.get("fusion_max_tokens") if isinstance(raw.get("fusion_max_tokens"), int) and not isinstance(raw.get("fusion_max_tokens"), bool) and 1 <= raw["fusion_max_tokens"] <= 2**53 - 1 else defaults.fusion_max_tokens,
         fusion_max_seconds=raw.get("fusion_max_seconds") if isinstance(raw.get("fusion_max_seconds"), int) and not isinstance(raw.get("fusion_max_seconds"), bool) and 1 <= raw["fusion_max_seconds"] <= 86_400 else defaults.fusion_max_seconds,
+        fusion_gates=fusion_gates,
+        fusion_drive_shared=raw.get("fusion_drive_shared") if isinstance(raw.get("fusion_drive_shared"), bool) else defaults.fusion_drive_shared,
+        fusion_drive_warm=fusion_float("fusion_drive_warm", 0, 1),
+        fusion_drive_keep_days=raw.get("fusion_drive_keep_days") if type(raw.get("fusion_drive_keep_days")) is int and 1 <= raw["fusion_drive_keep_days"] <= 3650 else defaults.fusion_drive_keep_days,
+        fusion_drive_qk=fusion_float("fusion_drive_qk", -1, 1),
+        fusion_drive_auto_delete=raw.get("fusion_drive_auto_delete") if isinstance(raw.get("fusion_drive_auto_delete"), bool) else defaults.fusion_drive_auto_delete,
+        fusion_drive_max_gb=fusion_float("fusion_drive_max_gb", 0.1, 1000),
+        fusion_observer_judgement=raw.get("fusion_observer_judgement") if isinstance(raw.get("fusion_observer_judgement"), bool) else defaults.fusion_observer_judgement,
         think_chinese=think_chinese,
         answer_language=text("answer_language", LANGUAGES),
         thinking_language=text("thinking_language", ("", *LANGUAGES)),

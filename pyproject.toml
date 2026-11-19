@@ -22,4 +22,5 @@ pythonpath = ["."]
 addopts = "-ra"
 markers = [
     "ui: drives the real Qt WebEngine page (runs offscreen, no live model calls)",
+    "fusion_gates: use the production defaults for Fusion gates",
 ]
