@@ -4008,7 +4008,8 @@ class AppCore:
 
     async def _m_connections_list(self, params: dict[str, Any]) -> dict[str, Any]:
         try:
-            return await asyncio.to_thread(self.connections.scan, self._connection_project(params))
+            scan = await asyncio.to_thread(self.connections.scan, self._connection_project(params))
+            return {**scan, "builtinHooks": self.hooks.builtin_prompt_hooks()}
         except ConnectionError as error:
             raise AppError(str(error)) from error
 

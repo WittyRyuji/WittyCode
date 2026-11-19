@@ -20,6 +20,7 @@ import qasync
 
 from desktop.core.app_core import AppCore
 from desktop.core.cache import Cache
+from desktop.core.hooks import MANAGED_TEST_HOOK
 from desktop.core.memory.launch import MemoryLaunch
 from desktop.core.settings import SETTINGS_ENV, AppSettings, default_settings_path, load_settings, migrate_legacy_settings
 from desktop.ui.shell import APP_TITLE, MainWindow, release_profile
@@ -160,6 +161,8 @@ def build_application(options: argparse.Namespace, qt_args: list[str] | None = N
         cache=Cache(default_settings_path().parent / "cache"),
         memory=memory,
     )
+    # AppCore shares this registry with every engine, including those used by delegated experts.
+    core.hooks.on_prompt(MANAGED_TEST_HOOK)
     window.attach(core)
     return AppContext(app, loop, core, window, options)
 

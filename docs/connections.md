@@ -40,6 +40,14 @@ Windows 上会按服务器的 `PATH`／`PATHEXT` 查找 `npx.cmd` 等入口，�
 
 Codex 激活配置与 Hooks 来源规则参见 [官方配置参考](https://developers.openai.com/codex/config-file/config-reference) 与 [官方 Hooks 文档](https://developers.openai.com/codex/hooks)。本地适配器只采用上面明确列出的子集，不把缓存文件当作官方安装状态。
 
+## 内置 Hook：测试收尾
+
+在「设置 → 插件管理 → Hooks → WittyCode 官方内置」可以看到「测试收尾」。它随客户端启用，全局和项目视图都可见，不需要导入，也不使用外部 Hook 的编辑和信任流程。它要求每个经过客户端的会话（包括子代理）通过本会话独立的运行入口做测试；父会话、其他线程或同项目的并发会话不能代为清理。运行入口不接受要删除的路径，也不扫描工作区或会话历史。
+
+从会话的项目根目录用 `python <WittyCode 安装目录>/desktop/core/test_runs.py -- <可执行程序> <参数>` 运行前台测试，已有托管收尾的入口（如 WittyCode 仓库的 `scripts/check_ci.py`）直接运行，不再套一层。命令可通过 `WITTYCODE_TEST_WORK` 找到本轮的仓库外临时目录，通过 `WITTYCODE_TEST_EVIDENCE` 保存必要的证据；结束后作用域内的临时文件会被清理，退出状态和显式保存的证据留在 `outputs/test-runs/`。不要把临时环境创建在真实项目、证据目录或其他会话的目录内。
+
+未登记的命令、外部引擎绕过客户端的原生工具，以及脱离前台运行入口的进程，不在自动清理的覆盖范围。入口被强制终止时可能来不及收尾；不会通过跨会话扫描来兜底。上线前的历史残留也不自动处理。
+
 ## Factory CLI
 
 在「账号与模型」或「外部程序」指定 `droid` 路径（留空从 PATH 检测），按需启用。先在终端运行 Factory CLI 完成它自己的登录，WittyCode 不复制它的凭据或 API 模型设置。

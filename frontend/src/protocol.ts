@@ -263,7 +263,10 @@ export interface ConnectionEntry {
   id: string; kind: "skill" | "plugin" | "hook" | "mcp"; name: string; source: string; project: string;
   config: Record<string, unknown>; enabled: boolean; imported: boolean; changed?: boolean; parent?: string;
 }
-export interface ConnectionScan { items: ConnectionEntry[]; errors: { source: string; text: string }[]; hookEvents: string[] }
+export interface BuiltinHookInfo { id: string; name: string; description: string }
+export interface ConnectionScan {
+  items: ConnectionEntry[]; errors: { source: string; text: string }[]; hookEvents: string[]; builtinHooks?: BuiltinHookInfo[];
+}
 export interface ConnectionPreview { preview: string; items: ConnectionEntry[]; commands: { name: string; kind: string; command: string; args: string[] }[] }
 
 export type ConnectorId = "github" | "google-workspace";
