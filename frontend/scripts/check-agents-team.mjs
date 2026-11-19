@@ -39,7 +39,7 @@ export function agentFlowColours() {
   const label = style(".agent-flow-name").color;
   const model = style(".agent-flow-model").color;
   const grid = style(".react-flow__background-pattern.dots").fill;
-  const particle = $(".agent-flow-particle") ? style(".agent-flow-particle").fill : null;
+  const particle = $(".agent-flow-particle") ? style(".agent-flow-particle").stroke : null;
   const edges = {};
   for (const state of ["pending", "working", "waiting", "done", "stopped", "failed"]) {
     const edge = $(`.agent-flow-edge.${state}`);
@@ -56,14 +56,93 @@ export function agentFlowColours() {
 }
 
 const setMotion = (page, value) => page.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value }] });
+const flow = "#conversation-team .agent-flow";
 const flowIsMoving = `(() => {
-  const graph = document.querySelector('#conversation-team .agent-flow');
-  const working = graph?.querySelector('.agent-flow-edge.working');
-  const waiting = graph?.querySelector('.agent-flow-edge.waiting .agent-flow-wire');
+  const graph = document.querySelector('${flow}');
+  const working = [...graph.querySelectorAll('.agent-flow-edge.working')];
+  const waiting = graph.querySelector('.agent-flow-edge.waiting .agent-flow-wire');
   const running = (node) => node?.getAnimations().some((a) => a.playState === 'running');
-  return matchMedia('(prefers-reduced-motion: no-preference)').matches &&
-    working?.querySelectorAll('animateMotion').length === 2 && running(working.querySelector('.agent-flow-signal')) && running(waiting);
+  return matchMedia('(prefers-reduced-motion: no-preference)').matches && working.length > 0 && running(waiting) &&
+    working.every((edge) => running(edge.querySelector('.agent-flow-signal')) && running(edge.querySelector('.agent-flow-particle')));
 })()`;
+
+// Inspect the composited browser screenshot, not just the SVG elements' declared positions.
+async function flowPixels(png, { x, y, width, height }) {
+  const graph = document.querySelector('#conversation-team .agent-flow');
+  const image = new Image();
+  image.src = `data:image/png;base64,${png}`;
+  await image.decode();
+  const canvas = document.createElement('canvas');
+  Object.assign(canvas, { width, height });
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(image, 0, 0);
+  const pixels = ctx.getImageData(0, 0, width, height).data;
+  ctx.clearRect(0, 0, width, height);
+  // Mask wires with room for their round caps and antialiasing. Portraits can legitimately contain green pixels.
+  ctx.lineCap = ctx.lineJoin = 'round';
+  ctx.strokeStyle = 'lime';
+  for (const wire of graph.querySelectorAll('.agent-flow-edge.working .agent-flow-wire')) {
+    const m = wire.getScreenCTM();
+    ctx.setTransform(m.a, m.b, m.c, m.d, m.e - x, m.f - y);
+    ctx.lineWidth = 6 + 4 / m.a;
+    ctx.stroke(new Path2D(wire.getAttribute('d')));
+  }
+  ctx.resetTransform();
+  ctx.fillStyle = 'red';
+  for (const node of graph.querySelectorAll('.agent-flow-character')) {
+    const r = node.getBoundingClientRect();
+    ctx.fillRect(r.left - x - 2, r.top - y - 2, r.width + 4, r.height + 4);
+  }
+  const mask = ctx.getImageData(0, 0, width, height).data;
+  const colour = (selector) => getComputedStyle(graph.querySelector(selector)).stroke.match(/\d+/g).slice(0, 3).map(Number);
+  const dot = colour('.agent-flow-particle'), signal = colour('.agent-flow-signal');
+  const near = (rgb, i) => rgb.every((channel, c) => Math.abs(channel - pixels[i + c]) <= 16);
+  const dotPixels = [];
+  let offWire = 0;
+  for (let i = 0; i < pixels.length; i += 4) {
+    if (mask[i] > 0) continue;
+    if (mask[i + 1] > 0 && near(dot, i)) dotPixels.push(i / 4);
+    if (mask[i + 3] === 0 && (near(dot, i) || near(signal, i))) offWire++;
+  }
+  return { dotPixels, offWire };
+}
+
+async function checkDraft(page, label, ok) {
+  const js = page.eval;
+  await page.click("textarea.input");
+  const before = await js(`(() => {
+    const graph = document.querySelector('${flow}');
+    const dot = graph.querySelector('.agent-flow-particle');
+    window.draftFlowAnimation = dot.getAnimations()[0];
+    return { time: draftFlowAnimation.currentTime, sends: __fake.callsOf('session.send').length };
+  })()`);
+  const frames = [];
+  for (const text of ["Unsent ", "sample ", "draft ", "edit"]) {
+    await page.type(text);
+    const clip = await js(`(() => {
+      const { left, top, right, bottom } = document.querySelector('${flow}').getBoundingClientRect();
+      const x = Math.ceil(left), y = Math.ceil(top);
+      return { x, y, width: Math.floor(right) - x, height: Math.floor(bottom) - y };
+    })()`);
+    const { data } = await page.send("Page.captureScreenshot", { format: "png", clip: { ...clip, scale: 1 } });
+    frames.push(await js(`(${flowPixels.toString()})(${JSON.stringify(data)}, ${JSON.stringify(clip)})`));
+  }
+  await page.key("Backspace", { vk: 8 });
+  const after = await js(`(() => {
+    const graph = document.querySelector('${flow}');
+    const animation = graph.querySelector('.agent-flow-particle').getAnimations()[0];
+    const particles = [...graph.querySelectorAll('.agent-flow-particle')];
+    return { value: document.querySelector('textarea.input').value, time: animation?.currentTime, sameAnimation: animation === draftFlowAnimation,
+      sends: __fake.callsOf('session.send').length, attribution: !!graph.querySelector('.react-flow__attribution') || graph.textContent.includes('React Flow'),
+      attached: particles.length === graph.querySelectorAll('.agent-flow-edge.working').length && !graph.querySelector('animateMotion') &&
+        particles.every((p) => p.matches('.working > path') && p.getAttribute('d') === p.parentNode.querySelector('.agent-flow-wire').getAttribute('d')) };
+  })()`);
+  ok(label("real draft edits do not send, interrupt the working animation, or reveal React Flow attribution"),
+    after.value === "Unsent sample draft edi" && after.sends === before.sends && after.sameAnimation && after.time > before.time && !after.attribution, { before, after });
+  ok(label("current dots move along working wires without spilling into the empty canvas while typing"),
+    after.attached && frames.every((f) => f.offWire === 0) &&
+    new Set(frames.filter((f) => f.dotPixels.length > 0).map((f) => f.dotPixels.join(","))).size > 1, frames);
+}
 
 async function checkFlow(page, theme, label, ok) {
   const js = page.eval;
@@ -127,14 +206,18 @@ async function checkFlow(page, theme, label, ok) {
     return sharp && points.length >= 4 && points.every(([x, y], i) => i === 0 || Math.abs(x - points[i - 1][0]) < 0.01 || Math.abs(y - points[i - 1][1]) < 0.01);
   }), wires.slice(0, 3));
   ok(label("working edges move, waiting edges pulse, and done edges stay still"), await js(`(${flowIsMoving}) && (() => {
-    const done = document.querySelector('#conversation-team .agent-flow-edge.done');
-    return done.querySelector('.agent-flow-wire').getAnimations().length === 0 && !done.querySelector('animateMotion');
+    const done = document.querySelector('${flow} .agent-flow-edge.done');
+    return done.getAnimations({ subtree: true }).length === 0 && !done.querySelector('.agent-flow-particle');
   })()`));
+  await checkDraft(page, label, ok);
   await setMotion(page, "reduce");
-  await page.waitFor("matchMedia('(prefers-reduced-motion: reduce)').matches && !document.querySelector('.agent-flow animateMotion')");
-  ok(label("reduced motion removes moving particles and freezes wires and sprites"), await js(`(() => {
+  await page.waitFor("matchMedia('(prefers-reduced-motion: reduce)').matches && document.querySelector('#conversation-team').getAnimations({ subtree: true }).length === 0");
+  ok(label("reduced motion hides the dots, retains static working wires and freezes waiting wires and sprites"), await js(`(() => {
     const rail = document.querySelector('#conversation-team');
-    return rail.querySelectorAll('.dragon-sprite.playing').length > 0 && rail.getAnimations({ subtree: true }).length === 0 &&
+    const dots = [...rail.querySelectorAll('.agent-flow-particle')], signals = [...rail.querySelectorAll('.agent-flow-signal')];
+    return dots.length > 0 && dots.every((dot) => getComputedStyle(dot).display === 'none') &&
+      signals.length === dots.length && signals.every((signal) => getComputedStyle(signal).display !== 'none') &&
+      rail.querySelectorAll('.dragon-sprite.playing').length > 0 &&
       [...rail.querySelectorAll('.dragon-sprite.playing')].every((sprite) => getComputedStyle(sprite).backgroundPosition === '0px 0px');
   })()`));
   await setMotion(page, "no-preference");
@@ -201,7 +284,7 @@ export async function checkAgentsTeam({ url, scripts, ok }) {
       const id = await js("__fake.events.findLast(([name, payload]) => name === 'tabs' && payload.select)[1].select");
       const patch = (changes) => js(`__fake.patch(${JSON.stringify(id)}, ${JSON.stringify(changes)})`);
       await js(`__fake.emit('settings', { settings: { maxOpen: 4, theme: '${theme}', fontScale: 'md', sidebarWidth: 300 } })`);
-      await patch({ agents, agentRuns: runs });
+      await patch({ mark: "running", agents, agentRuns: runs });
       await checkFlow(page, theme, label, ok);
       await page.click("#conversation-team .agent-history-toggle");
       ok(label("every rail chip has a labelled 32×32 pixel dragon"), await js(chipsHaveSprites("#conversation-team")));
@@ -276,6 +359,27 @@ export async function checkAgentsTeam({ url, scripts, ok }) {
       ok(label("every inspector chip has a labelled 32×32 pixel dragon"), await js(chipsHaveSprites(".agentpanel")));
       await page.key("Escape");
       ok(label("Escape closes the inspector without changing the conversation rail"), await js("!document.querySelector('.agentpanel') && !!document.querySelector('#conversation-team .agent-chip') && !document.querySelector('#conversation-team .agent-chip-tokens')"));
+      const firstEdge = `${flow} .react-flow__edge[data-id="expert:${agents[0].id}"] .agent-flow-edge`;
+      await patch({ agents: [{ ...agents[0], status: "waiting" }, ...agents.slice(1)] });
+      await page.waitFor(`!!document.querySelector('${firstEdge}.waiting')`);
+      ok(label("a working expert that starts waiting loses the dots and pulses amber"), await js(`(() => {
+        const edge = document.querySelector('${firstEdge}');
+        return !edge.querySelector('.agent-flow-particle, .agent-flow-signal') && edge.querySelector('.agent-flow-wire').getAnimations().some((a) => a.playState === 'running') &&
+          !!document.querySelector('${flow} button[aria-label="查看专家 检查专家 1 · 等你确认"]');
+      })()`));
+      await patch({ mark: "ready", agents: agents.map((agent) => ["working", "waiting"].includes(agent.status) ? { ...agent, status: "done", finishedAt: Date.now() } : agent) });
+      await page.waitFor(`!!document.querySelector('${firstEdge}.done') && !document.querySelector('${flow} .agent-flow-edge.working, ${flow} .agent-flow-edge.waiting')`);
+      await page.click("textarea.input");
+      await page.key("End", { vk: 35 });
+      await page.type(" - idle edit");
+      const idle = await js(`(() => {
+        const graph = document.querySelector('${flow}');
+        return { value: document.querySelector('textarea.input').value, sends: __fake.callsOf('session.send').length,
+          current: !!graph.querySelector('.agent-flow-signal, .agent-flow-particle'),
+          animatedEdges: [...graph.querySelectorAll('.agent-flow-edge')].filter((edge) => edge.getAnimations({ subtree: true }).length > 0).length };
+      })()`);
+      ok(label("typing in an idle team leaves its wires static and the draft unsent"),
+        idle.value === "Unsent sample draft edi - idle edit" && idle.sends === 0 && !idle.current && idle.animatedEdges === 0, idle);
       ok(label("no console errors or CSP violations"), page.errorTexts().length === 0, page.errorTexts());
     } finally {
       await page.close();

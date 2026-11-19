@@ -96,7 +96,7 @@
 .agent-flow {
   --flow-bg: var(--bg-side); --flow-glow: var(--flow-bg); --flow-grid: #a2a8af;
   --flow-label: var(--fg); --flow-model: var(--fg-2); --flow-ring: var(--bg-raised); --flow-hover: #e3e8ed;
-  --flow-credit: var(--bg-bar); --flow-particle: #005440;
+  --flow-particle: #005440;
   --flow-idle: #536174; --flow-working: #006b53; --flow-waiting: #885000;
   --flow-done: #596b7b; --flow-stopped: #62666b; --flow-failed: #a62924;
   position: relative; isolation: isolate; width: 100%; height: clamp(150px, 25vh, 340px); margin-bottom: 10px; overflow: hidden; overscroll-behavior: contain;
@@ -105,7 +105,7 @@
 html[data-theme="dark"] .agent-flow {
   --flow-bg: #090f1d; --flow-glow: #152437; --flow-grid: #52647c;
   --flow-label: #f3f6fd; --flow-model: #bac5d7; --flow-ring: #121b2a; --flow-hover: #22334a;
-  --flow-credit: #121d2c; --flow-particle: #e2fff9;
+  --flow-particle: #e2fff9;
   --flow-idle: #8293a9; --flow-working: #56ecc7; --flow-waiting: #ffc264;
   --flow-done: #8098ad; --flow-stopped: #929398; --flow-failed: #ff776e;
   background-image: radial-gradient(ellipse at 48% 42%, var(--flow-glow), var(--flow-bg) 83%);
@@ -115,8 +115,6 @@ html[data-theme="dark"] .agent-flow {
 .agent-flow .react-flow__handle { top: 25px; opacity: 0; pointer-events: none; }
 .agent-flow .react-flow__handle-left { left: 18px; }
 .agent-flow .react-flow__handle-right { right: 18px; }
-.agent-flow .react-flow__attribution { --xy-attribution-background-color: var(--flow-credit); }
-.agent-flow .react-flow__attribution a { color: var(--flow-model); }
 .agent-flow-node, .agent-flow-edge { --agent-wire: var(--flow-idle); }
 .agent-flow-node.working, .agent-flow-edge.working { --agent-wire: var(--flow-working); }
 .agent-flow-node.waiting, .agent-flow-edge.waiting { --agent-wire: var(--flow-waiting); }
@@ -137,8 +135,9 @@ button.agent-flow-character:hover, button.agent-flow-character:focus-visible { b
 .agent-flow-edge.failed .agent-flow-wire { opacity: 0.94; stroke-dasharray: 5 5; }
 .agent-flow-edge.waiting .agent-flow-wire { animation: agent-flow-pulse 2.6s ease-in-out infinite; }
 .agent-flow-signal { stroke-dasharray: 5 19; animation: agent-flow-current 0.75s linear infinite; }
-.agent-flow-particle { fill: var(--flow-particle); filter: drop-shadow(0 0 3px var(--agent-wire)); }
+.agent-flow-particle { fill: none; stroke: var(--flow-particle); stroke-width: 5.6; stroke-linecap: round; stroke-dasharray: 0 50; animation: agent-flow-particles 0.8s linear infinite; }
 @keyframes agent-flow-current { to { stroke-dashoffset: -24; } }
+@keyframes agent-flow-particles { to { stroke-dashoffset: -50; } }
 @keyframes agent-flow-pulse { 50% { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) {
   .dragon-sprite.playing, .agent-flow-edge .agent-flow-wire, .agent-flow-signal { animation: none; }

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useSyncExternalStore, type RefObject } from "react";
+import { memo, useEffect, useRef, type RefObject } from "react";
 import { Background, BackgroundVariant, getSmoothStepPath, getViewportForBounds, Handle, Position, ReactFlow, useReactFlow, type Edge, type EdgeProps, type Node, type NodeProps } from "@xyflow/react";
 import "@xyflow/react/dist/base.css";
 import type { AgentInfo, Session } from "../types";
@@ -8,7 +8,7 @@ import { dragonIdentity, dragonPalette, type DragonIdentity, type DragonStatus }
 import { DragonSprite } from "./DragonSprite";
 
 type DragonNode = Node<{ identity: DragonIdentity; paletteKey: string; status: DragonStatus; name: string; model?: string; open?: () => void }, "dragon">;
-type CurrentEdge = Edge<{ status: DragonStatus; reducedMotion: boolean }, "current">;
+type CurrentEdge = Edge<{ status: DragonStatus }, "current">;
 const MAIN = "team-main";
 const ROW = 70;
 const NODE_WIDTH = 86;
@@ -17,14 +17,7 @@ const MAIN_HEIGHT = 84;
 const FIT = { padding: 0.085, maxZoom: 1 };
 const MIN_ZOOM = 0.08;
 const PAN_BUTTONS = [1];
-const REDUCED_MOTION = "(prefers-reduced-motion: reduce)";
-
-function subscribeToMotion(change: () => void) {
-  const media = window.matchMedia(REDUCED_MOTION);
-  media.addEventListener("change", change);
-  return () => media.removeEventListener("change", change);
-}
-const readReducedMotion = () => window.matchMedia(REDUCED_MOTION).matches;
+const PRO_OPTIONS = { hideAttribution: true };
 
 function FlowDragon({ data }: NodeProps<DragonNode>) {
   const { identity, paletteKey, status, name, model, open } = data;
@@ -47,9 +40,8 @@ function FlowCurrent(props: EdgeProps<CurrentEdge>) {
     <path d={path} className="agent-flow-wire" />
     {status === "working" && <>
       <path d={path} className="agent-flow-signal" />
-      {!props.data?.reducedMotion && ["0s", "-0.8s"].map((begin) => <circle className="agent-flow-particle" r={2.8} key={begin}>
-        <animateMotion path={path} begin={begin} dur="1.6s" repeatCount="indefinite" />
-      </circle>)}
+      {/* The round dashes travel on the wire itself; there is no separate dot at an SVG origin. */}
+      <path d={path} pathLength={100} className="agent-flow-particle" />
     </>}
   </g>;
 }
@@ -79,24 +71,24 @@ function RefitFlow({ chart, layoutKey }: { chart: RefObject<HTMLDivElement | nul
   return null;
 }
 
-export function AgentFlow({ session, agents, onOpen }: { session: Session; agents: AgentInfo[]; onOpen: (id: string) => void }) {
+export const AgentFlow = memo(function AgentFlow({ sessionId, modelId, mark, agents, onOpen }: {
+  sessionId: string; modelId: string; mark: Session["mark"]; agents: AgentInfo[]; onOpen: (id: string) => void;
+}) {
   const chart = useRef<HTMLDivElement>(null);
-  const reducedMotion = useSyncExternalStore(subscribeToMotion, readReducedMotion);
-  const modelId = session.settings.model === "fusion" ? session.context.model : session.settings.model;
   const label = useStore((s) => s.models.find((model) => model.id === modelId)?.label) || modelId;
   const rows = agents.length > 6 ? Math.ceil(agents.length / 2) : agents.length;
-  const mainStatus = session.mark === "attention" ? "waiting" : session.mark === "running" ? "working" : session.mark === "dead" ? "failed" : "pending";
+  const mainStatus = mark === "attention" ? "waiting" : mark === "running" ? "working" : mark === "dead" ? "failed" : "pending";
   const nodes: DragonNode[] = [{ id: MAIN, type: "dragon", width: NODE_WIDTH, height: MAIN_HEIGHT, position: { x: 0, y: (rows - 1) * ROW / 2 - 7 },
-    data: { identity: "main", paletteKey: session.id, status: mainStatus, name: "主代理", model: label } }];
+    data: { identity: "main", paletteKey: sessionId, status: mainStatus, name: "主代理", model: label } }];
   const edges: CurrentEdge[] = [];
   agents.forEach((agent, i) => {
     const nodeId = `expert:${agent.id}`;
     nodes.push({ id: nodeId, type: "dragon", width: NODE_WIDTH, height: NODE_HEIGHT, position: { x: 150 + Math.floor(i / rows) * 94, y: i % rows * ROW },
       data: { identity: dragonIdentity(agent.fusionRole), paletteKey: agent.id, status: agent.status, name: agent.name, open: () => onOpen(agent.id) } });
-    edges.push({ id: nodeId, type: "current", source: MAIN, target: nodeId, data: { status: agent.status, reducedMotion } });
+    edges.push({ id: nodeId, type: "current", source: MAIN, target: nodeId, data: { status: agent.status } });
   });
   return <div ref={chart} className="agent-flow" role="region" aria-label="专家流程图" title="滚轮缩放，按住鼠标中键拖动">
-    <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes}
+    <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes} proOptions={PRO_OPTIONS}
       nodesDraggable={false} nodesConnectable={false} elementsSelectable={false} nodesFocusable={false} edgesFocusable={false}
       disableKeyboardA11y deleteKeyCode={null} zoomOnScroll preventScrolling zoomOnDoubleClick={false} panOnDrag={PAN_BUTTONS}
       minZoom={MIN_ZOOM} maxZoom={2.5} fitView fitViewOptions={FIT}>
@@ -104,4 +96,4 @@ export function AgentFlow({ session, agents, onOpen }: { session: Session; agent
       <RefitFlow chart={chart} layoutKey={JSON.stringify(agents.map((agent) => agent.id))} />
     </ReactFlow>
   </div>;
-}
+});

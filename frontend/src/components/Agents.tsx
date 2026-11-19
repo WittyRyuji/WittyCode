@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, ChevronRight, UsersRound, X } from "lucide-react";
 import type { AgentInfo, Session, Usage } from "../types";
 import { currentSession, useStore } from "../store";
@@ -16,12 +16,18 @@ export function AgentBar(props: { session: Session; onClose?: () => void; inspec
 }
 
 function AgentTeam({ session, onClose, inspector }: { session: Session; onClose?: () => void; inspector?: boolean }) {
-  const agents = session.agents ?? [];
+  const agents = session.agents;
   const [historyOpen, setHistoryOpen] = useState(false);
-  const { active, history } = groupAgents(agents);
+  // Keep the graph inputs stable when the session changes only because a draft was edited.
+  const { active, history, flowAgents } = useMemo(() => {
+    const { active, history } = groupAgents(agents ?? []);
+    return { active, history, flowAgents: [...active, ...history] };
+  }, [agents]);
   const open = useStore((s) => s.agentPanel);
   const openAgent = useStore((s) => s.openAgent);
-  if (agents.length === 0) return null;
+  const openFlowAgent = useCallback((id: string) => openAgent(session.id, id), [openAgent, session.id]);
+  if (!agents?.length) return null;
+  const modelId = session.settings.model === "fusion" ? session.context.model : session.settings.model;
   const teamTokens = inspector ? agents.reduce<number | null>((total, a) => a.tokens ? (total ?? 0) + usageTotal(a.tokens) : total, null) : null;
   const list = (items: AgentInfo[], label: string) => (
       <ul className="agent-list" aria-label={label}>
@@ -56,7 +62,7 @@ function AgentTeam({ session, onClose, inspector }: { session: Session; onClose?
         {teamTokens !== null && <span className="agentbar-tokens num" title="已知专家的累计 Token 用量">{formatTokens(teamTokens)} Token</span>}
         {onClose && <button type="button" className="icon-btn sm" aria-label="关闭 Agents Team" onClick={onClose}><X size={15} aria-hidden /></button>}
       </header>
-      {!inspector && <AgentFlow session={session} agents={[...active, ...history]} onOpen={(id) => openAgent(session.id, id)} />}
+      {!inspector && <AgentFlow sessionId={session.id} modelId={modelId} mark={session.mark} agents={flowAgents} onOpen={openFlowAgent} />}
       {active.length > 0 && list(active, "当前 Sub-Agents")}
       {history.length > 0 && <div className="agent-history">
         <button type="button" className="agent-history-toggle" aria-expanded={historyOpen} onClick={() => setHistoryOpen(!historyOpen)}>

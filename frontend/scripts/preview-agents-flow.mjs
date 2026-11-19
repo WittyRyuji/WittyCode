@@ -7,7 +7,7 @@ import { openPage } from "./cdp.mjs";
 import { fakeBackendScripts } from "./fake-backend.mjs";
 import { agentFlowColours } from "./check-agents-team.mjs";
 
-const out = resolve("../outputs/agents-flow-preview");
+const out = resolve(process.env.WITTYCODE_TEST_WORK ?? "../outputs", "agents-flow-preview");
 mkdirSync(out, { recursive: true });
 const url = pathToFileURL(resolve("dist/index.html")).href;
 const { scripts, client } = fakeBackendScripts();
@@ -45,7 +45,7 @@ const measures = `(() => {
     viewport: view ? { x: view.e, y: view.f, zoom: view.a } : null,
     nodes: chart?.querySelectorAll('.react-flow__node').length ?? 0, edges: chart?.querySelectorAll('.agent-flow-edge').length ?? 0,
     chipSprite: sprite($('.agent-chip .dragon-sprite')), chartSprite: sprite($('.agent-flow-node .dragon-sprite')),
-    attribution: !!chart?.querySelector('.react-flow__attribution a') };
+    attribution: !!chart?.querySelector('.react-flow__attribution') || !!chart?.textContent.includes('React Flow') };
 })()`;
 
 async function capture(theme, history, fn) {
@@ -54,11 +54,13 @@ async function capture(theme, history, fn) {
   const shot = async (filename) => {
     const layout = await js(measures);
     if (layout.chart && !filename.includes("zoomed")) assert.ok(layout.allNodesFit, `${filename}: the fitted canvas shows all nodes`);
+    assert.equal(layout.attribution, false, `${filename}: no visible React Flow attribution`);
     report.shots[filename] = layout;
     await page.shot(resolve(out, filename));
     console.log(filename, JSON.stringify(layout));
   };
   try {
+    await page.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "no-preference" }] });
     await page.waitFor("!!document.querySelector('.srow')");
     await page.click(".srow");
     await page.waitFor("!!document.querySelector('.tab.current .dot-ready')");
