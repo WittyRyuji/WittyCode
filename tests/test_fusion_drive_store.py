@@ -9,6 +9,7 @@ from contextlib import closing
 
 import pytest
 
+from desktop.core.fusion.drive import store
 from desktop.core.fusion.drive.filter import scrub
 from desktop.core.fusion.drive.retention import Retention, temperature
 from desktop.core.fusion.drive.store import L0_TOKENS, L1_TOKENS, Drive, DriveError
@@ -278,6 +279,55 @@ def test_unknown_kind_and_normalized_relative_paths(tmp_path):
     assert drive.put("run", "key", "Summary", paths=("src\\test.py", "./docs/a.md")).paths == (
         "src/test.py", "docs/a.md",
     )
+
+
+@pytest.mark.parametrize("code", [sqlite3.SQLITE_BUSY_RECOVERY, sqlite3.SQLITE_LOCKED])
+def test_initialization_retries_schema_lock_on_a_fresh_connection(tmp_path, monkeypatch, code):
+    project = tmp_path / "project"
+    connect = sqlite3.connect
+    attempts = []
+
+    class ContendedConnection(sqlite3.Connection):
+        def executescript(self, script):
+            attempts.append(self)
+            if len(attempts) == 1:
+                # Fail after starting the schema transaction to verify it is rolled back before retrying.
+                super().executescript("BEGIN IMMEDIATE; CREATE TABLE unfinished_schema (id INTEGER);")
+                error = sqlite3.OperationalError("database is locked")
+                error.sqlite_errorcode = code
+                raise error
+            return super().executescript(script)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(sqlite3, "connect", lambda *args, **kwargs: connect(*args, factory=ContendedConnection, **kwargs))
+        drive = Drive(tmp_path, project, "owner")
+    assert len(attempts) == 2 and attempts[0] is not attempts[1]
+    with closing(connect(_db_path(tmp_path, project))) as db:
+        assert db.execute("SELECT name FROM sqlite_master WHERE name = 'unfinished_schema'").fetchone() is None
+    drive.set_meta("key", "value")
+    assert drive.meta("key") == "value"
+
+
+def test_initialization_stops_retrying_if_writer_keeps_the_lock(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    Drive(tmp_path, project, "owner")
+    monkeypatch.setattr(store, "_TIMEOUT", 0.1)
+    with closing(sqlite3.connect(_db_path(tmp_path, project))) as db:
+        db.execute("BEGIN IMMEDIATE")
+        with pytest.raises(DriveError, match="Could not initialize") as exc:
+            Drive(tmp_path, project, "peer")
+        assert exc.value.__cause__.sqlite_errorcode == sqlite3.SQLITE_BUSY
+    assert Drive(tmp_path, project, "peer").meta("key") is None
+
+
+def test_initialization_propagates_non_lock_errors(tmp_path):
+    project = tmp_path / "project"
+    index = _db_path(tmp_path, project)
+    index.parent.mkdir()
+    index.write_bytes(b"not a SQLite database")
+    with pytest.raises(sqlite3.DatabaseError) as exc:
+        Drive(tmp_path, project, "owner")
+    assert exc.value.sqlite_errorcode == sqlite3.SQLITE_NOTADB
 
 
 def test_four_processes_concurrently_initialize_and_write_400_records(tmp_path):

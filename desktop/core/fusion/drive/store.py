@@ -200,27 +200,35 @@ class Drive:
         self._root.mkdir(parents=True, exist_ok=True)
         if project is None and self._root.resolve().name != key:
             raise DriveError("This session's storage path aliases another session.")
-        with self._connect() as db:
-            deadline = time.monotonic() + _TIMEOUT
-            while True:
-                try:
-                    if db.execute("PRAGMA journal_mode").fetchone()[0] == "wal":
-                        break
-                    if db.execute("PRAGMA journal_mode = WAL").fetchone()[0] == "wal":
-                        break
-                except sqlite3.OperationalError as error:
-                    if (error.sqlite_errorcode & 0xff) not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
-                        raise
-                if time.monotonic() >= deadline:
-                    raise DriveError("Could not enable WAL for the Drive index.")
-                time.sleep(0.02)
-            db.executescript("BEGIN IMMEDIATE;\n" + _SCHEMA + "\nCOMMIT;")
+        self._initialize()
+
+    def _initialize(self) -> None:
+        deadline = time.monotonic() + _TIMEOUT
+        last_lock = None
+        # WAL setup and schema creation both contend with other processes. Close each
+        # failed attempt to roll back any partial schema before retrying.
+        while (remaining := deadline - time.monotonic()) > 0:
+            try:
+                # Keep SQLite's per-statement wait short so a failed attempt leaves time to retry.
+                with self._connect(timeout=min(0.1, remaining)) as db:
+                    if (db.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+                            or db.execute("PRAGMA journal_mode = WAL").fetchone()[0] == "wal"):
+                        db.executescript("BEGIN IMMEDIATE;\n" + _SCHEMA + "\nCOMMIT;")
+                        return
+            except sqlite3.OperationalError as error:
+                if (error.sqlite_errorcode & 0xff) not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+                    raise
+                last_lock = error
+            delay = min(0.02, deadline - time.monotonic())
+            if delay > 0:
+                time.sleep(delay)
+        raise DriveError("Could not initialize the Drive index.") from last_lock
 
     @contextmanager
-    def _connect(self) -> Iterator[sqlite3.Connection]:
+    def _connect(self, *, timeout: float = _TIMEOUT) -> Iterator[sqlite3.Connection]:
         _reject_link(self._root)
         _reject_link(self._database)
-        db = sqlite3.connect(self._database, timeout=_TIMEOUT, isolation_level=None)
+        db = sqlite3.connect(self._database, timeout=timeout, isolation_level=None)
         try:
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA foreign_keys = ON")
