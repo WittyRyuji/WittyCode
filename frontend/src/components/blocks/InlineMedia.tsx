@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Play, Square } from "lucide-react";
+import { Play } from "lucide-react";
 import { messageOf } from "../../lib/errors";
 import { INLINE_IMAGE_DATA } from "../../lib/inlineMedia";
 import { useStore } from "../../store";
@@ -54,17 +54,17 @@ export function InlinePicture({ sessionId, path, label }: Props) {
     return image;
   }, [read, sessionId, path]);
   const { box, result, setResult } = useVisibleMedia(load);
-  const [playing, setPlaying] = useState(false);
+  const [started, setStarted] = useState(false);
   const image = result && "data" in result ? result.data : undefined;
-  const picture = image && <img src={(playing && image.animation) || image.url} alt={label} draggable={false}
+  const picture = image && <img src={(started && image.animation) || image.url} alt={label} draggable={false}
     onError={() => setResult({ error: unreadable })} />;
-  const action = `${playing ? "停止" : "播放"} GIF：${label}`;
+  const action = `播放 GIF：${label}`;
   return <span className="inline-media inline-picture" ref={box} title={path}>
     {image?.animation ? <span className="inline-gif">
       {picture}
-      <button type="button" className="inline-gif-toggle" aria-label={action} title={action} onClick={() => setPlaying((value) => !value)}>
-        {playing ? <Square size={16} aria-hidden="true" /> : <Play size={19} aria-hidden="true" />}
-      </button>
+      {!started && <button type="button" className="inline-gif-toggle" aria-label={action} title={action} onClick={() => setStarted(true)}>
+        <Play size={19} aria-hidden="true" />
+      </button>}
     </span> : picture ?? <><span className="inline-media-label">{label}</span>{result && "error" in result && errorText(result.error)}</>}
   </span>;
 }

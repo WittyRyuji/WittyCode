@@ -140,10 +140,11 @@ async def painted_media(rig, expected, filename=None):
     await wait_for(painted, 5, f"{list(expected)} showing the expected pixels")
 
 
-def test_gif_is_a_centered_still_until_play_and_can_be_stopped(qapp, loop, tmp_path):
+@pytest.mark.parametrize("activation", ["mouse", "keyboard"])
+def test_gif_is_a_centered_still_until_started_then_removes_play_button(qapp, loop, tmp_path, activation):
     async def scenario():
         rig = await open_rig(tmp_path, size=(1320, 900))
-        image, button = ".inline-gif img", ".inline-gif-toggle"
+        image, button = ".inline-gif img", ".inline-gif button"
         first, second = (36, 156, 146), (224, 112, 55)
         try:
             (rig.project / "motion.gif").write_bytes(gif(180, 96))
@@ -153,7 +154,7 @@ def test_gif_is_a_centered_still_until_play_and_can_be_stopped(qapp, loop, tmp_p
             model.next(say("### Animation preview\n\n![Two colors](motion.gif)\n\n`motion.gif`"), hold=False)
             await rig.send("Show the animation")
             await natural_width(rig, image, 180)
-            await rig.wait_for(f"{button}[aria-label^='播放']", 1)
+            await rig.wait_for(f'{button}[aria-label="播放 GIF：Two colors"]', 1)
             assert await rig.js(f"""(() => {{
                 const a = document.querySelector('{image}').getBoundingClientRect();
                 const b = document.querySelector('{button}').getBoundingClientRect();
@@ -162,22 +163,32 @@ def test_gif_is_a_centered_still_until_play_and_can_be_stopped(qapp, loop, tmp_p
             }})()""")
             poster = await rig.js(f"document.querySelector('{image}').src")
             assert poster.startswith("data:image/png;base64,")
-            await painted_media(rig, {image: first}, "inline-gif-still.png")
+            await painted_media(rig, {image: first}, f"inline-gif-{activation}-still.png")
             await asyncio.sleep(0.5)
             assert await rig.js(f"document.querySelector('{image}').src") == poster
             await painted_media(rig, {image: first})
 
-            await rig.click(button)
-            await rig.wait_for(f"{button}[aria-label^='停止']", 1)
+            if activation == "mouse":
+                await rig.click(button)
+            else:
+                assert await rig.js(f"""(() => {{
+                    const play = document.querySelector('{button}');
+                    play.focus();
+                    return document.activeElement === play && play.tabIndex === 0;
+                }})()""")
+                await rig.press("Enter")
+            await rig.wait_for(button, 0)
             animation = await rig.js(f"document.querySelector('{image}').src")
             assert animation.startswith("data:image/gif;base64,")
-            await painted_media(rig, {image: second}, "inline-gif-playing.png")
-            await painted_media(rig, {image: first})  # both colors while the same image is mounted
-            assert await rig.js(f"document.activeElement === document.querySelector('{button}')")
-            await rig.press("Enter")
-            await rig.wait_for(f"{button}[aria-label^='播放']", 1)
-            assert await rig.js(f"document.querySelector('{image}').src") == poster
+            await painted_media(rig, {image: second}, f"inline-gif-{activation}-playing.png")
             await painted_media(rig, {image: first})
+
+            await rig.click(image)
+            assert await rig.count(button) == 0
+            assert await rig.js(f"document.querySelector('{image}').src") == animation
+            await painted_media(rig, {image: second})
+            await painted_media(rig, {image: first})
+            assert await rig.count(button) == 0
 
             await rig.click(".text-block code.pathref")
             await natural_width(rig, ".filepanel img", 180)
