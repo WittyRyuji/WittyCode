@@ -225,6 +225,11 @@ function fakeBackend(config) {
     ctx.fillStyle = "#fff"; ctx.fillRect(15, 15, 48, 24);
     return canvas.toDataURL("image/jpeg");
   };
+  const videoInfo = (path) => {
+    if (path === "broken.mov") throw new Error("这个视频无法解码：用默认程序打开。");
+    return { duration: 42000, width: 96, height: 54, videoCodec: "H264", audioCodec: "AAC", hasAudio: true, seekable: true,
+      frame: videoFrame(path === "sample.mp4" ? "#35719f" : "#987126") };
+  };
   let releaseInit;
   const initReady = new Promise((resolve) => { releaseInit = resolve; if (!config.initHold) resolve(); });
   const S = {
@@ -1103,16 +1108,24 @@ function fakeBackend(config) {
       const name = p.path.split(/[\\/]/).pop();
       const url = config.pictures?.[name]?.url;
       if (!url) throw new Error("在此会话的项目中找不到这个媒体文件。");
+      if (name === "sample.gif") {
+        // The two-color test fixture begins with a single red pixel.
+        const still = document.createElement("canvas");
+        still.width = still.height = 1;
+        const ctx = still.getContext("2d");
+        ctx.fillStyle = "#f00"; ctx.fillRect(0, 0, 1, 1);
+        return { url: still.toDataURL("image/png"), animation: url };
+      }
       return { url };
     },
+    "files.inlineVideoPoster": (p) => videoInfo(p.path),
     "files.video": (p) => {
       if (p.action === "open") {
         if (video) emit("files.video", { token: video.token, released: true });
         video = null;
-        if (p.path === "broken.mov") throw new Error("这个视频无法解码：用默认程序打开。");
+        const info = videoInfo(p.path);
         video = { token: p.token, position: 0, playing: false, ended: false };
-        return { duration: 42000, width: 96, height: 54, videoCodec: "H264", audioCodec: "AAC", hasAudio: true, seekable: true,
-          frame: videoFrame(p.path === "sample.mp4" ? "#35719f" : "#987126") };
+        return info;
       }
       if (video?.token !== p.token) return null;
       if (p.action === "close") video = null;

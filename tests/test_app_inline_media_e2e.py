@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import shutil
 from pathlib import Path
 
 import pytest
@@ -63,7 +62,8 @@ def test_inline_images_and_missing_refs_use_the_message_project(qapp, loop, tmp_
             await rig.send("Show the local pictures")
             await natural_width(rig, ".inline-picture img[alt='PNG']", 3)
             await natural_width(rig, ".inline-picture img[alt='GIF']", 2)
-            assert await rig.js("document.querySelector('.inline-picture img[alt=GIF]').src.startsWith('data:image/gif;base64,')")
+            assert await rig.js("document.querySelector('.inline-picture img[alt=GIF]').src.startsWith('data:image/png;base64,')")
+            await rig.wait_for(".inline-gif-toggle", 1)
             await rig.wait_text(".inline-media-error", "找不到")
             assert await rig.texts(".text-block .img-link") == ["[图片：Outside]", "[图片：Remote]"]
             assert sorted((m, p["id"], p["path"]) for m, p in calls) == [
@@ -111,6 +111,115 @@ def test_plan_markdown_does_not_auto_load_media(qapp, loop, tmp_path, monkeypatc
     run(loop, scenario())
 
 
+async def painted_media(rig, expected, filename=None):
+    selectors = json.dumps(list(expected))
+    raw = await rig.js(f"""JSON.stringify({selectors}.map(selector => {{
+        const r = document.querySelector(selector).getBoundingClientRect();
+        return [r.x + r.width * 0.2, r.y + r.height / 2];
+    }}))""")
+    points = json.loads(raw)
+    zoom = rig.window.view.zoomFactor()
+    evidence = os.environ.get("WITTYCODE_TEST_EVIDENCE")
+
+    def painted():
+        shot = rig.window.view.grab()
+        image = shot.toImage()
+        scale = zoom * shot.devicePixelRatio()
+        for (x, y), target in zip(points, expected.values(), strict=True):
+            x, y = round(x * scale), round(y * scale)
+            if not image.valid(x, y):
+                return False
+            got = image.pixelColor(x, y).getRgb()[:3]
+            if max(abs(actual - wanted) for actual, wanted in zip(got, target)) > 24:
+                return False
+        if filename and evidence:
+            assert shot.save(str(Path(evidence) / filename))
+        return True
+
+    # QWebEngine can update the DOM before its offscreen compositor presents the frame.
+    await wait_for(painted, 5, f"{list(expected)} showing the expected pixels")
+
+
+def test_gif_is_a_centered_still_until_play_and_can_be_stopped(qapp, loop, tmp_path):
+    async def scenario():
+        rig = await open_rig(tmp_path, size=(1320, 900))
+        image, button = ".inline-gif img", ".inline-gif-toggle"
+        first, second = (36, 156, 146), (224, 112, 55)
+        try:
+            (rig.project / "motion.gif").write_bytes(gif(180, 96))
+            model = await new_conversation(rig)
+            if await rig.exists(".sidebar"):
+                await rig.click("[aria-label='切换侧栏']")
+            model.next(say("### Animation preview\n\n![Two colors](motion.gif)\n\n`motion.gif`"), hold=False)
+            await rig.send("Show the animation")
+            await natural_width(rig, image, 180)
+            await rig.wait_for(f"{button}[aria-label^='播放']", 1)
+            assert await rig.js(f"""(() => {{
+                const a = document.querySelector('{image}').getBoundingClientRect();
+                const b = document.querySelector('{button}').getBoundingClientRect();
+                return Math.abs(a.x + a.width / 2 - b.x - b.width / 2) < 1 &&
+                       Math.abs(a.y + a.height / 2 - b.y - b.height / 2) < 1;
+            }})()""")
+            poster = await rig.js(f"document.querySelector('{image}').src")
+            assert poster.startswith("data:image/png;base64,")
+            await painted_media(rig, {image: first}, "inline-gif-still.png")
+            await asyncio.sleep(0.5)
+            assert await rig.js(f"document.querySelector('{image}').src") == poster
+            await painted_media(rig, {image: first})
+
+            await rig.click(button)
+            await rig.wait_for(f"{button}[aria-label^='停止']", 1)
+            animation = await rig.js(f"document.querySelector('{image}').src")
+            assert animation.startswith("data:image/gif;base64,")
+            await painted_media(rig, {image: second}, "inline-gif-playing.png")
+            await painted_media(rig, {image: first})  # both colors while the same image is mounted
+            assert await rig.js(f"document.activeElement === document.querySelector('{button}')")
+            await rig.press("Enter")
+            await rig.wait_for(f"{button}[aria-label^='播放']", 1)
+            assert await rig.js(f"document.querySelector('{image}').src") == poster
+            await painted_media(rig, {image: first})
+
+            await rig.click(".text-block code.pathref")
+            await natural_width(rig, ".filepanel img", 180)
+            assert await rig.js("document.querySelector('.filepanel img').src") == animation
+        finally:
+            await rig.finish()
+    run(loop, scenario())
+
+
+def test_offscreen_video_loads_on_scroll_without_interrupting_sidebar(qapp, loop, tmp_path, monkeypatch):
+    async def scenario():
+        rig = await open_rig(tmp_path, size=(1350, 900))
+        try:
+            calls = record_file_calls(rig, monkeypatch)
+            await make_clip(rig.project / "on-scroll.mp4")
+            model = await new_conversation(rig)
+            # Keep the middle embed outside the viewport whether the transcript starts at the top or the bottom.
+            spacer = "\n\n".join(f"Spacer paragraph {i}." for i in range(40))
+            model.next(say(f"{spacer}\n\n![On scroll](on-scroll.mp4)\n\n{spacer}\n\n`on-scroll.mp4`"), hold=False)
+            await rig.send("Show the clip below the fold")
+            await rig.wait_for(".inline-video", 1)
+            assert not await rig.exists(".inline-video img")
+            assert not any(m == "files.inlineVideoPoster" for m, _ in calls)
+
+            await rig.click(".text-block code.pathref")
+            await natural_width(rig, ".filepanel .fp-video-stage img", 64)
+            playing = rig.window.platform._video
+            lease = rig.core._video_preview
+            playing.player.setPlaybackRate(0.25)
+            await rig.click(".filepanel .fp-video-play")
+            await rig.wait_for(".filepanel .fp-video-play[aria-label='暂停']", 1)
+            await rig.js("document.querySelector('.inline-video').scrollIntoView({block: 'center'})")
+            await natural_width(rig, ".inline-video .fp-video-stage img", 64)
+            await rig.wait_for(".inline-video .fp-video-play[aria-label='播放']", 1)
+            assert rig.core._video_preview == lease and rig.window.platform._video is playing
+            assert playing.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+            assert [p["path"] for m, p in calls if m == "files.inlineVideoPoster"] == ["on-scroll.mp4"]
+        finally:
+            await rig.finish()
+    run(loop, scenario())
+
+
 async def drag_progress(rig, selector, fraction):
     assert await rig._center(selector, 0) is not None  # scroll the input into the real viewport
     raw = await rig.js(f"""(() => {{
@@ -146,8 +255,8 @@ def test_inline_mp4_plays_pauses_seeks_and_releases_its_decoder(qapp, loop, tmp_
             calls = record_file_calls(rig, monkeypatch)
             directory = rig.project / "outputs"
             directory.mkdir()
-            clip = await make_clip(directory / "first.mp4")
-            shutil.copyfile(clip, directory / "second.mp4")
+            await make_clip(directory / "first.mp4", size=(192, 96))
+            await make_clip(directory / "second.mp4", (0xFF8452A8, 0xFF489064), size=(192, 96))
             make_preview_chart(directory / "signal.png")
             (rig.project / "notes.txt").write_text("This is still a text file.\n", encoding="utf-8")
             model = await new_conversation(rig)
@@ -158,60 +267,44 @@ def test_inline_mp4_plays_pauses_seeks_and_releases_its_decoder(qapp, loop, tmp_
                            "![First clip](outputs/first.mp4)\n\n[Second](outputs/second.mp4)\n\n![Missing](outputs/missing.mp4)\n\n"
                            "[Outside clip](../outside.mp4)\n\n`notes.txt` and `outputs/second.mp4`"), hold=False)
             await rig.send("Show the image and the video together")
-            button = ".inline-video-activate"
             chart = ".inline-picture img[alt='Synthetic signal']"
-            picture = ".inline-video .fp-video-stage img"
-            play = ".inline-video .fp-video-play"
-            slider = ".inline-video .fp-video-time"
-            await rig.wait_for(button, 3)
+            first_box, second_box = (f".inline-video[title=\"outputs/{name}.mp4\"]" for name in ("first", "second"))
+            pictures = [f"{box} .fp-video-stage img" for box in (first_box, second_box)]
+            picture = pictures[0]
+            play, play_second = (f"{box} .fp-video-play" for box in (first_box, second_box))
+            slider = f"{first_box} .fp-video-time"
             await natural_width(rig, chart, 384)
+            for img in pictures:
+                await natural_width(rig, img, 192)
+            await rig.wait_text(".inline-video .inline-media-error", "找不到")
             assert await rig.text(".text-block .img-link") == "Outside clip"
-            assert rig.core._video_preview is None
-            assert calls == [("files.inlineImage", {"id": cid, "path": "outputs/signal.png"})]
-            assert not await rig.exists(".fp-video-stage")
-
-            await rig.click(button, 0)
-            await natural_width(rig, picture, 64)
-            first_lease = rig.core._video_preview
-            first = rig.window.platform._video
-            assert first_lease[0] == cid and first is not None
-            assert first.player.playbackState() == QMediaPlayer.PlaybackState.PausedState
-            poster = await rig.js(f"document.querySelector('{picture}').src")
+            assert rig.core._video_preview is None and rig.window.platform._video is None
+            assert not any(m == "files.video" for m, _ in calls), "passive posters never acquire the playback lease"
+            assert sorted(p["path"] for m, p in calls if m == "files.inlineVideoPoster") == [
+                "outputs/first.mp4", "outputs/missing.mp4", "outputs/second.mp4",
+            ]
+            poster = await rig.js(f"document.querySelector({json.dumps(picture)}).src")
             assert poster.startswith("data:image/jpeg;base64,")
-            assert await rig.js(f"!document.querySelector('{slider}').disabled")
-            await rig.wait_for(f"{play}[aria-label='播放']", 1)
+            assert await rig.js(f"!document.querySelector({json.dumps(slider)}).disabled")
+            await rig.wait_for(".inline-video .fp-video-play[aria-label='播放']", 2)
             assert not await rig.exists(".sidebar, .filepanel, .conversation-rail")
             assert await rig.js(f"""(() => {{
                 const reply = document.querySelector('.conversation-column .text-block');
                 const viewport = reply.closest('.scroller').getBoundingClientRect();
-                return {json.dumps([chart, picture, play, slider])}.every(selector => {{
+                return {json.dumps([chart, *pictures, play, play_second, slider, f"{second_box} .fp-video-time"])}.every(selector => {{
                     const box = reply.querySelector(selector)?.getBoundingClientRect();
                     return box && box.width > 0 && box.height > 0 && box.top >= viewport.top && box.bottom <= viewport.bottom;
                 }});
-            }})()"""), "the chart, decoded video and controls are visible in one assistant reply"
-            if evidence := os.environ.get("WITTYCODE_TEST_EVIDENCE"):
-                raw = await rig.js(f"""(() => {{
-                    const r = document.querySelector('{picture}').getBoundingClientRect();
-                    return JSON.stringify([r.x + r.width / 2, r.y + r.height / 2]);
-                }})()""")
-                x, y = json.loads(raw)
-                zoom = rig.window.view.zoomFactor()
-
-                def save_painted_frame():
-                    # The DOM can be ready before the offscreen compositor has painted the blue first frame.
-                    shot = rig.window.view.grab()
-                    scale = zoom * shot.devicePixelRatio()
-                    pixel = shot.toImage().pixelColor(round(x * scale), round(y * scale))
-                    if max(abs(got - target) for got, target in zip(pixel.getRgb()[:3], (45, 112, 155))) > 24:
-                        return False
-                    assert shot.save(str(Path(evidence) / "inline-media-paused.png"))
-                    return True
-
-                await wait_for(save_painted_frame, 5, "the paused frame to appear in the offscreen screenshot")
+            }})()"""), "the chart and both posters with controls are visible together"
+            await painted_media(rig, {pictures[0]: (45, 112, 155), pictures[1]: (132, 82, 168)}, "inline-video-posters.png")
 
             await rig.click(play)
+            await rig.wait_for(f"{play}[aria-label='暂停']", 1)
+            first_lease = rig.core._video_preview
+            first = rig.window.platform._video
+            assert first_lease[0] == cid and first is not None
             await wait_for(lambda: first.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
-                           and first.player.position() > 100, 3, "MP4 playing and advancing")
+                           and first.player.position() > 100, 3, "first click plays and advances the MP4")
             await rig.wait_for(f"{play}[aria-label='暂停']", 1)
             await rig.click(play)
             await rig.wait_for(f"{play}[aria-label='播放']", 1)
@@ -231,39 +324,34 @@ def test_inline_mp4_plays_pauses_seeks_and_releases_its_decoder(qapp, loop, tmp_
             await rig.wait_text(".fp-text", "still a text file")
             assert rig.core._video_preview == first_lease and rig.window.platform._video is first
             await rig.click(".filepanel [aria-label='关闭文件面板']")
-            await rig.click(button, 1)
-            await natural_width(rig, ".inline-video[title='outputs/second.mp4'] .fp-video-stage img", 64)
-            assert await rig.count(picture) == 1
+            await rig.click(play_second)
+            await rig.wait_for(f"{play_second}[aria-label='暂停']", 1)
             assert rig.core._video_preview != first_lease and first._closed and first._source_fd is None
-            assert not await rig.exists(".inline-video[title='outputs/first.mp4'] .fp-video-stage")
+            await rig.wait_for(f"{play}[aria-label='播放']", 1)
+            assert await rig.js(f"document.querySelector('{picture}').src") == poster
+            assert await rig.count(".inline-video .fp-video-stage img") == 2
 
-            # The same decoder is shared with the pre-existing, explicitly opened file panel.
+            # The same interactive decoder is shared with the pre-existing, explicitly opened file panel.
             await rig.click_text(".text-block code.pathref", "outputs/second.mp4")
-            await natural_width(rig, ".filepanel .fp-video-stage img", 64)
-            assert await rig.count(picture) == 0
+            await natural_width(rig, ".filepanel .fp-video-stage img", 192)
+            assert await rig.count(".inline-video .fp-video-stage img") == 2
+            assert await rig.count(".inline-video .fp-video-play[aria-label='播放']") == 2
             await rig.click(".filepanel [aria-label='关闭文件面板']")
             await wait_for(lambda: rig.window.platform._video is None)
 
-            await rig.click(button, 2)
-            await rig.wait_text(".inline-video .inline-media-error", "找不到")
-            assert rig.core._video_preview is None and rig.window.platform._video is None
-            await rig.click(button, 2)
-            await rig.click(button, 0)
-            await natural_width(rig, picture, 64)
-            await rig.click(button, 0)
-            await wait_for(lambda: rig.window.platform._video is None)
-            await rig.click(button, 1)
-            await natural_width(rig, picture, 64)
+            await rig.click(play)
+            await rig.wait_for(f"{play}[aria-label='暂停']", 1)
             await new_conversation(rig, tab_count=2)
             await wait_for(lambda: rig.core._video_preview is None and rig.window.platform._video is None)
             await rig.click(".tab", 0)
-            await rig.wait_for(button, 3)
-            assert rig.core._video_preview is None and not await rig.exists(".fp-video-stage")
+            await rig.wait_for(".inline-video .fp-video-play[aria-label='播放']", 2)
+            assert rig.core._video_preview is None and rig.window.platform._video is None
 
             opens = [p for m, p in calls if m == "files.video" and p["action"] == "open"]
             assert [p["path"] for p in opens if p.get("inline")] == [
-                "outputs/first.mp4", "outputs/second.mp4", "outputs/missing.mp4", "outputs/first.mp4", "outputs/second.mp4",
+                "outputs/first.mp4", "outputs/second.mp4", "outputs/first.mp4",
             ]
+            assert len([p for m, p in calls if m == "files.video" and p["action"] == "play"]) == 3
             assert all(p["id"] == cid for p in opens)
             assert not any(m == "files.page" for m, _ in calls), "videos are never sent as file bytes"
         finally:

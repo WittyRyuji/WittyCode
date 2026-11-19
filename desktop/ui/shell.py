@@ -330,6 +330,16 @@ class QtPlatform:
 
         return picture_png(path)
 
+    async def video_poster(self, path: str, width: int) -> dict[str, Any]:
+        from desktop.ui.videoview import VideoView
+
+        # AppCore serializes these requests. Never enter the interactive player's slot.
+        player = VideoView(self.window, width, None)
+        try:
+            return await player.load(path)
+        finally:
+            player.close()
+
     async def video_open(self, path: str, width: int, publish: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
         from desktop.ui.videoview import VideoView
 

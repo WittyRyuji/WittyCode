@@ -1,4 +1,4 @@
-"""One local video stream for the file inspector and transcript; the page only sees JPEGs and controls."""
+"""Local Qt video playback and one-shot posters; the page only sees JPEGs and controls."""
 from __future__ import annotations
 
 import asyncio
@@ -37,7 +37,7 @@ def _local_container(header: bytes) -> bool:
 class VideoView(QObject):
     """A fresh player/sink per source: late Qt signals from the previous file cannot enter the new preview."""
 
-    def __init__(self, parent: QObject, width: int, publish: Callable[[dict[str, Any]], None]) -> None:
+    def __init__(self, parent: QObject, width: int, publish: Callable[[dict[str, Any]], None] | None) -> None:
         super().__init__(parent)
         self._publish = publish
         self._width = min(MAX_SIDE, max(240, width))
@@ -50,11 +50,13 @@ class VideoView(QObject):
         self.source = QFile(self)
         self._source_fd: int | None = None
         self.player = QMediaPlayer(self)
-        self.audio = QAudioOutput(self)
-        self.audio.setVolume(0.7)
-        self.audio.setMuted(True)
+        # A poster has no audio output at all. Interactive players also prime while muted.
+        self.audio = QAudioOutput(self) if publish is not None else None
+        if self.audio is not None:
+            self.audio.setVolume(0.7)
+            self.audio.setMuted(True)
+            self.player.setAudioOutput(self.audio)
         self.sink = QVideoSink(self)
-        self.player.setAudioOutput(self.audio)
         self.player.setVideoSink(self.sink)
         self.timer = QTimer(self)
         self.timer.setInterval(200)
@@ -113,7 +115,7 @@ class VideoView(QObject):
         elif action == "seek" and self.player.isSeekable():
             self.player.setPosition(min(args["position"], self.player.duration()))
             self._state()
-        elif action == "volume":
+        elif action == "volume" and self.audio is not None:
             self.audio.setVolume(args["volume"])
             self.audio.setMuted(args["muted"])
 
@@ -154,7 +156,7 @@ class VideoView(QObject):
     def _failed(self, message: str) -> None:
         if self._closed:
             return
-        if self._opened:
+        if self._opened and self._publish is not None:
             self._opened = False
             self.timer.stop()
             self._publish({"position": self.player.position(), "playing": False, "ended": False, "error": message})
@@ -163,7 +165,7 @@ class VideoView(QObject):
             self._ready.set_exception(FileProblem(message))
 
     def _state(self, *, ended: bool = False, url: str | None = None) -> None:
-        if not self._opened or self._closed:
+        if not self._opened or self._closed or self._publish is None:
             return
         ended = ended or self.player.mediaStatus() == Status.EndOfMedia
         position = max(0, self.player.duration() if ended else self.player.position())
@@ -202,13 +204,15 @@ class VideoView(QObject):
         if self._opened:
             self._state(url=url)
         else:
-            self.player.pause()
-            self.audio.setMuted(False)
+            if self.audio is not None:
+                self.player.pause()
+                self.audio.setMuted(False)
+                self._opened = True
+            # For posters the caller closes the source as soon as this one JPEG is ready.
             meta = self.player.metaData()
             keys = QMediaMetaData.Key
             video = meta.value(keys.VideoCodec)
             audio = meta.value(keys.AudioCodec)
-            self._opened = True
             self._ready.set_result({
                 "duration": max(0, self.player.duration()), "width": width, "height": height,
                 "videoCodec": QMediaFormat.videoCodecName(video) if isinstance(video, QMediaFormat.VideoCodec) else "",

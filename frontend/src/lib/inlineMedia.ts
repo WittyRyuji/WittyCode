@@ -2,7 +2,7 @@
 // checks the decoded path, the owning project's filesystem boundary, and the media signature.
 const IMAGE = /\.(png|apng|jpe?g|jpe|jfif|gif|webp)$/i;
 const VIDEO = /\.(mp4|m4v|mov|3gp|webm|mkv)$/i;
-export const INLINE_IMAGE_DATA = /^data:image\/(?:png|apng|jpeg|gif|webp);base64,/;
+export const INLINE_IMAGE_DATA = /^data:image\/(?:png|apng|jpeg|webp);base64,/;
 
 /** An unsafe local video destination must not silently fall back to the less restricted file panel. */
 export function localVideoLink(url: string | undefined): boolean {

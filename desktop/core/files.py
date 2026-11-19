@@ -260,7 +260,7 @@ def _open_inline(raw: str, project: str | Path, suffixes: frozenset[str], limit:
         raise FileProblem("读不了此会话项目中的媒体文件。") from error
 
 
-def inline_image_url(raw: str, project: str | Path) -> str:
+def inline_image(raw: str, project: str | Path) -> dict[str, str]:
     path, source = _open_inline(raw, project, INLINE_IMAGES, INLINE_IMAGE_BYTES)
     try:
         with source:
@@ -276,7 +276,16 @@ def inline_image_url(raw: str, project: str | Path) -> str:
         raise FileProblem("图片格式不符或文件已损坏，不能在正文中预览。")
     if dimensions[0] * dimensions[1] > INLINE_IMAGE_PIXELS:
         raise FileProblem("图片像素太多，不能在正文中预览。")
-    return _image_url(data, mime)
+    url = _image_url(data, mime)
+    if mime != "image/gif":
+        return {"url": url}
+    from desktop.ui.imaging import gif_poster_png
+
+    poster = gif_poster_png(data)
+    if not poster:
+        raise FileProblem("无法读取 GIF 的首帧，不能在正文中预览。")
+    # Both URLs are from the same checked read; only the static one is rendered before Play.
+    return {"url": _image_url(poster, "image/png"), "animation": url}
 
 
 class InlineVideoSource(str):

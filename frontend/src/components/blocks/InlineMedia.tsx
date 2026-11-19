@@ -1,48 +1,84 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Play, X } from "lucide-react";
+import { Play, Square } from "lucide-react";
 import { messageOf } from "../../lib/errors";
 import { INLINE_IMAGE_DATA } from "../../lib/inlineMedia";
 import { useStore } from "../../store";
-import { MediaPreview } from "../MediaPreview";
+import { MediaPreview, videoWidth, VIDEO_FRAME } from "../MediaPreview";
 
 type Props = { sessionId: string; path: string; label: string };
 const errorText = (message: string) => <span className="inline-media-error" role="status">{message}</span>;
 const unreadable = "这张图片不能在正文中预览。";
+let posterQueue = Promise.resolve();
 
-export function InlinePicture({ sessionId, path, label }: Props) {
-  const read = useStore((s) => s.inlineImage);
+function useVisibleMedia<T>(load: (node: HTMLSpanElement) => Promise<T>, serial = false) {
   const box = useRef<HTMLSpanElement>(null);
-  const [result, setResult] = useState<{ url: string } | { error: string }>();
+  const [result, setResult] = useState<{ data: T } | { error: string }>();
   useEffect(() => {
     const node = box.current;
     if (!node) return;
-    let current = true;
-    let requested = false;
-    const watcher = new IntersectionObserver((entries) => {
-      if (!current || requested || !entries.some((e) => e.isIntersecting)) return;
-      requested = true;
+    let current = true, visible = false, queued = false, started = false;
+    const request = async () => {
+      queued = false;
+      if (!current || !visible) return;
+      started = true;
       watcher.disconnect();
-      void read(sessionId, path).then((url) => {
-        if (current) setResult(INLINE_IMAGE_DATA.test(url) ? { url } : { error: unreadable });
-      }, (error) => { if (current) setResult({ error: messageOf(error) }); });
+      try {
+        const data = await load(node);
+        if (current) setResult({ data });
+      } catch (error) {
+        if (current) setResult({ error: messageOf(error) });
+      }
+    };
+    const watcher = new IntersectionObserver((entries) => {
+      visible = entries[entries.length - 1]?.isIntersecting ?? false;
+      if (!visible || started || queued) return;
+      queued = true;
+      // Don't send a backlog of poster RPCs for items that could have scrolled away by their turn.
+      if (serial) posterQueue = posterQueue.then(request);
+      else void request();
     });
     watcher.observe(node);
     return () => { current = false; watcher.disconnect(); };
-  }, [path, read, sessionId]);
+  }, [load, serial]);
+  return { box, result, setResult };
+}
+
+export function InlinePicture({ sessionId, path, label }: Props) {
+  const read = useStore((s) => s.inlineImage);
+  const load = useCallback(async () => {
+    const image = await read(sessionId, path);
+    if (!INLINE_IMAGE_DATA.test(image.url) || (image.animation &&
+      (!image.url.startsWith("data:image/png;base64,") || !image.animation.startsWith("data:image/gif;base64,")))) {
+      throw new Error(unreadable);
+    }
+    return image;
+  }, [read, sessionId, path]);
+  const { box, result, setResult } = useVisibleMedia(load);
+  const [playing, setPlaying] = useState(false);
+  const image = result && "data" in result ? result.data : undefined;
+  const picture = image && <img src={(playing && image.animation) || image.url} alt={label} draggable={false}
+    onError={() => setResult({ error: unreadable })} />;
+  const action = `${playing ? "停止" : "播放"} GIF：${label}`;
   return <span className="inline-media inline-picture" ref={box} title={path}>
-    {result && "url" in result ? <img src={result.url} alt={label} draggable={false} onError={() => setResult({ error: unreadable })} /> :
-      <><span className="inline-media-label">{label}</span>{result && errorText(result.error)}</>}
+    {image?.animation ? <span className="inline-gif">
+      {picture}
+      <button type="button" className="inline-gif-toggle" aria-label={action} title={action} onClick={() => setPlaying((value) => !value)}>
+        {playing ? <Square size={16} aria-hidden="true" /> : <Play size={19} aria-hidden="true" />}
+      </button>
+    </span> : picture ?? <><span className="inline-media-label">{label}</span>{result && "error" in result && errorText(result.error)}</>}
   </span>;
 }
 
 export function InlineVideo({ sessionId, path, label }: Props) {
-  const [active, setActive] = useState(false);
-  const release = useCallback(() => setActive(false), []);
-  return <span className="inline-media inline-video" title={path}>
-    <button type="button" className="btn small inline-video-activate" aria-expanded={active}
-      aria-label={`${active ? "关闭视频" : "加载视频"}：${label}`} onClick={() => setActive(!active)}>
-      {active ? <X size={14} /> : <Play size={14} />}{active ? "关闭视频" : label}
-    </button>
-    {active && <MediaPreview sessionId={sessionId} fileRef={path} inline renderError={errorText} onRelease={release} />}
+  const read = useStore((s) => s.inlineVideoPoster);
+  const load = useCallback(async (node: HTMLSpanElement) => {
+    const poster = await read(sessionId, path, videoWidth(node));
+    if (!poster.frame.startsWith(VIDEO_FRAME)) throw new Error("这个视频不能在正文中预览。");
+    return poster;
+  }, [read, sessionId, path]);
+  const { box, result } = useVisibleMedia(load, true);
+  return <span className="inline-media inline-video" ref={box} title={path}>
+    {result && "data" in result ? <MediaPreview sessionId={sessionId} fileRef={path} label={label} poster={result.data} renderError={errorText} /> :
+      <><span className="inline-media-label">{label}</span>{result && "error" in result && errorText(result.error)}</>}
   </span>;
 }

@@ -280,6 +280,7 @@ export interface RulesDocument { path: string; text: string; revision: string; e
 
 export interface FactoryState { cli: "found" | "missing"; cliPath: string; path: string; enabled: boolean }
 
+export interface InlineImageInfo { url: string; animation?: string }
 export type VideoCommand = { id: string; token: string } & (
   { action: "open"; path: string; width: number; inline?: boolean } |
   { action: "play" | "pause" | "close" } |
@@ -376,7 +377,9 @@ export interface Calls {
    *  `data:` URI. An error is one sentence for the user. */
   "files.page": { params: { id: string; path: string; page: number; width: number }; result: { url: string } };
   /** An assistant embed, constrained to the project belonging to this conversation. */
-  "files.inlineImage": { params: { id: string; path: string }; result: { url: string } };
+  "files.inlineImage": { params: { id: string; path: string }; result: InlineImageInfo };
+  /** Get a silent first frame without acquiring the shared playback lease. */
+  "files.inlineVideoPoster": { params: { id: string; path: string; width: number }; result: VideoInfo };
   /** Open a local video paused on its first JPEG; the token identifies this mount and guards subsequent controls. */
   "files.video": { params: VideoCommand; result: VideoInfo | null };
   /** open it outside the window: `default` program (a program or script is only shown in its folder: `shown`, `message`),

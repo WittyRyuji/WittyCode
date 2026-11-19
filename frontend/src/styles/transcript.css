@@ -92,7 +92,10 @@
 .inline-picture img { display: block; max-width: 100%; max-height: 420px; object-fit: contain; border-radius: 4px; }
 .inline-media-label, .inline-media-error { color: var(--muted); font-size: 0.9em; }
 .inline-media-error { display: block; overflow-wrap: anywhere; }
-.inline-video-activate[aria-expanded="true"] { margin-bottom: 5px; }
+.inline-gif { position: relative; display: inline-grid; place-items: center; max-width: 100%; min-width: 36px; min-height: 36px; vertical-align: top; }
+.inline-gif-toggle { position: absolute; inset: 50% auto auto 50%; transform: translate(-50%, -50%); display: grid; place-items: center; width: 36px; height: 36px; padding: 0; border-radius: 50%; border: 1px solid #fff8; color: #fff; background: #141820cc; cursor: pointer; }
+.inline-gif-toggle:hover, .inline-gif-toggle:focus-visible { background: #141820; }
+.inline-gif-toggle:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
 .inline-video .fp-media { border: 1px solid var(--line); border-radius: 5px; overflow: hidden; }
 .inline-video .fp-video-stage { flex: none; padding: 0; grid-template: auto / minmax(0, 1fr); }
 .inline-video .fp-video-stage img { width: auto; height: auto; max-width: 100%; max-height: 380px; }

@@ -185,6 +185,9 @@ class Platform(Protocol):
         """A ``data:`` URI of the whole picture, for the big view."""
         ...
 
+    async def video_poster(self, path: filetools.InlineVideoSource, width: int) -> dict[str, Any]:
+        ...
+
     async def video_open(self, path: str, width: int, publish: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
         ...
 
@@ -485,6 +488,7 @@ class AppCore:
         self._models_loaded = False
         self._shutting_down = False
         self._video_preview: tuple[str, str] | None = None
+        self._inline_video_posters = asyncio.Lock()
         self._inline_images = asyncio.Semaphore(2)
 
         if factory is not None:
@@ -2892,12 +2896,37 @@ class AppCore:
             if self._shutting_down or self._by_cid.get(cid) is not conv:
                 raise AppError("这个会话已经关闭。")
             try:
-                url = await asyncio.to_thread(filetools.inline_image_url, params.get("path"), conv.project)
+                image = await asyncio.to_thread(filetools.inline_image, params.get("path"), conv.project)
             except filetools.FileProblem as problem:
                 raise AppError(str(problem)) from problem
         if self._shutting_down or self._by_cid.get(cid) is not conv:
             raise AppError("这个会话已经关闭。")
-        return {"url": url}
+        return image
+
+    async def _m_files_inlineVideoPoster(self, params: dict[str, Any]) -> dict[str, Any]:
+        """One short-lived, silent decode at a time, wholly separate from the playback lease."""
+        cid, width = params.get("id"), params.get("width")
+        if not isinstance(cid, str):
+            raise AppError("没有指定媒体所属的会话。")
+        if not _is_int(width) or width <= 0:
+            raise AppError("视频预览宽度不合法。")
+        conv = self._conversation(cid)
+
+        def check_session() -> None:
+            if self._shutting_down or self._by_cid.get(cid) is not conv:
+                raise AppError("这个会话已经关闭。")
+
+        async with self._inline_video_posters:
+            check_session()
+            try:
+                source = await self._open_inline_video(params.get("path"), conv.project)
+                with source.file:
+                    check_session()
+                    info = await self.platform.video_poster(source, min(width, 1280))
+                    check_session()
+                    return info
+            except filetools.FileProblem as problem:
+                raise AppError(str(problem)) from problem
 
     def _close_video_preview(self, *, replaced: bool = False) -> None:
         lease, self._video_preview = self._video_preview, None

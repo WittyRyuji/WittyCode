@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import type { ApiProvider, AttachmentView, Engine, FileView, MemoryState, ModelChoice, ProviderDraft, Session, SessionSettings, SkillItem, SwitchBlock, Turn } from "./types";
-import type { FollowUp, FusionSettingKey, HandoffChoice, QuestionAnswer, SavedRow, SettingValue, SoundKey, SoundKind, VideoCommand, VideoInfo, VideoUpdate } from "./protocol";
+import type { FollowUp, FusionSettingKey, HandoffChoice, InlineImageInfo, QuestionAnswer, SavedRow, SettingValue, SoundKey, SoundKind, VideoCommand, VideoInfo, VideoUpdate } from "./protocol";
 import {
   API_PROVIDERS,
   CHATGPT_ACCOUNT,
@@ -163,7 +163,8 @@ export interface Store extends LiveData {
   refreshPlanUsage: () => void;
   /** Preview data as a `data:` URI; null on failure unless the caller wants the bridge's error. */
   filePage: (ref: string, page: number, width: number, reportError?: boolean) => Promise<string | null>;
-  inlineImage: (sessionId: string, path: string) => Promise<string>;
+  inlineImage: (sessionId: string, path: string) => Promise<InlineImageInfo>;
+  inlineVideoPoster: (sessionId: string, path: string, width: number) => Promise<VideoInfo>;
   fileVideo: (command: VideoCommand) => Promise<VideoInfo | null>;
   watchVideo: (token: string, receive: (event: VideoUpdate) => void) => () => void;
   closeFile: () => void;
@@ -614,6 +615,7 @@ export const useStore = create<Store>((set, get) => ({
     return `data:image/svg+xml;base64,${btoa(svg)}`;
   },
   inlineImage: async () => { throw new Error("演示中没有可预览的本地图片。"); },
+  inlineVideoPoster: async () => { throw new Error("演示中没有可预览的本地视频。"); },
   fileVideo: async () => null,
   watchVideo: () => () => {},
   closeFile: () => set({ filePanel: null }),
