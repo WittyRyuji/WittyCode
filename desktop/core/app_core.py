@@ -263,6 +263,8 @@ class Conversation:
     sound_complete_pending: bool = False
     sound_result: str = ""
     """A settled result waiting for the same publication that updates the session's status dot."""
+    opening_row: SavedRow | None = None
+    """Indexed display metadata until a saved conversation finishes opening; never used to configure the engine."""
     preview: bool = False
     """The page shows the cached conversation while the real history is still being loaded."""
     cached_turns: list[dict[str, Any]] = field(default_factory=list)
@@ -1103,6 +1105,8 @@ class AppCore:
             "engine": conv.engine,
             "title": snapshot.get("title") or "",
             **conv.cached_meta,
+            "settings": self._shown_settings(conv),
+            "fusion": self._shown_fusion(conv),
         }
         self.emit("session", {"id": conv.cid, "patch": patch})
         self.emit("turns", {"id": conv.cid, "turns": list(snapshot["turns"]), "all": True})
@@ -1174,6 +1178,8 @@ class AppCore:
         if controller.state is SessionState.CLOSED:
             self._drop(conv, controller)
             return
+        if controller.state is not SessionState.OPENING:
+            conv.opening_row = None
         self._sync_sidebar_key(conv)
         if conv.history and not conv.switching and controller.state in (SessionState.READY, SessionState.RUNNING) and getattr(controller, "_history_loaded", True):
             prefix = conv.history["turns"]
@@ -1305,6 +1311,8 @@ class AppCore:
             conv.ledger = UsageLedger.from_json(conv.history["ledger"])
         key = self._row_of(conv)
         saved = next((row for row in self._saved.get(conv.project, []) if row.id == key), None)
+        if controller.state is SessionState.OPENING:
+            conv.opening_row = saved
         conv.created_at = self.settings.session_created.get(key) or (
             _aware(saved.created).timestamp() if saved is not None and saved.created else conv.created_at
         )
@@ -1414,7 +1422,17 @@ class AppCore:
             return self._settings_of(conv.engine, live)
         saved = getattr(conv.controller, "saved_settings", None)
         left = self._settings_of(conv.engine, saved) if saved is not None else dict(conv.cached_meta.get("settings") or {})
+        if saved is None and conv.opening_row is not None and conv.opening_row.model:
+            left["model"] = conv.opening_row.model
         return {**left, **conv.requested}
+
+    @staticmethod
+    def _shown_fusion(conv: Conversation) -> bool:
+        if conv.pending_model is not None:
+            return conv.pending_model["model"] == "fusion"
+        if getattr(conv.controller, "_fusion", None) is not None:
+            return True
+        return conv.controller.state is SessionState.OPENING and conv.opening_row is not None and conv.opening_row.fusion
 
     def _attention_prompts(self, conv: Conversation) -> list[Any]:
         controller = conv.controller
@@ -1526,7 +1544,7 @@ class AppCore:
                            "attachments": [self._attachment_view(a) for a in conv.preparing.attachments]}
                           if conv.preparing is not None else None),
             "agents": self._agents_json(conv),
-            "fusion": conv.pending_model["model"] == "fusion" if conv.pending_model is not None else getattr(controller, "_fusion", None) is not None,
+            "fusion": self._shown_fusion(conv),
             "fusionPolicy": ({"workers": list(controller._fusion.registry.policy.workers), "light": controller._fusion.registry.policy.light,
                               "maxCalls": controller._fusion.registry.policy.max_calls, "calls": controller._fusion.registry.calls,
                               "maxTokens": controller._fusion.registry.policy.max_tokens, "knownTokens": controller._fusion.known_tokens(),

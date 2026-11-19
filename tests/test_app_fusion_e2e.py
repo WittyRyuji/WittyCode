@@ -1,9 +1,15 @@
 """Fusion settings, new conversation, and expert panel through the real Qt page."""
 from __future__ import annotations
 
-import pytest
-from PySide6.QtCore import Qt
+import asyncio
+import json
+import threading
 
+import pytest
+from PySide6.QtCore import QRect, Qt
+
+from desktop.core.cache import Cache
+from desktop.core.session_state import SessionState
 from tests.e2e_support import open_rig
 from tests.fake_responses import call, fail, say
 from tests.fakes import until
@@ -185,12 +191,15 @@ def test_submitted_message_leaves_composer_while_fusion_handoff_is_blocked(qapp,
     run(loop, scenario())
 
 
-def test_devin_fusion_main_and_plan_through_the_real_page(qapp, loop, tmp_path):
+@pytest.mark.parametrize("preview", [False, True], ids=["no-preview", "cached-preview"])
+def test_devin_fusion_main_and_plan_through_the_real_page(qapp, loop, tmp_path, monkeypatch, preview):
     from tests.fusion_acp_support import make_guarded_engine
 
     async def scenario():
         harness = make_guarded_engine(tmp_path)
-        rig = await open_rig(tmp_path, devin_engine=harness.engine)
+        cache = Cache(tmp_path / "cache") if preview else None
+        rig = await open_rig(tmp_path, devin_engine=harness.engine, cache=cache)
+        entered, release = threading.Event(), threading.Event()
         try:
             await until(lambda: any(model["source"] == "devin" for model in rig.core.catalog.models), timeout=20)
             for key, value in {"fusionMain": "devin:swe-2-high", "fusionWorkers": ["chatgpt:gpt-6-luna"], "fusionLight": "chatgpt:gpt-6-luna"}.items():
@@ -218,10 +227,46 @@ def test_devin_fusion_main_and_plan_through_the_real_page(qapp, loop, tmp_path):
             await until(lambda: row_id in rig.core._saved_sessions_json())
             saved = rig.core._saved_sessions_json()[row_id]
             assert saved["fusion"] is True and saved["settings"]["model"] == "devin:swe-2-high"
-            saved_sidebar = f'.srow:not(.open)[data-session-id="{row_id}"] .ssub'
-            await rig.wait_for(saved_sidebar)
-            assert (await rig.text(saved_sidebar)).split(" · ")[-1] == "WittyFusion"
+            saved_row = f'.srow:not(.open)[data-session-id="{row_id}"]'
+            await rig.wait_text(f"{saved_row} .ssub", "WittyFusion")
+            assert (await rig.text(f"{saved_row} .ssub")).split(" · ")[-1] == "WittyFusion"
+            if cache is not None:
+                await until(lambda: cache.load_session(row_id) is not None)
+
+            load = rig.engine.sessions.load
+
+            def slow_load(native):
+                if native == main.session_id:
+                    entered.set()
+                    assert release.wait(30), "the test did not release the archive read"
+                return load(native)
+
+            monkeypatch.setattr(rig.engine.sessions, "load", slow_load)
+            await rig.click(saved_row)
+            await until(entered.is_set)
+            (reopened,) = rig.core.order
+            assert reopened.controller.state is SessionState.OPENING and reopened.preview is preview
+            row = f'.srow.open[data-session-id="{reopened.cid}"]'
+            opening_row = f"{row}.m-opening"
+            await rig.wait_for(opening_row)
+            label = await rig.text(f"{opening_row} .ssub")
+            assert label.startswith("连接中 · ") and label.endswith(" · WittyFusion") and "Devin" not in label, label
+            # The DOM is already correct; let Qt paint it while the archive read is still blocked.
+            await asyncio.sleep(0.2)
+            # Keep only the synthetic row as evidence, not the parent project's local path.
+            bounds = json.loads(await rig.js(f'''JSON.stringify((() => {{
+                const r = document.querySelector({json.dumps(opening_row)}).getBoundingClientRect();
+                return [Math.floor(r.x), Math.floor(r.y), Math.ceil(r.width), Math.ceil(r.height)];
+            }})())'''))
+            assert rig.window.view.grab(QRect(*bounds)).save(str(tmp_path / "fusion-sidebar-connecting.png"))
+            release.set()
+            await rig.wait_text(f"{row}.m-ready .ssub", "已打开")
+            ready_label = await rig.text(f"{row} .ssub")
+            assert ready_label.endswith(" · WittyFusion") and "Devin" not in ready_label, ready_label
+            assert reopened.controller.session_id == main.session_id and reopened.controller.model == "devin:swe-2-high"
+            assert not rig.plan.requests
         finally:
+            release.set()
             await rig.finish()
     run(loop, scenario())
 
