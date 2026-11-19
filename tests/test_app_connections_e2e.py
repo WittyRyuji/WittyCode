@@ -1,6 +1,7 @@
 """Connections and the optional Factory CLI, in the real React / QWebChannel / Qt window with local-only peers."""
 
 import asyncio
+import os
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,49 @@ from tests.test_factory import engine_for
 from tests.ui_support import run
 
 pytestmark = pytest.mark.ui
+
+
+def test_qt_shows_the_bundled_test_hook_in_every_scope(qapp, loop, tmp_path, monkeypatch):
+    from desktop.core.hooks import MANAGED_TEST_HOOK
+
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
+
+    async def scenario():
+        rig = await open_rig(tmp_path)
+        try:
+            rig.core.hooks.on_prompt(MANAGED_TEST_HOOK)
+            config = rig.project / ".wittycode" / "hooks.json"
+            config.parent.mkdir()
+            write_json(config, {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo demo"}]}]}})
+            await rig.press(",", Qt.KeyboardModifier.ControlModifier)
+            await rig.wait_for(".settings")
+            await rig.click_text(".snav", "插件")
+            await rig.click_text(".connection-tabs button", "Hooks")
+            builtin = '.connection-list [data-builtin-hook="wittycode.test-cleanup"]'
+            external = '.connection-list [data-kind="hook"][data-connection]'
+            await rig.wait_for(builtin, 1)
+            assert await rig.text(f"{builtin} b") == "测试收尾"
+            assert await rig.text(f"{builtin} .connection-state") == "WittyCode 官方内置 · 始终启用，不可停用"
+            assert "只清理本次测试" in await rig.text(f"{builtin} p")
+            assert await rig.text('.connection-tabs [data-kind="hook"] .num') == "1"
+            assert await rig.count(f"{builtin} button") == 1
+            assert await rig.js(f"""(() => {{ const toggle = document.querySelector({f'{builtin} [role=switch]'!r});
+                toggle.click(); return toggle.disabled && toggle.getAttribute('aria-checked') === 'true'; }})()""")
+            await rig.js("""{ const select = document.querySelector('.connection-toolbar select');
+                select.selectedIndex = 1; select.dispatchEvent(new Event('change', {bubbles: true})); }""")
+            await rig.wait_for(external, 1)
+            assert "尚未信任" in await rig.text(f"{external} .connection-state")
+            assert await rig.exists(f"{external} [role=switch]:enabled")
+            assert await rig.exists(f"{builtin} [role=switch]:disabled")
+            assert await rig.text('.connection-tabs [data-kind="hook"] .num') == "2"
+            if evidence := os.environ.get("WITTYCODE_TEST_EVIDENCE"):
+                await asyncio.sleep(0.4)  # Let the settings transition finish before grabbing the Qt surface.
+                assert rig.window.grab().save(str(Path(evidence) / "builtin-test-hook.png"))
+            assert not rig.core.connections.file.exists(), "listing bundled hooks must not import any configuration"
+        finally:
+            await rig.finish()
+
+    run(loop, scenario())
 
 
 @pytest.mark.parametrize("launcher", ["python", "npx"])
@@ -203,7 +247,7 @@ def test_qt_skill_switches_keep_sorted_rows_scroll_and_runtime_state_and_setting
             assert not await rig.exists(".preview, .preview-k")
             assert "session_manager.py" not in await rig.text(".settings-scroll")
             await rig.click_text(".snav", "关于")
-            assert await rig.text(".about .kvs b") == "0.2.1"
+            assert await rig.text(".about .kvs b") == "0.3.0"
             assert rig.plan.requests == []
             assert not any(line.startswith("error:") for line in rig.window.page.console)
         finally:

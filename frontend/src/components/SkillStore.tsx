@@ -1,9 +1,19 @@
 import { useEffect, useRef, useState } from "react";
+import { AudioLines, Code2, FileText, Globe, Image, Palette, Puzzle, Sheet } from "lucide-react";
+import { skillIconKind } from "../lib/skillIcons";
 import { LIVE } from "../mode";
 import { liveCall } from "../liveBridge";
 import { messageOf } from "../lib/errors";
 import { useStore } from "../store";
 import type { MarketSkill, SkillInstallPreview, SkillSource } from "../protocol";
+
+const SKILL_ICONS = { document: FileText, table: Sheet, design: Palette, image: Image, browser: Globe, audio: AudioLines, code: Code2, skill: Puzzle };
+
+function SkillIcon({ name }: { name: string }) {
+  const kind = skillIconKind(name);
+  const Icon = SKILL_ICONS[kind];
+  return <span className="skill-icon" data-kind={kind} aria-hidden="true"><Icon size={22} strokeWidth={1.6} /></span>;
+}
 
 export function SkillStore({ onInstalled }: { onInstalled: () => void }) {
   const [source, setSource] = useState<SkillSource>("openai");
@@ -61,6 +71,6 @@ export function SkillStore({ onInstalled }: { onInstalled: () => void }) {
     <div className="connection-toolbar"><div className="segc">{(["openai", "anthropic"] as const).map((id) => <button type="button" key={id} className={source === id ? "on" : ""} disabled={busy || !!preview} onClick={() => { setSource(id); setItems([]); setQuery(""); }}>{id === "openai" ? "OpenAI" : "Anthropic"}</button>)}</div><button type="button" className="btn small" disabled={busy || !!preview} onClick={() => void load(true)}>刷新目录</button></div>
     {error && <p role="alert" className="connection-error">{error}</p>}{note && <p role="status" className="connection-result">{note}</p>}
     {busy && <p className="snote" role="status">正在处理…</p>}
-    {preview ? <section className="connection-preview"><h4>{preview.existing ? "启用" : "安装"} {preview.name}</h4><p>{preview.description}</p><a href={preview.url} target="_blank" rel="noreferrer">查看对应官方目录</a><p className="field-hint">{preview.existing ? "本地已有文件，来源与原版本未经验证" : `固定版本 ${preview.commit.slice(0, 12)}`} · {preview.files} 个文件</p><p>{preview.license}</p>{preview.licenseText && <details><summary>许可内容</summary><pre className="skill-license selectable">{preview.licenseText}</pre></details>}<label className="connection-consent"><input type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} />我确认来源与许可，了解技能在使用时可能执行其脚本。</label><div className="row-btns"><button type="button" className="btn primary" disabled={busy || !confirmed} onClick={() => void install()}>{preview.existing ? "确认启用" : "确认安装"}</button><button type="button" className="btn" disabled={busy} onClick={() => void cancel()}>取消</button></div></section> : <><input className="textin selectable skill-search" aria-label="搜索商店技能" placeholder="搜索技能名称…" value={query} onChange={(e) => setQuery(e.target.value)} /><div className="skill-catalog">{items.filter((i) => i.name.toLowerCase().includes(query.toLowerCase())).map((item) => <section className="skill-card" key={item.name}><b>{item.name}</b><button type="button" className="btn small" disabled={busy || (item.installed && item.active !== false)} onClick={() => void inspect(item)}>{item.installed ? item.active === false ? "启用…" : "已安装" : "安装…"}</button></section>)}</div>{!busy && !items.length && <p className="snote">目录暂不可用，请刷新重试。</p>}</>}
+    {preview ? <section className="connection-preview"><h4 className="skill-preview-title"><SkillIcon name={preview.name} />{preview.existing ? "启用" : "安装"} {preview.name}</h4><p>{preview.description}</p><a href={preview.url} target="_blank" rel="noreferrer">查看对应官方目录</a><p className="field-hint">{preview.existing ? "本地已有文件，来源与原版本未经验证" : `固定版本 ${preview.commit.slice(0, 12)}`} · {preview.files} 个文件</p><p>{preview.license}</p>{preview.licenseText && <details><summary>许可内容</summary><pre className="skill-license selectable">{preview.licenseText}</pre></details>}<label className="connection-consent"><input type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} />我确认来源与许可，了解技能在使用时可能执行其脚本。</label><div className="row-btns"><button type="button" className="btn primary" disabled={busy || !confirmed} onClick={() => void install()}>{preview.existing ? "确认启用" : "确认安装"}</button><button type="button" className="btn" disabled={busy} onClick={() => void cancel()}>取消</button></div></section> : <><input className="textin selectable skill-search" aria-label="搜索商店技能" placeholder="搜索技能名称…" value={query} onChange={(e) => setQuery(e.target.value)} /><div className="skill-catalog">{items.filter((i) => i.name.toLowerCase().includes(query.toLowerCase())).map((item) => <section className="skill-card" key={item.name}><SkillIcon name={item.name} /><b>{item.name}</b><button type="button" className="btn small" disabled={busy || (item.installed && item.active !== false)} onClick={() => void inspect(item)}>{item.installed ? item.active === false ? "启用…" : "已安装" : "安装…"}</button></section>)}</div>{!busy && !items.length && <p className="snote">目录暂不可用，请刷新重试。</p>}</>}
   </div>;
 }

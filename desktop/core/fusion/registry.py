@@ -14,7 +14,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
+from desktop.core.fusion.identity import display_name, load
+from desktop.core.fusion.metrics import RETAINED_TASKS, retained_tasks
 from desktop.core.fusion.reasoning import reasoning_map
+
+_IDENTITIES = load(None).names
 
 
 class FusionError(ValueError):
@@ -82,11 +86,20 @@ class Expert:
     transferred_from: str = ""
     handoff_complete: bool = False
     aliases: tuple[str, ...] = ()
+    workstream: str = ""
+    paths: tuple[str, ...] = ()
+    identity: str = ""
+
+    @property
+    def label(self) -> str:
+        workstream = self.workstream or self.scope
+        return display_name(self.identity, workstream) if self.identity else workstream
 
     def to_json(self) -> dict[str, Any]:
         return {"id": self.id, "scope": self.scope, "model": self.model, "role": self.role, "status": self.status,
                 "task": self.task, "startedAt": self.started_at, "finishedAt": self.finished_at,
-                "transferredFrom": self.transferred_from, "handoffComplete": self.handoff_complete, "aliases": list(self.aliases)}
+                "transferredFrom": self.transferred_from, "handoffComplete": self.handoff_complete, "aliases": list(self.aliases),
+                "workstream": self.workstream, "paths": list(self.paths), "identity": self.identity}
 
 
 @dataclass(slots=True)
@@ -98,6 +111,8 @@ class FusionRegistry:
     tokens: int = 0
     unmetered: bool = False
     had_unknown: bool = False
+    misroutes: int = 0
+    task_metrics: list[dict] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.project = Path(self.project).resolve(strict=False)
@@ -124,11 +139,46 @@ class FusionRegistry:
     def _overlaps(left: str, right: str) -> bool:
         return left == right or left.startswith(right + "/") or right.startswith(left + "/")
 
+    @staticmethod
+    def _workstream(value: Any) -> str:
+        if not isinstance(value, str) or not value.strip() or len(value) > 160 or any(ord(c) < 32 for c in value):
+            raise FusionError("Provide a short, stable responsibility or deliverable name, not one expert per file.")
+        return value.strip()
+
+    @staticmethod
+    def write_paths(expert: Expert) -> tuple[str, ...]:
+        return expert.paths if expert.workstream else (expert.scope,)
+
+    def assign_workstream(self, workstream: str, paths: tuple[str, ...], model: str, role: str, *, identity: str = "", reuse: bool = True) -> Expert:
+        if not self.policy.allowed(model, role):
+            raise FusionError("The requested model is not in the authorised pool for this role.")
+        if identity and identity not in _IDENTITIES:
+            raise FusionError("The expert identity is invalid.")
+        label = self._workstream(workstream)
+        if not isinstance(paths, (list, tuple)) or len(paths) > 128:
+            raise FusionError("Provide up to 128 project-relative write paths; an empty list reserves the project.")
+        canonical = tuple(dict.fromkeys(self._scope(path) for path in paths))
+        owners = [agent for agent in self.agents.values() if agent.status != "retired" and agent.identity == identity
+                  and (agent.workstream or agent.scope).casefold() == label.casefold()]
+        if owners and reuse:
+            owner = owners[-1]
+            if owner.model != model or owner.role != role:
+                raise FusionError(f"This workstream is already assigned to {owner.model} ({owner.role}); reuse it or ask before transferring it.")
+        if any(owner.status == "running" for owner in owners):
+            raise FusionError("This expert is already running.")
+        if owners and reuse:
+            owner.workstream, owner.paths = owner.workstream or label, canonical
+            return owner
+        expert = Expert(uuid.uuid4().hex, canonical[0] if canonical else "__project__", model, role,
+                        workstream=label, paths=canonical, identity=identity)
+        self.agents[expert.id] = expert
+        return expert
+
     def assign(self, scope: str, model: str, role: str) -> Expert:
         if not self.policy.allowed(model, role):
             raise FusionError("The requested model is not in the authorised pool for this role.")
         logical, canonical = self._logical(scope), self._scope(scope)
-        owners = [agent for agent in self.agents.values() if agent.status != "retired" and (
+        owners = [agent for agent in self.agents.values() if not agent.workstream and agent.status != "retired" and (
             self._overlaps(agent.scope, canonical) or any(self._overlaps(alias, logical) for alias in agent.aliases))]
         if len(owners) > 1:
             raise FusionError("This scope overlaps multiple experts; the main agent must split the task.")
@@ -159,7 +209,10 @@ class FusionRegistry:
             raise FusionError("Wait until the running expert stops before transferring ownership.")
         if not self.policy.allowed(model, role) or (old.model == model and old.role == role):
             raise FusionError("Choose a different model or role from the authorised pool.")
-        replacement = Expert(uuid.uuid4().hex, old.scope, model, role, transferred_from=old.id, aliases=old.aliases)
+        if old.identity and role != old.role:
+            raise FusionError("An identified expert must keep its model role.")
+        replacement = Expert(uuid.uuid4().hex, old.scope, model, role, transferred_from=old.id, aliases=old.aliases,
+                             workstream=old.workstream, paths=old.paths, identity=old.identity)
         old.status = "retired"
         self.agents[replacement.id] = replacement
         return replacement
@@ -176,8 +229,17 @@ class FusionRegistry:
             raise FusionError("This expert is already running.")
         if expert.status in ("interrupted", "failed") and not resume:
             raise FusionError("The previous result may be incomplete; inspect the workspace and explicitly resume.")
-        if any(agent.status == "running" for agent in self.agents.values()):
-            raise FusionError("Another expert is running; writable expert work is serial.")
+        paths = self.write_paths(expert)
+        for other in self.agents.values():
+            if other.status != "running":
+                continue
+            if self.policy.max_tokens:
+                raise FusionError("This legacy token-limited session runs experts serially to protect its shared budget.")
+            occupied = self.write_paths(other)
+            if (expert.identity and not paths) or (other.identity and not occupied):
+                continue  # An empty structured brief has no declared writes, not a whole-project reservation.
+            if not paths or not occupied or any(self._overlaps(left, right) for left in paths for right in occupied):
+                raise FusionError("Another expert is running with overlapping write paths; wait or split the conflicting work.")
         self.calls += 1
         expert.status = "running"
         expert.started_at, expert.finished_at = time.time(), None
@@ -197,13 +259,17 @@ class FusionRegistry:
         expert.status = status
         expert.finished_at = time.time()
 
+    def record_task(self, task: dict) -> None:
+        self.task_metrics = [*self.task_metrics, task][-RETAINED_TASKS:]
+
     def to_json(self) -> dict[str, Any]:
-        return {"version": 1, "policy": self.policy.to_json(), "agents": [agent.to_json() for agent in self.agents.values()],
-                "calls": self.calls, "tokens": self.tokens, "unmetered": self.unmetered, "hadUnknown": self.had_unknown}
+        return {"version": 2, "policy": self.policy.to_json(), "agents": [agent.to_json() for agent in self.agents.values()],
+                "calls": self.calls, "tokens": self.tokens, "unmetered": self.unmetered, "hadUnknown": self.had_unknown,
+                "misroutes": self.misroutes, "metrics": self.task_metrics[-RETAINED_TASKS:]}
 
     @classmethod
     def from_json(cls, project: Path, raw: Any) -> FusionRegistry:
-        if not isinstance(raw, Mapping) or raw.get("version") != 1 or not isinstance(raw.get("agents"), list):
+        if not isinstance(raw, Mapping) or raw.get("version") not in (1, 2) or not isinstance(raw.get("agents"), list):
             raise FusionError("The Fusion state is missing or damaged.")
         calls, tokens, unmetered = raw.get("calls"), raw.get("tokens"), raw.get("unmetered")
         had_unknown = raw.get("hadUnknown", unmetered)
@@ -211,14 +277,34 @@ class FusionRegistry:
                 or not isinstance(tokens, int) or tokens < 0 or not isinstance(unmetered, bool) or not isinstance(had_unknown, bool)
                 or (unmetered and not had_unknown)):
             raise FusionError("The Fusion budget state is invalid.")
-        result = cls(project, Policy.from_json(raw.get("policy")), calls=calls, tokens=tokens, unmetered=unmetered, had_unknown=had_unknown)
+        misroutes = raw.get("misroutes", 0)
+        if type(misroutes) is not int or misroutes < 0:
+            raise FusionError("The Fusion misroute count is invalid.")
+        result = cls(project, Policy.from_json(raw.get("policy")), calls=calls, tokens=tokens, unmetered=unmetered,
+                     had_unknown=had_unknown, misroutes=misroutes, task_metrics=retained_tasks(raw.get("metrics")))
         for item in raw["agents"]:
             if not isinstance(item, Mapping):
                 raise FusionError("The expert record is invalid.")
             ident, scope, model, role, status = (item.get(k) for k in ("id", "scope", "model", "role", "status"))
             if (not isinstance(ident, str) or len(ident) != 32 or any(c not in "0123456789abcdef" for c in ident)
-                    or not result.policy.allowed(model, role) or status not in ("idle", "running", "done", "failed", "interrupted", "retired")):
+                    or role not in ("worker", "light") or not _model(model, external=True)
+                    or (status != "retired" and not result.policy.allowed(model, role))
+                    or status not in ("idle", "running", "done", "failed", "interrupted", "retired")):
                 raise FusionError("The expert record is invalid.")
+            workstream = item.get("workstream", "")
+            if workstream:
+                workstream = result._workstream(workstream)
+            elif workstream != "":
+                raise FusionError("The expert workstream is invalid.")
+            identity = item.get("identity", "")
+            if identity != "" and (identity not in _IDENTITIES or not workstream):
+                raise FusionError("The expert identity is invalid.")
+            paths_raw = item.get("paths", [])
+            if not isinstance(paths_raw, list) or len(paths_raw) > 128 or (paths_raw and not workstream):
+                raise FusionError("The expert write paths are invalid.")
+            paths = tuple(result._scope(path) for path in paths_raw)
+            if any(path != result._logical(raw_path) for path, raw_path in zip(paths, paths_raw)):
+                raise FusionError("A saved write path changed its resolved target.")
             canonical = result._scope(scope)
             if canonical != result._logical(scope):
                 raise FusionError("The saved module path changed its resolved target.")
@@ -226,26 +312,33 @@ class FusionRegistry:
             if not isinstance(aliases_raw, list) or len(aliases_raw) > 128:
                 raise FusionError("The expert scope aliases are invalid.")
             aliases = tuple(result._logical(alias) for alias in aliases_raw)
-            if ident in result.agents or (status != "retired" and any(other.status != "retired" and (
-                    result._overlaps(other.scope, canonical) or any(result._overlaps(left, right) for left in other.aliases for right in aliases))
+            # Identified workstreams may keep multiple finished attempts with the same label.
+            if ident in result.agents or (not identity and status != "retired" and any(not other.identity and other.status != "retired" and (
+                    (bool(workstream) and (other.workstream or other.scope).casefold() == workstream.casefold())
+                    or (not workstream and not other.workstream and (result._overlaps(other.scope, canonical)
+                        or any(result._overlaps(left, right) for left in other.aliases for right in aliases))))
                     for other in result.agents.values())):
                 raise FusionError("The expert ownership records overlap.")
             task, started, finished, source = item.get("task", ""), item.get("startedAt", 0.0), item.get("finishedAt"), item.get("transferredFrom", "")
             handoff = item.get("handoffComplete", False)
-            if (not isinstance(handoff, bool) or (handoff and not source) or not isinstance(task, str) or len(task) > 50_000 or isinstance(started, bool) or not isinstance(started, (int, float))
+            if (not isinstance(handoff, bool) or (handoff and not source) or not isinstance(task, str)
+                    or len(task) > (60_000 if identity else 50_000) or isinstance(started, bool) or not isinstance(started, (int, float))
                     or not math.isfinite(started) or started < 0 or not isinstance(source, str) or (source and (len(source) != 32 or any(c not in "0123456789abcdef" for c in source)))
                     or (finished is not None and (isinstance(finished, bool) or not isinstance(finished, (int, float)) or not math.isfinite(finished) or finished < 0))):
                 raise FusionError("The expert task record is invalid.")
             if status == "running":
                 result.unmetered = result.had_unknown = True
             result.agents[ident] = Expert(ident, canonical, model, role, "interrupted" if status == "running" else status,
-                                          task, float(started), float(finished) if finished is not None else None, source, handoff, aliases)
+                                          task, float(started), float(finished) if finished is not None else None,
+                                          source, handoff, aliases, workstream, paths, identity)
         for expert in result.agents.values():
             seen = {expert.id}
             source = expert.transferred_from
             while source:
                 previous = result.agents.get(source)
-                if source in seen or previous is None or previous.status != "retired" or not result._overlaps(previous.scope, expert.scope):
+                if source in seen or previous is None or previous.status != "retired" or previous.identity != expert.identity or (
+                        (previous.workstream or previous.scope).casefold() != expert.workstream.casefold() if expert.workstream
+                        else previous.workstream or not result._overlaps(previous.scope, expert.scope)):
                     raise FusionError("The expert handoff chain is invalid.")
                 seen.add(source)
                 source = previous.transferred_from

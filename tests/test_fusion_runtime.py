@@ -6,11 +6,12 @@ import asyncio
 import pytest
 
 from desktop.core.app_core import AppError
+from desktop.core.cache import Cache
 from desktop.core.chatgpt.errors import ChatGPTError
 from desktop.core.fusion.registry import Policy
 from tests.app_support import ready_core
 from tests.chatgpt_support import finish_turn, make_engine
-from tests.fake_responses import FakeResponses, call, say
+from tests.fake_responses import FakeResponses, call, say, usage
 from tests.fakes import until
 
 
@@ -75,6 +76,51 @@ def test_reopening_restores_the_same_expert_and_its_history(tmp_path):
     asyncio.run(go())
 
 
+def test_agents_json_uses_live_then_persisted_expert_tokens(tmp_path):
+    async def go():
+        cache = Cache(tmp_path / "cache")
+        project = str(tmp_path / "proj")
+        core, model, _, _, _ = await ready_core(tmp_path, cache=cache)
+        try:
+            cid = (await core.call("session.new", {"projectId": project}))["id"]
+            await until(lambda: cid in core._by_cid and core._by_cid[cid].controller.state.value == "ready")
+            conv = core._by_cid[cid]
+            main = conv.controller
+            main.enable_fusion(Policy("chatgpt:gpt-6.1-sol", ("chatgpt:gpt-6-luna",), "chatgpt:gpt-6-luna", 3))
+            raw = usage(260, 35, cached=50)
+            raw["input_tokens_details"]["cache_write_tokens"] = 20
+            model.script(call("delegate_task", {"scope": "src", "model": "chatgpt:gpt-6-luna", "role": "worker", "task": "Check a sample."}),
+                         [("hold", "expert"), *say("Sample checked.", used=raw)], say("Reviewed."))
+            await core.call("session.send", {"id": cid, "text": "Check the sample"})
+            await until(lambda: len(model.requests) == 2)
+            expert = next(iter(main.agents.values()))
+            assert expert.controller.is_open and core._agents_json(conv)[0]["tokens"] is None
+            model.release("expert")
+            await finish_turn(main)
+            expected = {"input": 190, "output": 35, "cacheWrite": 20, "cacheRead": 50}
+            key = f"agent:{expert.session_id}"
+            seen = conv.ledger.seen.pop(key, None)
+            assert expert.controller.is_open and core._agents_json(conv)[0]["tokens"] == expected
+            if seen is not None:
+                conv.ledger.seen[key] = seen
+            row = core._row_of(conv)
+        finally:
+            model.release("expert")
+            await core.shutdown()
+
+        again, _, _, _, _ = await ready_core(tmp_path, cache=cache)
+        try:
+            cid = (await again.call("session.openSaved", {"projectId": project, "id": row}))["id"]
+            conv = again._by_cid[cid]
+            await until(lambda: conv.controller.state.value == "ready")
+            assert conv.controller.agents[expert.session_id].controller is None
+            assert conv.ledger.seen[key].to_json() == expected
+            assert again._agents_json(conv)[0]["tokens"] == expected
+        finally:
+            await again.shutdown()
+    asyncio.run(go())
+
+
 def test_expert_permission_is_routed_to_the_main_conversation(tmp_path):
     async def go():
         core, model, events, _, _ = await ready_core(tmp_path)
@@ -119,7 +165,7 @@ def test_unavailable_acp_worker_cannot_be_started_even_if_a_model_requests_it(tm
     asyncio.run(go())
 
 
-def test_expert_coding_command_requires_approval_even_when_parent_is_full(tmp_path):
+def test_expert_coding_command_inherits_the_parents_full_access(tmp_path):
     async def go():
         core, model, _, _, _ = await ready_core(tmp_path)
         try:
@@ -128,15 +174,12 @@ def test_expert_coding_command_requires_approval_even_when_parent_is_full(tmp_pa
             assert await main.update_settings(autonomy="full")
             main.enable_fusion(Policy("chatgpt:gpt-6.1-sol", ("chatgpt:gpt-6-luna",), "chatgpt:gpt-6-luna", 3))
             model.script(call("delegate_task", {"scope": "src", "model": "chatgpt:gpt-6-luna", "role": "worker", "task": "Create a file."}),
-                         call("shell", {"command": "New-Item marker.txt"}), say("The command was declined."), say("Reported."))
+                         call("shell", {"command": "New-Item marker.txt"}), say("The command ran."), say("Reported."))
             await core.call("session.send", {"id": cid, "text": "Create a file"})
-            await until(lambda: bool(main.agent_prompts()) or main.state.value != "running")
-            assert main.agent_prompts() and not (tmp_path / "proj" / "marker.txt").exists()
-            expert = next(iter(main.agents.values()))
-            prompt = main.agent_prompts()[0]
-            assert (await core.call("session.answerPermission", {"id": cid, "agentId": expert.session_id, "promptId": prompt.id, "value": "cancel"}))["ok"]
             await finish_turn(main)
-            assert not (tmp_path / "proj" / "marker.txt").exists()
+            expert = next(iter(main.agents.values()))
+            assert not main.agent_prompts() and expert.record.status == "done"
+            assert (tmp_path / "proj" / "marker.txt").is_file()
         finally:
             await core.shutdown()
     asyncio.run(go())
@@ -144,7 +187,7 @@ def test_expert_coding_command_requires_approval_even_when_parent_is_full(tmp_pa
 
 def test_app_settings_start_fusion_explicitly_and_pin_the_main(tmp_path):
     async def go():
-        core, _, events, _, _ = await ready_core(tmp_path)
+        core, fake, events, _, _ = await ready_core(tmp_path)
         try:
             values = {"fusionMain": "chatgpt:gpt-6.1-sol", "fusionWorkers": ["chatgpt:gpt-6-luna"],
                       "fusionLight": "chatgpt:gpt-6-luna", "fusionMaxCalls": 3, "fusionMaxTokens": 50_000, "fusionMaxSeconds": 60}
@@ -154,10 +197,20 @@ def test_app_settings_start_fusion_explicitly_and_pin_the_main(tmp_path):
             main = core._by_cid[cid].controller
             assert main.model == "gpt-6.1-sol" and core._session_meta(core._by_cid[cid])["fusion"] is True
             assert core.settings.fusion_max_calls == 3 and main._fusion.registry.policy.max_seconds == 60
-            from desktop.core.app_core import AppError
-            with pytest.raises(AppError, match="主模型"):
-                await core.call("session.choose", {"id": cid, "field": "model", "value": "chatgpt:gpt-6-luna"})
+            assert not await main.update_settings(model="gpt-6-luna")
             assert main.model == "gpt-6.1-sol"
+            assert (await core.call("session.choose", {"id": cid, "field": "model", "value": "chatgpt:gpt-6-luna"}))["ok"]
+            assert not fake.requests
+            fake.script(say("Continue without Fusion."))
+            await core.call("session.send", {"id": cid, "text": "Continue"})
+            await finish_turn(main)
+            assert main._fusion is None and main._paused_fusion is not None
+            assert (await core.call("session.choose", {"id": cid, "field": "model", "value": "fusion"}))["ok"]
+            assert main._fusion is None and core._session_meta(core._by_cid[cid])["fusion"]
+            fake.script(say("SUMMARY: continued without Fusion."), say("Fusion resumed."))
+            await core.call("session.send", {"id": cid, "text": "Resume Fusion"})
+            await finish_turn(main)
+            assert main.model == "gpt-6.1-sol" and main._fusion is not None
             from desktop.core.settings import settings_from_dict, settings_to_dict
             restored = settings_from_dict(settings_to_dict(core.settings))
             assert restored.fusion_workers == ["chatgpt:gpt-6-luna"] and restored.fusion_max_tokens == 50_000
@@ -409,10 +462,10 @@ def test_explicit_main_model_change_preserves_session_and_never_falls_back(tmp_p
             await finish_turn(main)
             count = len(model.requests)
             native = main.session_id
-            with pytest.raises(AppError):
-                await core.call("session.choose", {"id": cid, "field": "model", "value": "chatgpt:gpt-6-luna"})
+            assert not await main.update_settings(model="gpt-6-luna")
             assert (await core.call("fusion.changeMain", {"id": cid, "model": "chatgpt:gpt-6-luna"}))["ok"]
-            assert len(model.requests) == count and main.session_id == native
+            assert len(model.requests) == count + 1 and main.session_id == native
+            assert model.requests[-1]["model"] == "gpt-6.1-sol", "the old main produces the handoff first"
             assert main.model == "gpt-6-luna" and main._fusion.registry.policy.main == "chatgpt:gpt-6-luna"
             with pytest.raises(AppError):
                 await core.call("fusion.changeMain", {"id": cid, "model": "chatgpt:missing"})
@@ -431,7 +484,7 @@ def test_explicit_main_model_change_preserves_session_and_never_falls_back(tmp_p
             def fail_save(_saved):
                 raise OSError("simulated disk failure")
             monkeypatch.setattr(main.manager.sessions, "save", fail_save)
-            with pytest.raises(ChatGPTError):
+            with pytest.raises(AppError, match="仍使用原模型"):
                 await core.call("fusion.changeMain", {"id": cid, "model": "chatgpt:gpt-6.1-sol"})
             assert main.model == "gpt-6-luna" and main._fusion.registry.policy.main == "chatgpt:gpt-6-luna"
             monkeypatch.setattr(main.manager.sessions, "save", save)

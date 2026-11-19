@@ -106,6 +106,38 @@ def test_a_missing_or_stale_index_is_rebuilt_from_the_files(tmp_path):
     assert [r.title for r in store.rows()] == ["alpha"]
 
 
+def test_legacy_index_recovers_active_fusion_without_reading_histories_on_later_listings(tmp_path, monkeypatch):
+    store = SessionStore(tmp_path)
+    ordinary, active, paused, expert = (session(name) for name in ("ordinary", "active", "paused", "expert"))
+    active.model = "devin:swe-2-high"
+    active.fusion = {"policy": {"main": active.model}}
+    paused.fusion = {"policy": {"main": "chatgpt:gpt-6.1-sol"}, "enabled": False}
+    expert.origin = {"app": "fusion"}
+    for saved in (ordinary, active, paused, expert):
+        store.save(saved)
+
+    expected = {saved.id: (saved is active, saved.model) for saved in (ordinary, active, paused)}
+
+    def listed():
+        return {row.id: (row.fusion, row.model) for row in store.rows()}
+
+    assert listed() == expected
+    path = tmp_path / "index.json"
+    legacy = json.loads(path.read_text(encoding="utf-8"))
+    for entry in legacy["sessions"].values():
+        entry.pop("fusion")
+    path.write_text(json.dumps(legacy), encoding="utf-8")
+    archives = {p: p.read_bytes() for p in (tmp_path / "sessions").glob("*.json")}
+    assert listed() == expected
+    assert all(p.read_bytes() == before for p, before in archives.items()), "only the index is rebuilt"
+
+    def unexpected_load(session_id):
+        pytest.fail(f"listing a current index must not load history for {session_id}")
+
+    monkeypatch.setattr(store, "load", unexpected_load)
+    assert listed() == expected
+
+
 def test_a_corrupt_file_is_skipped_not_fatal(tmp_path):
     store = SessionStore(tmp_path)
     store.save(session("good"))

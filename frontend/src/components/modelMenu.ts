@@ -16,8 +16,8 @@ export interface ModelMenuInput {
   running?: boolean;
   /** the session has no messages yet: changing engine loses nothing */
   fresh?: boolean;
-  /** Composer-only choice for a new Fusion session; not a provider's model id. */
-  fusion?: { selected: boolean; disabled?: boolean; description?: string; onSelect: () => void };
+  /** Composer-only mode, selectable in an idle conversation; not a provider's model id. */
+  fusion?: { selected: boolean; disabled?: boolean; onSelect: () => void; onConfigure?: () => void };
   onPick: (id: string) => void;
   /** open the settings page where accounts and providers are managed */
   onManage: (providerEdit?: string | null) => void;
@@ -44,8 +44,9 @@ function byGroup(models: ModelChoice[]): [string | null, ModelChoice[]][] {
 export function buildModelMenu(i: ModelMenuInput): MenuItem[] {
   const items: MenuItem[] = [];
   if (i.fusion) items.push(
-    { id: "fusion", label: "Fusion", checked: i.fusion.selected, disabled: i.fusion.disabled, description: i.fusion.description, onSelect: i.fusion.onSelect },
-    { id: "sep-fusion", separator: true },
+    { id: "h-wittycode", heading: true, label: "WittyCode" },
+    { id: "fusion", label: "Fusion", checked: i.fusion.selected, disabled: i.fusion.disabled, onSelect: i.fusion.onSelect,
+      configure: i.fusion.onConfigure ? { label: "Fusion 设置", onSelect: i.fusion.onConfigure } : undefined },
   );
   const hidden = new Set(i.hidden ?? []);
   const available = i.models.filter((m) => !m.disabled);
@@ -66,9 +67,9 @@ export function buildModelMenu(i: ModelMenuInput): MenuItem[] {
   const modelItem = (m: ModelChoice): MenuItem => ({
     id: m.id,
     label: m.label,
-    description: foreign(m) && i.running ? crossing(m) : hidden.has(m.id) ? "已在设置里隐藏，正在使用所以还显示" : m.note,
+    description: i.running ? (foreign(m) ? crossing(m) : "本轮结束后才能压缩并切换模型") : i.fusion?.selected ? "退出 Fusion 并使用此普通模型" : hidden.has(m.id) ? "已在设置里隐藏，正在使用所以还显示" : m.note,
     checked: !i.fusion?.selected && m.id === i.current,
-    disabled: foreign(m) && !!i.running,
+    disabled: !!i.running,
     onSelect: () => i.onPick(m.id),
   });
 

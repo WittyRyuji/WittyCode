@@ -7,7 +7,8 @@ The rules (what goes where, what is refused and why):
 - other pictures Qt can decode (BMP, TIFF, ICO, a clipboard bitmap ...) are re-encoded as PNG;
 - PDF up to 3 MiB; its text layer goes along for models that cannot read PDFs themselves;
 - text: files with a text or source extension, or anything that is clean UTF-8 / UTF-16 with BOM, up to 1 MiB;
-- everything else (archives, executables, Office files, folders ...) and everything too large is refused
+- ZIP, TAR and TAR.GZ are unpacked into a bounded text attachment; non-text members are not sent;
+- everything else (executables, Office files, folders ...) and everything too large is refused
   with a reason and, when it is a file, its path, so that the user can have the path typed into the prompt.
 
 Nothing here needs a window; all of it also runs without a ``QApplication``.
@@ -23,6 +24,7 @@ from pathlib import Path
 from PySide6.QtCore import QEvent, QMimeData, Qt
 from PySide6.QtGui import QDropEvent, QImage, QPixmap
 
+from desktop.core import archive_attachments
 from desktop.core.attachments import (
     HARD_ATTACHMENTS,
     MAX_IMAGE_BYTES,
@@ -135,6 +137,10 @@ def _classify(name: str, where: str, size: int, head: bytes, rest: Callable[[], 
     media_type = sniff_image(head)
     if media_type:
         return _picture(name, where, whole(), media_type)
+    if kind := archive_attachments.archive_kind(name):
+        if size > archive_attachments.MAX_SOURCE:
+            return Rejection(name, f"压缩包超过 {archive_attachments.MAX_SOURCE // MIB} MB。", where)
+        return archive_attachments.unpack_text(name, where, kind, whole())
     trusted = is_text_name(name)
     if trusted and decode_text(head, trusted=True, partial=partial) is not None:
         return _text(name, where, size, whole, trusted=True)

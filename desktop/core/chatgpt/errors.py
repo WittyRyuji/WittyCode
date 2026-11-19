@@ -55,6 +55,10 @@ class ChatGPTError(Exception):
         return " · ".join(parts)
 
 
+class RequestNotSent(ChatGPTError):
+    """Local request preparation failed before any inference call could be sent."""
+
+
 class AuthError(ChatGPTError):
     """Signing in or renewing the sign-in failed. ``terminal``: the tokens cannot be used again, sign in anew."""
 

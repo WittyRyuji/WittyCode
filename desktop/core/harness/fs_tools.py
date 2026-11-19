@@ -24,6 +24,7 @@ for minutes on a pattern like ``(a+)+$`` and holds the GIL meanwhile, which woul
 
 from __future__ import annotations
 
+import base64
 import codecs
 import contextlib
 import difflib
@@ -47,6 +48,7 @@ from pathlib import Path
 from typing import Any
 
 from desktop.core.diffs import FileDiff, diff_for_new_file, diff_from_contents
+from desktop.core.harness.image_files import MEDIA_TYPES, picture_info
 from desktop.core.harness.tools import (
     STOPPED_NOTHING_WRITTEN,
     ToolContext,
@@ -299,6 +301,26 @@ def _read_window(path: Path, offset: int, limit: int, ctx: ToolContext, encoding
     return lines, None, more
 
 
+def _read_picture(path: Path, media_type: str, size: int, ctx: ToolContext) -> ToolResult:
+    if not ctx.supports_images:
+        raise ToolError(f"{path} is a picture, but the current model does not support images.")
+    too_large = f"{path} is over the {_human_size(MAX_READ_BYTES)} picture limit; resize or compress it before reading."
+    if size > MAX_READ_BYTES:
+        raise ToolError(too_large)
+    with path.open("rb") as handle:
+        data = handle.read(MAX_READ_BYTES + 1)
+    size = len(data)
+    if size > MAX_READ_BYTES:
+        raise ToolError(too_large)
+    try:
+        width, height, animated = picture_info(path, media_type, data)
+    except ValueError as error:
+        raise ToolError(str(error)) from None
+    note = " Most models only see the first frame of an animated GIF." if animated else ""
+    return ToolResult(f"{path} ({media_type}, {width} x {height} px, {_human_size(size)}).{note}",
+                      images=[{"media_type": media_type, "data": base64.b64encode(data).decode("ascii")}])
+
+
 def read_file(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     path = _target(ctx, args["file_path"])
     narrowed = "offset" in args or "limit" in args
@@ -314,6 +336,12 @@ def read_file(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         raise ToolError(f"{path} is a folder, not a file. Use list_dir to see its contents.")
     if not stat.S_ISREG(info.st_mode):
         raise ToolError(f"{path} is not a regular file.")
+    media_type = MEDIA_TYPES.get(Path(_unquoted(args["file_path"])).suffix.lower())
+    if media_type:
+        try:
+            return _read_picture(path, media_type, info.st_size, ctx)
+        except OSError as error:
+            raise _io_error("read", path, error) from None
     if info.st_size > MAX_READ_BYTES and not narrowed:
         raise ToolError(
             f"{path} is {_human_size(info.st_size)}, over the {_human_size(MAX_READ_BYTES)} limit for reading a whole file. "
@@ -1370,12 +1398,11 @@ _PATH_NOTE = "Absolute, or relative to the project folder."
 READ_FILE = ToolSpec(
     name="read_file",
     description=(
-        "Read a text file and return its lines numbered like `{line number}<TAB>{text}`. "
-        f"{_PATH_NOTE} Returns up to 2000 lines from the start unless offset/limit are given; use them to page through "
-        "a long file (the result says how to continue). Lines longer than 2000 characters are cut. UTF-8, GB18030 and UTF-16 "
-        "(with BOM) are read. Guessed legacy encodings require an explicit encoding read before editing. "
-        "Binary files are refused, and so are files over 5 MB unless offset and limit narrow the read. "
-        "To look at a folder use list_dir."
+        "Read numbered text (`{line number}<TAB>{text}`). "
+        f"{_PATH_NOTE} Use offset/limit to page through text (default 2000 lines; 2000 characters per line). "
+        "Reads UTF-8, GB18030 and UTF-16 with BOM; confirm guessed encodings before editing. "
+        "Vision models can read PNG, JPEG, GIF and WebP (up to 5 MB and 8000 px per side); text options do not apply. "
+        "Other binaries are refused. Text over 5 MB requires offset/limit. Use list_dir for folders."
     ),
     parameters={
         "type": "object",

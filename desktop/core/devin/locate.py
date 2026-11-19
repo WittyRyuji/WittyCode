@@ -36,7 +36,11 @@ class DevinBinary:
     """The command line that runs it (the executable itself, unless a test points at a script)."""
 
     def argv(self, *arguments: str) -> list[str]:
-        return [*(self.command or (str(self.path),)), *arguments]
+        # New CLIs default to a shared daemon. ACP connections owned by this application must also own their process,
+        # rather than reuse a daemon with stale authentication or leave it alive after the window has closed.
+        numbers = tuple(int(n) for n in re.findall(r"\d+", self.version)[:3])
+        local = ["--process-model", "in-process"] if arguments[:1] == ("acp",) and numbers >= (3000, 13, 4) else []
+        return [*(self.command or (str(self.path),)), *local, *arguments]
 
 
 Runner = Callable[..., Any]

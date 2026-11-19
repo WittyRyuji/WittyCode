@@ -1,11 +1,17 @@
 """Fusion settings, new conversation, and expert panel through the real Qt page."""
 from __future__ import annotations
 
-import pytest
-from PySide6.QtCore import Qt
+import asyncio
+import json
+import threading
 
+import pytest
+from PySide6.QtCore import QRect, Qt
+
+from desktop.core.cache import Cache
+from desktop.core.session_state import SessionState
 from tests.e2e_support import open_rig
-from tests.fake_responses import call, say
+from tests.fake_responses import call, fail, say
 from tests.fakes import until
 from tests.ui_support import run
 
@@ -17,6 +23,8 @@ async def select_fusion(rig):
     await rig.click(".chip-model")
     await rig.wait_text(".menu-item .menu-label", "Fusion")
     assert (await rig.texts(".menu-item .menu-label"))[0] == "Fusion"
+    assert await rig.text(".menu-head", 0) == "WittyCode"
+    assert await rig.js("document.querySelector('.menu-row').previousElementSibling.classList.contains('menu-head') && document.querySelector('.menu-row').nextElementSibling.classList.contains('menu-head')"), "Fusion shares the provider layout, without its own separator"
     await rig.click_text(".menu-item", "Fusion")
 
 
@@ -26,24 +34,28 @@ def test_configure_and_start_fusion_with_a_local_fake(qapp, loop, tmp_path):
         try:
             await select_fusion(rig)  # The incomplete setup opens settings instead of silently enabling Fusion.
             await rig.wait_text(".settings-body h2", "Fusion")
-            for index, name in [(0, "GPT-6.1-Sol"), (1, "GPT-6-Luna"), (2, "GPT-6-Luna")]:
-                await rig.click(".settings-body .selectbox", index)
+            for role, name in [("main", "GPT-6.1-Sol"), ("worker", "GPT-6-Luna"), ("light", "GPT-6-Luna")]:
+                await rig.click(f'.fusion-model-row[data-role="{role}"] .fusion-model-picker .selectbox')
                 await rig.wait_text(".menu-item", name)
                 await rig.click_text(".menu-item", name)
             await until(lambda: rig.core.settings.fusion_main == "chatgpt:gpt-6.1-sol" and rig.core.settings.fusion_light == "chatgpt:gpt-6-luna" and rig.core.settings.fusion_workers == ["chatgpt:gpt-6-luna"])
-            await rig.wait_for(".fusion-reasoning-row", 2)  # The worker and lightweight role share one model.
-            for model_id, level in [("chatgpt:gpt-6.1-sol", "High"), ("chatgpt:gpt-6-luna", "Low")]:
-                await rig.click(f'.fusion-reasoning-row[data-model="{model_id}"] .selectbox')
-                if model_id.endswith("luna"):
+            await rig.wait_for(".fusion-model-row", 3)
+            for role, level in [("main", "High"), ("worker", "Low"), ("light", "Low")]:
+                await rig.click(f'.fusion-model-row[data-role="{role}"] .fusion-effort-picker .selectbox')
+                if role == "worker":
                     assert await rig.texts(".menu-item .menu-label") == ["默认", "Low"]
                 await rig.click_text(".menu-item", level)
-            levels = {"chatgpt:gpt-6.1-sol": "high", "chatgpt:gpt-6-luna": "low"}
+            await rig.wait_text('.fusion-model-row[data-role="light"] .fusion-effort-picker .selectbox', "Low")
+            levels = {"main:chatgpt:gpt-6.1-sol": "high", "worker:chatgpt:gpt-6-luna": "low", "light:chatgpt:gpt-6-luna": "low"}
             await until(lambda: rig.core.settings.fusion_reasoning == levels)
             await rig.click('.settings-body button[aria-label="关闭"]')
             await rig.press(",", Qt.KeyboardModifier.ControlModifier)
             await rig.click_text(".snav", "Fusion")
-            await rig.wait_text('.fusion-reasoning-row[data-model="chatgpt:gpt-6.1-sol"] .selectbox', "High")
-            await rig.wait_text('.fusion-reasoning-row[data-model="chatgpt:gpt-6-luna"] .selectbox', "Low")
+            await rig.wait_text('.fusion-model-row[data-role="main"] .fusion-effort-picker .selectbox', "High")
+            await rig.wait_text('.fusion-model-row[data-role="worker"] .fusion-effort-picker .selectbox', "Low")
+            await rig.wait_text('.fusion-model-row[data-role="light"] .fusion-effort-picker .selectbox', "Low")
+            assert not await rig.exists(".fusion-reasoning")
+            assert "各模型思考等级" not in await rig.text(".settings-body")
             assert not await rig.exists('input[aria-label="专家调用次数"]')
             assert not await rig.exists('input[aria-label="Token 预算"]')
             await rig.click('input[aria-label="成本与效率倾向"]')
@@ -54,15 +66,19 @@ def test_configure_and_start_fusion_with_a_local_fake(qapp, loop, tmp_path):
             await rig.click('.settings-body button[aria-label="关闭"]')
             await select_fusion(rig)
             await rig.wait_text(".chip-model .chip-v", "Fusion")
-            await rig.wait_text(".chip-reasoning .chip-v", "High")
-            assert await rig.js('document.querySelector(".chip-reasoning").disabled')
+            assert not await rig.exists(".chip-reasoning")
             assert not await rig.exists(".hint .fusion-choice, .fusion-badge")
             rig.plan.script(call("delegate_task", {"scope": "src", "model": "chatgpt:gpt-6-luna", "role": "worker", "task": "Inspect the module."}),
                             say("专家检查完成。"), say("主代理已检查报告。"))
             await rig.send("请检查模块")
             await rig.wait_text(".chip-model .chip-v", "Fusion")
-            await rig.wait_text(".agent-chip", "src")
             await rig.wait_text(".transcript", "主代理已检查报告")
+            await rig.wait_text(".tab-title", "会话主题摘要")
+            await rig.wait_text(".srow.open .stitle", "会话主题摘要")
+            assert "会话主题摘要" not in await rig.text(".transcript")
+            await rig.wait_for(".agent-history-toggle")
+            await rig.click(".agent-history-toggle")
+            await rig.wait_text(".agent-chip", "src")
             assert len(rig.core.order) == 1
             assert [request["model"] for request in rig.plan.requests] == ["gpt-6.1-sol", "gpt-6-luna", "gpt-6.1-sol"]
             assert [request["reasoning"]["effort"] for request in rig.plan.requests] == ["high", "low", "high"]
@@ -72,20 +88,18 @@ def test_configure_and_start_fusion_with_a_local_fake(qapp, loop, tmp_path):
             assert rig.window.grab().save(str(tmp_path / "fusion-expert.png"))
             main = rig.core.order[0].controller
             await until(lambda: main.state.value == "ready")
-            await rig.click_text(".hint button", "更换主模型")
+            assert not await rig.exists(".chip-reasoning")
+            assert "更换主模型" not in await rig.text(".hint") and "授权模型" not in await rig.text(".hint")
+            await rig.click(".chip-model")
+            await rig.click('.menu-configure[aria-label="Fusion 设置"]')
+            await rig.wait_text(".settings-body h2", "Fusion")
+            await rig.click('.fusion-model-row[data-role="main"] .fusion-model-picker .selectbox')
             await rig.click_text(".menu-item", "GPT-6-Luna")
-            await rig.wait_text(".dialog", "更换主模型为 GPT-6-Luna")
-            assert main.model == "gpt-6.1-sol" and len(rig.plan.requests) == 3
-            assert rig.window.grab().save(str(tmp_path / "fusion-change-main.png"))
-            await rig.click_text(".dialog button", "更换主模型")
-            await until(lambda: main.model == "gpt-6-luna")
-            assert len(rig.plan.requests) == 3 and main._fusion.registry.policy.main == "chatgpt:gpt-6-luna"
-            await rig.click_text(".hint button", "授权模型")
-            await rig.click_text(".menu-item", "GPT-6.1-Sol")
-            await rig.wait_text(".dialog", "授权 GPT-6.1-Sol")
+            await until(lambda: rig.core.settings.fusion_main == "chatgpt:gpt-6-luna")
+            assert main.model == "gpt-6.1-sol" and main._fusion.registry.policy.main == "chatgpt:gpt-6.1-sol"
             assert "chatgpt:gpt-6.1-sol" not in main._fusion.registry.policy.workers
-            await rig.click_text(".dialog button", "授权模型")
-            await until(lambda: "chatgpt:gpt-6.1-sol" in main._fusion.registry.policy.workers)
+            assert rig.window.grab().save(str(tmp_path / "fusion-settings-shortcut.png"))
+            await rig.click('.settings-body button[aria-label="关闭"]')
             assert len(rig.plan.requests) == 3
             await rig.wait_for(".agentpanel-actions .btn")
             await rig.click_text(".agentpanel-actions .btn", "转交专家")
@@ -99,17 +113,93 @@ def test_configure_and_start_fusion_with_a_local_fake(qapp, loop, tmp_path):
             assert (main._fusion.registry.policy.max_calls, main._fusion.registry.policy.max_tokens, main._fusion.registry.policy.preference) == (0, 0, 100)
             assert "cost x0.50" in rig.plan.requests[0]["instructions"] and "efficiency x1.50" in rig.plan.requests[0]["instructions"]
             assert len(rig.plan.requests) == 3
+            await rig.click(".tab.current .tab-x")
+            await rig.wait_text(".srow:not(.open) .stitle", "会话主题摘要")
+            await rig.click_text(".srow:not(.open)", "会话主题摘要")
+            await rig.wait_text(".tab-title", "会话主题摘要")
+            await rig.wait_text(".transcript", "主代理已检查报告")
+            assert len(rig.plan.fake.title_requests) == 1
         finally:
             await rig.finish()
     run(loop, scenario())
 
 
-def test_devin_fusion_main_and_plan_through_the_real_page(qapp, loop, tmp_path):
+@pytest.mark.parametrize(("gesture", "outcome"), [("enter", "done"), ("click", "done"), ("click", "stop"), ("enter", "fail")])
+def test_submitted_message_leaves_composer_while_fusion_handoff_is_blocked(qapp, loop, tmp_path, gesture, outcome):
+    async def scenario():
+        rig = await open_rig(tmp_path)
+        try:
+            rig.plan.script(say("Original response."))
+            await rig.send("Source conversation")
+            await rig.wait_text(".transcript", "Original response.")
+            main = rig.core.order[0].controller
+            await until(lambda: main.state.value == "ready")
+            for key, value in {"fusionMain": "chatgpt:gpt-6-luna", "fusionWorkers": ["chatgpt:gpt-6.1-sol"],
+                               "fusionLight": "chatgpt:gpt-6.1-sol"}.items():
+                await rig.core.call("settings.set", {"key": key, "value": value})
+            await select_fusion(rig)
+            await rig.wait_text(".chip-model .chip-v", "Fusion")
+            attachment = tmp_path / "handoff.txt"
+            attachment.write_text("Attached to the new request, not its summary.", encoding="utf-8")
+            await rig.drop_files([attachment])
+            await rig.wait_for(".att-row .att", 1)
+            summary = fail("invalid_request", "Summary unavailable") if outcome == "fail" else say("Handoff summary.")
+            rig.plan.script([("hold", "handoff"), *summary], say("Destination response."))
+            await rig.focus_composer()
+            await rig.type("Submitted user request")
+            if gesture == "enter":
+                await rig.press("Enter")
+            else:
+                await rig.click('button[aria-label="发送"]')
+            await rig.wait_text(".preparing-turn .body", "Submitted user request")
+            await rig.wait_text(".preparing-turn [role=status]", "正在压缩并切换模型")
+            await rig.wait_text(".preparing-turn .fname", "handoff.txt")
+            assert await rig.js("document.querySelector('.input').value") == ""
+            assert not await rig.exists(".att-row .att")
+            await until(lambda: len(rig.plan.requests) == 2)
+            assert main.model == "gpt-6.1-sol" and len(main.transcript.turns) == 1
+            assert "Submitted user request" not in str(rig.plan.requests[1])
+            assert "Attached to the new request" not in str(rig.plan.requests[1])
+            assert rig.window.grab().save(str(tmp_path / "fusion-preparing.png"))
+
+            # Same text typed again on purpose must not be deleted a second time when the pending RPC replies.
+            followup = "Submitted user request" if outcome == "done" else "A new draft during the handoff"
+            await rig.focus_composer()
+            await rig.type(followup)
+            await rig.press("Enter")
+            assert await rig.js("document.querySelector('.input').value") == followup
+            assert len(rig.plan.requests) == 2 and not await rig.exists(".send.how")
+            if outcome == "stop":
+                await rig.click(".send.stop")
+            else:
+                rig.plan.release("handoff")
+            await rig.wait_for(".preparing-turn", 0)
+            if outcome == "done":
+                await rig.wait_text(".text-block", "Destination response.")
+                assert await rig.js("document.querySelector('.input').value") == followup
+                assert [r["model"] for r in rig.plan.requests] == ["gpt-6.1-sol", "gpt-6.1-sol", "gpt-6-luna"]
+                assert (await rig.texts(".block.user .body")).count("Submitted user request") == 1
+            else:
+                await rig.wait_for(".att-row .att", 1)
+                assert await rig.js("document.querySelector('.input').value") == "Submitted user request\n\n" + followup
+                assert await rig.texts(".att-row .fname") == ["handoff.txt"]
+                assert len(rig.plan.requests) == 2 and len(main.transcript.turns) == 1
+                assert rig.core.order[0].pending_model["model"] == "fusion"
+        finally:
+            rig.plan.release("handoff")
+            await rig.finish()
+    run(loop, scenario())
+
+
+@pytest.mark.parametrize("preview", [False, True], ids=["no-preview", "cached-preview"])
+def test_devin_fusion_main_and_plan_through_the_real_page(qapp, loop, tmp_path, monkeypatch, preview):
     from tests.fusion_acp_support import make_guarded_engine
 
     async def scenario():
         harness = make_guarded_engine(tmp_path)
-        rig = await open_rig(tmp_path, devin_engine=harness.engine)
+        cache = Cache(tmp_path / "cache") if preview else None
+        rig = await open_rig(tmp_path, devin_engine=harness.engine, cache=cache)
+        entered, release = threading.Event(), threading.Event()
         try:
             await until(lambda: any(model["source"] == "devin" for model in rig.core.catalog.models), timeout=20)
             for key, value in {"fusionMain": "devin:swe-2-high", "fusionWorkers": ["chatgpt:gpt-6-luna"], "fusionLight": "chatgpt:gpt-6-luna"}.items():
@@ -121,6 +211,9 @@ def test_devin_fusion_main_and_plan_through_the_real_page(qapp, loop, tmp_path):
             main = rig.core.order[0].controller
             await until(lambda: main.state.value == "ready")
             assert main.model == "devin:swe-2-high" and not rig.plan.requests
+            open_sidebar = ".srow.open .ssub"
+            await rig.wait_text(open_sidebar, "WittyFusion")
+            assert (await rig.text(open_sidebar)).split(" · ")[-1] == "WittyFusion"
             await rig.core.call("session.choose", {"id": rig.core.order[0].cid, "field": "mode", "value": "spec"})
             await rig.send("[fusion-plan] Propose a plan")
             await rig.wait_for(".plan-approval", timeout=30)
@@ -129,7 +222,51 @@ def test_devin_fusion_main_and_plan_through_the_real_page(qapp, loop, tmp_path):
             await rig.click_text(".plan-approval button", "执行方案")
             await until(lambda: main.state.value == "ready" and main.saved.plan.get("status") == "approved", timeout=30)
             assert main.saved.plan["execution"] == "started" and not rig.plan.requests
+            await rig.core.call("session.close", {"id": rig.core.order[0].cid})
+            row_id = f"cg:{main.session_id}"
+            await until(lambda: row_id in rig.core._saved_sessions_json())
+            saved = rig.core._saved_sessions_json()[row_id]
+            assert saved["fusion"] is True and saved["settings"]["model"] == "devin:swe-2-high"
+            saved_row = f'.srow:not(.open)[data-session-id="{row_id}"]'
+            await rig.wait_text(f"{saved_row} .ssub", "WittyFusion")
+            assert (await rig.text(f"{saved_row} .ssub")).split(" · ")[-1] == "WittyFusion"
+            if cache is not None:
+                await until(lambda: cache.load_session(row_id) is not None)
+
+            load = rig.engine.sessions.load
+
+            def slow_load(native):
+                if native == main.session_id:
+                    entered.set()
+                    assert release.wait(30), "the test did not release the archive read"
+                return load(native)
+
+            monkeypatch.setattr(rig.engine.sessions, "load", slow_load)
+            await rig.click(saved_row)
+            await until(entered.is_set)
+            (reopened,) = rig.core.order
+            assert reopened.controller.state is SessionState.OPENING and reopened.preview is preview
+            row = f'.srow.open[data-session-id="{reopened.cid}"]'
+            opening_row = f"{row}.m-opening"
+            await rig.wait_for(opening_row)
+            label = await rig.text(f"{opening_row} .ssub")
+            assert label.startswith("连接中 · ") and label.endswith(" · WittyFusion") and "Devin" not in label, label
+            # The DOM is already correct; let Qt paint it while the archive read is still blocked.
+            await asyncio.sleep(0.2)
+            # Keep only the synthetic row as evidence, not the parent project's local path.
+            bounds = json.loads(await rig.js(f'''JSON.stringify((() => {{
+                const r = document.querySelector({json.dumps(opening_row)}).getBoundingClientRect();
+                return [Math.floor(r.x), Math.floor(r.y), Math.ceil(r.width), Math.ceil(r.height)];
+            }})())'''))
+            assert rig.window.view.grab(QRect(*bounds)).save(str(tmp_path / "fusion-sidebar-connecting.png"))
+            release.set()
+            await rig.wait_text(f"{row}.m-ready .ssub", "已打开")
+            ready_label = await rig.text(f"{row} .ssub")
+            assert ready_label.endswith(" · WittyFusion") and "Devin" not in ready_label, ready_label
+            assert reopened.controller.session_id == main.session_id and reopened.controller.model == "devin:swe-2-high"
+            assert not rig.plan.requests
         finally:
+            release.set()
             await rig.finish()
     run(loop, scenario())
 
@@ -153,14 +290,14 @@ def test_fusion_model_menus_respect_visibility_and_include_devin(qapp, loop, tmp
             await rig.core.call("models.setVisible", {"ids": ["chatgpt:gpt-6-luna", api_id], "visible": False})
             await select_fusion(rig)
             await rig.wait_text(".settings-body h2", "Fusion")
-            await rig.click(".settings-body .selectbox", 0)
+            await rig.click('.fusion-model-row[data-role="main"] .fusion-model-picker .selectbox')
             assert "GPT-6-Luna" not in await rig.text(".menu") and "Hidden API Demo" not in await rig.text(".menu")
             await rig.wait_text(".menu-item", "SWE-2")
             assert not await rig.js("[...document.querySelectorAll('.menu-item')].find(e => e.textContent.includes('SWE-2')).disabled")
             await rig.click_text(".menu-item", "SWE-2")
             await until(lambda: rig.core.settings.fusion_main == "devin:swe-2-high")
             await rig.click(".settings-body h2")
-            await rig.click(".settings-body .selectbox", 1)
+            await rig.click('.fusion-model-row[data-role="worker"] .fusion-model-picker .selectbox')
             await rig.wait_text(".menu-item", "SWE-2")
             assert "GPT-6-Luna" not in await rig.text(".menu") and "Hidden API Demo" not in await rig.text(".menu")
             assert not await rig.js("[...document.querySelectorAll('.menu-item')].find(e => e.textContent.includes('SWE-2')).disabled")

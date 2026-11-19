@@ -254,7 +254,7 @@ def test_the_geometry_is_saved_with_the_settings_and_handed_back_on_the_next_sta
     run(loop, scenario())
 
 
-def test_notification_player_loads_all_bundled_wavs_and_picker_only_accepts_one_wav(qapp, loop, tmp_path):
+def test_notification_player_loads_all_bundled_wavs_and_picker_accepts_wav_and_mp3(qapp, loop, tmp_path):
     from PySide6.QtMultimedia import QSoundEffect
     from PySide6.QtWidgets import QFileDialog
 
@@ -280,7 +280,61 @@ def test_notification_player_loads_all_bundled_wavs_and_picker_only_accepts_one_
 
             platform._ask = pick
             assert await platform.pick_sound(sounds.sound_path("question")) == sounds.sound_path("question")
-            assert seen == [(QFileDialog.FileMode.ExistingFile, ["PCM WAV 声音 (*.wav)"])]
+            assert seen == [(QFileDialog.FileMode.ExistingFile, ["提示音 (*.wav *.mp3)"])]
+        finally:
+            await rig.finish()
+
+    run(loop, scenario())
+
+
+def test_notification_players_load_mp3_and_stop_each_other(qapp, loop, tmp_path, mp3_frame):
+    from PySide6.QtMultimedia import QMediaPlayer, QSoundEffect
+
+    async def scenario():
+        rig = await open_rig(tmp_path)
+        try:
+            platform = rig.window.platform
+            mp3 = tmp_path / "sound.MP3"
+            mp3.write_bytes(mp3_frame * 120)
+            wav = sounds.sound_path("complete")
+            assert platform._sound is platform._media is None
+            platform.play_sound(wav)
+            effect = platform._sound
+            assert isinstance(effect, QSoundEffect) and platform._media is None
+            await wait_for(lambda: effect.status() == QSoundEffect.Status.Ready)
+            platform.play_sound(wav)
+            assert effect.isPlaying()
+
+            platform.play_sound(str(mp3))
+            assert not effect.isPlaying()
+            player = platform._media
+            assert isinstance(player, QMediaPlayer)
+            assert player.parent() is player.audioOutput().parent() is rig.window
+            assert player.audioOutput().volume() == pytest.approx(0.7)
+            assert player.audioOutput().isMuted()
+            assert Path(player.source().toLocalFile()) == mp3
+            loaded = (QMediaPlayer.MediaStatus.LoadedMedia, QMediaPlayer.MediaStatus.BufferedMedia, QMediaPlayer.MediaStatus.EndOfMedia)
+            await wait_for(lambda: player.mediaStatus() in (*loaded, QMediaPlayer.MediaStatus.InvalidMedia))
+            assert player.mediaStatus() in loaded and player.error() == QMediaPlayer.Error.NoError
+            assert player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+
+            platform.play_sound(wav)
+            assert player.playbackState() == QMediaPlayer.PlaybackState.StoppedState
+            assert platform._sound is effect and effect.isPlaying()
+            platform.stop_sound()
+            assert not effect.isPlaying()
+
+            platform.play_sound(str(mp3))
+            assert platform._media is player
+            await wait_for(lambda: player.playbackState() == QMediaPlayer.PlaybackState.PlayingState)
+            platform.stop_sound()
+            assert player.playbackState() == QMediaPlayer.PlaybackState.StoppedState
+
+            mp3 = tmp_path / "broken.mp3"
+            mp3.write_bytes(b"not an MP3")
+            platform.play_sound(str(mp3))
+            await wait_for(lambda: player.mediaStatus() == QMediaPlayer.MediaStatus.InvalidMedia)
+            assert not effect.isPlaying() and player.playbackState() == QMediaPlayer.PlaybackState.StoppedState
         finally:
             await rig.finish()
 

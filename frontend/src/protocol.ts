@@ -66,6 +66,8 @@ export interface SettingsView {
   /** what Enter does with a message typed while a turn runs; Ctrl+Enter does the other */
   followUp: FollowUp;
   sidebarWidth: number;
+  conversationWidth?: number;
+  inspectorWidth?: number;
   /** the shared memory is given to new and resumed conversations (master switch), of these engines */
   memoryEnabled: boolean;
   /** each message goes with the notes that bear on it (the application's own hook before sending) */
@@ -94,7 +96,7 @@ export interface SettingsView {
 export type FollowUp = "queue" | "steer";
 export type Language = "auto" | "zh-CN" | "en";
 export type FusionSettingKey = "fusionMain" | "fusionWorkers" | "fusionLight" | "fusionReasoning" | "fusionPreference" | "fusionMaxSeconds";
-export type SettingKey = "theme" | "fontScale" | "followUp" | "maxOpen" | "maxSteps" | "sidebarWidth" | "devinPath" | "memoryEnabled" | "memoryRecall" | "memoryCapture" | "memoryCurate" | "memoryEngines" | "compactAuto" | "compactAt" | "thinkChinese" | "answerLanguage" | "thinkingLanguage" | "soundEnabled" | SoundKey | FusionSettingKey;
+export type SettingKey = "theme" | "fontScale" | "followUp" | "maxOpen" | "maxSteps" | "sidebarWidth" | "conversationWidth" | "inspectorWidth" | "devinPath" | "memoryEnabled" | "memoryRecall" | "memoryCapture" | "memoryCurate" | "memoryEngines" | "compactAuto" | "compactAt" | "thinkChinese" | "answerLanguage" | "thinkingLanguage" | "soundEnabled" | SoundKey | FusionSettingKey;
 export type SoundKind = "question" | "complete" | "error";
 export type SoundKey = "soundQuestion" | "soundComplete" | "soundError";
 export type SettingValue = string | number | boolean | string[] | Record<string, string>;
@@ -140,7 +142,8 @@ export interface SavedRow {
   modified: string;
   modifiedAt: number;
   engine: Engine;
-  /** `model` is "" here: a saved row does not know its model */
+  fusion?: boolean;
+  /** `model` is empty if the saved row does not know its model. */
   settings: SessionSettings;
   usage: null;
   context: ContextState;
@@ -166,6 +169,7 @@ export interface ConversationMeta {
   context: ContextState;
   handoff: PendingHandoff | null;
   queued: QueuedMessage[];
+  preparing?: QueuedMessage | null;
   agents: AgentInfo[];
   fusion?: boolean;
   fusionPolicy?: FusionSessionPolicy | null;
@@ -260,7 +264,10 @@ export interface ConnectionEntry {
   id: string; kind: "skill" | "plugin" | "hook" | "mcp"; name: string; source: string; project: string;
   config: Record<string, unknown>; enabled: boolean; imported: boolean; changed?: boolean; parent?: string;
 }
-export interface ConnectionScan { items: ConnectionEntry[]; errors: { source: string; text: string }[]; hookEvents: string[] }
+export interface BuiltinHookInfo { id: string; name: string; description: string }
+export interface ConnectionScan {
+  items: ConnectionEntry[]; errors: { source: string; text: string }[]; hookEvents: string[]; builtinHooks?: BuiltinHookInfo[];
+}
 export interface ConnectionPreview { preview: string; items: ConnectionEntry[]; commands: { name: string; kind: string; command: string; args: string[] }[] }
 
 export type ConnectorId = "github" | "google-workspace";
@@ -272,6 +279,31 @@ export interface SkillInstallPreview { preview: string; source: SkillSource; nam
 export interface RulesDocument { path: string; text: string; revision: string; exists: boolean }
 
 export interface FactoryState { cli: "found" | "missing"; cliPath: string; path: string; enabled: boolean }
+
+export type VideoCommand = { id: string; token: string } & (
+  { action: "open"; path: string; width: number } |
+  { action: "play" | "pause" | "close" } |
+  { action: "seek"; position: number } |
+  { action: "volume"; volume: number; muted: boolean }
+);
+export interface VideoInfo {
+  duration: number;
+  width: number;
+  height: number;
+  videoCodec: string;
+  audioCodec: string;
+  hasAudio: boolean;
+  seekable: boolean;
+  frame: string;
+}
+export interface VideoUpdate {
+  token: string;
+  position: number;
+  playing: boolean;
+  ended: boolean;
+  url?: string;
+  error?: string;
+}
 
 export interface Calls {
   "connectors.list": { params: None; result: ConnectorView[] };
@@ -319,7 +351,7 @@ export interface Calls {
   /** `how`, for a message sent while a turn runs: `queue` holds it until the turn is over, `steer` gives it to the running
    *  turn now. `queued`: the message is kept and goes out by itself, in its turn (`session.unqueue` takes it back); `steered`:
    *  the running turn has it. A steer the engine cannot take is queued instead (Python says so in a notice). */
-  "session.send": { params: { id: string; text: string; attachmentIds?: string[]; confirmOver?: boolean; how?: FollowUp }; result: { ok: boolean; over?: SendOver; queued?: boolean; steered?: boolean } };
+  "session.send": { params: { id: string; text: string; attachmentIds?: string[]; confirmOver?: boolean; how?: FollowUp }; result: { ok: boolean; over?: SendOver; queued?: boolean; steered?: boolean; prepared?: boolean } };
   /** takes queued messages back into the composer: the one `queueId` names, or all of them */
   "session.unqueue": { params: { id: string; queueId?: string }; result: { ok: boolean } };
   /** changes the words of a waiting message (it keeps its place and attachments); ok false: it had gone out or been taken back */
@@ -337,12 +369,14 @@ export interface Calls {
   "fusion.updateBudget": { params: { id: string; maxCalls: number; maxTokens: number; acceptUnknown: boolean }; result: { ok: boolean } };
   "fusion.authorizeModel": { params: { id: string; model: string }; result: { ok: boolean } };
   "fusion.changeMain": { params: { id: string; model: string }; result: { ok: boolean } };
-  /** a text file the conversation named, for the side panel; `path` as the model wrote it (relative to the project, an optional
-   *  `:line` or `:line-line` at the end). An error is one sentence for the user (no such file, not text, a folder). */
+  /** A file the conversation named, for the side panel; `path` as the model wrote it (relative to the project, an optional
+   *  `:line` or `:line-line` at the end). An error is one sentence for the user. */
   "files.read": { params: { id: string; path: string }; result: FileView };
-  /** what the panel draws of a PDF (page `page` from 0, drawn `width` pixels wide) or a picture (the whole picture), as a
+  /** A PDF page (`page` from 0, drawn `width` pixels wide), or the bytes of a picture or Office file (page 0), as a
    *  `data:` URI. An error is one sentence for the user. */
   "files.page": { params: { id: string; path: string; page: number; width: number }; result: { url: string } };
+  /** Open a local video paused on its first JPEG; the token identifies this mount and guards subsequent controls. */
+  "files.video": { params: VideoCommand; result: VideoInfo | null };
   /** open it outside the window: `default` program (a program or script is only shown in its folder: `shown`, `message`),
    *  the system's `choose` dialog, or `reveal` in its folder */
   "files.open": { params: { id: string; path: string; how: "default" | "choose" | "reveal" }; result: { ok: boolean; shown?: boolean; message?: string } };
@@ -351,7 +385,8 @@ export interface Calls {
   /** open a sub-agent's run: its whole run comes as an `agentTurns` event, then its changes, until `agents.unwatch` */
   "agents.watch": { params: { id: string; agentId: string }; result: { ok: boolean } };
   "agents.unwatch": { params: { id: string }; result: { ok: boolean } };
-  /** no id: the defaults for new sessions. A model of the other engine moves the conversation there (`switched`).
+  /** no id: the defaults for new sessions. An existing conversation saves its selected model until the next send;
+   *  an empty conversation may change engines immediately (`switched`).
    *  When the conversation holds any attachment, Python first answers `{ ok: false, choose }` and changes nothing: the
    *  page asks the user which to take along and calls again with `attachments`, the ids picked (empty: none), and
    *  `overLimit` when the user has confirmed a pick that makes the first message hold more than a message usually does. */
@@ -436,6 +471,8 @@ export interface Calls {
 export type Method = keyof Calls;
 
 export interface Events {
+  /** Throttled JPEG frames and playback state (milliseconds); delivered directly to the video component. */
+  "files.video": VideoUpdate;
   /** a status bar message */
   notice: { text: string };
   /** the open conversations in tab order; `select`: show this one (a conversation the page just opened) */

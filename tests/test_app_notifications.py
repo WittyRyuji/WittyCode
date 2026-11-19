@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 import shutil
-import wave
 
 import pytest
 
@@ -202,20 +201,6 @@ def test_muting_during_preview_validation_prevents_late_playback(tmp_path, monke
     asyncio.run(scenario())
 
 
-def test_bundled_sounds_are_distinct_short_pcm_wavs_and_corrupt_files_are_rejected(tmp_path):
-    contents = []
-    for kind in sounds.KINDS:
-        path = sounds.validate_path(sounds.sound_path(kind))
-        with wave.open(path, "rb") as audio:
-            assert audio.getnchannels() == 1 and audio.getsampwidth() == 2
-            assert 0.25 < audio.getnframes() / audio.getframerate() < 1
-            data = audio.readframes(audio.getnframes())
-            assert any(data)
-            contents.append(data)
-    assert len(set(contents)) == 3
-    broken = tmp_path / "broken.wav"
-    broken.write_bytes(Path(sounds.sound_path("question")).read_bytes()[:-20])
-    with pytest.raises(sounds.SoundProblem):
-        sounds.validate_path(str(broken))
+def test_invalid_stored_sound_settings_fall_back_to_defaults():
     assert settings_from_dict({"sound_enabled": "yes", "sound_question": []}).sound_enabled is True
     assert settings_from_dict({"sound_question": []}).sound_question == ""

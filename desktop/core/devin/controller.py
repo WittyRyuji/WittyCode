@@ -57,7 +57,7 @@ from desktop.core.devin.policy import (
 )
 from desktop.core.context_envelope import wrap as wrap_context
 from desktop.core.handoff import Handoff
-from desktop.core.hooks import PromptEvent
+from desktop.core.hooks import PromptContext, PromptEvent
 from desktop.core.memory.launch import new_run
 from desktop.core.prompts import ActionView
 from desktop.core.session_state import SESSION_STATE_LABELS, LiveSettings, SessionState, SteerOutcome
@@ -466,7 +466,8 @@ class DevinController:
         client, session_id = self._client, self.session_id
         running = self._turn is not None
         self._expire_pending()
-        if self.transcript.active_turn is not None:
+        # After an engine handoff the shared transcript may already belong to the destination's first turn.
+        if self._turn is not None and self.transcript.active_turn is self._turn:
             self.transcript.abort_turn("本轮已取消。")
         if self._turn is not None:
             self._end_turn(self._turn, quiet=True)
@@ -486,6 +487,7 @@ class DevinController:
         self.state = SessionState.CLOSED
         self._notify("state")
         self.manager._forget(self)
+        await self.manager.release_idle()
 
     def _connection_lost(self, error: BaseException) -> None:
         """The ``devin acp`` process is gone: DEAD, with a way back (``reconnect``)."""
@@ -614,7 +616,8 @@ class DevinController:
             return False
         self.used_at = self.active_at = time.time()
         self.state = SessionState.RUNNING
-        context = self.manager.hooks.prompt(PromptEvent(self.engine, self.project, text, frozenset(self.recalled), first=bool(self.preface)))
+        summary = getattr(self, "_switch_summary", False)
+        context = PromptContext() if summary else self.manager.hooks.prompt(PromptEvent(self.engine, self.project, text, frozenset(self.recalled), first=bool(self.preface)))
         sent, carried, outgoing = text, None, attachments
         handoff = self.handoff if self.handoff is not None and not self.handoff.empty else None
         if handoff is not None:
@@ -623,9 +626,9 @@ class DevinController:
             sent = handoff.prefix + text
             carried = (handoff.carried, handoff.truncated) if handoff.carried else None
             outgoing = tuple(handoff.attachments) + attachments
-        sent += wrap_context(self.preface, context.text)  # (after the message: see core/context_envelope)
+        sent += wrap_context("" if summary else self.preface, context.text)  # (after the message: see core/context_envelope)
         self.transcript.output_probe = self._output_so_far
-        turn = self.transcript.start_turn(text, attachments, handoff=carried)
+        turn = self.transcript.start_turn("/compact" if summary else text, attachments, handoff=carried)
         self._usage_model = self.model
         if context.notice:
             self.transcript.add_notice(context.notice)
@@ -1006,6 +1009,8 @@ class DevinController:
     # ------------------------------------------------------------------ requests (approvals)
 
     async def _on_server_request(self, method: str, params: Mapping[str, Any], request_id: Any) -> Any:
+        if getattr(self, "_switch_summary", False):
+            return CANCELLED if method == "session/request_permission" else {"action": "decline"}
         if method == "session/request_permission":
             return await self._permission(params, request_id)
         if method == "elicitation/create":

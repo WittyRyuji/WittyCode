@@ -48,6 +48,8 @@ export interface LiveData {
   /** what Enter does with a message typed while a turn runs (Ctrl+Enter does the other) */
   followUp: FollowUp;
   sidebarWidth: number;
+  conversationWidth: number;
+  inspectorWidth: number;
   /** the shared memory is given to new and resumed conversations of these engines (master switch, engines) */
   memoryEnabled: boolean;
   /** each message goes with the notes that bear on it */
@@ -83,7 +85,7 @@ export interface LiveData {
   /** the sub-agent open in the side panel (of a conversation, by its thread id) and its run */
   agentPanel: { sessionId: string; agentId: string } | null;
   agentTurns: Turn[];
-  /** the text file open in the side panel (it takes the place of the sub-agent's) */
+  /** The file inspector replaces the sub-agent's; video frames go directly to the mounted player, never into this state. */
   filePanel: FilePanelState | null;
   /** the menu of a file path in the conversation (right click): which path, and where */
   pathMenu: { ref: string; x: number; y: number } | null;
@@ -137,6 +139,8 @@ export function emptyLiveData(theme: ThemeChoice = "system", fontScale: FontScal
     fontScale,
     followUp: "queue",
     sidebarWidth: 288,
+    conversationWidth: 280,
+    inspectorWidth: 0,
     memoryEnabled: true,
     memoryRecall: true,
     memoryCapture: true,
@@ -198,6 +202,7 @@ export function savedSession(row: SavedRow): Session {
     modified: row.modified,
     modifiedAt: row.modifiedAt,
     engine: row.engine,
+    fusion: row.fusion === true,
     turns: [],
     usage: null,
     context: row.context,
@@ -232,6 +237,8 @@ export function settingsFields(v: SettingsView): Partial<LiveData> {
     fontScale: v.fontScale,
     followUp: v.followUp ?? "queue",
     sidebarWidth: v.sidebarWidth,
+    conversationWidth: v.conversationWidth ?? 280,
+    inspectorWidth: v.inspectorWidth ?? 0,
     memoryEnabled: v.memoryEnabled ?? true,
     memoryRecall: v.memoryRecall ?? true,
     memoryCapture: v.memoryCapture ?? true,
@@ -324,10 +331,19 @@ export function applyInit(s: LiveData, init: InitResult): Partial<LiveData> {
 function onSession(s: LiveData, e: Events["session"]): Partial<LiveData> {
   if (!s.tabs.includes(e.id)) return {}; // a conversation that is not (or no longer) open
   const before = s.sessions[e.id] ?? newConversation(e.id);
-  const { handoff, queued, ...rest } = e.patch;
+  const { handoff, queued, preparing, ...rest } = e.patch;
   const next: Session = { ...before, ...rest, id: e.id };
   if ("handoff" in e.patch) next.handoff = handoff ?? undefined;
   if ("queued" in e.patch) next.queued = queued && queued.length > 0 ? queued : undefined;
+  if ("preparing" in e.patch) {
+    next.preparing = preparing ?? undefined;
+    if (preparing && preparing.id !== before.preparing?.id) {
+      // Python accepted this specific submission. Leave anything typed or attached afterwards alone.
+      if (before.draft === preparing.text) next.draft = "";
+      const sent = new Set(preparing.attachments.map((a) => a.id));
+      next.attachments = before.attachments.filter((a) => !sent.has(a.id));
+    }
+  }
   const patch: Partial<LiveData> = { sessions: { ...s.sessions, [e.id]: next } };
   if (s.pendingSelect === e.id) {
     patch.currentId = e.id;

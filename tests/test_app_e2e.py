@@ -426,14 +426,22 @@ def test_the_conversation_can_move_to_devin_and_back(qapp, loop, tmp_path):
         await rig.click(".controls .chip", 0)
         await rig.wait_text(".menu-head", "DEVIN")
         await rig.click_text(".menu-item", "SWE-2")
+        await rig.wait_text(".chip-model .chip-v", "SWE-2")
+        assert await rig.count(".block.engine-switch") == 0 and len(model.requests) == 1
+        await rig.send("Continue on Devin")
         await rig.wait_for(".block.engine-switch", 1, timeout=15)
         assert await rig.count(".tab") == 1, "the same tab"
         assert "Devin" in await rig.text(".block.engine-switch .sw-main")
-        assert rig.core.order[0].controller.handoff.carried == 2
-        await rig.wait_text(".hint", "下一条消息会带上")
+        await rig.wait_text(".transcript", "echo:")
+        await rig.wait_text(".statusbar .st-left", "就绪")
         await rig.click(".controls .chip", 0)
         await rig.click_text(".menu-item", "GPT-6.1-Sol")
+        await rig.wait_text(".chip-model .chip-v", "GPT-6.1-Sol")
+        assert rig.core.order[0].engine == "devin"
+        model.next(say("Back on ChatGPT."), hold=False)
+        await rig.send("Return to ChatGPT")
         await rig.wait_for(".block.engine-switch", 2, timeout=15)
+        await rig.wait_text(".transcript", "Back on ChatGPT.")
         assert rig.core.order[0].engine == "chatgpt", "and back on the own loop"
         await rig.finish()
 
@@ -595,6 +603,34 @@ def test_files_dropped_from_explorer_are_attached(qapp, loop, tmp_path):
         texts = [p.get("text", "") for p in user_parts(model.requests[-1])]
         assert texts[0] == "read it" and any("notes.txt" in t and "remember the milk" in t for t in texts[1:]) and notes.exists()
         await finish(rig, model)
+
+    run(loop, scenario())
+
+
+def test_a_dropped_zip_sends_unpacked_text_without_writing_files(qapp, loop, tmp_path):
+    import zipfile
+
+    async def scenario():
+        rig = await open_rig(tmp_path)
+        try:
+            model = await new_conversation(rig)
+            model.next(say("Checked the log."), hold=False)
+            bundle = tmp_path / "ci-logs.zip"
+            with zipfile.ZipFile(bundle, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("build/python.log", "SAMPLE_FAILURE: expected 1")
+            assert await rig.drop_files([bundle]) == Qt.DropAction.CopyAction
+            await rig.wait_for(".att-row .att", 1, timeout=15)
+            assert await rig.text(".att-row .fname") == "ci-logs.zip"
+            assert "已解包" in await rig.text(".att-row .att")
+            await rig.send("Check the archive")
+            await model.asked()
+            parts = user_parts(model.requests[-1])
+            assert all(p["type"] == "input_text" for p in parts)
+            assert any("build/python.log" in p["text"] and "SAMPLE_FAILURE: expected 1" in p["text"] for p in parts)
+            assert bundle.is_file() and not (rig.project / "build").exists()
+            await rig.wait_text(".statusbar .st-left", "就绪")
+        finally:
+            await rig.finish()
 
     run(loop, scenario())
 
@@ -1222,12 +1258,17 @@ def test_changing_engine_asks_which_of_the_attachments_go_along(qapp, loop, tmp_
         await rig.click(".dialog .carry-list input", names.index("shot.png"))
         await rig.wait_text(".dialog .dialog-btns .btn.primary", "带上选中的 1 个，换过去")
         await rig.click_text(".dialog .btn", "带上选中的 1 个")
-        await wait_for(lambda: rig.core.order[0].engine == "devin", message="the conversation to move to Devin")
-        handoff = rig.core.order[0].controller.handoff
-        assert (handoff.files, handoff.pictures) == (0, 1) and "remember the milk" not in handoff.prefix, "only the picture was ticked"
+        await rig.wait_text(".chip-model .chip-v", "SWE-2")
+        assert rig.core.order[0].engine == "chatgpt" and len(model.requests) == 1
+        model.next(say("Previous request: read it; response: noted."), hold=False)
+        await rig.send("Continue with the selected picture")
+        await wait_for(lambda: harness.requests("session/prompt"), message="the conversation to move to Devin")
+        prompt = harness.requests("session/prompt")[-1]["prompt"]
+        assert len([block for block in prompt if block["type"] == "image"]) == 1
+        assert "remember the milk" not in str(prompt), "only the picture was ticked"
         await rig.wait_for(".block.engine-switch", 1)
-        await rig.wait_text(".statusbar .st-left", "1 张图片一起带过去")
-        await rig.wait_text(".hint", "和 1 个附件")
+        await rig.wait_text(".transcript", "echo:")
+        assert len(await rig.texts(".block.user .body")) == 2, "no standalone compact command"
         await rig.finish()
 
     run(loop, scenario())
@@ -1414,7 +1455,7 @@ def test_the_permission_of_a_devin_conversation_is_one_of_its_modes(qapp, loop, 
             await rig.click_text(".menu-item", "智能")
             await wait_for(lambda: rig.core._by_cid[cid].controller.autonomy == "smart", 10, "the mode to change")
             assert harness.state()["sessions"][rig.core._by_cid[cid].controller.session_id]["mode"] == "smart"
-            assert await rig.text(".controls .chip-v", 2) == "智能"
+            await rig.wait_text(".chip-permission .chip-v", "智能")
             await rig.click(".controls .chip", 1)
             assert await rig.texts(".menu-label") == ["Medium", "High", "Max"], "the model's own thought levels"
             await rig.press("Escape")
@@ -1490,7 +1531,7 @@ def test_a_devin_question_is_shown_once_and_names_devin_not_the_app(qapp, loop, 
                     "config": {"type": "string", "title": "配置文件", "description": question, "enum": ["保留", "移除"]},
                 }, "required": ["config"]},
             }
-            waiting = asyncio.ensure_future(harness.engine._route_request(harness.clients[0], "elicitation/create", request, "form1"))
+            waiting = asyncio.ensure_future(harness.engine._route_request(controller._client, "elicitation/create", request, "form1"))
             await rig.wait_for(".prompt.ask", 1)
             assert (await rig.text(".prompt.ask .phead")).strip() == "Devin 想先问你几个问题"
             assert (await rig.text(".prompt.ask .qtext")).strip() == question
@@ -1619,15 +1660,18 @@ def test_token_tooltip_shows_the_models_share_of_the_whole_conversation(qapp, lo
             await rig.wait_text(".statusbar .st-left", "就绪")
             await rig.click(".controls .chip", 0)
             await rig.click_text(".menu-item", "GPT-6-Luna")
-            rig.plan.script(say("second answer", used=usage(200, 20, cached=50)))
+            await rig.wait_text(".chip-model .chip-v", "GPT-6-Luna")
+            assert len(rig.plan.requests) == 1
+            rig.plan.script(say("The first answer was completed.", used=usage(120, 30)),
+                            say("second answer", used=usage(200, 20, cached=50)))
             await rig.send("second")
             await rig.wait_text(".transcript", "second answer")
             await rig.wait_text(".statusbar .st-left", "就绪")
             at = await rig._center(".usage", 0)
             await outside_task(lambda: QTest.mouseMove(rig._target(), at))
             await rig.wait_for(".usage-pie", 1)
-            assert await rig.texts(".usage-percent") == ["66.7%", "33.3%"]
-            assert await rig.texts(".usage-model-name") == ["GPT-6-Luna", "GPT-6.1-Sol"]
+            assert await rig.texts(".usage-percent") == ["54.2%", "45.8%"], "the source model also owns its compaction request"
+            assert await rig.texts(".usage-model-name") == ["GPT-6.1-Sol", "GPT-6-Luna"]
             assert await rig.count(".usage-pie linearGradient") == 2 and await rig.count(".usage-pie path") == 2
             assert await rig.js("(() => { const r = document.querySelector('.usage .tip').getBoundingClientRect(); return r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight; })()")
         finally:

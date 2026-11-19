@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { Check } from "lucide-react";
+import { Check, Settings } from "lucide-react";
 import type { SessionMark } from "../types";
 
 // ---------------------------------------------------------------------------------------------- state dot
@@ -28,6 +28,8 @@ export interface MenuItem {
   /** stays at the bottom of a long, scrolling menu */
   pinned?: boolean;
   onSelect?: () => void;
+  /** Independent settings shortcut; never selects the row or inherits its disabled state. */
+  configure?: { label: string; onSelect: () => void };
 }
 
 export interface Anchor {
@@ -74,7 +76,10 @@ export function Menu({ items, anchor, onClose, minWidth = 200 }: { items: MenuIt
           const next = e.key === "ArrowDown" ? (at + 1) % selectable.length : (at - 1 + selectable.length) % selectable.length;
           return selectable[next] ?? -1;
         });
-      } else if (e.key === "Enter" && active >= 0) {
+      } else if (e.key === "ArrowRight" && active >= 0 && items[active]?.configure) {
+        e.preventDefault();
+        ref.current?.querySelector<HTMLButtonElement>(`[data-menu-index="${active}"] .menu-configure`)?.focus();
+      } else if (e.key === "Enter" && active >= 0 && !(e.target instanceof Element && e.target.closest(".menu-configure"))) {
         e.preventDefault();
         const it = items[active];
         onClose();
@@ -91,8 +96,16 @@ export function Menu({ items, anchor, onClose, minWidth = 200 }: { items: MenuIt
     };
   });
 
-  const row = (it: MenuItem, i: number) =>
-    it.separator ? (
+  const row = (it: MenuItem, i: number): ReactNode =>
+    it.configure ? (
+      <div key={it.id} className="menu-row" data-menu-index={i} role="presentation">
+        {row({ ...it, configure: undefined }, i)}
+        <button type="button" role="menuitem" className="menu-configure" aria-label={it.configure.label} title={it.configure.label}
+          onMouseEnter={() => setActive(-1)} onClick={() => { onClose(); it.configure?.onSelect(); }}>
+          <Settings size={15} aria-hidden />
+        </button>
+      </div>
+    ) : it.separator ? (
       <div key={it.id} className="menu-sep" role="separator" />
     ) : it.heading && it.sub ? (
       <div key={it.id} className="menu-sub" role="presentation">

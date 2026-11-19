@@ -96,3 +96,24 @@ def test_no_retry_of_unfinished_work_after_restore_and_budget_is_enforced(tmp_pa
     assert restored.unmetered and restored.had_unknown
     with pytest.raises(FusionError, match="budget"):
         restored.begin(expert.id)
+
+
+def test_registry_round_trips_identity_and_new_attempts_and_loads_legacy(tmp_path):
+    policy = Policy("chatgpt:main", ("chatgpt:worker",), "chatgpt:small", 0)
+    registry = FusionRegistry(tmp_path, policy)
+    legacy = registry.assign_workstream("Inventory", ("inventory.txt",), "chatgpt:worker", "worker")
+    coder = registry.assign_workstream("Inventory", ("inventory.txt",), "chatgpt:worker", "worker", identity="Coder")
+    for _ in range(2):
+        runner = registry.assign_workstream("Inventory", (), "chatgpt:small", "light", identity="Runner", reuse=False)
+        registry.begin(runner.id)
+        registry.finish(runner.id, status="done", tokens=0)
+    saved = registry.to_json()
+    saved["agents"][0].pop("identity")
+    restored = FusionRegistry.from_json(tmp_path, json.loads(json.dumps(saved)))
+    assert restored.agents[legacy.id].identity == "" and restored.agents[legacy.id].label == "Inventory"
+    assert restored.agents[coder.id].identity == "Coder" and restored.agents[coder.id].label == "Coder-Inventory"
+    assert [item.label for item in restored.agents.values()].count("Runner-Inventory") == 2
+    assert restored.assign_workstream("inventory", ("inventory.txt",), "chatgpt:worker", "worker", identity="Coder").id == coder.id
+    saved["agents"][1]["identity"] = "Unknown"
+    with pytest.raises(FusionError, match="identity"):
+        FusionRegistry.from_json(tmp_path, saved)

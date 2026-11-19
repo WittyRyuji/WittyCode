@@ -49,6 +49,33 @@ RequestHandler = Callable[[str, Any, Any], Awaitable[Any]]
 ExitHandler = Callable[[EngineProcessError], None]
 
 
+class _ProcessProtocol(asyncio.subprocess.SubprocessStreamProtocol):
+    """Separate process exit from pipe disconnection (descendants may inherit the output handles)."""
+
+    def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+        super().__init__(limit=READ_CHUNK, loop=loop)
+        self.exited: asyncio.Future[None] = loop.create_future()
+        self.closed: asyncio.Future[None] = loop.create_future()
+        self._in_pipe_callback = False
+
+    def process_exited(self) -> None:
+        super().process_exited()
+        self.exited.set_result(None)
+
+    def pipe_connection_lost(self, fd: int, exc: Exception | None) -> None:
+        # SubprocessStreamProtocol also calls connection_lost for stdin alone, not just the whole transport.
+        self._in_pipe_callback = True
+        try:
+            super().pipe_connection_lost(fd, exc)
+        finally:
+            self._in_pipe_callback = False
+
+    def connection_lost(self, exc: Exception | None) -> None:
+        super().connection_lost(exc)
+        if not self._in_pipe_callback and not self.closed.done():
+            self.closed.set_result(None)
+
+
 class JsonRpcClient:
     """One ``codex app-server`` process and the JSON-RPC conversation with it.
 
@@ -78,6 +105,9 @@ class JsonRpcClient:
         self.name = name
         self.exit_code: int | None = None
         self._process: asyncio.subprocess.Process | None = None
+        self._protocol: _ProcessProtocol | None = None
+        self._start_task: asyncio.Task[None] | None = None
+        self._close_waiters: set[asyncio.Task[Any]] = set()
         self._ids = itertools.count(1)
         self._pending: dict[Any, asyncio.Future[Any]] = {}
         self._inbox: asyncio.Queue[tuple[str, Any]] | None = None
@@ -122,13 +152,31 @@ class JsonRpcClient:
     # ------------------------------------------------------------------ start
 
     async def start(self) -> None:
-        if self._process is not None:
+        if self._closing:
+            raise self._gone()
+        if self._start_task is not None:
             raise RuntimeError("the client was started already")
+        # Creation can yield after Windows has launched the child but before its pipes have connected. Keep ownership
+        # in a separate task: cancellation and a concurrent close must acquire that child before returning.
+        self._start_task = asyncio.create_task(self._start())
+        try:
+            await asyncio.shield(self._start_task)
+        except asyncio.CancelledError:
+            await self.close(grace=0)
+            raise
+        if self._closing:
+            await self.close()
+            raise self._gone()
+
+    async def _start(self) -> None:
         options: dict[str, Any] = {}
         if sys.platform == "win32":
             options["creationflags"] = CREATE_NO_WINDOW
+        loop = asyncio.get_running_loop()
+        protocol = _ProcessProtocol(loop)
         try:
-            self._process = await asyncio.create_subprocess_exec(
+            transport, _ = await loop.subprocess_exec(
+                lambda: protocol,
                 *self.argv,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
@@ -139,6 +187,8 @@ class JsonRpcClient:
             )
         except (OSError, ValueError) as error:
             raise EngineProcessError(f"cannot start {self.name} ({self.argv[0]}): {error}") from error
+        self._process = asyncio.subprocess.Process(transport, protocol, loop)
+        self._protocol = protocol
         self._inbox = asyncio.Queue()
         self._write_lock = asyncio.Lock()
         self._spawn(self._read_stdout())
@@ -354,48 +404,70 @@ class JsonRpcClient:
     # ------------------------------------------------------------------ close
 
     async def close(self, *, grace: float = CLOSE_GRACE_SECONDS) -> None:
-        """End the process (stdin EOF, then terminate, then kill) and every task of this client. Idempotent."""
+        """End our process and disconnect every pipe before returning, even when the caller is cancelled. Idempotent."""
         if self._close_task is None:
-            self._close_task = asyncio.ensure_future(self._shut_down(grace))
-        await asyncio.shield(self._close_task)
+            self._closing = True
+            self._close_task = asyncio.create_task(self._shut_down(grace))
+        caller = asyncio.current_task()
+        if caller is not None:
+            self._close_waiters.add(caller)
+        cancelled = False
+        try:
+            while not self._close_task.done():
+                try:
+                    await asyncio.shield(self._close_task)
+                except asyncio.CancelledError:
+                    cancelled = True  # keep the loop alive until cleanup finishes; also tolerate repeated cancellation
+            self._close_task.result()
+            if cancelled:
+                raise asyncio.CancelledError
+        finally:
+            if caller is not None:
+                self._close_waiters.discard(caller)
 
     async def _shut_down(self, grace: float) -> None:
-        self._closing = True
-        process = self._process
-        if process is not None:
-            if process.stdin is not None:
-                with contextlib.suppress(Exception):
+        if self._start_task is not None:
+            with contextlib.suppress(EngineProcessError):
+                await asyncio.shield(self._start_task)
+        process, protocol = self._process, self._protocol
+        try:
+            if process is not None and protocol is not None:
+                if process.stdin is not None:
                     process.stdin.close()
-            if process.returncode is None:
+                # Process.wait() can wait for inherited stdout/stderr handles as well as the child. Reap the child
+                # independently, keeping both readers alive so output backpressure cannot prevent it from exiting.
                 try:
-                    await asyncio.wait_for(process.wait(), grace)
+                    await asyncio.wait_for(asyncio.shield(protocol.exited), grace)
                 except asyncio.TimeoutError:
                     log.warning("%s did not exit %.1f s after its stdin was closed; terminating it", self.name, grace)
                     with contextlib.suppress(ProcessLookupError, OSError):
                         process.terminate()
                     try:
-                        await asyncio.wait_for(process.wait(), KILL_WAIT_SECONDS)
+                        await asyncio.wait_for(asyncio.shield(protocol.exited), KILL_WAIT_SECONDS)
                     except asyncio.TimeoutError:
                         with contextlib.suppress(ProcessLookupError, OSError):
                             process.kill()
-                        with contextlib.suppress(asyncio.TimeoutError):
-                            await asyncio.wait_for(process.wait(), KILL_WAIT_SECONDS)
-            self.exit_code = process.returncode
-        self._fail_pending(self._ended or EngineProcessError(f"{self.name} was closed", exit_code=self.exit_code, closed=True))
-        # The readers end by themselves at EOF; whatever still runs (a request waiting for the user) is cancelled.
-        if self._tasks:
-            with contextlib.suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(asyncio.gather(*list(self._tasks), return_exceptions=True), 2.0)
-        leftovers = [task for task in (*self._tasks, *self._serving) if not task.done()]
-        for task in leftovers:
-            task.cancel()
-        if leftovers:
-            await asyncio.gather(*leftovers, return_exceptions=True)
-        if process is not None:
-            transport = getattr(process, "_transport", None)
-            if transport is not None:
-                with contextlib.suppress(Exception):
-                    transport.close()
+                        await asyncio.wait_for(asyncio.shield(protocol.exited), KILL_WAIT_SECONDS)
+                self.exit_code = process.returncode
+            self._ended = self._ended or EngineProcessError(f"{self.name} was closed", exit_code=self.exit_code, closed=True)
+            self._fail_pending(self._ended)
+            # Do not wait for a handler that is itself awaiting close(). asyncio.wait does not cancel a gather and
+            # then wait forever for that handler's cancellation; leftovers are cancelled separately below.
+            readers = self._tasks - self._close_waiters
+            if readers:
+                await asyncio.wait(readers, timeout=2.0)
+        finally:
+            if process is not None and protocol is not None:
+                process._transport.close()
+                # close() only queues pipe connection_lost callbacks. Await them while Qt's timer still exists.
+                await asyncio.wait_for(asyncio.shield(protocol.closed), KILL_WAIT_SECONDS)
+            if self._inbox is not None:
+                self._inbox.put_nowait(("exit", self._ended or self._gone()))
+            leftovers = [task for task in (*self._tasks, *self._serving) if not task.done() and task not in self._close_waiters]
+            for task in leftovers:
+                task.cancel()
+            if leftovers:
+                await asyncio.gather(*leftovers, return_exceptions=True)
 
 
 # ---------------------------------------------------------------------------------------------- launching

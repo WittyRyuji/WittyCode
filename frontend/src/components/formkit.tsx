@@ -38,9 +38,9 @@ export function Seg<T extends string>({ value, options, onChange }: { value: T; 
   );
 }
 
-export function Select({ value, items, disabled, minWidth = 220 }: { value: string; items: MenuItem[]; disabled?: boolean; minWidth?: number }) {
+export function Select({ value, items, disabled, minWidth = 220, ariaLabel }: { value: string; items: MenuItem[]; disabled?: boolean; minWidth?: number; ariaLabel?: string }) {
   return (
-    <MenuButton className="selectbox" items={items} minWidth={minWidth} disabled={disabled}>
+    <MenuButton className="selectbox" items={items} minWidth={minWidth} disabled={disabled} ariaLabel={ariaLabel}>
       <span>{value}</span>
       <ChevronDown size={14} />
     </MenuButton>

@@ -4,7 +4,7 @@
 
 WittyHarness 是 WittyCode 自己的循环，运行 ChatGPT Plan 与 API Provider；Devin 和 Factory 是可选的外部引擎。不安装它们，应用仍能启动、登录 ChatGPT 或使用 API。共享记忆页面按 **WittyHarness、Devin、Factory** 显示，内部已有的 `chatgpt` 标识不改名，也不迁移用户的数据。
 
-本批兼容 OpenAI / Codex 生态的**本地格式子集**，不是插件商店或远程账号接入。外部配置只读，导入和编辑写在所选 WittyCode 设置目录旁的 `connections.json`，不覆盖 Codex、Factory 或其他客户端的文件。
+本地导入兼容 OpenAI / Codex 生态的**本地格式子集**，不读取其他产品账号内的专属商店。外部配置只读，导入和编辑写在所选 WittyCode 设置目录旁的 `connections.json`，不覆盖 Codex、Factory 或其他客户端的文件。另有内置公开技能目录及 GitHub / Google 连接器，分别见[技能来源与兼容边界](skill-sources.md)和[发布者 OAuth 注册](connector-registration.md)。
 
 ## 设置 → Connections
 
@@ -30,7 +30,7 @@ WittyHarness 是 WittyCode 自己的循环，运行 ChatGPT Plan 与 API Provide
 3. 停用再启用未改变的导入项会保留信任。命令编辑需要再次确认；来源配置或插件文件变化后会停用执行，要求重新预览导入。
 4. MCP 在新开／重新连接的会话中加载；「测试连接」会立即启动所选服务器、握手并读取工具列表，随后关闭。Hooks 在下一次对应事件生效。
 
-导入是允许执行外部程序，不是沙箱。仅导入信任的来源；本地指纹检查不保证系统里安装的命令或其依赖永远不变。插件商店、远程 MCP / OAuth 和非 command Hook 不在本批范围。
+导入是允许执行外部程序，不是沙箱。仅导入信任的来源；本地指纹检查不保证系统里安装的命令或其依赖永远不变。非 command Hook 不受支持；内置连接器的 OAuth 授权与其他产品的商店账号是不同的接入，不可互相替代。
 
 ### MCP 测试与失败提示
 
@@ -39,6 +39,14 @@ Windows 上会按服务器的 `PATH`／`PATHEXT` 查找 `npx.cmd` 等入口，�
 失败会清除上次的成功结果，显示缺少启动程序、权限不足、握手超时或服务器提前退出等原因。服务器 stderr 与原始异常可能含凭据，不原样展示或写入连接配置；需检查环境变量、安装依赖或修正路径后再试。一个测试成功不代表其他插件、其他服务器或远程 OAuth 已受支持。
 
 Codex 激活配置与 Hooks 来源规则参见 [官方配置参考](https://developers.openai.com/codex/config-file/config-reference) 与 [官方 Hooks 文档](https://developers.openai.com/codex/hooks)。本地适配器只采用上面明确列出的子集，不把缓存文件当作官方安装状态。
+
+## 内置 Hook：测试收尾
+
+在「设置 → 插件管理 → Hooks」的列表里可以看到「测试收尾」，行内标明「WittyCode 官方内置」。它始终启用、不可关闭，全局和项目视图都可见，不需要导入，也不使用外部 Hook 的编辑和信任流程。它要求每个经过客户端的会话（包括子代理）通过本会话独立的运行入口做测试；父会话、其他线程或同项目的并发会话不能代为清理。运行入口不接受要删除的路径，也不扫描工作区或会话历史。
+
+从会话的项目根目录用 `python <WittyCode 安装目录>/desktop/core/test_runs.py -- <可执行程序> <参数>` 运行前台测试，已有托管收尾的入口（如 WittyCode 仓库的 `scripts/check_ci.py`）直接运行，不再套一层。命令可通过 `WITTYCODE_TEST_WORK` 找到本轮的仓库外临时目录，通过 `WITTYCODE_TEST_EVIDENCE` 保存必要的证据；结束后作用域内的临时文件会被清理，退出状态和显式保存的证据留在 `outputs/test-runs/`。不要把临时环境创建在真实项目、证据目录或其他会话的目录内。
+
+未登记的命令、外部引擎绕过客户端的原生工具，以及脱离前台运行入口的进程，不在自动清理的覆盖范围。入口被强制终止时可能来不及收尾；不会通过跨会话扫描来兜底。上线前的历史残留也不自动处理。
 
 ## Factory CLI
 

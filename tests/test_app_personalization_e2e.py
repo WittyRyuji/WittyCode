@@ -116,6 +116,7 @@ def test_landing_and_live_choices_never_overwrite_persistent_defaults_even_after
             rig.plan.script(say("demo answer"))
             await rig.send("check temporary defaults")
             await rig.wait_for(".tab", 1)
+            await rig.wait_text(".transcript", "demo answer")
             await rig.wait_for(".send.stop", 0)
             assert rig.core._page_settings(rig.core.order[0])["model"] == OTHER_MODEL
             assert rig.core.defaults() == expected
@@ -124,7 +125,13 @@ def test_landing_and_live_choices_never_overwrite_persistent_defaults_even_after
             await rig.wait_text(".controls .chip-v", rig.core.catalog.find(MODEL)["label"])
             await rig.click(".controls .chip", 1)
             await rig.click_text(".menu-item", "Medium")
-            await wait_for(lambda: rig.core._page_settings(rig.core.order[0])["reasoning"] == "medium")
+            await wait_for(lambda: rig.core._shown_settings(rig.core.order[0])["reasoning"] == "medium")
+            assert rig.core._page_settings(rig.core.order[0])["model"] == OTHER_MODEL
+            rig.plan.script(say("Temporary conversation summarised."), say("Changed for this conversation only."))
+            await rig.send("Apply the selected model and reasoning")
+            await rig.wait_text(".transcript", "Changed for this conversation only.")
+            await rig.wait_for(".send.stop", 0)
+            assert rig.core._page_settings(rig.core.order[0])["reasoning"] == "medium"
             assert rig.core.defaults() == expected
             await rig.click(".newbtn")
             await rig.wait_text(".controls .chip-v", "High")
@@ -214,6 +221,12 @@ def test_skill_store_installs_both_sources_with_consent_and_selects_the_latest_s
             await rig.click_text(".snav", "插件")
             await rig.click_text(".connection-tabs button", "技能商店")
             await rig.wait_for(".skill-card", 1)
+            await rig.wait_for(".skill-card .skill-icon svg", 1)
+            assert await rig.js('document.querySelector(".skill-icon").getAttribute("aria-hidden")') == "true"
+            await wait_for(lambda: rig.js('document.querySelector(".settings").getAnimations({subtree: true}).every(a => a.playState !== "running")'))
+            bounds = json.loads(await rig.js('JSON.stringify((() => { const card = document.querySelector(".skill-card"), icon = card.querySelector(".skill-icon").getBoundingClientRect(), name = card.querySelector("b").getBoundingClientRect(), button = card.querySelector("button").getBoundingClientRect(); return {width: icon.width, height: icon.height, right: icon.right, nameLeft: name.left, nameRight: name.right, buttonLeft: button.left}; })())'))
+            assert bounds["width"] == 32 and bounds["height"] == 32 and bounds["right"] <= bounds["nameLeft"] and bounds["nameRight"] <= bounds["buttonLeft"], bounds
+            assert rig.window.grab().save(str(tmp_path / "skill-store-icons.png"))
             await rig.click_text(".skill-card .btn", "安装")
             await wait_for(download.is_set)
             await rig.click_text(".snav", "关于")
@@ -229,6 +242,7 @@ def test_skill_store_installs_both_sources_with_consent_and_selects_the_latest_s
                 await rig.wait_for(".skill-card", 1)
                 await rig.click_text(".skill-card .btn", "安装")
                 await rig.wait_for(".skill-store .connection-preview")
+                await rig.wait_for(".skill-preview-title .skill-icon svg", 1)
                 assert await rig.js("document.querySelector('.skill-store .connection-preview .primary').disabled")
                 await rig.click(".skill-store .connection-consent input")
                 await rig.click_text(".skill-store .btn", "确认安装")
@@ -251,5 +265,31 @@ def test_skill_store_installs_both_sources_with_consent_and_selects_the_latest_s
             assert any("Read the diff and summarize it." in json.dumps(request) for request in rig.plan.requests)
         finally:
             release.set()
+            await rig.finish()
+    run(loop, scenario())
+
+
+@pytest.mark.parametrize("size,theme", [((900, 600), "light"), ((1320, 860), "dark")])
+def test_skill_store_category_icons_and_long_names_fit_real_cards(qapp, loop, tmp_path, monkeypatch, size, theme):
+    async def scenario():
+        rig = await open_rig(tmp_path, size=size)
+        try:
+            names = ["pdf", "figma", "screenshot", "playwright", "spreadsheet", "speech", "gh-fix-ci", "unknown-skill-with-a-long-name"]
+            async def catalog(source, **_options):
+                return {"items": [{"name": name, "source": source, "commit": "a" * 40,
+                                   "url": "https://example.com/skills/" + name, "installed": False} for name in names], "warning": ""}
+            monkeypatch.setattr(rig.core.skill_marketplace, "catalog", catalog)
+            await rig.core.call("settings.set", {"key": "theme", "value": theme})
+            await rig.press(",", Qt.KeyboardModifier.ControlModifier)
+            await rig.click_text(".snav", "插件")
+            await rig.click_text(".connection-tabs button", "技能商店")
+            await rig.wait_for(".skill-card .skill-icon svg", len(names))
+            await wait_for(lambda: rig.js('document.querySelector(".settings").getAnimations({subtree: true}).every(a => a.playState !== "running")'))
+            kinds = await rig.js('Array.from(document.querySelectorAll(".skill-icon"), e => e.dataset.kind).join(",")')
+            assert kinds == "document,design,image,browser,table,audio,code,skill"
+            assert await rig.js('Array.from(document.querySelectorAll(".skill-card")).every(e => { const icon = e.querySelector(".skill-icon").getBoundingClientRect(), name = e.querySelector("b").getBoundingClientRect(), button = e.querySelector("button").getBoundingClientRect(); return icon.width === 32 && icon.right <= name.left && name.right <= button.left && button.right <= window.innerWidth; })')
+            assert rig.window.grab().save(str(tmp_path / "skill-category-icons.png"))
+            assert not rig.plan.requests
+        finally:
             await rig.finish()
     run(loop, scenario())

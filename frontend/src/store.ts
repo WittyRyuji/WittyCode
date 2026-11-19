@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import type { ApiProvider, AttachmentView, Engine, FileView, MemoryState, ModelChoice, ProviderDraft, Session, SessionSettings, SkillItem, SwitchBlock, Turn } from "./types";
-import type { FollowUp, FusionSettingKey, HandoffChoice, QuestionAnswer, SavedRow, SettingValue, SoundKey, SoundKind } from "./protocol";
+import type { FollowUp, FusionSettingKey, HandoffChoice, QuestionAnswer, SavedRow, SettingValue, SoundKey, SoundKind, VideoCommand, VideoInfo, VideoUpdate } from "./protocol";
 import {
   API_PROVIDERS,
   CHATGPT_ACCOUNT,
@@ -17,6 +17,7 @@ import { readFiles } from "./mock/attachments";
 import { cancelRun, runTurn, settlePrompt } from "./mock/simulator";
 import { bridge } from "./bridge-instance";
 import { engineLabel, engineOfSource, findModel } from "./lib/models";
+import { fusionEffort } from "./lib/fusionReasoning";
 import { handoffOf } from "./lib/handoff";
 import { quitWarning } from "./lib/quit";
 import { effortLabel, permissionsFor, startingLevel } from "./lib/vocab";
@@ -160,8 +161,10 @@ export interface Store extends LiveData {
   openFile: (ref: string, how?: "panel" | "default" | "choose" | "reveal") => void;
   /** read the ChatGPT account again (what the ChatGPT Plan badge shows); at most once in a while */
   refreshPlanUsage: () => void;
-  /** a page of the PDF (or the picture) in the file panel, as a `data:` URI; null when it could not be drawn */
-  filePage: (ref: string, page: number, width: number) => Promise<string | null>;
+  /** Preview data as a `data:` URI; null on failure unless the caller wants the bridge's error. */
+  filePage: (ref: string, page: number, width: number, reportError?: boolean) => Promise<string | null>;
+  fileVideo: (command: VideoCommand) => Promise<VideoInfo | null>;
+  watchVideo: (token: string, receive: (event: VideoUpdate) => void) => () => void;
   closeFile: () => void;
   copyPath: (ref: string) => void;
   /** the menu of a path (right click) */
@@ -247,6 +250,8 @@ export interface Store extends LiveData {
   setDevinPath: (p: string) => void;
   /** while the splitter is dragged; `commit` once it is let go (the live app then saves it) */
   setSidebarWidth: (px: number, commit?: boolean) => void;
+  setConversationWidth: (px: number, commit?: boolean) => void;
+  setInspectorWidth: (px: number) => void;
   setSidebarOpen: (open: boolean) => void;
   setReviewOpen: (open: boolean) => void;
   setDragging: (v: boolean) => void;
@@ -303,6 +308,8 @@ function mockData(): LiveData {
     fontScale: "md",
     followUp: "queue",
     sidebarWidth: 288,
+    conversationWidth: 280,
+    inspectorWidth: 0,
     memoryEnabled: true,
     memoryRecall: true,
     memoryCapture: true,
@@ -409,7 +416,8 @@ export const useStore = create<Store>((set, get) => ({
     const id = `s-new-${++sessionCounter}`;
     const base = st.landing.settings ?? st.defaults;
     const settings = st.landing.fusion ? settingsForModel(st.models, base, st.fusionMain).settings : { ...base };
-    if (st.landing.fusion && st.fusionReasoning[st.fusionMain]) settings.reasoning = st.fusionReasoning[st.fusionMain]!;
+    const effort = fusionEffort(st.fusionReasoning, "main", st.fusionMain);
+    if (st.landing.fusion && effort) settings.reasoning = effort;
     const m = findModel(st.models, settings.model);
     const session: Session = {
       id,
@@ -604,6 +612,8 @@ export const useStore = create<Store>((set, get) => ({
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="595" height="842"><rect width="595" height="842" fill="#fff"/><text x="40" y="80" font-size="28" fill="#333" font-family="sans-serif">${label}</text></svg>`;
     return `data:image/svg+xml;base64,${btoa(svg)}`;
   },
+  fileVideo: async () => null,
+  watchVideo: () => () => {},
   closeFile: () => set({ filePanel: null }),
   copyPath: (ref) => get().say(`（演示）已复制路径：${ref}`),
   showPathMenu: (ref, x, y) => set({ pathMenu: { ref, x, y } }),
@@ -658,8 +668,10 @@ export const useStore = create<Store>((set, get) => ({
       get().patchSession(id, (s) => ({ ...s, settings: { ...s.settings, [field]: value } }));
       return;
     }
+    if (value === "fusion") return get().say("（演示）真实应用中可在会话空闲时切换 Fusion，并保留历史和专家上下文。");
     const model = findModel(st.models, value);
     if (!model) return;
+    if (session.fusion) get().patchSession(id, (s) => ({ ...s, fusion: false }));
     const was = findModel(st.models, session.settings.model);
     if (engineOfSource(model.source) !== engineOfSource(was?.source ?? "chatgpt")) return switchEngine(id, model, was);
     const { settings, changed } = settingsForModel(st.models, session.settings, value);
@@ -802,6 +814,8 @@ export const useStore = create<Store>((set, get) => ({
   setMemoryState: (memory) => set({ memory: { latest: memory.latest, unseen: memory.unseen, seen: memory.seen, pending: memory.pending ?? 0 } }),
   setDevinPath: (devinPath) => set({ devinPath }),
   setSidebarWidth: (sidebarWidth) => set({ sidebarWidth }),
+  setConversationWidth: (conversationWidth) => set({ conversationWidth }),
+  setInspectorWidth: (inspectorWidth) => set({ inspectorWidth }),
   setSidebarOpen: (sidebarOpen) => set({ sidebarOpen }),
   setReviewOpen: (reviewOpen) => set({ reviewOpen }),
   setDragging: (dragging) => set({ dragging }),

@@ -33,25 +33,48 @@ def _no_files_of_the_real_user(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("WITTYCODE_SETTINGS", str(tmp_path_factory.mktemp("app") / "settings.json"))
 
 
+@pytest.fixture(autouse=True)
+def _fusion_gates_off(request, monkeypatch):
+    """Fusion gates are off in tests; ``@pytest.mark.fusion_gates`` turns all on, with names only those."""
+    from desktop.core.fusion import gates
+
+    marker = request.node.get_closest_marker("fusion_gates")
+    if marker is None or marker.args:
+        monkeypatch.setattr(gates, "DEFAULT", frozenset(marker.args) if marker else False)
+
+
+@pytest.fixture
+def mp3_frame():
+    # One silent MPEG-1 Layer III frame, 128 kbit/s at 44.1 kHz.
+    return b"\xff\xfb\x90\x00" + b"\x00" * 413
+
+
 @pytest.fixture(scope="session")
 def qapp():
     pytest.importorskip("PySide6.QtWebEngineWidgets")
     from PySide6 import QtWebEngineWidgets  # noqa: F401  (must be imported before the QApplication exists)
-    from PySide6.QtMultimedia import QSoundEffect
+    from PySide6.QtMultimedia import QMediaPlayer, QSoundEffect
     from PySide6.QtWidgets import QApplication
 
     app = QApplication.instance() or QApplication(["wittycode-tests"])
     # Destroying a test's last window must not end the event loop that is still awaiting the test.
     app.setQuitOnLastWindowClosed(False)
-    play = QSoundEffect.play
+    play_wav, play_mp3 = QSoundEffect.play, QMediaPlayer.play
 
-    def play_silently(effect):
-        # Offscreen hides windows, not speakers. Keep the real loading/playback lifecycle without audible test chimes.
+    # Offscreen hides windows, not speakers. Keep the real loading/playback lifecycle without audible test chimes.
+    def play_wav_silently(effect):
         effect.setMuted(True)
-        play(effect)
+        play_wav(effect)
+
+    def play_mp3_silently(player):
+        output = player.audioOutput()
+        if output is not None:
+            output.setMuted(True)
+        play_mp3(player)
 
     with pytest.MonkeyPatch.context() as patches:
-        patches.setattr(QSoundEffect, "play", play_silently)
+        patches.setattr(QSoundEffect, "play", play_wav_silently)
+        patches.setattr(QMediaPlayer, "play", play_mp3_silently)
         yield app
 
 

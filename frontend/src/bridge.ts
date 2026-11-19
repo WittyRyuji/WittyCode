@@ -11,8 +11,8 @@
 //   window.*     the frameless window's controls: the title bar is drawn by the page. Python: Qt.FramelessWindowHint,
 //                `QWindow.startSystemMove()` / `startSystemResize(edges)` so Windows snapping keeps working, and a push of
 //                the maximized state back to the page.
-//   devin.*      the Devin CLI (`devin auth status|login|logout`, `devin acp` for the sessions). Its sign-in is shared with the
-//                Devin desktop app; the tokens stay in Devin's credentials.toml.
+//   devin.*      the Devin CLI (`devin auth status|login|logout`, `devin acp` for the sessions). Desktop authentication may
+//                be separate; tokens remain CLI-owned and are never read or copied by this application.
 //   chatgpt.*    the ChatGPT plan as an engine run by WittyCode's own agent loop (desktop/core/chatgpt): OpenAI's "Sign in with
 //                ChatGPT" for open-source apps (browser, PKCE, loopback callback). The tokens stay in WittyCode's own folder.
 //   memory.*     the shared memory (desktop/core/memory): notes that the own loop, Devin and the user read and write. The page lists,
@@ -34,7 +34,7 @@ export interface TestResult {
 export interface Bridge {
   devin: {
     account(): Promise<DevinAccount>;
-    /** `devin auth login` opens the browser; resolves with the account once the user has signed in (or cancelled) */
+    /** Opens the native CLI login picker; resolves with the account after sign-in or cancellation. */
     login(): Promise<DevinAccount>;
     cancelLogin(): Promise<DevinAccount>;
     logout(): Promise<DevinAccount>;

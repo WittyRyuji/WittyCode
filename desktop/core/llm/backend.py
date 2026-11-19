@@ -15,7 +15,7 @@ from collections.abc import AsyncIterator, Mapping
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 
-from desktop.core.chatgpt.errors import ChatGPTError
+from desktop.core.chatgpt.errors import ChatGPTError, RequestNotSent
 from desktop.core.chatgpt.http import HttpClient, stream_idle_timeout
 from desktop.core.chatgpt.models import ChatGPTModel
 from desktop.core.chatgpt.responses import Event, read_events
@@ -70,7 +70,7 @@ def route_of(spec: ApiModelSpec, key: str | None, headers: Mapping[str, str]) ->
             del sent[existing]
         sent[name] = value
     return Route(kind, spec.base_url, spec.native, sent, spec.extra_args, spec.max_output, spec.thinking,
-                 spec.reasoning_args if spec.bedrock is None else {})
+                 spec.reasoning_args if spec.bedrock is None else {}, supports_images=spec.images)
 
 
 def api_failure(error: ChatGPTError, spec: ApiModelSpec) -> ChatGPTError:
@@ -152,7 +152,7 @@ class ApiBackend:
         try:
             return await asyncio.to_thread(build)
         except ProviderError as error:
-            raise ChatGPTError(str(error), code="api") from error
+            raise RequestNotSent(str(error), code="api") from error
 
     async def stream(self, request: dict[str, Any]) -> AsyncIterator[Event]:
         """Ask the model of the request: its body for the provider's wire format, and the events of the answer."""
@@ -189,12 +189,12 @@ class ApiBackend:
             plan = await asyncio.to_thread(self.providers.bedrock_plan, spec)
             user_headers = await asyncio.to_thread(self.providers.api_headers, spec)
         except ProviderError as error:
-            raise ChatGPTError(str(error), code="api") from error
+            raise RequestNotSent(str(error), code="api") from error
         kind = spec.kind
         mantle = kind == "openai"
         base = plan.base_url.rstrip("/") if plan.base_url else (f"https://bedrock-mantle.{plan.region}.api.aws/v1" if mantle else bedrock.endpoint(plan.region))
         wire = {"anthropic": ANTHROPIC, "openai": RESPONSES}.get(kind, "converse")
-        route = Route(wire, base, spec.native, {}, spec.extra_args, spec.max_output, spec.thinking)
+        route = Route(wire, base, spec.native, {}, spec.extra_args, spec.max_output, spec.thinking, supports_images=spec.images)
         headers: dict[str, str] = {"Content-Type": "application/json", **user_headers}
         if kind == BEDROCK:
             url, body = bedrock.model_url(base, spec.native, "converse-stream"), bedrock.converse_body(request, route, plan.metadata)

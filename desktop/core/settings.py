@@ -18,6 +18,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from desktop.core.fusion.gates import GATES
 from desktop.core.fusion.reasoning import reasoning_map
 
 log = logging.getLogger("desktop.settings")
@@ -41,6 +42,12 @@ FOLLOW_UPS = ("queue", "steer")
 """What Enter does with a message typed while a turn runs: ``queue`` holds it until the turn is over, ``steer`` gives it
 to the running turn now. Ctrl+Enter does the other one."""
 SIDEBAR_WIDTH_RANGE = (220, 440)
+CONVERSATION_WIDTH_RANGE = (240, 600)
+INSPECTOR_WIDTH_RANGE = (340, 4000)
+
+
+def valid_inspector_width(value: object) -> bool:
+    return type(value) is int and (value == 0 or INSPECTOR_WIDTH_RANGE[0] <= value <= INSPECTOR_WIDTH_RANGE[1])
 MAX_OPEN_SESSIONS_RANGE = (1, 16)
 DEFAULT_MAX_OPEN_SESSIONS = 4
 DEFAULT_MAX_STEPS = 80
@@ -82,6 +89,9 @@ class AppSettings:
     follow_up: str = "queue"
     """One of ``FOLLOW_UPS``: what Enter does while a turn is running."""
     sidebar_width: int = 288
+    conversation_width: int = 280
+    inspector_width: int = 0
+    """The file and Sub-Agent inspector column in pixels; zero follows the window width."""
     default_model: str = ""
     """Model id for new sessions; empty: the first model of the menu."""
     reasoning_effort: str = ""
@@ -105,11 +115,19 @@ class AppSettings:
     fusion_workers: list[str] = field(default_factory=list)
     fusion_light: str = ""
     fusion_reasoning: dict[str, str] = field(default_factory=dict)
-    """Page model id -> explicit effort for new Fusion sessions; missing keeps the existing default."""
+    """Role:page-model-id -> effort for new Fusion sessions; legacy per-model keys remain readable."""
     fusion_preference: int = 50
     fusion_max_calls: int = 8  # Legacy defaults are kept for settings compatibility, not applied to new sessions.
     fusion_max_tokens: int = 500_000
     fusion_max_seconds: int = 900
+    fusion_gates: dict[str, bool] = field(default_factory=dict)
+    fusion_drive_shared: bool = False
+    fusion_drive_warm: float = 0.5
+    fusion_drive_keep_days: int = 7
+    fusion_drive_qk: float = 0.6
+    fusion_drive_auto_delete: bool = False
+    fusion_drive_max_gb: float = 5.0
+    fusion_observer_judgement: bool = False
     think_chinese: bool = True
     """Legacy fallback for thinking_language when no explicit language has been saved."""
     answer_language: str = "auto"
@@ -118,7 +136,7 @@ class AppSettings:
     sound_question: str = ""
     sound_complete: str = ""
     sound_error: str = ""
-    """Local WAV paths; empty means the corresponding bundled sound (resolved for display by ``core/sounds``)."""
+    """Local PCM WAV or MP3 paths; empty means the corresponding bundled sound (resolved for display by ``core/sounds``)."""
     mode: str = "auto"
     projects: list[str] = field(default_factory=list)
     max_open_sessions: int = DEFAULT_MAX_OPEN_SESSIONS
@@ -241,6 +259,9 @@ def settings_from_dict(raw: object) -> AppSettings:
     low_w, high_w = SIDEBAR_WIDTH_RANGE
     if not isinstance(sidebar, int) or isinstance(sidebar, bool) or not low_w <= sidebar <= high_w:
         sidebar = defaults.sidebar_width
+    conversation = raw.get("conversation_width")
+    if type(conversation) is not int or not CONVERSATION_WIDTH_RANGE[0] <= conversation <= CONVERSATION_WIDTH_RANGE[1]:
+        conversation = defaults.conversation_width
     devin_enabled = raw.get("devin_enabled")
     if not isinstance(devin_enabled, bool):
         devin_enabled = defaults.devin_enabled
@@ -296,6 +317,14 @@ def settings_from_dict(raw: object) -> AppSettings:
         fusion_reasoning = reasoning_map(raw.get("fusion_reasoning", {}))
     except ValueError:
         fusion_reasoning = {}
+    raw_gates = raw.get("fusion_gates")
+    fusion_gates = {name: raw_gates[name] for name in GATES if isinstance(raw_gates.get(name), bool)} if isinstance(raw_gates, dict) else {}
+
+    def fusion_float(name: str, low: float, high: float) -> float:
+        value = raw.get(name)
+        if type(value) in (int, float) and low <= value <= high:
+            return float(value)
+        return getattr(defaults, name)
 
     splitter = raw.get("splitter_sizes")
     if not (
@@ -363,6 +392,8 @@ def settings_from_dict(raw: object) -> AppSettings:
         font_scale=text("font_scale", FONT_SCALES),
         follow_up=text("follow_up", FOLLOW_UPS),
         sidebar_width=sidebar,
+        conversation_width=conversation,
+        inspector_width=raw["inspector_width"] if valid_inspector_width(raw.get("inspector_width")) else defaults.inspector_width,
         default_model=text("default_model"),
         reasoning_effort=text("reasoning_effort"),
         devin_autonomy=text("devin_autonomy", DEVIN_PERMISSIONS),
@@ -373,13 +404,21 @@ def settings_from_dict(raw: object) -> AppSettings:
         chatgpt_compact_at=compact_at,
         max_steps=max_steps,
         fusion_main=text("fusion_main"),
-        fusion_workers=list(dict.fromkeys(item for item in raw.get("fusion_workers", []) if isinstance(item, str) and item.strip()))[:32] if isinstance(raw.get("fusion_workers"), list) else [],
+        fusion_workers=list(dict.fromkeys(item for item in raw.get("fusion_workers", []) if isinstance(item, str) and item.strip()))[:1] if isinstance(raw.get("fusion_workers"), list) else [],
         fusion_light=text("fusion_light"),
         fusion_reasoning=fusion_reasoning,
         fusion_preference=raw.get("fusion_preference") if isinstance(raw.get("fusion_preference"), int) and not isinstance(raw.get("fusion_preference"), bool) and 0 <= raw["fusion_preference"] <= 100 else defaults.fusion_preference,
         fusion_max_calls=raw.get("fusion_max_calls") if isinstance(raw.get("fusion_max_calls"), int) and not isinstance(raw.get("fusion_max_calls"), bool) and 1 <= raw["fusion_max_calls"] <= 1000 else defaults.fusion_max_calls,
         fusion_max_tokens=raw.get("fusion_max_tokens") if isinstance(raw.get("fusion_max_tokens"), int) and not isinstance(raw.get("fusion_max_tokens"), bool) and 1 <= raw["fusion_max_tokens"] <= 2**53 - 1 else defaults.fusion_max_tokens,
         fusion_max_seconds=raw.get("fusion_max_seconds") if isinstance(raw.get("fusion_max_seconds"), int) and not isinstance(raw.get("fusion_max_seconds"), bool) and 1 <= raw["fusion_max_seconds"] <= 86_400 else defaults.fusion_max_seconds,
+        fusion_gates=fusion_gates,
+        fusion_drive_shared=raw.get("fusion_drive_shared") if isinstance(raw.get("fusion_drive_shared"), bool) else defaults.fusion_drive_shared,
+        fusion_drive_warm=fusion_float("fusion_drive_warm", 0, 1),
+        fusion_drive_keep_days=raw.get("fusion_drive_keep_days") if type(raw.get("fusion_drive_keep_days")) is int and 1 <= raw["fusion_drive_keep_days"] <= 3650 else defaults.fusion_drive_keep_days,
+        fusion_drive_qk=fusion_float("fusion_drive_qk", -1, 1),
+        fusion_drive_auto_delete=raw.get("fusion_drive_auto_delete") if isinstance(raw.get("fusion_drive_auto_delete"), bool) else defaults.fusion_drive_auto_delete,
+        fusion_drive_max_gb=fusion_float("fusion_drive_max_gb", 0.1, 1000),
+        fusion_observer_judgement=raw.get("fusion_observer_judgement") if isinstance(raw.get("fusion_observer_judgement"), bool) else defaults.fusion_observer_judgement,
         think_chinese=think_chinese,
         answer_language=text("answer_language", LANGUAGES),
         thinking_language=text("thinking_language", ("", *LANGUAGES)),

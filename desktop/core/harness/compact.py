@@ -42,6 +42,7 @@ from typing import Any
 
 from desktop.core.chatgpt.errors import is_transient
 from desktop.core.chatgpt.responses import Finished, Shape, Started, TextDone, build_request, declare_tools, user_message
+from desktop.core.harness.history import tool_images_of
 from desktop.core.harness.prompt import context_update
 
 log = logging.getLogger("desktop.harness.compact")
@@ -121,7 +122,7 @@ def estimate_item(item: Mapping[str, Any]) -> int:
     if kind == "function_call":
         return 8 + estimate_text(str(item.get("name") or "")) + estimate_text(str(item.get("arguments") or ""))
     if kind == "function_call_output":
-        return 6 + estimate_text(str(item.get("output") or ""))
+        return 6 + estimate_text(str(item.get("output") or "")) + IMAGE_TOKENS * len(tool_images_of(item))
     if kind == "reasoning":
         summary = " ".join(str(part.get("text") or "") for part in item.get("summary") or () if isinstance(part, Mapping))
         return 4 + estimate_text(summary) + len(str(item.get("encrypted_content") or "")) // 5
@@ -218,10 +219,9 @@ def log_index(cut: int, upto: int, synthetic: int) -> int:
     return upto + cut - synthetic
 
 
-def boundary_ok(items: Sequence[Mapping[str, Any]], upto: int) -> bool:
-    """Whether a view may begin at ``items[upto]`` (the end included): every call before it has its output before it, and
-    it does not part a reasoning item from what follows it. A place that splits a step would send an output without the
-    call it answers."""
+def boundary_ok(items: Sequence[Mapping[str, Any]], upto: int, *, after_turn: bool = False) -> bool:
+    """A view must not start between a call and its output or between reasoning and its next output. An idle handoff
+    may cover the entire log, including orphaned reasoning from a failed turn; that reasoning is never sent as input."""
     if not 0 <= upto <= len(items):
         return False
     if upto == 0:
@@ -233,7 +233,7 @@ def boundary_ok(items: Sequence[Mapping[str, Any]], upto: int) -> bool:
             pending.add(str(item.get("call_id") or ""))
         elif kind == "function_call_output":
             pending.discard(str(item.get("call_id") or ""))
-    return not pending and items[upto - 1].get("type") != "reasoning"
+    return not pending and (after_turn or items[upto - 1].get("type") != "reasoning")
 
 
 def mend_boundary(items: Sequence[Mapping[str, Any]], upto: int) -> int:
@@ -334,7 +334,9 @@ def render(item: Mapping[str, Any]) -> str:
         return f"ASSISTANT CALLED TOOL {name}: {args}"
     if kind == "function_call_output":
         reference = f" ({item['wc_output_ref']})" if item.get("wc_output_ref") else ""
-        return f"TOOL RESULT{reference}: {str(item.get('output') or '')}"
+        text = f"TOOL RESULT{reference}: {str(item.get('output') or '')}"
+        images = len(tool_images_of(item))
+        return text + (f"\n[{images} image(s) attached]" if images else "")
     return ""
 
 
@@ -463,6 +465,8 @@ OnRequest = Callable[[dict[str, Any], Finished | None, float, bool], None]
 
 def prefix_summary_request(base: Mapping[str, Any], items: Sequence[Mapping[str, Any]], window: int) -> dict[str, Any] | None:
     """Reuse the main Responses prefix when it fits; no experimental cache or server-compaction parameters."""
+    if any(tool_images_of(item) for item in items):
+        return None  # The text summary keeps the picture description, not the tool attachment.
     request = {**base, "input": [*items, user_message(SUMMARY_TASK + INSTRUCTIONS)], "tool_choice": "none"}
     size = estimate_items(request["input"]) + estimate_text(str(request.get("instructions") or ""))
     size += estimate_text(json.dumps(request.get("tools") or [], ensure_ascii=False))
@@ -605,6 +609,7 @@ async def compact(
     turn: int | None = None,
     on_usage: OnUsage | None = None,
     whole: bool = False,
+    handoff: bool = False,
     fallback: bool = False,
     output_reader: Callable[[str], Awaitable[str]] | None = None,
     rules: str = "",
@@ -622,12 +627,17 @@ async def compact(
     covers, and ``kept`` is its own; ``None``: at the last message of the user.
 
     ``whole``: the user asked for it (``/compact``), no turn is running: the whole conversation becomes the summary when it
-    ends at a finished step, rather than only what does not fit. ``fallback``: ``False`` lets a summary that could not be
-    written raise instead of becoming the digest of what the user asked (the digest is for a conversation that must
-    shrink; a user who asked for a summary is told it failed)."""
+    ends at a finished step, rather than only what does not fit. ``handoff``: cover the entire idle log, including a
+    final user message from a failed turn, as historical data. Never stage a partial summary for a model switch.
+    ``fallback``: ``False`` lets a summary that could not be written raise instead of becoming a digest."""
     room = budget(window) - fixed
-    if whole and ends_whole(view, synthetic):
-        cut: int | None = len(view)
+    cut: int | None
+    if handoff:
+        if not boundary_ok(view, len(view), after_turn=True):
+            raise CompactionFailed("The conversation contains an unfinished tool call.")
+        cut = len(view)
+    elif whole and ends_whole(view, synthetic):
+        cut = len(view)
     else:
         cut = choose_cut(view, keep_tokens(window), room - min(SUMMARY_ROOM, window // 20), synthetic=synthetic)
     if cut is None:
@@ -653,6 +663,11 @@ async def compact(
                 covered[index] = {**item, "output": await output_reader(item["wc_output_ref"])}
     chunk = chunk_budget(window)
     parts = summary_parts(covered, chunk)
+    if handoff and not parts:
+        if not told.strip():
+            raise CompactionFailed("There is no conversation text to summarise.")
+        # Refit an already complete summary when the destination has a smaller window.
+        parts, told = pieces(told, chunk), ""
     problem = ""
     mechanical = False
     try:
