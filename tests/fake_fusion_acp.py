@@ -113,7 +113,7 @@ class GuardedFake(Fake):
                 tool, arguments = "delegate_task", {"scope": "src", "model": "devin:swe-2-high", "role": "worker", "task": "[fusion-shell] Create the marker with a command."}
             elif action == "delegate-acp-slow":
                 tool, arguments = "delegate_task", {"scope": "src", "model": "devin:swe-2-high", "role": "worker", "task": "[fusion-slow] Wait for cancellation."}
-            elif action == "read":
+            elif action in ("read", "truncated-tools"):
                 tool, arguments = "read_file", {"file_path": "evidence.txt"}
             elif action == "plan":
                 tool, arguments = "submit_plan", {"plan": "Inspect the module, implement the change, and run tests."}
@@ -149,6 +149,21 @@ class GuardedFake(Fake):
                     await self.approve_tool(sid, MCP_LIST, {"server_name": SERVER})
                     manifest = (await self.mcp(sid, "tools/list", {}))["result"]["tools"]
                     assert any(item["name"] == tool for item in manifest)
+                    if action == "truncated-tools":
+                        # Simulate a CLI that replaces the schemas with a preview and a native output reference.
+                        assert len(json.dumps(manifest)) > 256
+                        header = "Private tool index (tool name, required arguments, optional arguments):\n"
+                        if header not in text:
+                            self.update(sid, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "The tool list was truncated."}})
+                            self.tool(sid, "get_output:0#1", "Retrieve truncated tool list", "read", {"id": "preview"}, "get_output")
+                            await turn["cancel"].wait()
+                            stop = "cancelled"
+                            return
+                        index = {name: (required, optional) for name, required, optional in json.loads(text.split(header, 1)[1].splitlines()[0])}
+                        assert index[tool][0] == ["file_path"]
+                        assert "get_output" not in index and set(index) == {item["name"] for item in manifest}
+                        code, result = await self.run_hook(sid, "PreToolUse", tool_name="get_output", tool_input={"id": "preview"})
+                        assert code == 2 and result["decision"] == "block"
                     await self.approve_tool(sid, MCP_CALL, {"server_name": SERVER, "tool_name": tool, "arguments": arguments})
                 else:
                     await self.approve_tool(sid, PREFIX + tool, arguments)

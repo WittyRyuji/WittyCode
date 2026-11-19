@@ -32,21 +32,26 @@ def test_qt_shows_the_bundled_test_hook_in_every_scope(qapp, loop, tmp_path, mon
             await rig.wait_for(".settings")
             await rig.click_text(".snav", "插件")
             await rig.click_text(".connection-tabs button", "Hooks")
-            await rig.wait_for(".connection-builtin [data-builtin-hook]", 1)
-            assert await rig.text(".connection-builtin h4") == "WittyCode 官方内置"
-            assert await rig.text(".connection-builtin b") == "测试收尾"
-            assert "随客户端启用" in await rig.text(".connection-builtin .connection-state")
-            assert "只清理本次测试" in await rig.text(".connection-builtin p")
+            builtin = '.connection-list [data-builtin-hook="wittycode.test-cleanup"]'
+            external = '.connection-list [data-kind="hook"][data-connection]'
+            await rig.wait_for(builtin, 1)
+            assert await rig.text(f"{builtin} b") == "测试收尾"
+            assert await rig.text(f"{builtin} .connection-state") == "WittyCode 官方内置 · 始终启用，不可停用"
+            assert "只清理本次测试" in await rig.text(f"{builtin} p")
             assert await rig.text('.connection-tabs [data-kind="hook"] .num') == "1"
-            assert not await rig.exists(".connection-builtin button, .connection-builtin input")
-            if evidence := os.environ.get("WITTYCODE_TEST_EVIDENCE"):
-                assert rig.window.grab().save(str(Path(evidence) / "builtin-test-hook.png"))
+            assert await rig.count(f"{builtin} button") == 1
+            assert await rig.js(f"""(() => {{ const toggle = document.querySelector({f'{builtin} [role=switch]'!r});
+                toggle.click(); return toggle.disabled && toggle.getAttribute('aria-checked') === 'true'; }})()""")
             await rig.js("""{ const select = document.querySelector('.connection-toolbar select');
                 select.selectedIndex = 1; select.dispatchEvent(new Event('change', {bubbles: true})); }""")
-            await rig.wait_for('.connection-list [data-kind="hook"]', 1)
-            assert "尚未信任" in await rig.text(".connection-list .connection-state")
-            assert await rig.count(".connection-builtin [data-builtin-hook]") == 1
+            await rig.wait_for(external, 1)
+            assert "尚未信任" in await rig.text(f"{external} .connection-state")
+            assert await rig.exists(f"{external} [role=switch]:enabled")
+            assert await rig.exists(f"{builtin} [role=switch]:disabled")
             assert await rig.text('.connection-tabs [data-kind="hook"] .num') == "2"
+            if evidence := os.environ.get("WITTYCODE_TEST_EVIDENCE"):
+                await asyncio.sleep(0.4)  # Let the settings transition finish before grabbing the Qt surface.
+                assert rig.window.grab().save(str(Path(evidence) / "builtin-test-hook.png"))
             assert not rig.core.connections.file.exists(), "listing bundled hooks must not import any configuration"
         finally:
             await rig.finish()

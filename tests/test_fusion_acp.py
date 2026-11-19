@@ -20,7 +20,7 @@ from tests.fakes import until
 
 def test_guard_denies_native_tools_and_keeps_only_the_private_bridge():
     config = guard_config()
-    assert {"read", "write", "edit", "exec", "grep", "glob", "mcp_list_servers", "mcp_read_resource"} <= set(config["permissions"]["deny"])
+    assert {"read", "write", "edit", "exec", "get_output", "grep", "glob", "mcp_list_servers", "mcp_read_resource"} <= set(config["permissions"]["deny"])
     assert config["permissions"]["allow"] == [PREFIX + "*"] and {MCP_LIST, MCP_CALL} <= set(config["permissions"]["ask"])
     assert {MCP_LIST, MCP_CALL} <= set(guard_config(tool_free=True)["permissions"]["deny"])
     assert config["subagents_enabled"] is False
@@ -142,6 +142,31 @@ def test_acp_main_delegates_to_either_runner_and_keeps_one_conversation(tmp_path
             assert expert.record.model == worker and main.model == "devin:swe-2-high"
             assert main.reasoning == "medium" and expert.agent_effort == levels[f"worker:{worker}"]
             assert main.saved.turns[-1].status == "done"
+        finally:
+            await core.shutdown()
+    asyncio.run(go())
+
+
+def test_truncated_acp_tool_list_can_use_the_private_index(tmp_path):
+    from tests.fusion_acp_support import make_guarded_engine
+
+    async def go():
+        harness = make_guarded_engine(tmp_path, FAKE_FUSION_MCP_WRAPPERS="1")
+        core, _, _, _, _ = await ready_core(tmp_path, devin_engine=harness.engine)
+        try:
+            await until(lambda: any(item["source"] == "devin" for item in core.catalog.models), timeout=20)
+            core.settings.fusion_main = core.settings.fusion_light = "devin:swe-2-high"
+            core.settings.fusion_workers = ["devin:swe-2-high"]
+            project = tmp_path / "proj"
+            (project / "evidence.txt").write_text("INDEX_RECOVERY_EVIDENCE", encoding="utf-8")
+            cid = (await core.call("session.new", {"projectId": str(project), "fusion": True}))["id"]
+            main = core._by_cid[cid].controller
+            assert main.send_prompt("[fusion-truncated-tools] Read the project note.")
+            await finish_turn(main, timeout=30)
+            turn = main.saved.turns[-1]
+            assert turn.status == "done", turn.error
+            outputs = [item["output"] for item in main.saved.items if item.get("type") == "function_call_output"]
+            assert any("INDEX_RECOVERY_EVIDENCE" in result for result in outputs)
         finally:
             await core.shutdown()
     asyncio.run(go())
