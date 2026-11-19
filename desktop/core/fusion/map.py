@@ -415,13 +415,16 @@ def touch(project_map: ProjectMap, workstream: str, paths: Sequence[str]) -> tup
 
 def update(project_map: ProjectMap, module: str, *, paths: Sequence[str] | None = None, role: str | None = None,
            method: str | None = None, traits: str | None = None) -> ProjectMap:
-    """Replace just the named module (or the project-wide traits)."""
+    """Replace just the named module. ``traits`` belong to the project, not to a module: given beside a module's fields
+    they replace the project-wide traits in the same call, because that is how a model fills the tool in."""
     if module in ("traits", _TRAITS):
         if traits is None or any(value is not None for value in (paths, role, method)):
             raise ValueError("Provide only traits for the project-wide traits entry.")
         return replace(project_map, traits=traits)
     if traits is not None:
-        raise ValueError("Leave out traits when updating a module; to set the project-wide traits call again with module 'traits' and only traits.")
+        project_map = replace(project_map, traits=traits)
+    if paths is None and role is None and method is None:
+        return project_map  # (traits alone under a module's name: nothing of the module changes, and none is added)
     old = next((entry for entry in project_map.entries if entry.module == module), None)
     base = old or MapEntry(module, ())
     entry = replace(base, paths=tuple(dict.fromkeys(map(_relative, paths))) if paths is not None else base.paths,

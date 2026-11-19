@@ -131,6 +131,23 @@ def test_workspace_signal_only_counts_changes_during_delegations(tmp_path, git, 
     asyncio.run(go())
 
 
+@pytest.mark.parametrize("git", [False, True])
+def test_caches_left_by_a_test_run_are_not_out_of_scope_changes(tmp_path, git):
+    # Found with a real model: in a git project a Coder's test run left __pycache__ behind, and a sampler was demanded for it.
+    from desktop.core.fusion.runtime import WorkspaceStart
+
+    (tmp_path / "stats.py").write_text("x = 1\n", encoding="utf-8")
+    if git:
+        _git(tmp_path, "init", "-q")
+        _git(tmp_path, "add", "-A")
+        _git(tmp_path, "commit", "-qm", "Fixture baseline")
+    start = WorkspaceStart.capture(tmp_path)
+    (tmp_path / "__pycache__").mkdir()
+    (tmp_path / "__pycache__" / "stats.cpython-311.pyc").write_bytes(b"compiled")
+    (tmp_path / "stats.py").write_text("x = 2\n", encoding="utf-8")
+    assert start is not None and start.changed(tmp_path) == {"stats.py"}
+
+
 @pytest.mark.parametrize("scenario", ["self", "no writes", "off", "plan"])
 def test_acceptance_scope_and_approved_plan_default(tmp_path, scenario):
     async def go():

@@ -662,7 +662,13 @@ class FusionRuntime:
             except _DRIVE_ERRORS:
                 self._drive_notice()
                 return Outcome("The project map could not be updated.", True)
-        return Outcome(f"Updated project map entry: {module.strip()}.")
+        if "traits" not in changes:
+            return Outcome(f"Updated project map entry: {module.strip()}.")
+        if len(changes) == 1:
+            return Outcome("Updated the project-wide traits.")
+        # Said plainly, so that the next module is not given a sentence about itself in this field.
+        return Outcome(f"Updated project map entry: {module.strip()}. The traits text replaced the project-wide traits: "
+                       "there is one for the whole project, not one per module.")
 
     async def _sync_map_for_delegate(self, workstream: str, paths: tuple[str, ...]) -> None:
         async with self._map_lock():

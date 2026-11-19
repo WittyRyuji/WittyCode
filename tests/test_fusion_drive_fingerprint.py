@@ -155,6 +155,28 @@ def test_changed_since_includes_renames_and_uses_project_relative_names(tmp_path
     assert fingerprint(project) != clean
 
 
+@needs_git
+def test_untracked_caches_and_build_output_are_not_changes_in_a_git_project(tmp_path):
+    # Found with a real model: the caches a test run left counted as changes outside an expert's declared paths.
+    _git(tmp_path, "init", "-q")
+    _put(tmp_path, "src/main.py")
+    tracked = _put(tmp_path, "build/release.py")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-qm", "Initial")
+    base = _git(tmp_path, "rev-parse", "HEAD")
+    clean, scoped = fingerprint(tmp_path), fingerprint(tmp_path, ("src",))
+    for name in ("node_modules", "__pycache__", ".venv", "venv", "dist", "build", ".mypy_cache", ".pytest_cache"):
+        _put(tmp_path, f"src/{name}/made.bin")
+    _put(tmp_path, "__PyCache__/main.cpython-311.pyc")
+    assert changed_since(tmp_path, base) == []
+    assert fingerprint(tmp_path) == clean and fingerprint(tmp_path, ("src",)) == scoped
+    # A tracked file is the project's work wherever it lies, and so is a new file anywhere else.
+    tracked.write_bytes(b"changed\n")
+    _put(tmp_path, "src/new.py")
+    assert changed_since(tmp_path, base) == ["build/release.py", "src/new.py"]
+    assert fingerprint(tmp_path) != clean and fingerprint(tmp_path, ("src",)) != scoped
+
+
 def test_plain_manifest_fields_and_skipped_folders(tmp_path):
     kept = _put(tmp_path, "sub/kept.txt")
     for name in (".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build", ".mypy_cache", ".pytest_cache"):

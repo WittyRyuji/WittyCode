@@ -79,6 +79,31 @@ def test_draft_entries_are_stored_and_injected_into_overlapping_coder(tmp_path):
     asyncio.run(go())
 
 
+def test_traits_given_beside_a_module_are_accepted_as_the_projects(tmp_path):
+    # Found with a real model: it fills traits in the same call as the module's fields. The call was refused, and the model
+    # repeated it twenty times before writing the map file by hand.
+    async def go():
+        async with _fusion(tmp_path, active=_ACTIVE) as (main, fake):
+            await _choose_turn(
+                main, fake, 0,
+                _update("stats", paths=["stats.py"], role="Computes statistics.", method="Sorts a copy.", traits="Small Python library."),
+                _update("stats", paths=[], role="Computes the mean and the median.", method="", traits="", call_id="empty"),
+                _update("stats", traits="Standard library only.", call_id="only"),
+                _update("traits", traits="Tested with unittest.", call_id="named"),
+                _update("stats", paths=[], role="", method="", traits="", call_id="nothing"))
+            assert "Updated project map entry: stats." in _output(main, "update")
+            assert "replaced the project-wide traits" in _output(main, "update") and "not one per module" in _output(main, "update")
+            assert _output(main, "empty") == "Updated project map entry: stats."
+            assert _output(main, "only") == _output(main, "named") == "Updated the project-wide traits."
+            assert "at least one of" in _output(main, "nothing")
+            stored = project_map.read(main.project)
+            assert stored.entries == (project_map.MapEntry("stats", ("stats.py",), "Computes the mean and the median.", "Sorts a copy."),)
+            assert stored.traits == "Tested with unittest."
+            records = _records(main)
+            assert set(records) == {"map:stats", "map:traits"} and "Tested with unittest." in records["map:traits"].summary
+    asyncio.run(go())
+
+
 def test_existing_file_wins_then_updates_one_entry_and_imports_hand_edit(tmp_path):
     async def go():
         async with _fusion(tmp_path, active=_ACTIVE) as (main, fake):

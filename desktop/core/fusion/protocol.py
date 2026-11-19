@@ -86,10 +86,13 @@ CHOOSE_MAP_DECLARATION: dict[str, Any] = {
 }
 UPDATE_MAP_DECLARATION: dict[str, Any] = {
     "name": "update_map_entry",
-    "description": "Refine one map module (responsibility and implementation, not tests or pitfalls); use module 'traits' for engineering traits.",
+    "description": "Refine one module of the project map: its paths, what it is responsible for and how it is implemented (not tests or pitfalls).",
     "parameters": {"type": "object", "properties": {
-        "module": {"type": "string"}, "paths": {"type": "array", "items": {"type": "string"}},
-        "role": {"type": "string"}, "method": {"type": "string"}, "traits": {"type": "string"},
+        "module": {"type": "string", "description": "The module's name as the map lists it; a new name adds a module."},
+        "paths": {"type": "array", "items": {"type": "string"}, "description": "Project-relative paths of the module; leave empty to keep them."},
+        "role": {"type": "string", "description": "What the module is responsible for, in one or two sentences; leave empty to keep it."},
+        "method": {"type": "string", "description": "How it is implemented, in one or two sentences; leave empty to keep it."},
+        "traits": {"type": "string", "description": "Not a field of the module: the one text of engineering traits of the whole project, which this replaces. Leave empty to keep it. To change only this, use module 'traits'."},
     }, "required": ["module"], "additionalProperties": False},
 }
 RATE_PARAMETERS: dict[str, Any] = {

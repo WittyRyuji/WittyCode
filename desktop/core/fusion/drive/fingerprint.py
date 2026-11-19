@@ -216,6 +216,10 @@ def _status(project: Path, prefix: str, paths: Sequence[str]) -> list[tuple[str,
             raw_names += (source,)  # In porcelain -z the destination comes first.
         names = tuple(name[len(prefix):] for name in raw_names if name.startswith(prefix))
         names = tuple(name for name in names if _under(name, paths))
+        if code == "??":
+            # What the plain inventory skips: caches and build output that running the project leaves behind. A tracked
+            # file is the project's work wherever it lies, so only untracked ones are left out.
+            names = tuple(name for name in names if not any(part.lower() in _SKIP for part in name.split("/")))
         if names:
             status.append((code, names))
     return status
