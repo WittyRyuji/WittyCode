@@ -39,6 +39,11 @@ sandbox/*
 !sandbox/probe_api_real.py
 !sandbox/probe_plan_real.py
 !sandbox/probe_fusion_route_real.py
+!sandbox/probe_fusion_repeat.py
+!sandbox/probe_fusion_quality.py
+!sandbox/probe_fusion_drafts.py
+!sandbox/probe_fusion_briefs.py
+!sandbox/probe_fusion_requests.py
 !sandbox/probe_chat_real.py
 !sandbox/probe_codex_compact.py
 !sandbox/probe_droid_compact.py
