@@ -242,7 +242,7 @@ def test_qt_skill_switches_keep_sorted_rows_scroll_and_runtime_state_and_setting
             assert not await rig.exists(".preview, .preview-k")
             assert "session_manager.py" not in await rig.text(".settings-scroll")
             await rig.click_text(".snav", "关于")
-            assert await rig.text(".about .kvs b") == "0.2.1"
+            assert await rig.text(".about .kvs b") == "0.3.0"
             assert rig.plan.requests == []
             assert not any(line.startswith("error:") for line in rig.window.page.console)
         finally:
