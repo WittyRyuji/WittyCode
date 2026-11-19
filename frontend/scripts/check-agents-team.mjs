@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { openPage } from "./cdp.mjs";
@@ -446,6 +447,36 @@ async function checkGroupUpdates(page, patch, sessionId, label, ok) {
   }
 }
 
+async function checkNestArt(page, patch, label, ok) {
+  const identities = new Map([
+    ["Coder", "dragon-nests/coder"], ["QualitySampler", "dragon-nests/quality-sampler"],
+    ["QS", "dragon-nests/quality-sampler"], ["Runner", "dragon-nests/runner"], ["Observer", "dragon-nests/observer"],
+    ["Coder helper", "dragon-nest"],
+  ]);
+  // Same model, role, and names on purpose: only the real identity can choose the artwork.
+  const team = [...identities.keys()].flatMap((fusionIdentity, i) => [0, 1].map((j) => ({
+    ...agents[0], id: `art-${i}-${j}`, name: "Coder", fusionIdentity, status: "done",
+  })));
+  await patch({ agents: team });
+  const readImages = `(() => Object.fromEntries(${JSON.stringify([...identities.keys()])}.map((identity) => {
+    const img = document.querySelector('${flow} [data-id="group:' + identity + '"] img');
+    return [identity, img?.complete && img.naturalWidth === 48 && img.naturalHeight === 48 ? img.currentSrc : null];
+  })))()`;
+  for (const [motion, ext] of [["no-preference", "gif"], ["reduce", "png"]]) {
+    await setMotion(page, motion);
+    const prefix = `data:image/${ext};base64,`;
+    await page.waitFor(`Object.values(${readImages}).every((src) => src?.startsWith('${prefix}'))`);
+    const selected = await page.eval(readImages);
+    const mismatches = [...identities].filter(([identity, path]) => {
+      const expected = readFileSync(new URL(`../src/assets/${path}.${ext}`, import.meta.url));
+      return selected[identity] !== prefix + expected.toString("base64");
+    }).map(([identity]) => identity);
+    ok(label(`${motion}: each role nest selects its exact 48×48 ${ext.toUpperCase()}, QS aliases QualitySampler, and unknown uses generic`),
+      mismatches.length === 0 && new Set(Object.values(selected)).size === 5, { mismatches });
+  }
+  await setMotion(page, "no-preference");
+}
+
 export async function checkAgentsTeam({ url, scripts, ok }) {
   for (const [width, height, theme] of [[1440, 900, "light"], [1100, 600, "dark"]]) {
     const page = await openPage(url, { width, height, init: scripts, hideScrollbars: false });
@@ -474,6 +505,7 @@ export async function checkAgentsTeam({ url, scripts, ok }) {
       const id = await js("__fake.events.findLast(([name, payload]) => name === 'tabs' && payload.select)[1].select");
       const patch = (changes) => js(`__fake.patch(${JSON.stringify(id)}, ${JSON.stringify(changes)})`);
       await js(`__fake.emit('settings', { settings: { maxOpen: 4, theme: '${theme}', fontScale: 'md', sidebarWidth: 300 } })`);
+      await checkNestArt(page, patch, label, ok);
       await patch({ mark: "running", agents, agentRuns: runs });
       await checkFlow(page, theme, label, ok);
       await page.click("#conversation-team .agent-history-toggle");

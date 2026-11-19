@@ -1,12 +1,11 @@
 import { memo, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { Background, BackgroundVariant, getSmoothStepPath, getViewportForBounds, Handle, Position, ReactFlow, useReactFlow, type Edge, type EdgeProps, type Node, type NodeProps, type Viewport } from "@xyflow/react";
 import "@xyflow/react/dist/base.css";
-import nestGif from "../assets/dragon-nest.gif";
-import nestPng from "../assets/dragon-nest.png";
 import type { AgentInfo, Session } from "../types";
 import { useStore } from "../store";
 import { AGENT_STATE, groupAgentIdentities } from "../lib/agentTeam";
 import { FLOW_NODE_WIDTH, buildAgentFlowTree, flowBranchBounds, keepExpandedGroups } from "../lib/agentFlowTree";
+import { dragonNestArt } from "../lib/dragonNestArt";
 import { dragonIdentity, dragonPalette, type DragonIdentity, type DragonStatus } from "../lib/dragonSprites";
 import { DragonSprite } from "./DragonSprite";
 
@@ -36,13 +35,14 @@ function FlowDragon({ data }: NodeProps<DragonNode>) {
 
 function FlowNest({ data }: NodeProps<NestNode>) {
   const { identity, count, status, expanded, toggle } = data;
+  const { gif, png } = dragonNestArt(identity);
   const action = expanded ? "收起" : "展开";
   const label = `${action} ${identity} · ${count} 位成员 · ${AGENT_STATE[status].text}`;
   return <div className={`agent-flow-node ${status}`}>
     <button type="button" className="agent-flow-character" onClick={toggle} aria-expanded={expanded} aria-label={label} title={label}>
       <span className="agent-flow-ring"><picture className="agent-flow-nest-art">
-        <source media="(prefers-reduced-motion: reduce)" srcSet={nestPng} />
-        <img src={nestGif} width={48} height={48} alt="" draggable={false} />
+        <source media="(prefers-reduced-motion: reduce)" srcSet={png} />
+        <img src={gif} width={48} height={48} alt="" draggable={false} />
       </picture></span>
       <span className="agent-flow-name">{identity}</span>
       <span className="agent-flow-model">{count} 位 · {action} {expanded ? "▾" : "▸"}</span>
