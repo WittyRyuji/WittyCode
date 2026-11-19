@@ -277,3 +277,13 @@ def test_declarations_validate_with_harness(declaration, name, parameters, args)
     assert declaration["name"] == name and declaration["description"]
     assert declaration["parameters"] is parameters
     assert validate_arguments(parameters, args) == args
+
+
+def test_route_self_allows_two_edits_and_sends_the_rest_to_a_coder():
+    from desktop.core.fusion.protocol import SELF_EDITS
+
+    own = Route("self", "Small.", "self_check")
+    assert SELF_EDITS == 2
+    assert route_refusal(own, "edit", edits=0) == "" and route_refusal(own, "edit", edits=1) == ""
+    assert "must go to a Coder" in route_refusal(own, "edit", edits=2)
+    assert "must go to a Coder" not in route_refusal(Route("coder", "Whole change.", "runner"), "edit", edits=5)

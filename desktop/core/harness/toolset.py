@@ -85,6 +85,7 @@ class HarnessTools:
         self.map_chooser: Callable[[Call], Awaitable[Outcome]] | None = None
         self.map_updater: Callable[[Mapping[str, Any]], Awaitable[Outcome]] | None = None
         self.route_guard: Callable[[str, tuple[str, ...]], str] | None = None
+        self.route_edit: Callable[[], None] | None = None
         self.rating_submitter: Callable[[Mapping[str, Any]], Awaitable[Outcome]] | None = None
         self.strict_context = False
         self.permission_parent: HarnessTools | None = None
@@ -312,6 +313,10 @@ class HarnessTools:
                 await self.connections.hooks("PostToolUse", self.context.project, {"tool_name": call.name, "tool_input": call.args, "tool_response": outcome.output})
             except ConnectionError as error:
                 outcome.output += "\n" + str(error)
+        if self.route_edit is not None and not outcome.is_error:
+            edited = self.registry.get(call.name)
+            if edited is not None and edited.kind == "edit":
+                self.route_edit()  # (the main agent's own edits are counted: more than a couple is a Coder's work)
         if self.tool_finished is not None:
             spec = self.registry.get(call.name)
             await self.tool_finished(call, outcome, spec.kind if spec is not None else "read")

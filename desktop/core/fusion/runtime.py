@@ -201,6 +201,8 @@ class RouteTurn:
     route: Route | None = None
     from_plan: bool = False
     workstreams: set[str] = field(default_factory=set)
+    edits: int = 0
+    """Edits the main agent made itself in this turn; a new route does not reset it."""
     latest_finished: float = 0.0
     reroute_due: bool = False
     submitted_at: float = 0.0
@@ -376,7 +378,14 @@ class FusionRuntime:
         if action == "exec":
             return route_refusal(None, "edit") if route is None else ""
         names = set(name.casefold() for name in workstreams)
-        return route_refusal(route, action, workstreams=len(names | (turn.workstreams if turn is not None else set())))
+        return route_refusal(route, action, workstreams=len(names | (turn.workstreams if turn is not None else set())),
+                             edits=turn.edits if turn is not None else 0)
+
+    def note_edit(self) -> None:
+        """One successful edit by the main agent itself. An approved plan is its own route and is not counted."""
+        turn = self.route_turn
+        if turn is not None and not turn.from_plan:
+            turn.edits += 1
 
     async def _retain_turn_record(self, kind: str, turn: RouteTurn, summary: str, data: Mapping[str, Any]) -> None:
         if self.drive_writable:
@@ -627,7 +636,9 @@ class FusionRuntime:
         if not self.drive_writable:
             return Outcome("Fusion Drive is not accepting writes.", True)
         module = args.get("module")
-        changes = {key: value for key, value in args.items() if key != "module"}
+        # A model fills every field of the schema: an empty one means "not given". With a real model an empty `traits`
+        # beside a module's fields was refused, and the model repeated the same call some twenty times.
+        changes = {key: value for key, value in args.items() if key != "module" and value not in ("", [], None)}
         if not isinstance(module, str) or not module.strip() or not changes or changes.keys() - {"paths", "role", "method", "traits"}:
             return Outcome("Provide a module and at least one of paths, role, method or traits.", True)
         for key, value in changes.items():

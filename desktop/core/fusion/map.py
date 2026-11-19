@@ -421,7 +421,7 @@ def update(project_map: ProjectMap, module: str, *, paths: Sequence[str] | None 
             raise ValueError("Provide only traits for the project-wide traits entry.")
         return replace(project_map, traits=traits)
     if traits is not None:
-        raise ValueError("Use module 'traits' to update project-wide traits.")
+        raise ValueError("Leave out traits when updating a module; to set the project-wide traits call again with module 'traits' and only traits.")
     old = next((entry for entry in project_map.entries if entry.module == module), None)
     base = old or MapEntry(module, ())
     entry = replace(base, paths=tuple(dict.fromkeys(map(_relative, paths))) if paths is not None else base.paths,

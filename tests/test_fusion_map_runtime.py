@@ -89,7 +89,8 @@ def test_existing_file_wins_then_updates_one_entry_and_imports_hand_edit(tmp_pat
             assert project_map.read(main.project) == original
             before = _records(main)
             assert set(before) == {"map:counts", "map:other", "map:traits"}
-            await _turn(main, fake, _update("counts", role="Counts boxes."),
+            # (a model fills every field: an empty traits beside a module's fields means "not given", not an error)
+            await _turn(main, fake, _update("counts", role="Counts boxes.", traits="", paths=[]),
                         _update("counts", paths=["C:/outside.txt"], call_id="bad-path"), say("Updated."))
             updated = project_map.read(main.project)
             assert updated.entries[0].role == "Counts boxes." and updated.entries[1] == original.entries[1]

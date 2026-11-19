@@ -130,6 +130,10 @@ async def main() -> None:
     await engine.ensure_ready()
     engine.sessions = SessionStore(WORK / "sessions")
     settings = AppSettings(max_open_sessions=8, think_chinese=False, fusion_max_seconds=900)
+    if "--off" in ARGS:  # (the comparison: the same tasks with every gate off, i.e. Fusion as it was before the fixed route)
+        from desktop.core.fusion.gates import GATES
+        settings.fusion_gates = {name: False for name in GATES}
+    print("gates:", "all off" if "--off" in ARGS else "all on", flush=True)
     core, _factory, events, _platform, _ = make_core(WORK, chatgpt_engine=engine, settings=settings)
     await core.call("app.init")
     await until(lambda: any(m["source"] == "chatgpt" for payload in events.of("models") for m in payload["models"]), 90)

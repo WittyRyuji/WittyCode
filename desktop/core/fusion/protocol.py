@@ -277,12 +277,19 @@ def parse_route(args: Mapping[str, Any]) -> tuple[Route | None, str]:
     return Route(destination, reason.strip(), verification), ""
 
 
-def route_refusal(route: Route | None, action: str, *, workstreams: int = 0) -> str:
-    """For delegation, count distinct write workstreams including the proposed workstream."""
+SELF_EDITS = 2
+"""How many edits the main agent may make itself in one user turn. More is multi-step work, and that goes to a Coder."""
+
+
+def route_refusal(route: Route | None, action: str, *, workstreams: int = 0, edits: int = 0) -> str:
+    """For delegation, count distinct write workstreams including the proposed workstream; ``edits`` are those already made."""
     if action not in ("edit", "delegate"):
         return "Use the edit or delegate action for write routing."
     if route is None:
         return "You must submit a route first before editing or delegating writes."
+    if route.destination == "self" and action == "edit" and edits >= SELF_EDITS:
+        return (f"You have made {SELF_EDITS} edits yourself in this turn. A change that needs more is multi-step work and must go "
+                "to a Coder: submit a route with destination coder (or split) and delegate the rest of the change.")
     if route.destination == "self" and action == "delegate":
         return "This route assigns writes to you. Route again before delegating writes."
     if route.destination in ("coder", "split") and action == "edit":

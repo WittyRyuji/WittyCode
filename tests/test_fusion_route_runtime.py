@@ -168,3 +168,35 @@ def test_devin_main_receives_route_schema_and_cannot_edit_before_routing(tmp_pat
         finally:
             await core.shutdown()
     asyncio.run(go())
+
+
+def _write(name, call_id):
+    return call("create_file", {"file_path": name, "content": "route test"}, call_id=call_id)
+
+
+def test_more_than_two_edits_of_its_own_must_go_to_a_coder(tmp_path):
+    # A hard rule from the user after a real model kept a multi-step change for itself by calling it small.
+    async def go():
+        async with _fusion(tmp_path, active=ROUTE_GATES) as (main, fake):
+            missed = call("edit_file", {"file_path": "a.txt", "old_str": "absent text", "new_str": "never written"}, call_id="failed")
+            await _turn(main, fake, _route("self", "self_check"), _write("a.txt", "one"), missed, _write("b.txt", "two"),
+                        _write("c.txt", "three"), _route("self", "self_check", call_id="again"), _write("c.txt", "still"),
+                        _route(call_id="coder"), _delegate(), _report(), say("Handed over."))
+            assert "Refused" not in _output(main, "one") and "Refused" not in _output(main, "two")
+            assert "must go to a Coder" not in _output(main, "failed")  # A failed edit is not one of the two.
+            assert "must go to a Coder" in _output(main, "three") and "must go to a Coder" in _output(main, "still")
+            assert sorted(path.name for path in main.project.iterdir()) == ["a.txt", "b.txt"]
+            assert "Coder-Inventory [done]" in _output(main, "delegate")
+            # The count belongs to one user turn.
+            await _turn(main, fake, _route("self", "self_check"), _write("d.txt", "next"), say("Done."))
+            assert "Refused" not in _output(main, "next") and (main.project / "d.txt").is_file()
+    asyncio.run(go())
+
+
+def test_an_approved_plan_is_not_held_to_the_two_edit_limit(tmp_path):
+    async def go():
+        async with _fusion(tmp_path, active=ROUTE_GATES) as (main, fake):
+            main.saved.plan = {"id": "plan", "status": "approved", "text": "Write three notes."}
+            await _turn(main, fake, _write("a.txt", "one"), _write("b.txt", "two"), _write("c.txt", "three"), say("Done."))
+            assert len(list(main.project.iterdir())) == 3
+    asyncio.run(go())

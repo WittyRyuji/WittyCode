@@ -611,6 +611,7 @@ class ChatGPTController:
         routing = self._fusion if self._fusion is not None and self._fusion.gate("route") else None
         self._tools.route_submitter = routing.submit_route if routing is not None else None
         self._tools.route_guard = routing.route_guard if routing is not None else None
+        self._tools.route_edit = routing.note_edit if routing is not None else None
         mapping = self._fusion if self._fusion is not None and self._fusion.map_enabled else None
         self._tools.map_chooser = mapping.choose_map_location if mapping is not None else None
         self._tools.map_updater = mapping.update_map_entry if mapping is not None else None
