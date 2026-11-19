@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Loader2, Pause, Play, RotateCcw, Volume2, VolumeX } from "lucide-react";
 import { messageOf } from "../lib/errors";
-import type { VideoCommand, VideoInfo, VideoUpdate } from "../protocol";
+import type { VideoCommand, VideoInfo, VideoState } from "../protocol";
 import { useStore } from "../store";
 
 let nextToken = 0;
@@ -15,13 +15,18 @@ function clock(ms: number): string {
   return mm < 60 ? `${mm}:${ss}` : `${Math.floor(mm / 60)}:${String(mm % 60).padStart(2, "0")}:${ss}`;
 }
 
-export function MediaPreview({ sessionId, fileRef, size, renderError }: { sessionId: string; fileRef: string; size: string; renderError: (message: string) => ReactNode }) {
+export function MediaPreview({ sessionId, fileRef, size, inline = false, renderError, onRelease }: {
+  sessionId: string; fileRef: string; size?: string; inline?: boolean;
+  renderError: (message: string) => ReactNode; onRelease?: () => void;
+}) {
   const fileVideo = useStore((s) => s.fileVideo);
   const watchVideo = useStore((s) => s.watchVideo);
-  const area = useRef<HTMLDivElement>(null);
+  const area = useRef<HTMLElement>(null);
   const active = useRef<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
+  const [released, setReleased] = useState(false);
   const [info, setInfo] = useState<VideoInfo | null>(null);
-  const [state, setState] = useState<Omit<VideoUpdate, "token">>({ position: 0, playing: false, ended: false });
+  const [state, setState] = useState<VideoState>({ position: 0, playing: false, ended: false });
   const [volume, setVolume] = useState(0.7);
   const [muted, setMuted] = useState(false);
   const [scrub, setScrub] = useState<number | null>(null);
@@ -30,26 +35,41 @@ export function MediaPreview({ sessionId, fileRef, size, renderError }: { sessio
   useEffect(() => {
     const token = `video-${++nextToken}`;
     active.current = token;
-    const unsubscribe = watchVideo(token, ({ position, playing, ended, url, error }) => {
+    const unsubscribe = watchVideo(token, (update) => {
       if (active.current !== token) return;
+      if (update.released) {
+        active.current = null;
+        dragging.current = false;
+        setInfo(null);
+        setScrub(null);
+        setState({ position: 0, playing: false, ended: false });
+        setVolume(0.7);
+        setMuted(false);
+        setReleased(true);
+        onRelease?.();
+        return;
+      }
+      const { position, playing, ended, url, error } = update;
       setState((s) => ({ position, playing, ended, url: url?.startsWith(JPEG) ? url : s.url, error }));
     });
     const width = Math.min(1280, Math.max(240, Math.round((area.current?.clientWidth ?? 640) * window.devicePixelRatio)));
-    void fileVideo({ action: "open", id: sessionId, token, path: fileRef, width }).then((result) => {
+    void fileVideo({ action: "open", id: sessionId, token, path: fileRef, width, ...(inline ? { inline } : {}) }).then((result) => {
       if (active.current !== token) return;
       if (result?.frame.startsWith(JPEG)) {
         setInfo(result);
         setState((s) => ({ ...s, url: s.url ?? result.frame }));
-      } else setState((s) => ({ ...s, error: "这个视频不能在侧栏里预览：用默认程序打开。" }));
+      } else setState((s) => ({ ...s, error: "这个视频不能预览。" }));
     }, (error) => {
       if (active.current === token) setState((s) => ({ ...s, error: messageOf(error) }));
     });
     return () => {
-      active.current = null;
       unsubscribe();
-      void fileVideo({ action: "close", id: sessionId, token }).catch(() => {});
+      if (active.current === token) {
+        active.current = null;
+        void fileVideo({ action: "close", id: sessionId, token }).catch(() => {});
+      }
     };
-  }, [fileRef, fileVideo, sessionId, watchVideo]);
+  }, [attempt, fileRef, fileVideo, inline, onRelease, sessionId, watchVideo]);
 
   const control = (command: LocalCommand) => {
     const token = active.current;
@@ -65,15 +85,18 @@ export function MediaPreview({ sessionId, fileRef, size, renderError }: { sessio
   };
   const facts = ["视频", ...(info ? [`${info.width} × ${info.height}`, [info.videoCodec, info.audioCodec].filter(Boolean).join(" / "), clock(info.duration)] : []), size].filter(Boolean).join(" · ");
   const playbackLabel = state.playing ? "暂停" : state.ended ? "重播" : "播放";
-  return <div ref={area} className="fp-media">
-    <div className="fp-facts">{facts}</div>
-    {state.error ? renderError(state.error) : !info ? <div className="fp-state"><Loader2 size={15} className="spin" /> 正在读取视频…</div> : <>
-      <div className="fp-video-stage" tabIndex={0} aria-label="视频画面，空格播放或暂停" onKeyDown={(e) => {
+  const Box = inline ? "span" : "div";
+  return <Box ref={(node) => { area.current = node; }} className="fp-media">
+    <span className="fp-facts">{facts}</span>
+    {released ? <span className="fp-state"><button type="button" className="btn small" onClick={() => {
+      setReleased(false); setAttempt(attempt + 1);
+    }}>重新加载视频</button></span> : state.error ? renderError(state.error) : !info ? <span className="fp-state"><Loader2 size={15} className="spin" /> 正在读取视频…</span> : <>
+      <span className="fp-video-stage" tabIndex={0} aria-label="视频画面，空格播放或暂停" onKeyDown={(e) => {
         if (e.key === " " && !e.repeat) { e.preventDefault(); e.stopPropagation(); toggle(); }
       }}>
         <img src={state.url ?? info.frame} width={info.width} height={info.height} alt="视频画面" draggable={false} />
-      </div>
-      <div className="fp-video-controls" aria-label="视频播放控制">
+      </span>
+      <span className="fp-video-controls" role="group" aria-label="视频播放控制">
         <button type="button" className="btn small fp-video-play" aria-label={playbackLabel} title={playbackLabel} onClick={toggle}>
           {state.playing ? <Pause size={15} /> : state.ended ? <RotateCcw size={15} /> : <Play size={15} />}
         </button>
@@ -96,7 +119,7 @@ export function MediaPreview({ sessionId, fileRef, size, renderError }: { sessio
             control({ action: "volume", volume: value, muted });
           }} />
         </>}
-      </div>
+      </span>
     </>}
-  </div>;
+  </Box>;
 }

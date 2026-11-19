@@ -485,6 +485,7 @@ class AppCore:
         self._models_loaded = False
         self._shutting_down = False
         self._video_preview: tuple[str, str] | None = None
+        self._inline_images = asyncio.Semaphore(2)
 
         if factory is not None:
             factory.add_listener(self._on_event)
@@ -2809,8 +2810,7 @@ class AppCore:
         return {"path": str(path), "isDir": path.is_dir(), "line": ref.line}
 
     async def _m_files_read(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Text or preview metadata; videos are streamed separately by ``files.video``."""
-        self._close_video_preview()
+        """Text or preview metadata; this read does not own the video player."""
         path, ref = await self._file_named(params)
         kind = await asyncio.to_thread(filetools.preview_kind, path)
         if kind is not None:
@@ -2882,10 +2882,42 @@ class AppCore:
             raise AppError(str(problem)) from problem
         return {"url": url}
 
-    def _close_video_preview(self) -> None:
-        if self._video_preview is not None:
-            self._video_preview = None
+    async def _m_files_inlineImage(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Automatic reads always use the message's own project and the restricted media reader."""
+        cid = params.get("id")
+        if not isinstance(cid, str):
+            raise AppError("没有指定媒体所属的会话。")
+        conv = self._conversation(cid)
+        async with self._inline_images:
+            if self._shutting_down or self._by_cid.get(cid) is not conv:
+                raise AppError("这个会话已经关闭。")
+            try:
+                url = await asyncio.to_thread(filetools.inline_image_url, params.get("path"), conv.project)
+            except filetools.FileProblem as problem:
+                raise AppError(str(problem)) from problem
+        if self._shutting_down or self._by_cid.get(cid) is not conv:
+            raise AppError("这个会话已经关闭。")
+        return {"url": url}
+
+    def _close_video_preview(self, *, replaced: bool = False) -> None:
+        lease, self._video_preview = self._video_preview, None
+        if lease is not None:
             self.platform.video_close()
+            if replaced:
+                self.emit("files.video", {"token": lease[1], "released": True})
+
+    async def _open_inline_video(self, raw: Any, project: str) -> filetools.InlineVideoSource:
+        opening = asyncio.create_task(asyncio.to_thread(filetools.open_inline_video, raw, project))
+        try:
+            return await asyncio.shield(opening)
+        except asyncio.CancelledError:
+            # A thread already opening a file cannot be cancelled; reclaim its result if the bridge goes away.
+            def dispose(task: asyncio.Task[filetools.InlineVideoSource]) -> None:
+                if not task.cancelled() and task.exception() is None:
+                    task.result().file.close()
+
+            opening.add_done_callback(dispose)
+            raise
 
     async def _m_files_video(self, params: dict[str, Any]) -> dict[str, Any] | None:
         """Only the owning session and mount token may change or close a live video."""
@@ -2894,27 +2926,36 @@ class AppCore:
             raise AppError("没有指定视频预览。")
         lease = (cid, token)
         if action == "open":
-            self._conversation(cid)
+            conv = self._conversation(cid)
             width = params.get("width")
             if not _is_int(width) or width <= 0:
                 raise AppError("视频预览宽度不合法。")
+            inline = params.get("inline", False)
+            if type(inline) is not bool:
+                raise AppError("视频预览类型不合法。")
             if self._shutting_down:
                 raise AppError("视频预览已关闭。")
-            self._close_video_preview()
+            self._close_video_preview(replaced=True)
             self._video_preview = lease
 
             def publish(payload: dict[str, Any]) -> None:
                 if self._video_preview is lease:
                     self.emit("files.video", {**payload, "token": token})
 
+            source: filetools.InlineVideoSource | None = None
             try:
-                path, _ = await self._file_named(params)
-                kind = await asyncio.to_thread(filetools.preview_kind, path)
+                name: str
+                if inline:
+                    source = await self._open_inline_video(params.get("path"), conv.project)
+                    name = source
+                else:
+                    path, _ = await self._file_named(params)
+                    if await asyncio.to_thread(filetools.preview_kind, path) != "video":
+                        raise AppError("这不是可以在侧栏预览的视频文件。")
+                    name = str(path)
                 if self._video_preview is not lease:
                     raise AppError("视频预览已关闭。")
-                if kind != "video":
-                    raise AppError("这不是可以在侧栏预览的视频文件。")
-                info = await self.platform.video_open(str(path), min(width, 1280), publish)
+                info = await self.platform.video_open(name, min(width, 1280), publish)
                 if self._video_preview is not lease:
                     raise AppError("视频预览已关闭。")
                 return info
@@ -2924,6 +2965,9 @@ class AppCore:
                 if isinstance(problem, filetools.FileProblem):
                     raise AppError(str(problem)) from problem
                 raise
+            finally:
+                if source is not None:
+                    source.file.close()
         if action not in ("play", "pause", "seek", "volume", "close"):
             raise AppError("视频操作不合法。")
         if self._video_preview != lease:

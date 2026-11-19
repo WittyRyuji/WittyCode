@@ -291,6 +291,7 @@ function liveActions(): Partial<Store> {
         return null;
       }
     },
+    inlineImage: async (id, path) => (await liveCall("files.inlineImage", { id, path })).url,
     fileVideo: (params) => liveCall("files.video", params),
     watchVideo: (token, receive) => {
       videoViews.set(token, receive);

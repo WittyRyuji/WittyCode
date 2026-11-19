@@ -163,6 +163,7 @@ export interface Store extends LiveData {
   refreshPlanUsage: () => void;
   /** Preview data as a `data:` URI; null on failure unless the caller wants the bridge's error. */
   filePage: (ref: string, page: number, width: number, reportError?: boolean) => Promise<string | null>;
+  inlineImage: (sessionId: string, path: string) => Promise<string>;
   fileVideo: (command: VideoCommand) => Promise<VideoInfo | null>;
   watchVideo: (token: string, receive: (event: VideoUpdate) => void) => () => void;
   closeFile: () => void;
@@ -612,6 +613,7 @@ export const useStore = create<Store>((set, get) => ({
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="595" height="842"><rect width="595" height="842" fill="#fff"/><text x="40" y="80" font-size="28" fill="#333" font-family="sans-serif">${label}</text></svg>`;
     return `data:image/svg+xml;base64,${btoa(svg)}`;
   },
+  inlineImage: async () => { throw new Error("演示中没有可预览的本地图片。"); },
   fileVideo: async () => null,
   watchVideo: () => () => {},
   closeFile: () => set({ filePanel: null }),

@@ -281,7 +281,7 @@ export interface RulesDocument { path: string; text: string; revision: string; e
 export interface FactoryState { cli: "found" | "missing"; cliPath: string; path: string; enabled: boolean }
 
 export type VideoCommand = { id: string; token: string } & (
-  { action: "open"; path: string; width: number } |
+  { action: "open"; path: string; width: number; inline?: boolean } |
   { action: "play" | "pause" | "close" } |
   { action: "seek"; position: number } |
   { action: "volume"; volume: number; muted: boolean }
@@ -296,14 +296,14 @@ export interface VideoInfo {
   seekable: boolean;
   frame: string;
 }
-export interface VideoUpdate {
-  token: string;
+export interface VideoState {
   position: number;
   playing: boolean;
   ended: boolean;
   url?: string;
   error?: string;
 }
+export type VideoUpdate = { token: string } & (VideoState & { released?: false } | { released: true });
 
 export interface Calls {
   "connectors.list": { params: None; result: ConnectorView[] };
@@ -375,6 +375,8 @@ export interface Calls {
   /** A PDF page (`page` from 0, drawn `width` pixels wide), or the bytes of a picture or Office file (page 0), as a
    *  `data:` URI. An error is one sentence for the user. */
   "files.page": { params: { id: string; path: string; page: number; width: number }; result: { url: string } };
+  /** An assistant embed, constrained to the project belonging to this conversation. */
+  "files.inlineImage": { params: { id: string; path: string }; result: { url: string } };
   /** Open a local video paused on its first JPEG; the token identifies this mount and guards subsequent controls. */
   "files.video": { params: VideoCommand; result: VideoInfo | null };
   /** open it outside the window: `default` program (a program or script is only shown in its folder: `shown`, `message`),

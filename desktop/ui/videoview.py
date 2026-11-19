@@ -1,8 +1,9 @@
-"""One local video stream for the file inspector. Qt decodes both tracks; the page only sees JPEGs and controls."""
+"""One local video stream for the file inspector and transcript; the page only sees JPEGs and controls."""
 from __future__ import annotations
 
 import asyncio
 import base64
+import os
 import time
 from collections.abc import Callable
 from typing import Any
@@ -10,7 +11,7 @@ from typing import Any
 from PySide6.QtCore import QFile, QIODevice, QObject, QTimer, QUrl, Qt
 from PySide6.QtMultimedia import QAudioOutput, QMediaFormat, QMediaMetaData, QMediaPlayer, QVideoFrame, QVideoSink
 
-from desktop.core.files import FileProblem, transport_stream_header
+from desktop.core.files import FileProblem, InlineVideoSource, transport_stream_header
 from desktop.ui.imaging import encode
 
 OPEN_SECONDS = 8
@@ -47,6 +48,7 @@ class VideoView(QObject):
         self._last_frame = float("-inf")
         self._last_state: tuple[int, bool, bool] | None = None
         self.source = QFile(self)
+        self._source_fd: int | None = None
         self.player = QMediaPlayer(self)
         self.audio = QAudioOutput(self)
         self.audio.setVolume(0.7)
@@ -63,12 +65,22 @@ class VideoView(QObject):
         self.sink.videoFrameChanged.connect(self._frame)
 
     async def load(self, path: str) -> dict[str, Any]:
-        self.source.setFileName(path)
-        if not self.source.open(QIODevice.OpenModeFlag.ReadOnly) or not _local_container(bytes(self.source.peek(1024))):
+        mode = QIODevice.OpenModeFlag.ReadOnly
+        if isinstance(path, InlineVideoSource):
+            # QMediaPlayer keeps reading after load() returns. Own a duplicate until the source is cleared.
+            # Do not give the demuxer a pathname or a base URL for resolving other locations.
+            self._source_fd = os.dup(path.file.fileno())
+            opened = self.source.open(self._source_fd, mode, QFile.FileHandleFlag.DontCloseHandle)
+            url = QUrl()
+        else:
+            self.source.setFileName(path)
+            opened = self.source.open(mode)
+            url = QUrl.fromLocalFile(path)
+        if not opened or not _local_container(bytes(self.source.peek(1024))):
             self._ready.cancel()
             raise FileProblem(_BAD_VIDEO)
         # Use a seekable, local device. Qt reads from disk on demand rather than buffering the clip.
-        self.player.setSourceDevice(self.source, QUrl.fromLocalFile(path))
+        self.player.setSourceDevice(self.source, url)
         try:
             return await asyncio.wait_for(self._ready, OPEN_SECONDS)
         except TimeoutError as error:
@@ -84,6 +96,9 @@ class VideoView(QObject):
         # stop() can hang on the FFmpeg backend during a quick replay of the same source.
         self.player.setSource(QUrl())
         self.source.close()
+        if self._source_fd is not None:
+            os.close(self._source_fd)
+            self._source_fd = None
         self.deleteLater()
 
     def control(self, action: str, args: dict[str, Any]) -> None:

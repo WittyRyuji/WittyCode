@@ -1074,7 +1074,6 @@ function fakeBackend(config) {
     "shell.openExternal": () => null,
     "files.resolve": (p) => ({ path: `D:\\Work\\demo-project\\${String(p.path).replace(/:\d+(-\d+)?$/, "").replace(/\//g, "\\")}`, isDir: false, line: null }),
     "files.read": (p) => {
-      video = null;
       if (/missing/.test(p.path)) throw new Error("找不到这个文件：" + p.path);
       const name = p.path.split("/").pop();
       const media = config.office?.[name] ?? config.pictures?.[name];
@@ -1100,8 +1099,16 @@ function fakeBackend(config) {
       const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}"><rect width="${w}" height="${h}" fill="#fff"/><text x="30" y="60" font-size="28" fill="#222" font-family="sans-serif">page ${p.page + 1} @${p.width}</text></svg>`;
       return { url: "data:image/svg+xml;base64," + btoa(svg) };
     },
+    "files.inlineImage": (p) => {
+      const name = p.path.split(/[\\/]/).pop();
+      const url = config.pictures?.[name]?.url;
+      if (!url) throw new Error("在此会话的项目中找不到这个媒体文件。");
+      return { url };
+    },
     "files.video": (p) => {
       if (p.action === "open") {
+        if (video) emit("files.video", { token: video.token, released: true });
+        video = null;
         if (p.path === "broken.mov") throw new Error("这个视频无法解码：用默认程序打开。");
         video = { token: p.token, position: 0, playing: false, ended: false };
         return { duration: 42000, width: 96, height: 54, videoCodec: "H264", audioCodec: "AAC", hasAudio: true, seekable: true,

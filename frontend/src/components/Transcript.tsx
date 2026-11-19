@@ -48,14 +48,14 @@ function ErrorView({ block, sessionId }: { block: Extract<Block, { kind: "error"
   );
 }
 
-function BlockView({ block, turn, sessionId }: { block: Block; turn: Turn; sessionId: string }) {
+function BlockView({ block, turn, sessionId, inlineMedia }: { block: Block; turn: Turn; sessionId: string; inlineMedia: boolean }) {
   switch (block.kind) {
     case "user":
       return <UserView block={block} />;
     case "text":
       return block.markdown ? (
         <div className="block text-block">
-          <Markdown source={block.markdown} streaming={block.streaming} />
+          <Markdown source={block.markdown} streaming={block.streaming} mediaSessionId={inlineMedia ? sessionId : undefined} />
         </div>
       ) : null;
     case "activity":
@@ -124,11 +124,11 @@ function Footer({ turn, label }: { turn: Turn; label: string }) {
   return text ? <div className={`turnfoot ${turn.status}`}>{text}</div> : null;
 }
 
-export function TurnView({ turn, session }: { turn: Turn; session: Session }) {
+export function TurnView({ turn, session, inlineMedia = false }: { turn: Turn; session: Session; inlineMedia?: boolean }) {
   return (
     <section className="turn" data-turn-id={turn.id}>
       {turn.blocks.map((b) => (
-        <BlockView key={b.id} block={b} turn={turn} sessionId={session.id} />
+        <BlockView key={b.id} block={b} turn={turn} sessionId={session.id} inlineMedia={inlineMedia} />
       ))}
       {turn.prompts
         .filter((p) => p.status === "pending")
@@ -307,7 +307,7 @@ export function Transcript({ session, positions }: { session: Session; positions
           ) : (
             <>
               {session.turns.map((t) => (
-                <TurnView key={t.id} turn={t} session={session} />
+                <TurnView key={t.id} turn={t} session={session} inlineMedia={!!session.mark} />
               ))}
               {preparing && (
                 <section className="turn preparing-turn">
