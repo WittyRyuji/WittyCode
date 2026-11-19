@@ -98,8 +98,15 @@ for line in sys.stdin:
         settings.update(params)
     elif method == "droid.add_user_message":
         assert params["text"]
+        if "[reject]" in params["text"]:
+            write({"id": message["id"], "error": {"code": -32602, "message": "Demo prompt refused"}})
+            continue
         session["messages"].append({"id": params["messageId"], "role": "user", "content": [{"type": "text", "text": params["text"]}]})
+        (ROOT / (native + ".json")).write_text(json.dumps({"session": session, "settings": settings}), encoding="utf-8")
     elif method == "droid.interrupt_session":
+        if "[stop-error]" in session["messages"][-1]["content"][0]["text"]:
+            write({"id": message["id"], "error": {"code": -32603, "message": "Demo stop not confirmed"}})
+            continue
         notify("agent_turn_completed", reason="cancelled", tokenUsage={"inputTokens": 0, "outputTokens": 0, "cacheReadTokens": 0})
     write({"id": message["id"], "result": result})
     if method == "droid.add_user_message":

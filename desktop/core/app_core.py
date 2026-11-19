@@ -79,6 +79,7 @@ from desktop.core.settings import (
     COMPACT_AT_RANGE,
     MAX_OPEN_SESSIONS_RANGE,
     MAX_STEPS_RANGE,
+    MAX_REMEMBERED_SESSIONS,
     MAX_SESSION_TITLE,
     MEMORY_ENGINES,
     SIDEBAR_WIDTH_RANGE,
@@ -87,12 +88,13 @@ from desktop.core.settings import (
     THEMES,
     AppSettings,
     default_settings_path,
+    folder_key,
     normalize_folder,
     same_folder,
     save_settings,
 )
 from desktop.core.timefmt import format_relative
-from desktop.core.transcript import Transcript, TurnStatus
+from desktop.core.transcript import Transcript, Turn, TurnStatus
 from desktop.core.speed import speed_of
 from desktop.core.usage import Tokens, UsageLedger
 from desktop.core.viewmodel import attachment_json, context_json, turn_json, usage_json
@@ -239,7 +241,11 @@ class Conversation:
     hidden: set[str] = field(default_factory=set)
     """Native ids of earlier engines' sessions of this conversation: not listed again in the sidebar."""
     history: dict[str, Any] | None = None
+    in_history: bool = False
+    """An existing conversation or one with a retained first dispatch. Draft tabs are not project rows."""
+    unsent_turns: set[str] = field(default_factory=set)
     title_started: bool = False
+    title_candidate: tuple[Turn, str] | None = None
     title_task: asyncio.Future[Any] | None = None
     sent_ids: list[str] = field(default_factory=list)
     sent_versions: dict[str, int] = field(default_factory=dict)
@@ -389,6 +395,7 @@ class AppCore:
         self.skill_marketplace = SkillMarketplace(self.connections)
         self.history = ConversationHistory(default_settings_path().parent / "conversations")
         self._opening_history: dict[str, Any] | None = None
+        self._opening_saved_row: str | None = None
         for engine in (factory, devin, chatgpt):
             if engine is not None:
                 engine.connections = self.connections
@@ -636,76 +643,146 @@ class AppCore:
     def _visible_saved(self, folder: str) -> list[SavedRow]:
         return [row for row in self._saved.get(normalize_folder(folder), []) if self._resolve_row(row.id) == row.id]
 
+    def _project_pins(self, folder: str) -> list[str]:
+        return self.settings.session_pins.get(folder_key(folder), []) if self.settings.session_pins else []
+
     def _rows_for(self, folder: str) -> list[dict[str, Any]]:
         open_here = [c for c in self.order if same_folder(c.project, folder)]
         taken: set[str] = set()
         for conv in open_here:
             taken |= conv.hidden
+            taken.add(conv.sidebar_key)
             native = getattr(conv.controller, "session_id", None)
             if native:
                 taken.add(native)
                 taken.update(prefix + native for prefix in ROW_PREFIXES.values())
-        rows: list[tuple[str, float, dict[str, Any]]] = []
+        rows: list[tuple[str, float, str]] = []
         for saved in self._visible_saved(folder):
             if saved.native in taken or saved.id in taken or saved.id in self.settings.archived_sessions:
                 continue
-            rows.append((saved.id, saved.modified.timestamp(), self._saved_json(saved, folder)))
+            rows.append((saved.id, saved.modified.timestamp(), saved.id))
         for conv in open_here:
-            rows.append((conv.sidebar_key, conv.sidebar_active_at, {"id": conv.cid}))
+            if conv.in_history and conv.sidebar_key not in self.settings.archived_sessions:
+                rows.append((conv.sidebar_key, conv.sidebar_active_at, conv.cid))
+        pins = {key: i for i, key in enumerate(self._project_pins(folder))}
         ranks = {key: i for i, key in enumerate(self.settings.session_order)}
-        rows.sort(key=lambda row: (1, ranks[row[0]], row[0]) if row[0] in ranks else (0, -row[1], row[0]))
-        return [row for _, _, row in rows]
+
+        def rank(row: tuple[str, float, str]) -> tuple[int, float, str]:
+            key, active, _ = row
+            if key in pins:
+                return (0, pins[key], key)
+            if key in ranks:
+                return (2, ranks[key], key)
+            return (1, -active, key)
+
+        rows.sort(key=rank)
+        return [{"id": ident, "key": key, "pinned": key in pins} for key, _, ident in rows]
 
     def _sync_sidebar_key(self, conv: Conversation) -> None:
-        if conv.switching:
-            return  # a failed engine open must not migrate any persistent identity or title
-        key = self._row_of(conv) or conv.cid
+        if conv.switching or not conv.in_history:
+            return  # neither a draft nor a tentative engine replacement has a persistent sidebar identity
+        key = self._row_of(conv) or conv.sidebar_key or conv.cid
         if key == conv.sidebar_key:
             return
         previous = conv.sidebar_key
         conv.sidebar_key = key
         if previous in self.settings.session_order:
             self.settings.session_order = list(dict.fromkeys(key if item == previous else item for item in self.settings.session_order))
+        pins = self._project_pins(conv.project)
+        if previous in pins:
+            pins[:] = dict.fromkeys(key if item == previous else item for item in pins)
         if previous:
             self.settings.session_created.pop(previous, None)
         self.settings.session_created[key] = conv.created_at
         self._save()
 
-    def _promote_session(self, conv: Conversation) -> None:
-        """Move only this project's conversation to the top, not on incremental engine output."""
-        conv.sidebar_active_at = conv.controller.active_at
-        ids = [row["id"] for row in self._rows_for(conv.project)]
-        if conv.cid not in ids:
+    def _admit_history(self, conv: Conversation) -> None:
+        if conv.in_history or conv.switching:
             return
-        ids.remove(conv.cid)
-        ids.insert(0, conv.cid)
-        keys = [self._by_cid[item].sidebar_key if item in self._by_cid else item for item in ids]
-        self.settings.session_order = keys + [item for item in self.settings.session_order if item not in keys]
+        conv.in_history = True
+        self._sync_sidebar_key(conv)
+        self._promote_session(conv)
+        self._schedule_sidebar(conv.project, reload=True)
+
+    def _remember_session_order(self, keys: list[str]) -> None:
+        known = set(keys)
+        self.settings.session_order = keys + [item for item in self.settings.session_order if item not in known]
+
+    def _promote_session(self, conv: Conversation) -> None:
+        """Move to the front of ordinary rows after significant activity; pinned order only changes by user action."""
+        conv.sidebar_active_at = conv.controller.active_at
+        keys = [row["key"] for row in self._rows_for(conv.project) if not row["pinned"]]
+        if conv.sidebar_key not in keys:
+            return
+        keys.remove(conv.sidebar_key)
+        self._remember_session_order([conv.sidebar_key, *keys])
         self._save()
         self._schedule_sidebar(conv.project)
 
+    def _sidebar_project(self, folder: Any) -> str:
+        if isinstance(folder, str) and folder.strip() and "\0" not in folder:
+            try:
+                key = folder_key(folder)
+                match = next((item for item in self.settings.projects if folder_key(item) == key), None)
+                if match is not None:
+                    return match
+            except (OSError, RuntimeError, ValueError):
+                pass
+        raise AppError("找不到这个项目。")
+
+    async def _m_session_pin(self, params: dict[str, Any]) -> dict[str, Any]:
+        folder = self._sidebar_project(params.get("projectId"))
+        ident, pinned = params.get("id"), params.get("pinned")
+        if not isinstance(ident, str) or not isinstance(pinned, bool):
+            raise AppError("置顶参数不合法。")
+        rows = self._rows_for(folder)
+        row = next((item for item in rows if item["id"] == ident), None)
+        if row is None or not row["key"].startswith(tuple(ROW_PREFIXES.values())):
+            raise AppError("只能置顶本项目列表中已保存的会话。")
+        if row["pinned"] == pinned:
+            return {"ok": True}
+        project_key, key = folder_key(folder), row["key"]
+        pins = self._project_pins(folder)
+        if pinned:
+            if len(pins) >= MAX_REMEMBERED_SESSIONS:
+                raise AppError("这个项目的置顶会话已达到上限。")
+            self.settings.session_pins[project_key] = [key, *pins]
+        else:
+            pins.remove(key)
+            if not pins:
+                self.settings.session_pins.pop(project_key)
+            self._remember_session_order([key, *(item["key"] for item in rows if not item["pinned"])])
+        self._save()
+        if ident in self._by_cid:
+            self.emit("session", {"id": ident, "patch": {"pinned": pinned}})
+        self._emit_sidebar()
+        return {"ok": True}
+
     async def _m_session_reorder(self, params: dict[str, Any]) -> dict[str, Any]:
-        folder = params.get("projectId")
+        folder = self._sidebar_project(params.get("projectId"))
         ident, target, after = params.get("id"), params.get("targetId"), params.get("after", False)
-        if not isinstance(folder, str) or not any(same_folder(folder, p) for p in self.settings.projects):
-            raise AppError("找不到这个项目。")
         if not isinstance(ident, str) or not isinstance(target, str) or not isinstance(after, bool):
             raise AppError("会话顺序不合法。")
         rows = self._rows_for(folder)
-        ids = [row["id"] for row in rows]
-        if ident not in ids or target not in ids:
+        by_id = {row["id"]: row for row in rows}
+        if ident not in by_id or target not in by_id:
             raise AppError("只能在同一个项目内拖动仍在列表中的会话。")
+        pinned = by_id[ident]["pinned"]
+        if pinned != by_id[target]["pinned"]:
+            raise AppError("只能在同一置顶分区内拖动会话。")
         if ident == target:
             return {"ok": True}
-        ids.remove(ident)
-        ids.insert(ids.index(target) + int(after), ident)
-        keys = [self._by_cid[item].sidebar_key if item in self._by_cid else item for item in ids]
-        self.settings.session_order = keys + [item for item in self.settings.session_order if item not in keys]
+        keys = self._project_pins(folder) if pinned else [row["key"] for row in rows if not row["pinned"]]
+        source_key, target_key = by_id[ident]["key"], by_id[target]["key"]
+        keys.remove(source_key)
+        keys.insert(keys.index(target_key) + int(after), source_key)
+        if not pinned:
+            self._remember_session_order(keys)
         self._save()
         self._emit_sidebar()
         return {"ok": True}
 
-    def _saved_json(self, saved: SavedRow, folder: str) -> dict[str, Any]:
+    def _saved_json(self, saved: SavedRow, folder: str, *, pinned: bool) -> dict[str, Any]:
         return {
             "id": saved.id,
             "projectId": folder,
@@ -714,6 +791,7 @@ class AppCore:
             "modifiedAt": int(saved.modified.timestamp() * 1000),
             "engine": saved.engine,
             "fusion": saved.fusion,
+            "pinned": pinned,
             "settings": {"model": saved.model, "reasoning": "", "autonomy": "", "mode": "auto"},
             "usage": None,
             "context": {"used": None, "window": 0, "model": "", "compacted": False},
@@ -723,19 +801,21 @@ class AppCore:
     def _saved_sessions_json(self) -> dict[str, Any]:
         sessions = {}
         for folder in self.settings.projects:
+            pins = set(self._project_pins(folder))
             for saved in self._visible_saved(folder):
                 if saved.id not in self.settings.archived_sessions:
-                    sessions[saved.id] = self._saved_json(saved, folder)
+                    sessions[saved.id] = self._saved_json(saved, folder, pinned=saved.id in pins)
         return sessions
 
     def _archived_json(self) -> list[dict[str, Any]]:
         """The archived conversations the engines still list, the one archived last first."""
         found: list[tuple[int, dict[str, Any]]] = []
         for folder in self.settings.projects:
+            pins = set(self._project_pins(folder))
             for saved in self._visible_saved(folder):
                 stamp = self.settings.archived_sessions.get(saved.id)
                 if stamp is not None:
-                    found.append((stamp, self._saved_json(saved, folder)))
+                    found.append((stamp, self._saved_json(saved, folder, pinned=saved.id in pins)))
         found.sort(key=lambda pair: pair[0], reverse=True)
         return [row for _, row in found]
 
@@ -771,6 +851,11 @@ class AppCore:
             with contextlib.suppress(Exception):
                 for item in await self.devin.list_sessions(folder, SESSION_LIST_LIMIT):
                     devin_row = DEVIN_ROW_PREFIX + item.id
+                    live = next((conv for conv in self.order if self._row_of(conv) == devin_row), None)
+                    if live is not None and not live.in_history:
+                        if not getattr(item, "has_user_messages", False):
+                            continue  # older ACPs can omit the flag; allocation alone says nothing about a live draft
+                        self._admit_history(live)
                     rows.append(SavedRow(devin_row, item.id, "devin", item.title or "", self._latest(devin_row, item.modified_at), item.message_count or 0, created=_aware(item.created_at)))
         if self.chatgpt is not None and (self.settings.chatgpt_enabled or self._has_api_models()):
             with contextlib.suppress(Exception):
@@ -1020,8 +1105,8 @@ class AppCore:
         """One conversation as the page shows it, for the cache (``None``: nothing worth keeping)."""
         controller = conv.controller
         native = getattr(controller, "session_id", None)
-        turns = controller.transcript.turns
-        if not native or not turns or conv.preview or not getattr(controller, "_history_loaded", True):
+        turns = [turn for turn in controller.transcript.turns if turn.id not in conv.unsent_turns]
+        if not conv.in_history or not native or not turns or conv.preview or not getattr(controller, "_history_loaded", True):
             return None  # a failed/incomplete load must never overwrite the last usable local history
         listed = []
         for turn in turns:
@@ -1112,6 +1197,7 @@ class AppCore:
             **conv.cached_meta,
             "settings": self._shown_settings(conv),
             "fusion": self._shown_fusion(conv),
+            "pinned": conv.sidebar_key in self._project_pins(conv.project),
         }
         self.emit("session", {"id": conv.cid, "patch": patch})
         self.emit("turns", {"id": conv.cid, "turns": list(snapshot["turns"]), "all": True})
@@ -1185,6 +1271,20 @@ class AppCore:
             return
         if controller.state is not SessionState.OPENING:
             conv.opening_row = None
+        if not conv.in_history and not conv.switching:
+            turns = controller.transcript.turns
+            turn = turns[-1] if turns else None
+            # The own loop knows when the first request has a durable history. For native clients, use
+            # conversation output or a completed user prompt, not merely RUNNING or a local error block.
+            ready = getattr(controller, "history_ready", None)
+            if ready is None:
+                ready = turn is not None and turn.user_block is not None and (
+                    turn.status is TurnStatus.DONE or any(b.kind in ("text", "thinking", "tool") for b in turn.blocks)
+                )
+            if ready:
+                self._admit_history(conv)
+            elif turn is not None and turn.status in (TurnStatus.FAILED, TurnStatus.INTERRUPTED):
+                conv.unsent_turns.add(turn.id)
         self._sync_sidebar_key(conv)
         if conv.history and not conv.switching and controller.state in (SessionState.READY, SessionState.RUNNING) and getattr(controller, "_history_loaded", True):
             prefix = conv.history["turns"]
@@ -1206,6 +1306,7 @@ class AppCore:
             self._schedule_sidebar(conv.project)
         if kind == "steer":
             self._return_steers(conv)
+        self._settle_title(conv)
         if controller.state is SessionState.RUNNING:
             conv.ran = True
         elif conv.queue or conv.ran:
@@ -1316,6 +1417,7 @@ class AppCore:
             conv.ledger = UsageLedger.from_json(conv.history["ledger"])
         key = self._row_of(conv)
         saved = next((row for row in self._saved.get(conv.project, []) if row.id == key), None)
+        conv.in_history = bool(key and (key == self._opening_saved_row or saved is not None))
         if controller.state is SessionState.OPENING:
             conv.opening_row = saved
         conv.created_at = self.settings.session_created.get(key) or (
@@ -1357,7 +1459,7 @@ class AppCore:
         controller = conv.controller
         native = getattr(controller, "session_id", None)
         active = getattr(controller, "active_at", None)
-        if native and active:
+        if conv.in_history and native and active:
             row = row_id(conv.engine, native)
             self._spoken[row] = max(self._spoken.get(row, 0.0), active)
 
@@ -1539,6 +1641,7 @@ class AppCore:
             "modifiedAt": int(controller.active_at * 1000),
             "engine": conv.engine,
             "nativeId": controller.session_id or "",
+            "pinned": conv.sidebar_key in self._project_pins(conv.project),
             "settings": settings,
             "usage": usage,
             "usageModels": usage_models,
@@ -1627,7 +1730,13 @@ class AppCore:
         if turn.running:
             return
         conv.inflight = None
-        if turn.status is not TurnStatus.FAILED:
+        submitted = getattr(conv.controller, "prompt_submitted", None)
+        if submitted is not None and submitted(turn):
+            return  # an error stopping an accepted native turn is not a failed delivery
+        if turn.id not in conv.unsent_turns and (not attachments or turn.status is not TurnStatus.FAILED):
+            return
+        if not attachments:
+            self._restore(conv, [(text, ())], "这条消息没有发出，已放回输入框，可以重试。")
             return
         # All of them go back, whatever was put into the composer meanwhile: the notice promises a retry that is one
         # Enter away, so no attachment may stay behind. When the lot is more than a message usually holds the user is
@@ -1863,6 +1972,7 @@ class AppCore:
         self._preview = preview
         self._ledger_seed = seed
         self._opening_history = history
+        self._opening_saved_row = row_id
         try:
             if row_id.startswith("fy:"):
                 if self.factory is None:
@@ -1891,6 +2001,7 @@ class AppCore:
             self._preview = None
             self._ledger_seed = None
             self._opening_history = None
+            self._opening_saved_row = None
         conv = self._conv_of(controller)
         if conv is not None:
             pending = await asyncio.to_thread(self.history.load, "pending-switch:" + row_id)
@@ -1970,7 +2081,7 @@ class AppCore:
         """Something was said in it, or it is one of the engine's saved sessions: there is something to archive or name."""
         if not row:
             return False
-        return bool(conv.controller.transcript.turns) or any(item.id == row for rows in self._saved.values() for item in rows)
+        return conv.in_history
 
     async def _m_session_archive(self, params: dict[str, Any]) -> dict[str, Any]:
         row, conv = self._row_for(params.get("id"))
@@ -1980,6 +2091,7 @@ class AppCore:
             if not self._has_content(conv, row):
                 raise AppError("这个会话还没有内容，直接关闭就行。")
             await self._close_conversation(conv)
+            row = conv.sidebar_key or row  # closing may cancel a tentative engine replacement
         self.settings.archived_sessions[row] = int(time.time() * 1000)
         self._save()
         self._emit_sidebar()
@@ -2080,7 +2192,13 @@ class AppCore:
             controller.saved.goal = previous
             return {"ok": False, "text": "目标未启动：会话保存失败，请先检查存储空间和权限。"}
         conv.goal = goal
-        if not controller.send_prompt(goal.next_message() if resuming else goals.opening(text)):
+        try:
+            accepted = controller.send_prompt(goal.next_message() if resuming else goals.opening(text))
+        except BaseException:
+            conv.goal = None
+            self._checkpoint_goal(conv, goals.Goal.from_json(previous))
+            raise
+        if not accepted:
             conv.goal = None
             self._checkpoint_goal(conv, goals.Goal.from_json(previous))
             return {"ok": False, "text": "现在不能发送：会话没有就绪。"}
@@ -2097,7 +2215,7 @@ class AppCore:
         saved = getattr(conv.controller, "saved", None)
         if conv.engine == OWN_ENGINE and saved is not None:
             saved.goal = goal.to_json() if goal is not None else {}
-            return conv.controller._save_now()
+            return not conv.in_history or conv.controller._save_now()
         return True
 
     def _stop_goal(self, conv: Conversation, notice: str, *, finished: bool = False) -> None:
@@ -2186,8 +2304,18 @@ class AppCore:
                 # Only name from this send: old text may belong to another model or account, even in the same tab.
                 controller.title_after_turn(question, unnamed)
             return
-        if conv.title_started or sum(t.user_block is not None for t in conv.controller.transcript.turns) != 1:
+        turns = controller.transcript.turns
+        if not conv.title_started and turns and not any(t.user_block is not None and t.id not in conv.unsent_turns for t in turns[:-1]):
+            conv.title_candidate = (turns[-1], question)
+
+    def _settle_title(self, conv: Conversation) -> None:
+        candidate = conv.title_candidate
+        if candidate is None or candidate[0].running:
             return
+        conv.title_candidate = None
+        turn, question = candidate
+        if not conv.in_history or turn.status is not TurnStatus.DONE:
+            return  # a rejected first prompt must not launch a naming request or save a title
         conv.title_started = True
         row = self._row_of(conv)
         if row in self.settings.session_auto_titles or row in self.settings.session_titles:
@@ -2351,7 +2479,7 @@ class AppCore:
             raise AppError("现在不能发送：会话没有就绪。")
         self._start_title(conv, text)
         conv.drafts = [a for a in conv.drafts if a.id not in wanted]
-        if attachments:
+        if attachments or not conv.in_history:
             conv.inflight = (controller.transcript.turns[-1], text, tuple(attachments))
 
     async def _m_session_approvePlan(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -2592,11 +2720,17 @@ class AppCore:
         if problem:
             self._unqueue_all(conv, problem)
             return
-        if not controller.send_prompt(head.text, head.attachments):
+        try:
+            accepted = controller.send_prompt(head.text, head.attachments)
+        except Exception as error:
+            self._unqueue_all(conv, f"消息没有发出，已放回输入框：{error_text(error)}")
+            return
+        if not accepted:
+            self._unqueue_all(conv, "会话没有就绪，排队消息已放回输入框。")
             return
         self._start_title(conv, head.text)
         conv.queue.pop(0)
-        if head.attachments:
+        if head.attachments or not conv.in_history:
             conv.inflight = (controller.transcript.turns[-1], head.text, head.attachments)
         conv.dirty = True
         self._schedule_flush()
@@ -3118,7 +3252,7 @@ class AppCore:
     def _set_pending_model(self, conv: Conversation, target: dict[str, Any] | None, *, row: str = "") -> None:
         # This intent is not a disposable UI cache or an engine setting. Reopening never executes it on its own.
         row = row or self._row_of(conv)
-        if row:
+        if row and conv.in_history:
             try:
                 self.history.save("pending-switch:" + row, {"project": conv.project, "turns": [], "target": target})
             except OSError as error:
@@ -3186,7 +3320,7 @@ class AppCore:
             raise AppError("模型切换已停止；消息和待切换选择保留，未自动重试。") from None
         finally:
             try:
-                if self._row_of(conv) != old_row:
+                if conv.in_history and self._row_of(conv) != old_row:
                     self._set_pending_model(conv, pending)
                     self.history.save("pending-switch:" + old_row, {"project": conv.project, "turns": [], "target": None})
             except OSError as error:
@@ -3200,6 +3334,8 @@ class AppCore:
 
     async def _compact_model_switch(self, conv: Conversation, page_model: str) -> str:
         """The old model owns the summary. No destination settings are committed before it succeeds."""
+        if not conv.in_history:
+            return ""  # no prompt was delivered to the source, so there is nothing to summarize
         from desktop.core.chatgpt.errors import ChatGPTError
         from desktop.core.model_switch import compact_native, recall_for_switch
         old = conv.controller
@@ -3527,6 +3663,7 @@ class AppCore:
         # only reported once the session is open, so the session opens with a hand-over for the figure known now
         # (nothing may be sent without one) and gets the final one when the window arrives.
         window = int(model.get("window") or 0)
+        prior_turns = [t for t in transcript.turns if t.id not in conv.unsent_turns]
         conv.switching = True
         try:
             summary = await self._compact_model_switch(conv, page_model)
@@ -3540,8 +3677,8 @@ class AppCore:
         handoff = (
             summary_handoff(summary, transcript, project=conv.project, memory=getattr(old.manager, "memory", None),
                             engine=self.catalog.target(page_model).engine, window=window, carry=chosen)
-            if summary else build_handoff(transcript.turns, window_tokens=window, carry=chosen)
-            if sent_as_files or conversation_messages(transcript.turns, carry={item.id for item in chosen}) else None
+            if summary else build_handoff(prior_turns, window_tokens=window, carry=chosen)
+            if sent_as_files or conversation_messages(prior_turns, carry={item.id for item in chosen}) else None
         )
         settings = self._open_settings(page_model, {**self._page_settings(conv),
                                                    **({"autonomy": ""} if self.catalog.target(page_model).engine != conv.engine else {})})
@@ -3583,7 +3720,7 @@ class AppCore:
             if handoff is not None and not window and not summary:
                 window = await self._window_of(controller, page_model)
                 if window and getattr(controller, "handoff", None) is handoff and controller.state is SessionState.READY:
-                    handoff = controller.handoff = build_handoff(transcript.turns, window_tokens=window, carry=chosen)
+                    handoff = controller.handoff = build_handoff(prior_turns, window_tokens=window, carry=chosen)
             if handoff is not None and handoff.carried:
                 transcript.add_switch(
                     from_model=was.get("label", ""), from_engine="Fusion" if getattr(old, "_fusion", None) is not None else engine_label(old.engine, was),
@@ -3592,13 +3729,16 @@ class AppCore:
                 )
             new_row = self._row_of(conv)
             history = {"project": conv.project, "title": previous_title, "activeAt": old.active_at, "created": conv.created_at,
-                       "turns": list(transcript.turns), "ledger": conv.ledger.to_json(), "handoff": handoff}
+                       "turns": [t for t in transcript.turns if t.id not in conv.unsent_turns],
+                       "ledger": conv.ledger.to_json(), "handoff": handoff}
             if retained is not None:
                 history["fusion"] = retained
-            await asyncio.to_thread(self.history.save, new_row, history)
-            if controller.engine == "chatgpt":
-                # Preserve even an empty native segment: its previous turns are in the engine-neutral archive.
-                await asyncio.to_thread(self.chatgpt.sessions.save, controller._snapshot())
+            if conv.in_history:
+                await asyncio.to_thread(self.history.save, new_row, history)
+                if controller.engine == "chatgpt":
+                    # Preserve even an empty native segment: its previous turns are in the engine-neutral archive.
+                    await asyncio.to_thread(self.chatgpt.sessions.save, controller._snapshot())
+                    controller._checkpoint_written = True
         except BaseException as error:
             self._rollback_switch(conv, old, controller)
             transcript.restore(before)  # a failed open writes its error into the shared transcript
@@ -3611,18 +3751,19 @@ class AppCore:
         finally:
             conv.switching = False
             self._adopt = None
-        if old.session_id:
-            conv.hidden.add(old.session_id)
-        aliases = [key for key in self.settings.session_links if self._resolve_row(key) == old_row]
-        for key in [*aliases, old_row]:
-            if key and key != new_row:
-                self.settings.session_links[key] = new_row
-        for names in (self.settings.session_titles, self.settings.session_auto_titles):
-            if old_row in names:
-                names[new_row] = names.pop(old_row)
-        conv.history = history
-        self._sync_sidebar_key(conv)
-        self._save()
+        if conv.in_history:
+            if old.session_id:
+                conv.hidden.add(old.session_id)
+            aliases = [key for key in self.settings.session_links if self._resolve_row(key) == old_row]
+            for key in [*aliases, old_row]:
+                if key and key != new_row:
+                    self.settings.session_links[key] = new_row
+            for names in (self.settings.session_titles, self.settings.session_auto_titles):
+                if old_row in names:
+                    names[new_row] = names.pop(old_row)
+            conv.history = history
+            self._sync_sidebar_key(conv)
+            self._save()
         transcript.model = controller.model
         self._spawn(old.close(), quiet=True)
         self._emit_sidebar()

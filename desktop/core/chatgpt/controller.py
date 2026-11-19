@@ -32,7 +32,7 @@ import logging
 import threading
 import time
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
@@ -40,8 +40,9 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from desktop.core.attachments import DEFAULT_PROMPT, IMAGE, PDF, TEXT, Attachment, sniff_image
 from desktop.core.chatgpt import history as saved_history
-from desktop.core.chatgpt.errors import AuthError, ChatGPTError, friendly_failure
-from desktop.core.chatgpt.responses import Finished, Usage, build_request
+from desktop.core.chatgpt.errors import AuthError, ChatGPTError, RequestNotSent, friendly_failure
+from desktop.core.chatgpt.responses import Event, Finished, Started, Usage, build_request
+from desktop.core.engine_errors import EngineRpcError
 from desktop.core.engine_items import attachment_block
 from desktop.core.connections import ConnectionError as ExtensionError
 from desktop.core.context import ContextState, format_tokens
@@ -54,7 +55,7 @@ from desktop.core.harness.mcp import McpClient, McpError, McpTool, parse_tools
 from desktop.core.harness.permissions import LEVELS
 from desktop.core.harness.diagnostics import MAX_RECORDS, RequestTrace
 from desktop.core.harness.prompt import build_instructions, changed_context, context_update
-from desktop.core.harness.store import SavedSession, SavedTurn, diff_to_json, pair_in_place, paired, recover
+from desktop.core.harness.store import FIRST_PROMPT, SavedSession, SavedTurn, diff_to_json, pair_in_place, paired, recover
 from desktop.core.harness.tools import ToolContext, ToolError
 from desktop.core.harness.toolset import HarnessTools
 from desktop.core.hooks import PromptEvent
@@ -187,6 +188,7 @@ class ChatGPTController:
     last_turn_end: TurnEnd | None = None
     _save_failed: bool = False
     _checkpoint_written: bool = False
+    _first_prompt_retained: bool = False
     _fusion: Any = None
     _pending_fusion_title: tuple[str, Any, Callable[[], bool]] | None = None
     _paused_fusion: Any = None
@@ -420,6 +422,11 @@ class ChatGPTController:
 
     # ------------------------------------------------------------------ opening
 
+    @property
+    def history_ready(self) -> bool:
+        """A saved conversation, not just an allocated ID or a tentative first request."""
+        return self._checkpoint_written and FIRST_PROMPT not in self.saved.origin
+
     async def open_new(self) -> None:
         self._claim_session()
         memory = self.manager.memory
@@ -433,6 +440,9 @@ class ChatGPTController:
         if saved is None:
             raise ChatGPTError("这个会话的存档找不到了。", code="missing_session")
         recovered = recover(saved)
+        if saved.origin.pop(FIRST_PROMPT, None) is True:
+            # The process died before it could tell whether the first dispatch reached the model. Preserve it.
+            recovered = True
         recovered_plan = saved.plan.get("status") == "approved" and saved.plan.get("execution") == "starting"
         if recovered_plan:
             saved.plan = {"id": uuid.uuid4().hex, "text": saved.plan["text"], "status": "pending",
@@ -831,14 +841,6 @@ class ChatGPTController:
             except BaseException:
                 self.saved.plan = previous
                 raise
-        self._proposed_plan = ""
-        self._pending_fusion_title = None
-        self.used_at = self.active_at = time.time()
-        self.state = SessionState.RUNNING
-        self.stop_hook_blocked = False
-        self.last_turn_end = None
-        self._turn_model, self._turn_reasoning, self._turn_mode = self.model, self.reasoning, self.mode
-        self._turn_start = len(self.saved.items)  # even setup failures belong to a new boundary, never the previous turn
         # A Fusion pack already carries brief-based recall instead of the memory preface.
         preface = "" if packed_context else self.preface
         context = self.manager.hooks.prompt(PromptEvent(self.engine, self.project, text, frozenset(self.recalled), first=bool(preface)))
@@ -850,6 +852,15 @@ class ChatGPTController:
             outgoing = tuple(handoff.attachments) + attachments
         approval = "The user explicitly approved this plan for execution:\n\n" + approved_plan if approved_plan else ""
         sent += wrap_context(preface, context.text, approval)  # (after the message: see core/context_envelope)
+        self._proposed_plan = ""
+        self._pending_fusion_title = None
+        self._first_prompt_retained = False
+        self.used_at = self.active_at = time.time()
+        self.state = SessionState.RUNNING
+        self.stop_hook_blocked = False
+        self.last_turn_end = None
+        self._turn_model, self._turn_reasoning, self._turn_mode = self.model, self.reasoning, self.mode
+        self._turn_start = len(self.saved.items)  # setup failures never belong to the previous turn
         self.transcript.output_probe = self._output_so_far
         turn = self.transcript.start_turn(text, attachments, handoff=carried)
         if context.notice:
@@ -947,7 +958,8 @@ class ChatGPTController:
                 self.saved.plan["execution"] = "started"
             self.saved.model, self.saved.reasoning, self.saved.autonomy = self.model, self.reasoning, self.autonomy
             self.saved.mode = PLAN if self.mode == PLAN else ""
-            self._save_now(required=True)  # The first request must have a durable input/goal checkpoint.
+            if self._checkpoint_written or self.saved.turns[:-1]:
+                self._save_now(required=True)
             if self._fusion is not None:
                 await self._fusion.sample_metrics(turn, start=True)
                 await self._fusion.retain_plan_route()
@@ -958,7 +970,7 @@ class ChatGPTController:
                 for note in notes:
                     self.transcript.add_notice(note)
             loop = AgentLoop(
-                self.manager.stream,
+                self._stream_turn,
                 tools,
                 _Watch(self, tools, turn, instructions=instructions),
                 model=model,
@@ -978,6 +990,7 @@ class ChatGPTController:
                 from desktop.core.fusion.acp import AcpRun
                 self._acp = self._acp or AcpRun(self)
                 end = await self._acp.run(tools, loop.observer, compact.view_of(self.saved.items, self.saved.compaction), sent, attachments, snapshot.get("current", instructions))
+                self._keep_first_prompt()
             else:
                 end = await loop.run(compact.view_of(self.saved.items, self.saved.compaction))
             fusion = self._fusion
@@ -1083,6 +1096,59 @@ class ChatGPTController:
             self._end_turn(turn)
             self.refresh_context()
 
+    async def _stream_turn(self, request: dict[str, Any]) -> AsyncIterator[Event]:
+        if not self._checkpoint_written:
+            # Prepare first, then checkpoint just before entering the transport. A crash or disconnect after this
+            # point is ambiguous and must not silently erase a possibly delivered prompt.
+            self.saved.origin[FIRST_PROMPT] = True
+            try:
+                self._save_now(required=True)
+            except BaseException:
+                self.saved.origin.pop(FIRST_PROMPT, None)
+                raise
+        started = False
+        try:
+            async with contextlib.aclosing(self.manager.stream(request)) as events:
+                async for event in events:
+                    if isinstance(event, Started):
+                        started = True
+                    else:
+                        self._keep_first_prompt()
+                    yield event
+        except Exception as error:
+            if self.saved.origin.get(FIRST_PROMPT) is True and self._request_refused(error, started=started):
+                self._discard_first_prompt()
+            else:
+                self._keep_first_prompt()
+            raise
+
+    @staticmethod
+    def _request_refused(error: Exception, *, started: bool) -> bool:
+        if isinstance(error, (AuthError, RequestNotSent, ValueError)):
+            return True
+        if not isinstance(error, ChatGPTError):
+            return False
+        if error.status is not None:
+            return 400 <= error.status < 500 and error.status != 408
+        if error.code == "network":
+            # HttpClient reports a pre-send connection failure as network, but a possibly sent body as stream.
+            return not started
+        return error.code == "api" or (isinstance(error.body, dict) and error.code not in ("stream", "stream_idle", "timeout"))
+
+    def _discard_first_prompt(self) -> None:
+        try:
+            self.manager.sessions.discard_first_prompt(self.session_id)
+        except OSError:
+            # On a storage failure prefer leaving the recovery checkpoint to rewriting it as an empty history.
+            log.warning("could not roll back the rejected first prompt", exc_info=True)
+        self.saved.origin.pop(FIRST_PROMPT, None)
+        self._checkpoint_written = False
+
+    def _keep_first_prompt(self) -> None:
+        if self.saved.origin.pop(FIRST_PROMPT, None) is True:
+            self._first_prompt_retained = True
+            self._notify("history")
+
     def _turn_failed(self, turn: Turn, error: BaseException) -> None:
         if isinstance(error, ChatGPTError):
             message = friendly_failure(error)
@@ -1096,11 +1162,20 @@ class ChatGPTController:
         else:
             log.error("a ChatGPT turn failed unexpectedly", exc_info=error)
             message = f"出现内部错误：{type(error).__name__}: {error}"
-        if (len(self.saved.items) == self._turn_start + 1 and self.saved.turns
+        acp = self.saved.origin.get("fusionAcp")
+        if (isinstance(error, EngineRpcError) and error.code in (-32600, -32601, -32602)
+                and isinstance(acp, dict) and self.saved.origin.get(FIRST_PROMPT) is True
+                and len(self.saved.items) == self._turn_start + 1):
+            self._discard_first_prompt()
+            acp["promptAttempted"] = False
+        self._keep_first_prompt()  # an ACP dispatch may have reached the native agent even when it did not answer
+        if (not self._first_prompt_retained and len(self.saved.items) == self._turn_start + 1 and self.saved.turns
                 and self.saved.turns[-1].start == self._turn_start and self.saved.turns[-1].finished is None):
-            # (nothing came of the turn: the message is not left in the history, the next try is not a repeat of it)
+            # The message was rejected without output: the next try must not repeat it from history.
             del self.saved.items[self._turn_start :]
             self.saved.turns.pop()
+            if not self._checkpoint_written:
+                self.saved.prompt = {}
         else:
             self._record_turn("failed", message)
         self._release_steers()
@@ -1115,6 +1190,12 @@ class ChatGPTController:
     def _end_turn(self, turn: Turn) -> None:
         if self._turn is not turn:
             return
+        self._keep_first_prompt()  # stopped after dispatch, or finished without a separate response event
+        if (not self._checkpoint_written and self.saved.turns and self.saved.turns[-1].start == self._turn_start):
+            # Stopped during local setup, before a request could reach the model.
+            del self.saved.items[self._turn_start :]
+            self.saved.turns.pop()
+            self.saved.prompt = {}
         if self._fusion is not None:
             self._fusion.finish_metrics(turn)
         self._settle_expired()
@@ -1589,11 +1670,18 @@ class ChatGPTController:
         if self._save_handle is not None:
             self._save_handle.cancel()
             self._save_handle = None
-        if not self.saved.turns and not self.saved.goal and not self.saved.fusion and not getattr(self, "_checkpoint_written", False):
-            return True
+        if not self._checkpoint_written and FIRST_PROMPT not in self.saved.origin:
+            acp = self.saved.origin.get("fusionAcp")
+            if self._turn is not None and isinstance(acp, dict) and acp.get("promptAttempted") is True:
+                # The ACP bridge sets this only at its durable dispatch boundary.
+                self.saved.origin[FIRST_PROMPT] = True
+            elif not (any(t.finished is not None for t in self.saved.turns) or self.saved.goal and not self.transcript.turns):
+                return True  # settings, Fusion configuration and local turn setup are not archives
         try:
             self.manager.sessions.save(self._snapshot())
         except OSError as error:
+            if not self._checkpoint_written:
+                self.saved.origin.pop(FIRST_PROMPT, None)
             log.warning("could not save the conversation", exc_info=True)
             message = "会话保存失败，请检查存储空间和权限；未保存的内容在退出后可能丢失，后续请求和写操作已暂停。"
             if not self._save_failed:

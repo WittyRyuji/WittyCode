@@ -203,12 +203,14 @@ function ProviderRow({ p, env }: { p: ApiProvider; env?: EnvState }) {
     p.keyMode === "env"
       ? `环境变量 ${envVarText(p.keyHint)}${name && env ? `（${ENV_TEXT[env]}）` : ""}`
       : p.keyMode === "inline"
-        ? "密钥明文在 settings.json 里，建议改用环境变量"
-        : p.keyMode === "command"
-          ? "命令获取密钥"
-          : p.kind === "bedrock-converse"
-            ? "AWS 凭据"
-            : "不需要密钥";
+        ? "旧密钥明文在 models.json 里，建议改用环境变量"
+        : p.keyMode === "protected"
+          ? "已保存加密 API Key（推荐改用环境变量）"
+          : p.keyMode === "command"
+            ? "命令获取密钥"
+            : p.kind === "bedrock-converse"
+              ? "AWS 凭据"
+              : "不需要密钥";
   const keyBad = p.keyMode === "inline" || (p.keyMode === "env" && env === "unset");
   const busy = p.status?.text === "正在测试…";
   return (
@@ -275,7 +277,7 @@ export function ProvidersPage() {
             </button>
           </div>
         </header>
-        <p className="pcard-note">用你自己的 API Key，或本机、公司网关上的模型。<b>WittyCode 自己的代理循环直接请求你的接口</b>。配置保存在 WittyCode 自己的 <code>models.json</code> 里（<code>customModels</code> 格式）。<b>密钥只放在环境变量里</b>，不会写进配置文件；设置之后马上能用，不用重启。</p>
+        <p className="pcard-note">用你自己的 API Key，或本机、公司网关上的模型。<b>WittyCode 自己的代理循环直接请求你的接口</b>。配置保存在 WittyCode 自己的 <code>models.json</code> 里（<code>customModels</code> 格式）。<b>默认推荐环境变量</b>；也可以直接输入（不推荐），保存时用当前 Windows 用户加密。</p>
         {providers.length === 0 ? (
           <div className="prov-empty">
             <p>常用的可以直接开始：</p>

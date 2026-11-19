@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { version } from "../../package.json";
-import { Brain, Brush, Cpu, FolderOpen, Info, KeyRound, Layers, Minus, Plus, SlidersHorizontal, Sparkles, Trash2, X } from "lucide-react";
+import { Brain, Brush, Cpu, ExternalLink, FolderOpen, Info, KeyRound, Layers, Minus, Plus, SlidersHorizontal, Sparkles, Trash2, X } from "lucide-react";
 import { useStore } from "../store";
+import { aboutContact, PROJECT_GITHUB_URL } from "../lib/about";
 import { MODES, effortLabel, permissionsFor, reasoningChoices } from "../lib/vocab";
 import { engineOfSource, findModel } from "../lib/models";
 import { LIVE } from "../mode";
@@ -21,6 +22,7 @@ import { ProviderEditor } from "./ProviderEditor";
 import { ProvidersPage } from "./ProvidersPage";
 import { FusionSettings } from "./FusionSettings";
 import type { MenuItem } from "./ui";
+import "../styles/settings.css";
 
 const PAGES = [
   { id: "appearance", label: "外观", icon: <Brush size={15} /> },
@@ -289,8 +291,21 @@ function ShortcutsPage() {
   );
 }
 
+function AboutLink({ text, href, action }: { text: string; href: string; action: string }) {
+  return (
+    <b className="about-link">
+      {/* Keep the value outside the anchor so mouse selection never opens the link. */}
+      <span className="about-link-text selectable">{text}</span>
+      <a className="icon-btn" href={href} aria-label={action} title={action}>
+        <ExternalLink size={14} aria-hidden />
+      </a>
+    </b>
+  );
+}
+
 function AboutPage() {
   const say = useStore((s) => s.say);
+  const contact = aboutContact(import.meta.env.VITE_WITTYCODE_CONTACT_EMAIL);
   return (
     <>
     <div className="about">
@@ -302,6 +317,14 @@ function AboutPage() {
           <div>
             <span>版本</span>
             <b>{version}</b>
+          </div>
+          <div>
+            <span>联系方式</span>
+            <AboutLink {...contact} action="打开联系方式" />
+          </div>
+          <div>
+            <span>项目 GitHub</span>
+            <AboutLink text={PROJECT_GITHUB_URL} href={PROJECT_GITHUB_URL} action="打开项目 GitHub" />
           </div>
           <div>
             <span>日志</span>

@@ -108,9 +108,10 @@ class ShellPage(QWebEnginePage):
         settings = self.settings()
         for name, value in (
             ("JavascriptCanOpenWindows", False),
-            # The copy buttons of the page need it: with False, navigator.clipboard.writeText never finishes, even
-            # for a click. Harmless here: the page is our own, has no network (CSP) and cannot navigate away.
+            # QtWebEngine's sanitized write access is needed for copy actions. Keep programmatic paste/read disabled;
+            # user-initiated keyboard paste still goes through Chromium's normal editing path.
             ("JavascriptCanAccessClipboard", True),
+            ("JavascriptCanPaste", False),
             ("LocalContentCanAccessRemoteUrls", False),
             ("LocalContentCanAccessFileUrls", False),
             ("LocalStorageEnabled", False),
@@ -457,6 +458,7 @@ class MainWindow(QMainWindow):
         self.page = ShellPage(shared_profile(), self.view)
         self.view.setPage(self.page)
         self.page.setBackgroundColor(background_for(settings.theme))
+        # Suppress the stock Chromium menu, not DOM contextmenu events (chat, paths and sidebar use those).
         self.view.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
         self.page.externalLink.connect(open_external)
         self.channel = QWebChannel(self.page)

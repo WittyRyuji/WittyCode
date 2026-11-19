@@ -282,6 +282,8 @@ export interface Session {
   id: string;
   projectId: string;
   title: string;
+  /** Pinned in this project's sidebar; missing on old payloads and demo fixtures means not pinned. */
+  pinned?: boolean;
   handoff?: PendingHandoff;
   /** the sub-agents of an open conversation, oldest first */
   agents?: AgentInfo[];
@@ -614,13 +616,9 @@ export interface ImportResult {
 /** The API formats an API provider's model entry (`customModels[].provider`) can name. */
 export type ApiKind = "anthropic" | "openai" | "generic-chat-completion-api" | "bedrock-converse";
 
-/** How the key reaches the request: read from an environment variable (`${NAME}` in `apiKey`), printed by a command
- *  (`apiKeyHelper`), or not needed (local servers, gateways that authenticate otherwise).
- *
- *  "inline" is only what an existing settings.json may already contain (older setups wrote keys there).
- *  The editor shows it with a warning and offers the way out; it never lets you choose it, and the page never receives
- *  the key, only a masked `keyHint`. WittyCode itself never writes a key into settings.json. */
-export type KeyMode = "inline" | "env" | "command" | "none";
+/** API Key source. `protected` uses Windows current-user DPAPI. `inline` is a legacy plaintext key
+ *  in models.json; it cannot be entered or edited in that mode. */
+export type KeyMode = "inline" | "env" | "command" | "none" | "protected";
 
 /** Whether an environment variable is there for the requests WittyCode makes: set; "pending" is set in the user's
  *  environment (registry) but WittyCode started before that, so a restart is needed; or not set at all. */
@@ -658,7 +656,7 @@ export interface SkillItem {
 
 /** One API provider as the page shows it. WittyCode's own grouping: the models file's `customModels` is a flat list, the models
  *  of one base URL and format are shown together under a name that WittyCode keeps. `keyHint` is the variable
- *  (`${OPENROUTER_API_KEY}`), the command, or for a legacy inline key a masked tail: no key ever reaches the page. */
+ *  (`${OPENROUTER_API_KEY}`), the command, or a masked tail for legacy inline mode. No directly entered key is returned. */
 export interface ApiProvider {
   id: string;
   name: string;
@@ -677,6 +675,5 @@ export interface ApiProvider {
   status?: { ok: boolean; text: string };
 }
 
-/** What the editor sends on save/test. A legacy "inline" provider that is saved without switching to an environment
- *  variable keeps its key as it is. */
-export type ProviderDraft = ApiProvider;
+/** Sent to save / test / listModels only. Missing or blank in protected mode keeps the key at its existing endpoint. */
+export type ProviderDraft = ApiProvider & { newApiKey?: string };

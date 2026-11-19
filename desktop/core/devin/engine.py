@@ -29,6 +29,7 @@ from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -53,7 +54,7 @@ from desktop.core.handoff import Handoff
 from desktop.core.hooks import Hooks
 from desktop.core.memory.launch import MemoryLaunch
 from desktop.core.session_state import SessionState
-from desktop.core.settings import AppSettings, normalize_folder
+from desktop.core.settings import AppSettings, default_settings_path, normalize_folder
 from desktop.core.transcript import Transcript
 
 log = logging.getLogger("desktop.devin")
@@ -90,6 +91,7 @@ class DevinSavedSession:
     cwd: str = ""
     model: str = ""
     owner: str = ""
+    has_user_messages: bool = False
 
 
 def _moment(value: Any) -> datetime:
@@ -106,6 +108,7 @@ def saved_session(raw: Mapping[str, Any]) -> DevinSavedSession:
         modified_at=_moment(updated),
         created_at=_moment(meta.get("cognition.ai/createdAt") or updated),
         cwd=str(raw.get("cwd") or ""),
+        has_user_messages=meta.get("cognition.ai/hasUserMessages") is True,
     )
 
 
@@ -589,6 +592,20 @@ class DevinEngine:
 
     # ------------------------------------------------------------------ sessions
 
+    @staticmethod
+    def _draft_marker(session_id: str) -> Path:
+        name = sha256(session_id.encode("utf-8")).hexdigest()
+        return default_settings_path().parent / "devin-drafts" / name
+
+    def _set_new_draft(self, session_id: str, draft: bool) -> None:
+        # Only new IDs allocated here get a marker. No ACP history is opened, rewritten or deleted.
+        marker = self._draft_marker(session_id)
+        if draft:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.touch()
+        else:
+            marker.unlink(missing_ok=True)
+
     async def list_sessions(self, project: str | Path, limit: int | None = SESSION_LIST_LIMIT) -> list[DevinSavedSession]:
         """Saved sessions of ``project`` that have a message, most recently used first ([] when Devin is not available)."""
         folder = normalize_folder(project)
@@ -601,9 +618,11 @@ class DevinEngine:
                         if not isinstance(raw, Mapping) or not raw.get("sessionId"):
                             continue
                         meta = raw.get("_meta") if isinstance(raw.get("_meta"), Mapping) else {}
-                        if meta.get("cognition.ai/hasUserMessages") is False:
-                            continue  # (made and never used: a scratch session, or one that was opened and left)
-                        found.setdefault(str(raw["sessionId"]), saved_session(raw))
+                        native = str(raw["sessionId"])
+                        used = meta.get("cognition.ai/hasUserMessages")
+                        if used is False or used is not True and self._draft_marker(native).is_file():
+                            continue  # an old CLI may omit this flag; only suppress IDs we allocated as drafts
+                        found.setdefault(native, saved_session(raw))
         except Exception as error:
             log.info("listing devin sessions failed: %s", error)
             if not found:
@@ -647,7 +666,9 @@ class DevinEngine:
             controller._abandon(error)
             raise
         if controller.state is SessionState.CLOSED:
-            self._forget(controller)
+            # Configuration can fail after session/new allocated a native ID; close, never delete it.
+            async with self.keep_connection():
+                await controller.close()
         return controller
 
     async def open_saved(

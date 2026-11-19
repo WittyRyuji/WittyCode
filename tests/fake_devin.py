@@ -306,10 +306,13 @@ class Fake:
         for sid, session in self.state["sessions"].items():
             if session["cwd"] != params.get("cwd"):
                 continue
+            meta = {"cognition.ai/createdAt": iso_z(session["createdAt"]), "cognition.ai/isLocked": False,
+                    "cognition.ai/lockHolderPid": None}
+            if not os.environ.get("FAKE_DEVIN_NO_HAS_USER_MESSAGES"):
+                meta["cognition.ai/hasUserMessages"] = session["used"]
             out.append({
                 "sessionId": sid, "cwd": session["cwd"], "title": session["title"], "updatedAt": iso_seconds(session["updatedAt"]),
-                "_meta": {"cognition.ai/createdAt": iso_z(session["createdAt"]), "cognition.ai/hasUserMessages": session["used"],
-                          "cognition.ai/isLocked": False, "cognition.ai/lockHolderPid": None},
+                "_meta": meta,
             })
         return {"sessions": out}
 

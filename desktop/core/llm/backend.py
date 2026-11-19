@@ -12,18 +12,21 @@ import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator, Mapping
+from dataclasses import replace
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 
 from desktop.core.chatgpt.errors import ChatGPTError, RequestNotSent
 from desktop.core.chatgpt.http import HttpClient, stream_idle_timeout
 from desktop.core.chatgpt.models import ChatGPTModel
-from desktop.core.chatgpt.responses import Event, read_events
+from desktop.core.chatgpt.responses import (
+    CallBegun, CallDone, Event, Finished, ItemDone, ReasoningDelta, ReasoningDone, TextDelta, TextDone, read_events,
+)
 from desktop.core.llm import aws, bedrock
 from desktop.core.llm.anthropic import VERSION, anthropic_body, read_anthropic
 from desktop.core.llm.chat import chat_body, read_chat
 from desktop.core.llm.responses_api import responses_body
-from desktop.core.llm.wire import ANTHROPIC, CHAT, RESPONSES, Route
+from desktop.core.llm.wire import ANTHROPIC, CHAT, RESPONSES, Route, sse_data
 from desktop.core.providers import BEDROCK, EFFORTS, ApiModelSpec, BedrockPlan, ProviderError
 
 log = logging.getLogger("desktop.llm")
@@ -96,6 +99,100 @@ def api_failure(error: ChatGPTError, spec: ApiModelSpec) -> ChatGPTError:
     return error.reworded(text, "api")
 
 
+def _key_echo_error() -> ChatGPTError:
+    return ChatGPTError("服务端响应包含 API Key，已停止接收。", code="api", transient=False)
+
+
+class _KeyEchoGuard:
+    """Block literal echoes at the output boundary, not protocol words. Not a defense against arbitrary encoding by a server."""
+
+    def __init__(self, key: str) -> None:
+        self.key = key
+        self.escaped = json.dumps(key)[1:-1]
+        self.tails: dict[tuple[type, str], str] = {}
+
+    def literal(self, text: str | None) -> bool:
+        return bool(text) and (self.key in text or self.escaped in text)
+
+    def _values(self, value: Any, *, replay_item: bool = False) -> bool:
+        if isinstance(value, str):
+            return self.literal(value)
+        if isinstance(value, dict):
+            for field, child in value.items():
+                if replay_item:
+                    if field in ("type", "role", "status"):  # protocol discriminators, not content
+                        continue
+                    if field == "arguments" and isinstance(child, str):
+                        if self._arguments(child):
+                            return True
+                        continue
+                if self._values(child, replay_item=replay_item):
+                    return True
+        elif isinstance(value, list):
+            return any(self._values(child, replay_item=replay_item) for child in value)
+        return False
+
+    def _arguments(self, text: str) -> bool:
+        try:
+            args = json.loads(text)
+        except ValueError:
+            return self.literal(text)  # even an invalid argument string can become a tool diagnostic
+        return self._values(args)
+
+    def check(self, event: Event) -> Event:
+        if isinstance(event, (TextDelta, ReasoningDelta)):
+            channel = (type(event), event.item_id)
+            text = self.tails.get(channel, "") + event.text
+            if self.key in text or event.item_id == self.key:
+                raise _key_echo_error()
+            # No buffering latency: only keep a suffix that could still start a cross-fragment match.
+            candidate = text.find(self.key[0], max(0, len(text) - len(self.key) + 1))
+            if candidate == -1:
+                self.tails.pop(channel, None)
+            else:
+                if channel not in self.tails and len(self.tails) >= 128:
+                    raise ChatGPTError("服务端同时打开了太多输出项，已停止接收。", code="api", transient=False)
+                self.tails[channel] = text[candidate:]
+        elif isinstance(event, (TextDone, ReasoningDone)):
+            self.tails.pop((TextDelta if isinstance(event, TextDone) else ReasoningDelta, event.item_id), None)
+            if self.literal(event.text) or event.item_id == self.key:
+                raise _key_echo_error()
+        elif isinstance(event, (CallBegun, CallDone)):
+            if self.literal(event.name) or self.literal(event.call_id) or event.item_id == self.key:
+                raise _key_echo_error()
+            if isinstance(event, CallDone) and self._arguments(event.arguments):
+                raise _key_echo_error()
+        elif isinstance(event, ItemDone) and self._values(event.item, replay_item=True):
+            raise _key_echo_error()
+        elif isinstance(event, Finished):
+            # Keep usage and non-reflecting completion details; never put an echo in the request trace.
+            return replace(event, response_id="" if self.literal(event.response_id) else event.response_id,
+                           incomplete="incomplete" if self.literal(event.incomplete) else event.incomplete,
+                           diagnostics={} if self._values(event.diagnostics) else event.diagnostics)
+        return event
+
+
+async def _quiet_sse(lines: AsyncIterator[str], guard: _KeyEchoGuard, kind: str) -> AsyncIterator[str]:
+    # Wire readers can log malformed packets verbatim. Only an apparent literal in the wire text needs an extra parse;
+    # valid JSON is left to the normal reader, regardless of its protocol field names.
+    async for data in sse_data(lines):
+        if data.strip() == "[DONE]":
+            if kind != ANTHROPIC:
+                yield "data: [DONE]"
+                yield ""
+            continue
+        if guard.literal(data):
+            try:
+                valid = isinstance(json.loads(data), dict)
+            except ValueError:
+                valid = False
+            if not valid:
+                raise _key_echo_error()
+        for line in data.split("\n"):
+            yield f"data: {line}"
+        yield ""
+
+
 _EXPIRED = ("ExpiredToken", "ExpiredTokenException", "UnrecognizedClientException", "InvalidSignatureException", "InvalidClientTokenId", "IncompleteSignature", "MissingAuthenticationToken")
 
 
@@ -144,15 +241,19 @@ class ApiBackend:
         return next((spec for spec in self.specs() if spec.id == model_id), None) if is_api_model(model_id) else None
 
     async def route(self, spec: ApiModelSpec) -> Route:
-        """The route with the key read now (it may be a command that takes a moment)."""
+        """The route with the key read now (it may need a command or Windows DPAPI)."""
+        route, _ = await self._route_and_protected_key(spec)
+        return route
 
-        def build() -> Route:
-            return route_of(spec, self.providers.api_key(spec), self.providers.api_headers(spec))
+    async def _route_and_protected_key(self, spec: ApiModelSpec) -> tuple[Route, str | None]:
+        def build() -> tuple[Route, str | None]:
+            key = self.providers.api_key(spec)
+            return route_of(spec, key, self.providers.api_headers(spec)), key if spec.key.mode == "protected" else None
 
         try:
             return await asyncio.to_thread(build)
         except ProviderError as error:
-            raise RequestNotSent(str(error), code="api") from error
+            raise RequestNotSent(str(error), code="api") from None
 
     async def stream(self, request: dict[str, Any]) -> AsyncIterator[Event]:
         """Ask the model of the request: its body for the provider's wire format, and the events of the answer."""
@@ -166,7 +267,7 @@ class ApiBackend:
             async for event in self._bedrock(spec, request):
                 yield event
             return
-        route = await self.route(spec)
+        route, key = await self._route_and_protected_key(spec)
         if route.kind == CHAT:
             body, read = chat_body(request, route), lambda lines: read_chat(lines, route.origin)
         elif route.kind == ANTHROPIC:
@@ -174,12 +275,28 @@ class ApiBackend:
         else:
             body, read = responses_body(request, route), read_events
         lines = self.http.stream_lines("POST", route.url, headers=route.headers, json_body=body, timeout=stream_idle_timeout(request))
+        guard = _KeyEchoGuard(key) if key else None
+        checked = _quiet_sse(lines, guard, route.kind) if guard is not None else None
         try:
-            async for event in read(lines):
-                yield event
+            async for event in read(checked if checked is not None else lines):
+                yield guard.check(event) if guard is not None else event
         except ChatGPTError as error:
-            raise api_failure(error, spec) from error
+            if guard is None:
+                raise api_failure(error, spec) from error
+            if any(guard.literal(text) for text in (error.message, error.code, error.request_id)):
+                safe = ChatGPTError("服务端错误信息包含 API Key，已隐藏。", status=error.status, transient=False)
+            else:
+                # Keep safe error details, never the untrusted raw body (including arbitrary property names).
+                safe = ChatGPTError(error.message, status=error.status, code=error.code, request_id=error.request_id,
+                                    transient=error.transient, retry_after=error.retry_after)
+            raise api_failure(safe, spec) from None
+        except Exception:
+            if key:
+                raise ChatGPTError("处理 API Provider 响应时出错。", code="api") from None
+            raise
         finally:
+            if checked is not None:
+                await checked.aclose()
             await lines.aclose()
 
     async def _bedrock(self, spec: ApiModelSpec, request: dict[str, Any]) -> AsyncIterator[Event]:

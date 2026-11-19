@@ -347,7 +347,12 @@ class ChatGPTEngine:
     # ------------------------------------------------------------------ conversations
 
     async def list_sessions(self, project: str | Path, limit: int | None = SESSION_LIST_LIMIT) -> list[SavedRow]:
-        return await asyncio.to_thread(self.sessions.rows, str(project), limit)
+        # A live, unresolved first dispatch has a recovery checkpoint, but is not a saved row yet. Once its
+        # owning process is gone the store still lists it, so an interrupted dispatch can be recovered.
+        pending = {c.session_id for c in self.controllers if not c.history_ready}
+        rows = await asyncio.to_thread(self.sessions.rows, str(project))
+        pending.update(c.session_id for c in self.controllers if not c.history_ready)
+        return [row for row in rows if row.id not in pending][:limit]
 
     def find(self, session_id: str) -> ChatGPTController | None:
         return next((c for c in self.controllers if c.session_id == session_id and not c._close_requested), None)

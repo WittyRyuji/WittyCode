@@ -327,26 +327,73 @@ def test_mode_switch_is_blocked_until_idle_with_no_pending_work(tmp_path, active
 def test_mode_save_failure_restores_model_mode_and_retained_configuration(tmp_path, monkeypatch, active):
     async def go():
         core, fake, _, _, _ = await ready_core(tmp_path)
-        save = core.chatgpt.sessions.save
+        store = core.chatgpt.sessions
         try:
             configure(core)
-            cid = (await core.call("session.new", {"projectId": str(tmp_path / "proj")}))["id"]
-            main = core._by_cid[cid].controller
-            if active:
-                main.enable_fusion(Policy(SOL, (LUNA,), LUNA, 0))
-            else:
-                core.settings.fusion_main = LUNA
+            cid = (await core.call("session.new", {"projectId": str(tmp_path / "proj"), "modelId": SOL, "fusion": active}))["id"]
+            conv = core._by_cid[cid]
+            main = conv.controller
+            fake.script(say("Persist this turn before switching modes."))
+            assert (await core.call("session.send", {"id": cid, "text": "Inspect the inventory."}))["ok"]
+            await finish_turn(main)
+            if conv.title_task is not None:
+                await conv.title_task
+            native = main.session_id
+            archived = store.load(native)
+            assert archived is not None and [turn.status for turn in archived.turns] == ["done"]
+            assert conv.in_history and bool(archived.fusion) is active
             before = (main.model, main.reasoning, deepcopy(main.saved.fusion), deepcopy(main.saved.origin))
-            def fail_save(_saved):
-                raise OSError("Simulated disk failure")
-            monkeypatch.setattr(core.chatgpt.sessions, "save", fail_save)
-            with pytest.raises(ChatGPTError):
-                await choose(core, cid, LUNA if active else "fusion")
+            runtimes = (main._fusion, main._paused_fusion)
+            requests = (len(fake.requests), len(fake.fake.title_requests))
+            writes = []
+            disk_error = OSError("Simulated disk failure")
+
+            def fail_save(snapshot):
+                writes.append((snapshot.id, snapshot.model, bool(snapshot.fusion), snapshot.fusion.get("enabled", True)))
+                raise disk_error
+
+            # Keep the native model fixed so no source summary can fail before the mode checkpoint.
+            with monkeypatch.context() as patch:
+                patch.setattr(store, "save", fail_save)
+                with pytest.raises(ChatGPTError) as error:
+                    await choose(core, cid, SOL if active else "fusion")
+            assert error.value.code == "checkpoint" and error.value.__cause__ is disk_error
+            assert writes == [(native, before[0], True, not active)]
             assert before == (main.model, main.reasoning, main.saved.fusion, main.saved.origin)
-            assert (main._fusion is not None) is active and not fake.requests
+            assert (main._fusion, main._paused_fusion) == runtimes and (main._fusion is not None) is active
+            assert store.load(native) == archived
+            assert (len(fake.requests), len(fake.fake.title_requests)) == requests
         finally:
-            monkeypatch.setattr(core.chatgpt.sessions, "save", save)
             await core.shutdown()
+    asyncio.run(go())
+
+
+def test_empty_draft_can_enter_and_leave_fusion_without_saving(tmp_path, monkeypatch):
+    async def go():
+        core, fake, _, _, _ = await ready_core(tmp_path)
+        store = core.chatgpt.sessions
+        save = store.save
+        writes = []
+
+        def record_save(snapshot):
+            writes.append(snapshot.id)
+            save(snapshot)
+
+        monkeypatch.setattr(store, "save", record_save)
+        try:
+            configure(core)
+            cid = (await core.call("session.new", {"projectId": str(tmp_path / "proj"), "modelId": LUNA}))["id"]
+            main = core._by_cid[cid].controller
+            native = main.session_id
+            for selected, model, active in (("fusion", SOL, True), (LUNA, LUNA, False)):
+                assert (await choose(core, cid, selected))["ok"]
+                assert main.model == model.removeprefix("chatgpt:") and (main._fusion is not None) is active
+                assert store.load(native) is None and core.project_rows()[0]["sessionIds"] == []
+            await core.call("session.close", {"id": cid})
+        finally:
+            await core.shutdown()
+        assert not writes and store.load(native) is None
+        assert not fake.requests and not fake.fake.title_requests
     asyncio.run(go())
 
 

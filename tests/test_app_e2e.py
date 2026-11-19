@@ -77,7 +77,7 @@ class Model:
 
 
 async def new_conversation(rig, *, tab_count: int = 1, autonomy: str | None = None) -> Model:
-    """A conversation opened the way the page does it once a first message is sent (the page opens none before that)."""
+    """Open an editable draft tab; it joins the project list only after a successful first send."""
     await rig.core.call("session.new", {"projectId": str(rig.project), **({"autonomy": autonomy} if autonomy else {})})
     await rig.wait_for(".tab", tab_count)
     await rig.wait_text(".statusbar .st-left", "就绪")
@@ -243,7 +243,7 @@ def test_a_session_can_be_renamed_and_archived_from_its_menu_and_brought_back(qa
             await rig.click(".srow", 1, right=True)
             await rig.wait_for(".menu-item")
             labels = await rig.texts(".menu-label")
-            assert "重命名…" in labels and "归档" in labels
+            assert labels == ["打开", "置顶", "重命名…", "复制会话 ID", "归档"]
             await rig.click_text(".menu-item", "重命名…")
             await rig.wait_for(".dialog input")
             await rig.js("document.querySelector('.dialog input').select()")
@@ -638,17 +638,24 @@ def test_a_dropped_zip_sends_unpacked_text_without_writing_files(qapp, loop, tmp
 def test_the_copy_buttons_reach_the_system_clipboard(qapp, loop, tmp_path):
     async def scenario():
         rig = await open_rig(tmp_path)
-        model = await new_conversation(rig)
-        model.next(say("好"), hold=False)
-        await rig.send("hello")
-        await rig.wait_text(".statusbar .st-left", "就绪")
-        sid = rig.core.order[0].controller.session_id
-        QGuiApplication.clipboard().setText("before")
-        await rig.click(".srow", 0, right=True)
-        await rig.wait_for(".menu-item")
-        await rig.click_text(".menu-item", "复制会话 ID")
-        await wait_for(lambda: QGuiApplication.clipboard().text() == sid, message="the session id on the clipboard")
-        await rig.finish()
+        try:
+            model = await new_conversation(rig)
+            await rig.wait_for(".srow", 0)
+            model.next(say("A reply for the saved conversation."), hold=False)
+            await rig.send("hello")
+            await rig.wait_text(".transcript .text-block", "A reply for the saved conversation.")
+            conv = rig.core.order[0]
+            row = f'.srow.open[data-session-id="{conv.cid}"]'
+            await rig.wait_for(row)
+            sid = conv.controller.session_id
+            assert sid
+            QGuiApplication.clipboard().setText("before")
+            await rig.click(row, right=True)
+            await rig.wait_for(".menu-item")
+            await rig.click_text(".menu-item", "复制会话 ID")
+            await wait_for(lambda: QGuiApplication.clipboard().text() == sid, message="the session id on the clipboard")
+        finally:
+            await rig.finish()
 
     run(loop, scenario())
 
@@ -1387,14 +1394,15 @@ def test_a_devin_conversation_goes_from_the_model_menu_to_the_answer_and_an_appr
             await rig.wait_text(".menu-head", "DEVIN")
             assert "Claude Opus 5.5" in " ".join(await rig.texts(".menu-item")), "the models are in the menu"
             await rig.click_text(".menu-item", "SWE-2")
-            await wait_for(lambda: rig.core.order[0].controller.engine == "devin", 15, "the conversation to move to Devin")
+            await wait_for(lambda: rig.core.order[0].controller.engine == "devin", 15, "the draft to move to Devin")
             await rig.wait_text(".statusbar .st-left", "就绪")
             assert await rig.text(".controls .chip-v", 0) == "SWE-2" and await rig.text(".controls .src-tag") == "订阅"
-            assert "Devin" in await rig.text(".srow.open .ssub"), "the sidebar names the engine"
+            await rig.wait_for(".srow", 0)
 
             await rig.send("hello devin")
             await rig.wait_text(".transcript .text-block", "echo: hello devin")
             await rig.wait_text(".statusbar .st-left", "就绪")
+            await rig.wait_text(".srow.open .ssub", "· Devin")
             assert "Token 合计" in await rig.text(".statusbar .st-right")
 
             await rig.send("[approve] clean the build folder")
@@ -1611,13 +1619,14 @@ def test_a_chatgpt_plan_conversation_goes_from_the_model_menu_to_the_answer_and_
                 assert await rig.text(".controls .chip-v", 0) == "GPT-6.1-Sol"
                 badge = await rig.text(".plan-badge")
                 assert "Using ChatGPT Plan" in badge and "Manage usage" in badge, "OpenAI's guideline: say the plan is in use and where to manage it"
-                assert "ChatGPT Plan" in await rig.text(".srow.open .ssub"), "the sidebar names the engine"
                 assert await rig.js("!document.querySelector('.plan-badge .plan-ring, .plan-badge .usage-ring')"), "the sign-in exposes no balance, so no empty subscription ring is shown"
+                await rig.wait_for(".srow", 0)
 
                 fake.script(say("Hello from the plan."))
                 await rig.send("hello plan")
                 await rig.wait_text(".transcript .text-block", "Hello from the plan.")
                 await rig.wait_text(".statusbar .st-left", "就绪")
+                await rig.wait_text(".srow.open .ssub", "· ChatGPT Plan")
                 assert "Token 合计" in await rig.text(".statusbar .st-right")
                 assert fake.requests[-1]["store"] is False and fake.requests[-1]["stream"] is True
 

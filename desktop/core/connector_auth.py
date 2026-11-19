@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import ctypes
-from ctypes import wintypes
 import hashlib
 import hmac
 import json
@@ -14,12 +12,11 @@ import os
 from pathlib import Path
 import re
 import secrets
-import sys
 import tempfile
 import time
 import urllib.parse
 
-from desktop.core import connector_clients
+from desktop.core import connector_clients, secret_protection
 from desktop.core.plugin_http import PluginError, PluginHttp, checked_json
 from desktop.core.plugin_lock import lock_file as _credential_lock
 from desktop.core.settings import default_settings_path
@@ -66,25 +63,10 @@ def _write(file: Path, data):
 
 
 def _crypt(data: bytes, *, decrypt=False) -> bytes:
-    if sys.platform != "win32":
-        raise PluginError("账号安全存储需要 Windows DPAPI。")
-    class Blob(ctypes.Structure):
-        _fields_ = [("size", wintypes.DWORD), ("data", ctypes.POINTER(ctypes.c_ubyte))]
-    buffer = (ctypes.c_ubyte * len(data)).from_buffer_copy(data)
-    source, result = Blob(len(data), buffer), Blob()
-    crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    operation = crypt32.CryptUnprotectData if decrypt else crypt32.CryptProtectData
-    operation.argtypes = [ctypes.POINTER(Blob), ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(Blob)]
-    operation.restype = wintypes.BOOL
-    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
-    kernel32.LocalFree.restype = ctypes.c_void_p
-    if not operation(ctypes.byref(source), None, None, None, None, 1, ctypes.byref(result)):
-        raise PluginError("无法读取或保护账号凭据，请使用原 Windows 用户重新授权。")
     try:
-        return ctypes.string_at(result.data, result.size)
-    finally:
-        kernel32.LocalFree(result.data)
+        return secret_protection.crypt(data, decrypt=decrypt)
+    except secret_protection.ProtectionError:
+        raise PluginError("无法使用 Windows DPAPI 读取或保护账号凭据，请使用原 Windows 用户重新授权。") from None
 
 
 class TokenStore:

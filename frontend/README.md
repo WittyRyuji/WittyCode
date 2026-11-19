@@ -32,8 +32,8 @@ Python 在 QWebChannel 上注册一个对象 `backend`（`desktop/ui/shell.py`�
 | `factory.account()` | 找到的 droid.exe 和它的版本（原型里还有演示用的邮箱、套餐，真正的 droid 不报告这些） |
 | `codex.account()` / `login()` / `cancelLogin()` / `logout()` / `setEnabled(on)` | Codex 订阅：命令行是否存在、登录状态、套餐、5 小时 / 每周额度；登录打开浏览器，完成后返回新状态 |
 | `devin.account()` / `login()` / `cancelLogin()` / `logout()` / `setEnabled(on)` | Devin 账号：命令行是否存在、登录状态（邮箱、套餐）；登录运行 `devin auth login`（它自己开浏览器），完成后返回新状态；Devin 桌面版和命令行共用这个登录 |
-| `providers.save(draft)` / `remove(id)` | API Provider 写进 / 删出 `~/.factory/settings.json` 的 `customModels`。**密钥只放环境变量**：`apiKey` 写 `${变量名}`（编辑器的「环境变量」栏只让用户写变量名本身，不带 `${}`，`lib/models.ts` 的 `envVarText` / `envHintOf` 在显示和存储之间转换），页面里没有输入密钥的地方，配置里不会出现密钥原文；已有的明文密钥原样保留、界面标出警告，用户改成环境变量并保存后才从配置里删掉 |
-| `providers.test(draft)` / `listModels(draft)` | 测试连接（耗时、模型数、失败原因）；向服务端要模型 ID 列表 |
+| `providers.save(draft)` / `remove(id)` | API Provider 写进 / 删出 WittyCode 自己的 `models.json`（`customModels`）。默认推荐**环境变量**：编辑器填变量名，配置写 `${变量名}`。「直接输入（不推荐）」只保存绑定当前 Windows 用户、接口类型和 Base URL 的 DPAPI 密文，不回填；留空保留，改端点需重新输入。直接输入不能与高级设置中的自定义 `Authorization` 或 API Key 请求头并用。旧明文仅为兼容保留，改用其他来源并保存后从模型配置移除。 |
+| `providers.test(draft)` / `listModels(draft)` | 测试连接（耗时、模型数、失败原因）；向服务端要模型 ID 列表。可使用当前输入但尚未保存的密钥，不写入配置。 |
 | `providers.envStatus(names)` | 每个变量名的状态：`set`（WittyCode 启动的 Droid 读得到）、`pending`（已写进用户环境变量，但 WittyCode 启动在先，需重启）、`unset`（没有）。没设置时界面给出可复制的 `setx` 命令 |
 | `window.minimize()` / `toggleMaximize()` / `close()` / `startMove()` / `startResize(edge)` / `isMaximized()` | **标题栏由页面自绘**（Qt 窗口无边框）：图标 + 名称 + 应用菜单 + 可拖动空白 + 三个窗口按钮。按下标题栏空白处调 `startMove()`（Python 用 `QWindow.startSystemMove()`，保留 Windows 贴边和分屏），边缘缩放用 `startSystemResize` |
 

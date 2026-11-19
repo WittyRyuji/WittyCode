@@ -69,6 +69,7 @@ export function runTurn(sessionId: string) {
     title: x.turns.length === 0 && x.title === "新会话" ? text.slice(0, 40) : x.title,
     turns: [...x.turns, turn],
   }));
+  st().recordDemoActivity(sessionId);
 
   void (async () => {
     const alive = () => !run.aborted;
@@ -208,6 +209,7 @@ function finish(sessionId: string, turnId: string, status: Turn["status"], secon
       },
     };
   });
+  if (status === "done") st().recordDemoActivity(sessionId);
 }
 
 export function cancelRun(sessionId: string, interrupt = false) {

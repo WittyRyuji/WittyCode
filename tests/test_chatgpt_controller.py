@@ -296,7 +296,7 @@ def test_a_usage_limit_error_is_shown_in_words_and_leaves_no_trace_in_the_histor
             assert "用量" in error.message and "ChatGPT" in error.message
             assert controller.saved.items == [] and controller.saved.turns == []
             checkpoint = engine.sessions.load(controller.session_id)
-            assert checkpoint is not None and checkpoint.items == [] and checkpoint.turns == [], "the initial request checkpoint is cleared, not left running"
+            assert checkpoint is None, "a confirmed rejection leaves no first-turn archive"
             controller.send_prompt("second try")
             await finish_turn(controller)
             assert len([i for i in fake.requests[1]["input"] if i["type"] == "message"]) == 1

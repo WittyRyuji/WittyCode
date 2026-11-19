@@ -246,6 +246,8 @@ function fakeBackend(config) {
     projects: [PROJECT, OTHER],
     saved: [],
     archived: [],
+    pins: {},
+    rowOrder: {},
     titles: {},
     savedLoaded: false,
     convs: {},
@@ -305,14 +307,28 @@ function fakeBackend(config) {
   }
 
   // ------------------------------------------------------------------ sidebar and conversations
+  const pinned = (folder, key) => S.pins[folder]?.includes(key) ?? false;
+  const rowKey = (id) => S.convs[id]?.savedId ?? id;
   function rowsFor(folder) {
-    const open = S.order.map((cid) => S.convs[cid]).filter((c) => c.project === folder);
-    const taken = new Set(open.map((c) => c.savedId).filter(Boolean));
+    const open = S.order.map((cid) => S.convs[cid]).filter((c) => c.project === folder && c.savedId && !S.archived.includes(c.savedId));
+    const taken = new Set(open.map((c) => c.savedId));
     const rows = [...S.saved.filter((r) => r.projectId === folder && !taken.has(r.id) && !S.archived.includes(r.id)).map((r) => [r.modifiedAt, r.id]), ...open.map((c) => [c.usedAt, c.cid])];
-    return rows.sort((a, b) => b[0] - a[0]).map((row) => row[1]);
+    const pins = S.pins[folder] ?? [];
+    const order = S.rowOrder[folder] ?? [];
+    const rank = ([time, id]) => {
+      const pin = pins.indexOf(rowKey(id));
+      const ordinary = order.indexOf(rowKey(id));
+      return pin >= 0 ? [0, pin] : ordinary >= 0 ? [2, ordinary] : [1, -time];
+    };
+    return rows.sort((a, b) => {
+      const [ag, ar] = rank(a), [bg, br] = rank(b);
+      return ag - bg || ar - br;
+    }).map((row) => row[1]);
   }
+  const ordinaryKeys = (folder) => rowsFor(folder).map(rowKey).filter((key) => !pinned(folder, key));
+  const rememberOrder = (folder, keys) => { S.rowOrder[folder] = [...new Set([...keys, ...(S.rowOrder[folder] ?? [])])]; };
   const projectRows = () => S.projects.map((p) => ({ id: p, name: p.split("\\").pop(), path: p, collapsed: false, sessionIds: rowsFor(p) }));
-  const shownRow = (r) => (S.titles[r.id] ? { ...r, title: S.titles[r.id] } : r);
+  const shownRow = (r) => ({ ...r, title: S.titles[r.id] || r.title, pinned: pinned(r.projectId, r.id) });
   const archivedRows = () => S.archived.map((id) => S.saved.find((r) => r.id === id)).filter(Boolean).map(shownRow);
   const emitSidebar = () => emit("sidebar", { projects: projectRows(), sessions: Object.fromEntries(S.saved.filter((r) => !S.archived.includes(r.id)).map((r) => [r.id, shownRow(r)])), archived: clone(archivedRows()) });
   const emitTabs = (select) => emit("tabs", { tabs: [...S.order], select });
@@ -329,6 +345,7 @@ function fakeBackend(config) {
     modifiedAt: c.usedAt,
     engine: c.engine,
     nativeId: c.nativeId,
+    pinned: pinned(c.project, c.savedId),
     settings: { model: c.model, reasoning: c.reasoning, autonomy: c.autonomy, mode: c.mode },
     usage: c.usage,
     speed: c.speed ?? null,
@@ -428,6 +445,18 @@ function fakeBackend(config) {
       c.waiting = { promptId, resolve };
     });
   }
+  function recordActivity(c) {
+    if (!S.convs[c.cid]) return;
+    c.usedAt = Date.now();
+    if (!c.savedId) {
+      c.savedId = c.nativeId;
+      S.saved.push(savedRow(c.savedId, c.project, c.title, c.usedAt, c.engine));
+    }
+    const saved = S.saved.find((r) => r.id === c.savedId);
+    if (saved) saved.modifiedAt = c.usedAt;
+    if (!pinned(c.project, c.savedId)) rememberOrder(c.project, [c.savedId, ...ordinaryKeys(c.project)]);
+    emitSidebar();
+  }
   function finish(c, turn, status = "done") {
     turn.status = status;
     turn.seconds = 2.4;
@@ -438,6 +467,7 @@ function fakeBackend(config) {
     c.usage = { input: 1200 * c.sends, output: 340 * c.sends, cacheWrite: c.engine === "chatgpt" ? null : 800, cacheRead: 5000 * c.sends };
     c.speed = { tps: 42.3 + c.sends, tokens: 340 * c.sends, seconds: 8, first: 1.2, genTps: 50.1 };
     c.context = { used: 12345, window: c.engine === "devin" ? 262000 : 0, model: c.model, compacted: false };
+    if (status === "done") recordActivity(c);
     emitTurns(c, [turn]);
     flush(c);
   }
@@ -627,8 +657,10 @@ function fakeBackend(config) {
         emit("models", { models: clone(S.models), defaults: S.defaults });
       });
       later(120, () => {
-        S.saved = [savedRow("s-saved-1", PROJECT, "整理发布说明", ago(5)), savedRow("dv:th-9", PROJECT, "Devin 会话：迁移脚本", ago(40), "devin"), savedRow("s-saved-2", OTHER, "旧的会话", ago(60 * 24 * 3))];
-        S.savedLoaded = true;
+        if (!S.savedLoaded) {
+          S.saved.push(savedRow("s-saved-1", PROJECT, "整理发布说明", ago(5)), savedRow("dv:th-9", PROJECT, "Devin 会话：迁移脚本", ago(40), "devin"), savedRow("s-saved-2", OTHER, "旧的会话", ago(60 * 24 * 3)));
+          S.savedLoaded = true;
+        }
         emitSidebar();
       });
       return {
@@ -670,7 +702,7 @@ function fakeBackend(config) {
       const already = S.order.find((cid) => S.convs[cid].savedId === p.id);
       if (already) return { id: already };
       const row = S.saved.find((r) => r.id === p.id);
-      const c = open(p.projectId, row?.engine === "devin" ? "devin:swe-2-high" : "api:gw:claude-haiku-5-5", { title: p.title || row?.title || "（无标题）", savedId: p.id, nativeId: p.id });
+      const c = open(p.projectId, row?.engine === "devin" ? "devin:swe-2-high" : "api:gw:claude-haiku-5-5", { title: p.title || row?.title || "（无标题）", savedId: p.id, nativeId: p.id, usedAt: row?.modifiedAt ?? Date.now() });
       // Python sends the restored history before the conversation's first session event
       c.turns = [{ id: nid("t"), status: "done", seconds: 4.2, blocks: [{ kind: "user", id: nid("b"), text: "上次的问题" }, { kind: "text", id: nid("b"), markdown: "上次的回答，见 `docs/notes.md:5`，另有 `docs/report.pdf`、`docs/long.pdf`、`docs/broken.pdf` 和 `shots/ui.png`。" + (config.office ? " 样例：`sample.docx`、`sample.xlsx`、`sample.pptx`。安全测试：`hostile.docx`、`hostile.xlsx`、`hostile.pptx`。" : "") + (config.pictures ? " 图片：`sample.gif`、`sample.apng`、`sample.webp`。" : "") + (config.video ? " 视频：`sample.mp4`、`sample.webm`、`broken.mov`。" : ""), streaming: false }], prompts: [] }];
       later(20, () => emitTurns(c, c.turns));
@@ -715,6 +747,30 @@ function fakeBackend(config) {
         ],
       };
     },
+    "session.pin": ({ projectId, id, pinned: value }) => {
+      if (!S.projects.includes(projectId) || typeof id !== "string" || typeof value !== "boolean" || !rowsFor(projectId).includes(id)) throw new Error("只能置顶本项目列表中已保存的会话。");
+      const key = rowKey(id);
+      if (pinned(projectId, key) === value) return { ok: true };
+      const pins = (S.pins[projectId] ?? []).filter((item) => item !== key);
+      S.pins[projectId] = value ? [key, ...pins] : pins;
+      if (!value) rememberOrder(projectId, [key, ...ordinaryKeys(projectId)]);
+      if (S.convs[id]) flush(S.convs[id]);
+      emitSidebar();
+      return { ok: true };
+    },
+    "session.reorder": ({ projectId, id, targetId, after }) => {
+      const rows = rowsFor(projectId);
+      const key = rowKey(id), target = rowKey(targetId);
+      const inPins = pinned(projectId, key);
+      if (!S.projects.includes(projectId) || typeof after !== "boolean" || !rows.includes(id) || !rows.includes(targetId) || inPins !== pinned(projectId, target)) throw new Error("只能在同一项目和分区内调整顺序。");
+      if (id === targetId) return { ok: true };
+      const keys = (inPins ? S.pins[projectId] : ordinaryKeys(projectId)).filter((item) => item !== key);
+      keys.splice(keys.indexOf(target) + Number(after), 0, key);
+      if (inPins) S.pins[projectId] = keys;
+      else rememberOrder(projectId, keys);
+      emitSidebar();
+      return { ok: true };
+    },
     "session.archive": (p) => {
       const c = S.convs[p.id];
       const id = c ? c.savedId || c.nativeId : p.id;
@@ -748,6 +804,7 @@ function fakeBackend(config) {
       const c = conversation(p.id);
       // (the real application keeps a message sent while the conversation is still connecting and sends it when ready)
       if (c.mark === "opening") await c.ready;
+      conversation(p.id); // it may have been closed before dispatch
       if (c.mark !== "ready") throw new Error("现在不能发送：会话没有就绪。");
       const wanted = new Set(p.attachmentIds ?? c.drafts.map((a) => a.id));
       const attachments = c.drafts.filter((a) => wanted.has(a.id));
@@ -757,8 +814,10 @@ function fakeBackend(config) {
       if (over && p.confirmOver !== true) {
         return { ok: false, over: { count: attachments.length, total, files: Math.max(0, attachments.length - sendLimit()), bytes: Math.max(0, total - 20 * MIB), text: over } };
       }
+      const typed = String(p.text ?? "").trim();
+      if (!typed && !attachments.length) return { ok: false };
       c.drafts = c.drafts.filter((a) => !wanted.has(a.id));
-      const text = String(p.text ?? "").trim() || "请查看附件。";
+      const text = typed || "请查看附件。";
       if (c.title === "新会话") c.title = text.split("\n")[0].slice(0, 60);
       const user = { kind: "user", id: nid("b"), text };
       if (attachments.length) user.attachments = attachments.map(sentView);
@@ -767,8 +826,8 @@ function fakeBackend(config) {
       c.turns.push(turn);
       c.mark = "running";
       c.workingLabel = "正在思考…";
-      c.usedAt = Date.now();
       c.handoff = null;
+      recordActivity(c);
       // ("quick: ..." is answered without asking for anything: a test that only needs the message to go out and the turn to end)
       const script = text.startsWith("quick:") ? (c.sends++, plain) : SCRIPTS[Math.min(c.sends++, SCRIPTS.length - 1)];
       later(40, () => {

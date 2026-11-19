@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 
 import pytest
 
@@ -26,6 +25,10 @@ def test_square_frames_sidebar_gutters_and_question_answers_in_the_real_page(qap
             model.next(say("Continue with the selected storage."), hold=False)
             await rig.send("Choose storage for the inventory service")
             await rig.wait_for(".prompt.ask")
+            # The first turn's prompt and sidebar admission reach the page in separate events.
+            cid = rig.core.order[0].cid
+            await rig.wait_for(f'.srow.current[data-session-id="{cid}"]')
+            await rig.wait_for('.srow[data-session-id="cg:saved"]')
             assert await rig.js("""(() => {
                 const selectors = ['.newbtn', '.srow.current', '.composer', '.composer .chip', '.send', '.block.user', '.block.activity', '.prompt.ask'];
                 return selectors.every(selector => {
@@ -53,8 +56,7 @@ def test_square_frames_sidebar_gutters_and_question_answers_in_the_real_page(qap
             await rig.click(".prompt.ask .btn.primary")
             await rig.wait_for(".q.missing")
             await rig.click_text(".prompt.ask .opt", "Postgres")
-            screenshot = Path(__file__).resolve().parents[1] / "sandbox" / f"frame-style-qt-{theme}.png"
-            screenshot.parent.mkdir(parents=True, exist_ok=True)
+            screenshot = tmp_path / f"frame-style-qt-{theme}.png"
             await asyncio.sleep(0.15)
             assert rig.window.grab().save(str(screenshot))
             await rig.click(".prompt.ask .btn.primary")

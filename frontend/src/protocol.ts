@@ -143,6 +143,7 @@ export interface SavedRow {
   modifiedAt: number;
   engine: Engine;
   fusion?: boolean;
+  pinned?: boolean;
   /** `model` is empty if the saved row does not know its model. */
   settings: SessionSettings;
   usage: null;
@@ -162,6 +163,7 @@ export interface ConversationMeta {
   modifiedAt: number;
   engine: Engine;
   nativeId: string;
+  pinned?: boolean;
   settings: SessionSettings;
   usage: Usage | null;
   usageModels?: Record<string, number>;
@@ -335,6 +337,7 @@ export interface Calls {
   "session.new": { params: { projectId?: string; modelId?: string; fromId?: string; settings?: SessionSettings; fusion?: boolean }; result: { id: string | null } };
   "session.openSaved": { params: { id: string; projectId: string; title?: string }; result: { id: string | null } };
   "session.reorder": { params: { projectId: string; id: string; targetId: string; after: boolean }; result: { ok: boolean } };
+  "session.pin": { params: { projectId: string; id: string; pinned: boolean }; result: { ok: boolean } };
   "session.close": { params: { id: string }; result: null };
   /** hide the conversation from the lists (an open one is closed first; one that is running is refused). Nothing of the
    *  engine's own files is touched; `session.unarchive` brings it back. `id`: an open conversation's, or a saved row's. */

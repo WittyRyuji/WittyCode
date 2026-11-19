@@ -51,6 +51,8 @@ Add a project folder, then open **Settings → Accounts & Models** and choose a 
 | Devin (optional) | Devin CLI or desktop app; use a compatible ACP setup for Fusion |
 | Factory (optional) | Factory CLI signed in separately; no Factory SDK required |
 
+For an API provider, use an **environment variable** by default. If you choose **Direct entry (not recommended)**, WittyCode saves the key using Windows current-user encryption. Leave the field blank when editing to keep the saved key; changing the interface type or Base URL requires re-entering the key or choosing another source. Bedrock keeps its separate AWS credential options.
+
 Press `Ctrl+N` to start a conversation. `Ctrl+O` adds a project, `Ctrl+L` focuses the composer, `Ctrl+B` toggles the sidebar, and `Ctrl+,` opens Settings. From the command line, use `--project DIR`, `--settings FILE`, or `--debug`. See the [usage guide](docs/usage-details.md), including how to try the app with a recording instead of a model.
 
 **Data and permissions:** WittyCode keeps its own conversation and memory data locally in `%APPDATA%\WittyCode\` by default and has no telemetry. Model providers and connectors still receive the inputs you send them. Tool permissions and write scopes are **not an OS sandbox**. Review commands and extensions before allowing them to run; do not use full access in an untrusted repository. Bedrock and Factory are not yet verified end to end against real accounts.
