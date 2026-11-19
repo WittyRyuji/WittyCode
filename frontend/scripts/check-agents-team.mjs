@@ -77,6 +77,15 @@ async function checkFlow(page, theme, label, ok) {
     (theme === "light" ? colours.luminance > 0.85 : colours.luminance < 0.08) && colours.labelContrast >= 4.5 && colours.modelContrast >= 4.5 &&
     colours.gridContrast > 1.5 && colours.particleContrast >= 3 && Object.keys(colours.edges).length === 6 &&
     Object.values(colours.edges).every((edge) => edge.contrast >= 3 && edge.ringContrast >= 3), colours);
+  const wires = await js("[...document.querySelectorAll('#conversation-team .agent-flow-wire')].map((wire) => wire.getAttribute('d'))");
+  ok(label("edges are right-angled polylines, not curves"), wires.length === agents.length && wires.every((d) => {
+    // React Flow writes a corner of radius 0 as a quadratic whose control point is its end point: still a sharp corner.
+    const commands = [...d.matchAll(/([A-Za-z])([^A-Za-z]*)/g)].map((m) => [m[1], (m[2].match(/-?\d+(?:\.\d+)?/g) ?? []).map(Number)]);
+    const sharp = commands.every(([name, n]) => name === "M" || name === "L" ? n.length === 2
+      : name === "Q" && n.length === 4 && Math.abs(n[0] - n[2]) < 0.01 && Math.abs(n[1] - n[3]) < 0.01);
+    const points = commands.map(([, n]) => n.slice(-2));
+    return sharp && points.length >= 4 && points.every(([x, y], i) => i === 0 || Math.abs(x - points[i - 1][0]) < 0.01 || Math.abs(y - points[i - 1][1]) < 0.01);
+  }), wires.slice(0, 3));
   ok(label("working edges move, waiting edges pulse, and done edges stay still"), await js(`(() => {
     const $ = (s) => document.querySelector(s);
     return $('.agent-flow-edge.working .agent-flow-signal').getAnimations().some((a) => a.playState === 'running') &&

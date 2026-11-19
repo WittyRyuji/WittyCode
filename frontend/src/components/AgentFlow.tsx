@@ -1,5 +1,5 @@
 import { useEffect, useRef, useSyncExternalStore, type RefObject } from "react";
-import { Background, BackgroundVariant, getBezierPath, getViewportForBounds, Handle, Position, ReactFlow, useReactFlow, type Edge, type EdgeProps, type Node, type NodeProps } from "@xyflow/react";
+import { Background, BackgroundVariant, getSmoothStepPath, getViewportForBounds, Handle, Position, ReactFlow, useReactFlow, type Edge, type EdgeProps, type Node, type NodeProps } from "@xyflow/react";
 import "@xyflow/react/dist/base.css";
 import type { AgentInfo, Session } from "../types";
 import { useStore } from "../store";
@@ -41,7 +41,7 @@ function FlowDragon({ data }: NodeProps<DragonNode>) {
 }
 
 function FlowCurrent(props: EdgeProps<CurrentEdge>) {
-  const [path] = getBezierPath(props);
+  const [path] = getSmoothStepPath({ ...props, borderRadius: 0 });
   const status = props.data?.status ?? "pending";
   return <g className={`agent-flow-edge ${status}`}>
     <path d={path} className="agent-flow-wire" />
