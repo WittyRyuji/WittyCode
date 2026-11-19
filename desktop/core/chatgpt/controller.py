@@ -968,7 +968,8 @@ class ChatGPTController:
                 if not plan and (map_request := await fusion.map_description_request()):
                     asks.append(map_request)
                 if asks and end.reason == "done" and end.steps < self.turn_step_limit():
-                    continuation = "\n\n".join(asks)
+                    # With a real model the turn's last words became a note about these steps instead of the result.
+                    continuation = "\n\n".join(asks) + " Then end with the answer to the user request, not with a report of these steps."
                     loop.observer.history_grew([{"type": "message", "role": "developer", "content": [{"type": "input_text", "text": continuation}]}])
                     self._save_now(required=True)
                     history = compact.view_of(self.saved.items, self.saved.compaction)

@@ -28,7 +28,7 @@ BRIEF_PARAMETERS: dict[str, Any] = {
         "constraints": {"type": "string", "minLength": 1, "description": "Limits, dependencies and relevant context."},
         "acceptance": {"type": "string", "minLength": 1, "description": "Acceptance criteria and the commands that check them, when available."},
         "paths": {"type": "array", "items": {"type": "string", "minLength": 1}, "maxItems": _MAX_PATHS, "description": "Concrete project-relative files or directories this expert may change."},
-        "read_only": {"type": "boolean", "default": False, "description": "Read-only research: leave paths empty. No editing tools or route are needed."},
+        "read_only": {"type": "boolean", "default": False, "description": "Research by a Coder that must change nothing: leave paths empty; it gets no editing tools, may run only read-only commands and needs no route. Leave false for Runner and QualitySampler: they never edit and must be able to run the checks."},
         "budget": {"type": "object", "properties": {
             "steps": {"type": "integer", "minimum": 1},
             "seconds": {"type": "integer", "minimum": 1},

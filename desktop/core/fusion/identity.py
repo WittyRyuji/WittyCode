@@ -150,6 +150,8 @@ def load(folder: Path | None) -> Identities:
     try:
         paths = sorted((path for path in folder.iterdir() if path.suffix.casefold() == ".md"),
                        key=lambda path: (path.name.casefold(), path.name))
+    except FileNotFoundError:
+        return _BUILTINS  # Nobody has written an identity file: the usual case, not a problem to report.
     except OSError as error:
         return Identities(_BUILTINS._entries, DECOMPOSITION, (f"Cannot read identity folder: {error.strerror}.",))
     entries = {entry.name: entry for entry in _BUILTINS._entries}

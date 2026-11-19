@@ -122,9 +122,13 @@ def test_unreadable_broken_and_oversized_files_do_not_block_good_overrides(tmp_p
     assert "unreadable.md" in identities.problems[2] and "Cannot read" in identities.problems[2]
 
 
-def test_missing_folder_keeps_builtins_and_records_problem(tmp_path):
+def test_missing_folder_is_the_usual_case_and_an_unreadable_one_is_a_problem(tmp_path):
     identities = load(tmp_path / "missing")
     assert identities.names == load(None).names
     assert identities.main == DECOMPOSITION
-    assert len(identities.problems) == 1
-    assert "Cannot read identity folder" in identities.problems[0]
+    assert identities.problems == ()  # Found with a real model: every conversation without the folder showed a notice.
+    not_a_folder = tmp_path / "agents"
+    not_a_folder.write_text("a file where the folder should be", encoding="utf-8")
+    blocked = load(not_a_folder)
+    assert blocked.names == load(None).names and len(blocked.problems) == 1
+    assert "Cannot read identity folder" in blocked.problems[0]

@@ -148,6 +148,19 @@ def test_expert_tool_filter_and_read_only_commands(tmp_path, identity):
     asyncio.run(go())
 
 
+def test_read_only_flag_does_not_stop_a_runner_from_running_checks(tmp_path):
+    # Found with a real model: the main agent marked Runners read-only (they have no write paths) and they came back blocked.
+    async def go():
+        async with _fusion(tmp_path) as (main, fake):
+            await _turn(main, fake, call("delegate_task", _brief("Runner", paths=[], read_only=True), call_id="delegate"),
+                        call("shell", {"command": "New-Item marker.txt"}, call_id="check"), say("Checked."), say("Reviewed."))
+            child = next(iter(main.agents.values())).controller
+            assert "Refused" not in _output(child, "check") and (main.project / "marker.txt").is_file()
+            assert "create_file" not in _names(fake.requests[1]["tools"])
+            assert "Do not change anything." not in str(fake.requests[1]["input"])
+    asyncio.run(go())
+
+
 @pytest.mark.parametrize("identity", ["Coder", "Runner"])
 def test_expert_memory_is_read_only_and_external_mcp_follows_identity(tmp_path, monkeypatch, identity):
     server = "wittycode-memory"

@@ -1431,7 +1431,10 @@ class FusionRuntime:
             if not await child.update_settings(autonomy=self.parent.autonomy, mode="auto",
                                                reasoning=self._expert_effort(expert, profile)):
                 raise FusionError("The expert could not inherit the main conversation's permissions.")
-            child._fusion_read_only = brief is not None and brief.read_only
+            # Only an identity that can edit is narrowed by a read-only brief. A Runner or QualitySampler never edits, and
+            # running the checks (not a read-only command) is its job: with a real model the main agent marked its
+            # Runners read-only because they had no write paths, and they came back blocked.
+            child._fusion_read_only = bool(brief is not None and brief.read_only and profile is not None and "edit" in profile.tools)
             child._fusion_step_limit = brief.budget.get("steps") if brief is not None else None
             parent_tools = await self.parent._ensure_tools()
             child_tools = await child._ensure_tools()
@@ -1468,6 +1471,10 @@ class FusionRuntime:
                 prompt = pack.text + "\n\n" + prompt
             if reporting is not None:
                 prompt += "\n\nFinish with submit_report. Rate each Fusion Drive record you used by record ID."
+                if reporting.used:
+                    # With a real model every expert's first report was refused for a rating it did not know was due.
+                    prompt += (" The records given above must each be rated, whether or not they helped: "
+                               + ", ".join(sorted(reporting.used)) + ".")
             if self.gate("observer"):
                 budget = brief.budget if brief is not None else {}
                 observed = ObservedRun(observer.Watch(write_paths, read_only=child._fusion_read_only,
