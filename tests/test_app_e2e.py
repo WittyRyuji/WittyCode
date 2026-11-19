@@ -607,6 +607,34 @@ def test_files_dropped_from_explorer_are_attached(qapp, loop, tmp_path):
     run(loop, scenario())
 
 
+def test_a_dropped_zip_sends_unpacked_text_without_writing_files(qapp, loop, tmp_path):
+    import zipfile
+
+    async def scenario():
+        rig = await open_rig(tmp_path)
+        try:
+            model = await new_conversation(rig)
+            model.next(say("Checked the log."), hold=False)
+            bundle = tmp_path / "ci-logs.zip"
+            with zipfile.ZipFile(bundle, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("build/python.log", "SAMPLE_FAILURE: expected 1")
+            assert await rig.drop_files([bundle]) == Qt.DropAction.CopyAction
+            await rig.wait_for(".att-row .att", 1, timeout=15)
+            assert await rig.text(".att-row .fname") == "ci-logs.zip"
+            assert "已解包" in await rig.text(".att-row .att")
+            await rig.send("Check the archive")
+            await model.asked()
+            parts = user_parts(model.requests[-1])
+            assert all(p["type"] == "input_text" for p in parts)
+            assert any("build/python.log" in p["text"] and "SAMPLE_FAILURE: expected 1" in p["text"] for p in parts)
+            assert bundle.is_file() and not (rig.project / "build").exists()
+            await rig.wait_text(".statusbar .st-left", "就绪")
+        finally:
+            await rig.finish()
+
+    run(loop, scenario())
+
+
 def test_the_copy_buttons_reach_the_system_clipboard(qapp, loop, tmp_path):
     async def scenario():
         rig = await open_rig(tmp_path)

@@ -191,7 +191,7 @@ def _copy(source: Path, target: Path) -> Path:
 @pytest.mark.parametrize(
     ("name", "content"),
     [
-        ("archive.zip", b"PK\x03\x04" + bytes(range(256)) * 4),
+        ("archive.rar", b"Rar!\x1a\x07\x01\x00" + bytes(range(256)) * 4),
         ("tool.exe", b"MZ\x90\x00\x03\x00\x00\x00" + b"\x00" * 200),
         ("blob.bin", os.urandom(512) + b"\x00\x01\x02"),
         ("lying.txt", b"\x00\x01\x02\x03" * 100),
