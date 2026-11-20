@@ -11,6 +11,9 @@ What goes into ``dist\WittyCode-<version>-win-x64\``:
     app\                       the desktop package (with the built page) and WittyCode.pyw
     LICENSE, NOTICE, THIRD_PARTY_NOTICES.txt, licenses\, README.txt
 
+``dist\WittyCode-<version>-win-x64.exe`` is the same zip behind a self-extracting stub (scripts/self_extract.py) for
+downloaders who want a single file: the first click unpacks under %LOCALAPPDATA%\WittyCode\ and starts the app.
+
 The release runs the same interpreter version and the same package versions as the tests do; it is the project's own files,
 not a re-implementation of them. Needs: the page built (``cd frontend; npm run build:app``), Python 3.11 (this interpreter),
 and PyInstaller in ``.venv-build`` (made on the first run). Python and React only; nothing else is compiled.
@@ -23,6 +26,7 @@ import hashlib
 import json
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -135,7 +139,7 @@ def precompile(python: Path, folders: list[Path]) -> None:
         print("compileall reported:\n" + "\n".join(done.stdout.splitlines()[-5:]))
 
 
-def build_launcher(target: Path, work: Path) -> None:
+def build_venv_python() -> Path:
     build_python = ROOT / ".venv-build" / "Scripts" / "python.exe"
     if not build_python.is_file():
         subprocess.run([sys.executable, "-m", "venv", str(ROOT / ".venv-build")], check=True)
@@ -144,6 +148,11 @@ def build_launcher(target: Path, work: Path) -> None:
     found = subprocess.run([str(build_python), "-m", "PyInstaller", "--version"], capture_output=True, text=True)
     if found.returncode != 0 or found.stdout.strip() != wanted:
         subprocess.run([str(build_python), "-m", "pip", "install", "--quiet", "-r", str(pinned)], check=True)
+    return build_python
+
+
+def build_launcher(target: Path, work: Path) -> None:
+    build_python = build_venv_python()
     subprocess.run(
         [
             str(build_python), "-m", "PyInstaller", "--noconfirm", "--clean", "--onedir", "--noconsole", "--name", "WittyCode",
@@ -162,11 +171,47 @@ def build_launcher(target: Path, work: Path) -> None:
             shutil.copy2(item, target / item.name)
 
 
+SETUP_MAGIC = b"WCPKG1\0\0"
+"""Footer ``u64 payload size | 32-byte version | magic`` — keep in sync with scripts/self_extract.py (its --selftest
+verifies the pairing on every build, so a drift fails the build, not the user)."""
+
+
+def build_setup_exe(archive: Path, work: Path, version: str) -> None:
+    """The single-file download: scripts/self_extract.py frozen by PyInstaller, with this release's zip appended and a
+    footer. First run unpacks the zip under ``%LOCALAPPDATA%\WittyCode\app-<version>\`` and starts it; later runs see the
+    ``.complete`` marker and hand the command line over. Same payload as the zip, so the tests and smoke already cover it."""
+    build_python = build_venv_python()
+    subprocess.run(
+        [
+            str(build_python), "-m", "PyInstaller", "--noconfirm", "--clean", "--onefile", "--noconsole",
+            "--name", "WittyCode-Setup", "--icon", str(ROOT / "desktop" / "assets" / "icon.ico"),
+            "--distpath", str(work / "setup"), "--workpath", str(work / "setup-build"), "--specpath", str(work),
+            str(ROOT / "scripts" / "self_extract.py"),
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    stub = (work / "setup" / "WittyCode-Setup.exe").read_bytes()
+    payload = archive.read_bytes()
+    footer = struct.pack("<Q", len(payload)) + version.encode("utf-8").ljust(32, b"\0") + SETUP_MAGIC
+    exe = archive.with_suffix(".exe")
+    exe.write_bytes(stub + payload + footer)
+    report = work / "selftest.txt"
+    done = subprocess.run([str(exe), "--selftest", str(report)], timeout=600)
+    text = report.read_text(encoding="utf-8").strip() if report.is_file() else "no report"
+    if done.returncode != 0:
+        raise SystemExit(f"the single-file exe failed its self-test: {text}")
+    digest = hashlib.sha256(exe.read_bytes()).hexdigest()
+    (archive.parent / (exe.name + ".sha256")).write_text(f"{digest} *{exe.name}\n", encoding="ascii")
+    print(f"exe: {exe} ({exe.stat().st_size / 1e6:.0f} MB) — {text}\nsha256: {digest}")
+
+
 def brand_gui_runtime(target: Path) -> None:
     """Windows also sees the real GUI interpreter, not just the short-lived launcher."""
     icon = target / "WittyCode.ico"
     shutil.copy2(ROOT / "desktop" / "assets" / "icon.ico", icon)
-    build_python = ROOT / ".venv-build" / "Scripts" / "python.exe"
+    build_python = build_venv_python()
     subprocess.run(
         [str(build_python), str(ROOT / "scripts" / "set_exe_icon.py"), str(target / "python" / "pythonw.exe"), str(icon)],
         check=True,
@@ -300,6 +345,7 @@ def main() -> int:
                 archive.unlink()
             digest = zip_folder(out, archive)
             print(f"zip: {archive} ({archive.stat().st_size / 1e6:.0f} MB)\nsha256: {digest}")
+            build_setup_exe(archive, work, version)
     finally:
         if not options.keep_work:
             shutil.rmtree(work, ignore_errors=True)
