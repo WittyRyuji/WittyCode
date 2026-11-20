@@ -336,8 +336,8 @@ def test_mode_save_failure_restores_model_mode_and_retained_configuration(tmp_pa
             fake.script(say("Persist this turn before switching modes."))
             assert (await core.call("session.send", {"id": cid, "text": "Inspect the inventory."}))["ok"]
             await finish_turn(main)
-            if conv.title_task is not None:
-                await conv.title_task
+            if conv.controller._fusion_title_task is not None:
+                await conv.controller._fusion_title_task
             native = main.session_id
             archived = store.load(native)
             assert archived is not None and [turn.status for turn in archived.turns] == ["done"]
