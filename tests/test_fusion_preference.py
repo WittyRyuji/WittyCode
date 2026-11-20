@@ -37,12 +37,13 @@ def test_unlimited_calls_and_preference_round_trip(tmp_path):
             Policy("chatgpt:main", ("chatgpt:worker",), "chatgpt:small", 0, 0, 60, invalid)
 
 
-@pytest.mark.parametrize(("preference", "cost", "efficiency"), [(0, "1.50", "0.50"), (50, "1.00", "1.00"), (100, "0.50", "1.50")])
-def test_preference_weights_are_guidance_to_the_main_agent(tmp_path, preference, cost, efficiency):
+@pytest.mark.parametrize(("preference", "cost", "quality"), [(0, "1.50", "0.50"), (50, "1.00", "1.00"), (100, "0.50", "1.50")])
+def test_preference_weights_are_guidance_to_the_main_agent(tmp_path, preference, cost, quality):
     policy = Policy("chatgpt:main", ("chatgpt:worker",), "chatgpt:small", 0, 0, 60, preference)
     runtime = FusionRuntime(None, FusionRegistry(tmp_path, policy), owner="fusion-instructions", main_tokens=0)
     instructions = runtime.instructions()
-    assert f"cost x{cost}" in instructions and f"efficiency x{efficiency}" in instructions
+    assert f"cost x{cost}" in instructions and f"quality x{quality}" in instructions
+    assert "efficiency" not in instructions
     assert "not prices" in instructions and "Decide the number of calls" in instructions
 
 

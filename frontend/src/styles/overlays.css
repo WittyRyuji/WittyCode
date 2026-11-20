@@ -288,6 +288,16 @@
 input[type="number"].textin { appearance: textfield; -moz-appearance: textfield; }
 input[type="number"].textin::-webkit-inner-spin-button { display: none; }
 
+/* the Fusion step band: name / Adaptive / number line up in two rows, the save key sits under the number box */
+.fusion-step-budget { display: grid; grid-template-columns: auto auto 112px; column-gap: 12px; row-gap: 10px; align-items: center; }
+.fusion-step-budget .step-label { font-size: 12.5px; color: var(--fg-2); white-space: nowrap; }
+.fusion-step-budget .step-adaptive { display: flex; align-items: center; gap: 6px; font-size: 12.5px; white-space: nowrap; }
+.fusion-step-budget .step-adaptive input { width: 15px; height: 15px; margin: 0; flex: none; accent-color: var(--ink); }
+.fusion-step-budget .textin { width: 112px; flex: none; }
+.fusion-step-budget .textin:disabled { background: var(--accent-soft-2); border-color: var(--line); color: var(--fg-2); }
+.fusion-step-budget .step-save { grid-column: 3; width: 100%; height: 30px; padding: 0 14px; }
+.fusion-step-budget > .field-hint.err { grid-column: 1 / -1; margin-top: 0; max-width: none; color: var(--err); }
+
 .switch { position: relative; width: 34px; height: 18px; flex: none; border: var(--bw) solid var(--line-strong); background: transparent; }
 .switch span { position: absolute; top: 1px; left: 1px; width: 12px; height: 12px; background: var(--line-strong); transition: transform 0.12s, background 0.12s; }
 .switch.on { border-color: var(--ink); background: var(--ink); }

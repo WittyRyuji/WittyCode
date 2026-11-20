@@ -112,7 +112,7 @@ def test_structured_models_reuse_and_batch_ownership(tmp_path):
             tasks = manifest["delegate_tasks"]["properties"]["tasks"]
             assert tasks["items"] == BRIEF_PARAMETERS and tasks["maxItems"] == 4
             instructions = main._fusion.instructions()
-            assert instructions.startswith(DECOMPOSITION) and "cost x1.25, efficiency x0.75" in instructions
+            assert instructions.startswith(DECOMPOSITION) and "cost x1.25, quality x0.75" in instructions
             assert WORKER not in instructions and LIGHT not in instructions
     asyncio.run(go())
 

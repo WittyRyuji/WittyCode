@@ -13,16 +13,16 @@ function SideRow({ label, adaptive, value, onAdaptive, onValue }:
   const typed = Number(value);
   const invalid = !adaptive && (!Number.isSafeInteger(typed) || typed < 1 || typed > 1000);
   return (
-    <div className="step-limit-setting">
-      <span>{label}</span>
-      <label>
+    <>
+      <span className="step-label">{label}</span>
+      <label className="step-adaptive">
         <input type="checkbox" checked={adaptive} aria-label={`${label} Adaptive`}
           onChange={(e) => onAdaptive(e.target.checked)} />
         Adaptive
       </label>
       <input className="textin num" type="number" min={1} max={1000} step={1} aria-label={label}
         disabled={adaptive} aria-invalid={invalid} value={value} onChange={(e) => onValue(e.target.value)} />
-    </div>
+    </>
   );
 }
 
@@ -49,11 +49,9 @@ export function FusionStepBudget({ min, minAdaptive, max, maxAdaptive, onSave }:
     <div className="fusion-step-budget" onKeyDown={key}>
       <SideRow label="委派最小步数" adaptive={loAd} value={lo} onAdaptive={setLoAd} onValue={setLo} />
       <SideRow label="委派最大步数" adaptive={hiAd} value={hi} onAdaptive={setHiAd} onValue={setHi} />
-      <div className="step-limit-setting">
-        <button type="button" className="btn" disabled={!valid || !dirty} onClick={save}>保存</button>
-        {(loBad || hiBad) && <div className="field-hint err" role="alert">手填值需要 1 到 1000 的整数。</div>}
-        {inverted && <div className="field-hint err" role="alert">最小值不能大于最大值。</div>}
-      </div>
+      <button type="button" className="btn step-save" disabled={!valid || !dirty} onClick={save}>保存</button>
+      {(loBad || hiBad) && <div className="field-hint err" role="alert">手填值需要 1 到 1000 的整数。</div>}
+      {inverted && <div className="field-hint err" role="alert">最小值不能大于最大值。</div>}
     </div>
   );
 }

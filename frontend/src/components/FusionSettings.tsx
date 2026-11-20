@@ -29,14 +29,14 @@ function PreferenceInput({ value, onChange }: { value: number; onChange: (value:
     if (next !== sent.current) { sent.current = next; onChange(next); }
   };
   return <div className="fusion-preference">
-    <input type="range" min={0} max={100} step={5} value={draft} aria-label="成本与效率倾向"
-      aria-valuetext={`成本权重 ${(1.5 - draft / 100).toFixed(2)}，效率权重 ${(0.5 + draft / 100).toFixed(2)}`}
+    <input type="range" min={0} max={100} step={5} value={draft} aria-label="成本与质量倾向"
+      aria-valuetext={`成本权重 ${(1.5 - draft / 100).toFixed(2)}，质量权重 ${(0.5 + draft / 100).toFixed(2)}`}
       onChange={(e) => setDraft(Number(e.target.value))}
       onPointerUp={(e) => commit(Number(e.currentTarget.value))}
       onKeyUp={(e) => commit(Number(e.currentTarget.value))}
       onBlur={(e) => commit(Number(e.currentTarget.value))} />
-    <div className="fusion-preference-labels"><span>偏向成本</span><span>偏向效率</span></div>
-    <div className="fusion-preference-weights">成本 ×{(1.5 - draft / 100).toFixed(2)} · 效率 ×{(0.5 + draft / 100).toFixed(2)}</div>
+    <div className="fusion-preference-labels"><span>偏向成本</span><span>偏向质量</span></div>
+    <div className="fusion-preference-weights">成本 ×{(1.5 - draft / 100).toFixed(2)} · 质量 ×{(0.5 + draft / 100).toFixed(2)}</div>
   </div>;
 }
 
@@ -83,13 +83,13 @@ export function FusionSettings() {
       <Field label="轻量模型" hint="供简单任务使用，不会为了保活定时调用。">
         {modelRow(s.fusionLight, "light", items([s.fusionLight], (id) => set("fusionLight", id)))}
       </Field>
-      <Field label="成本与效率倾向" hint="作为主代理选择轻量模型或工作模型的相对权重，不是价格、速度或费用上限的保证。">
+      <Field label="成本与质量倾向" hint="作为主代理选择轻量模型或工作模型的相对权重，不是价格、结果质量或费用上限的保证。">
         <PreferenceInput value={s.fusionPreference} onChange={(v) => set("fusionPreference", v)} />
       </Field>
       <Field label="单个专家最长运行秒数" hint="超时会停止并保留记录；未确认的任务不会自动重做。">
         <BudgetInput label="单个专家最长运行秒数" value={s.fusionMaxSeconds} max={86400} onChange={(v) => set("fusionMaxSeconds", v)} />
       </Field>
-      <Field label="委派步数范围" hint="对每次专家委派（Coder、Runner、QualitySampler）生效；勾选 Adaptive 的一侧由 Fusion 按任务规模自动计算，取消勾选可手填（数字会记住）。主代理请求的步数夹在区间内，全局单轮步数上限始终优先；只给秒预算时按有效最大步数；专家可提前交报告。">
+      <Field label="委派步数范围" hint="对每次专家委派生效；勾选 Adaptive 的一侧由 Fusion 按任务规模计算，取消勾选手填（数字会记住）。主代理请求的步数夹在区间内，全局单轮步数上限始终优先；专家可提前交报告。">
         <FusionStepBudget min={s.fusionStepsMin} minAdaptive={s.fusionStepsMinAdaptive} max={s.fusionStepsMax} maxAdaptive={s.fusionStepsMaxAdaptive}
           onSave={(lo, loAd, hi, hiAd) => set("fusionSteps", { min: lo, minAdaptive: loAd, max: hi, maxAdaptive: hiAd })} />
       </Field>

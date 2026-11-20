@@ -37,7 +37,7 @@ class Policy:
     max_calls: int
     max_tokens: int = 0
     max_seconds: int = 900
-    preference: int = 50  # 0 favours cost, 100 favours efficiency
+    preference: int = 50  # 0 favours cost, 100 favours quality
     reasoning: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:

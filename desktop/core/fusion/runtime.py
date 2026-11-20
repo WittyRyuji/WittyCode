@@ -1014,7 +1014,8 @@ class FusionRuntime:
         policy = self.registry.policy
         if self.brief_enabled:
             return (self.identities.main + "\n\nUse the user's weights as a preference when deciding whether to delegate: "
-                    f"cost x{1.5 - policy.preference / 100:.2f}, efficiency x{0.5 + policy.preference / 100:.2f}.")
+                    f"cost x{1.5 - policy.preference / 100:.2f}, quality x{0.5 + policy.preference / 100:.2f} "
+                    "(result quality and verification depth, not speed).")
         return (
             "Fusion mode: you are the fixed main agent. You own task analysis, planning, delegation and final verification. "
             "For implementation work, assess delegation before doing the whole task yourself: use experts for separable "
@@ -1028,11 +1029,12 @@ class FusionRuntime:
             "Declared paths coordinate writers, not a filesystem sandbox. Do not delegate while planning. "
             f"Authorised worker models: {', '.join(policy.workers)}. Lightweight model: {policy.light}. "
             f"User's relative decision weights: cost x{1.5 - policy.preference / 100:.2f}, "
-            f"efficiency x{0.5 + policy.preference / 100:.2f}. "
+            f"quality x{0.5 + policy.preference / 100:.2f}. "
             "Use these as a preference when weighing whether to delegate and choosing between the lightweight model "
-            "and a worker: lower cost weight favours capable workers, higher cost weight favours cheaper models when "
-            "appropriate. Consider difficulty, expected rework and available evidence about cost and speed; the weights "
-            "are not prices, guarantees or hard rules. Decide the number of calls and work needed yourself. "
+            "and a worker: higher quality weight favours capable workers and deeper verification, higher cost weight "
+            "favours cheaper models when appropriate. Consider difficulty, expected rework and available evidence about "
+            "cost and result quality; the weights are not prices, guarantees or hard rules. Decide the number of calls "
+            "and work needed yourself. "
             "Do not assume an expert's claim is proof; inspect the workspace and evidence before reporting success."
         )
 

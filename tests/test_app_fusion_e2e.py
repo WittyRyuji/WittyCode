@@ -60,10 +60,10 @@ def test_configure_and_start_fusion_with_a_local_fake(qapp, loop, tmp_path):
             assert "各模型思考等级" not in await rig.text(".settings-body")
             assert not await rig.exists('input[aria-label="专家调用次数"]')
             assert not await rig.exists('input[aria-label="Token 预算"]')
-            await rig.click('input[aria-label="成本与效率倾向"]')
+            await rig.click('input[aria-label="成本与质量倾向"]')
             await rig.press("End")
             await until(lambda: rig.core.settings.fusion_preference == 100)
-            await rig.wait_text(".fusion-preference-weights", "效率 ×1.50")
+            await rig.wait_text(".fusion-preference-weights", "质量 ×1.50")
             assert rig.window.grab().save(str(tmp_path / "fusion-settings.png"))
             await rig.click('.settings-body button[aria-label="关闭"]')
             await select_fusion(rig)
@@ -113,7 +113,7 @@ def test_configure_and_start_fusion_with_a_local_fake(qapp, loop, tmp_path):
             assert len(rig.plan.requests) == 3 and any(view.record.status == "retired" for view in main.agents.values())
             assert not await rig.exists(".fusion-budget")
             assert (main._fusion.registry.policy.max_calls, main._fusion.registry.policy.max_tokens, main._fusion.registry.policy.preference) == (0, 0, 100)
-            assert "cost x0.50" in rig.plan.requests[0]["instructions"] and "efficiency x1.50" in rig.plan.requests[0]["instructions"]
+            assert "cost x0.50" in rig.plan.requests[0]["instructions"] and "quality x1.50" in rig.plan.requests[0]["instructions"]
             assert len(rig.plan.requests) == 3
             await rig.click(".tab.current .tab-x")
             await rig.wait_text(".srow:not(.open) .stitle", "会话主题摘要")
@@ -332,11 +332,15 @@ def test_the_step_band_saves_as_one_group_in_fusion_settings(qapp, loop, tmp_pat
                     f"document.querySelector({json.dumps(low)}).disabled, document.querySelector({json.dumps(low)}).value," \
                     f"document.querySelector({json.dumps(high)}).disabled, document.querySelector({json.dumps(high)}).value])"
             assert json.loads(await rig.js(state)) == [True, True, True, "16", True, "32"], "both sides adaptive, inputs off, base numbers"
+            adaptive_bg = await rig.js(f"getComputedStyle(document.querySelector({json.dumps(low)})).backgroundColor")
             if evidence := os.environ.get("WITTYCODE_TEST_EVIDENCE"):
                 await rig.js('document.querySelector(".fusion-step-budget").scrollIntoView()')
                 await rig.shot(".settings", Path(evidence) / "fusion-step-budget.png")
             # Unchecking lets the user type; checking again remembers the typed number.
             await rig.click(box)
+            assert json.loads(await rig.js(state))[:3] == [False, True, False], "each side's Adaptive is independent"
+            manual_bg = await rig.js(f"getComputedStyle(document.querySelector({json.dumps(low)})).backgroundColor")
+            assert manual_bg != adaptive_bg, "a manual number box is visibly different from the adaptive grey"
             await rig.click(low)
             await rig.press(Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
             await rig.type("60")
@@ -355,6 +359,18 @@ def test_the_step_band_saves_as_one_group_in_fusion_settings(qapp, loop, tmp_pat
             await rig.click(high)
             await rig.press(Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
             await rig.type("90")
+            # The grid lines both rows up; the save key sits under the number column at the same x, width and height.
+            rect = await rig.js(
+                "JSON.stringify((function(){"
+                f"var n=document.querySelector({json.dumps(low)}),h=document.querySelector({json.dumps(high)}),"
+                f"c=document.querySelector({json.dumps(box)}),k=document.querySelector({json.dumps(hi_box)}),"
+                f"b=document.querySelector({json.dumps(button)});"
+                "var rn=n.getBoundingClientRect(),rh=h.getBoundingClientRect(),rc=c.getBoundingClientRect(),"
+                "rk=k.getBoundingClientRect(),rb=b.getBoundingClientRect();"
+                "return [rn.x,rh.x,rc.x,rk.x,rb.x,rn.width,rb.width,rn.height,rb.height];})())")
+            nx, hx, cx, kx, bx, nw, bw, nh, bh = json.loads(rect)
+            assert abs(nx - hx) <= 1 and abs(cx - kx) <= 1, "the two Adaptive rows line up"
+            assert abs(bx - nx) <= 1 and abs(bw - nw) <= 1 and abs(bh - nh) <= 1, "the save key matches the number box"
             await rig.click(button)
             await until(lambda: rig.core.settings.fusion_steps_min == 60 and not rig.core.settings.fusion_steps_min_adaptive
                         and rig.core.settings.fusion_steps_max == 90 and not rig.core.settings.fusion_steps_max_adaptive)
