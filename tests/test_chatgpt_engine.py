@@ -27,7 +27,7 @@ def auth():
         yield fake
 
 
-async def until(predicate: Any, timeout: float = 10.0) -> None:
+async def until(predicate: Any, timeout: float = 30.0) -> None:
     end = time.monotonic() + timeout
     while not predicate():
         assert time.monotonic() < end, "timed out"

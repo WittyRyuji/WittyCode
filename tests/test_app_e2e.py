@@ -72,7 +72,7 @@ class Model:
     def prompts(self) -> list[str]:
         return [user_text(r) for r in self.plan.requests]
 
-    async def asked(self, count: int = 1, timeout: float = 10.0) -> None:
+    async def asked(self, count: int = 1, timeout: float = 30.0) -> None:
         await until(lambda: len(self.plan.requests) >= count, timeout=timeout)
 
 

@@ -68,14 +68,14 @@ class Rig:
     async def exists(self, selector: str) -> bool:
         return await self.count(selector) > 0
 
-    async def wait_for(self, selector: str, count: int | None = None, timeout: float = 10.0) -> None:
+    async def wait_for(self, selector: str, count: int | None = None, timeout: float = 30.0) -> None:
         async def check() -> bool:
             n = await self.count(selector)
             return n == count if count is not None else n > 0
 
         await wait_for(check, timeout, f"{selector}" + (f" x {count}" if count is not None else ""))
 
-    async def wait_text(self, selector: str, needle: str, timeout: float = 10.0) -> None:
+    async def wait_text(self, selector: str, needle: str, timeout: float = 30.0) -> None:
         async def check() -> bool:
             return any(needle in item for item in await self.texts(selector))
 

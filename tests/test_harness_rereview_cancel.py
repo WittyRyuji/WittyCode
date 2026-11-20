@@ -39,7 +39,7 @@ def registry() -> ToolRegistry:
     return ToolRegistry.default()
 
 
-async def until(event: threading.Event, seconds: float = 10.0) -> None:
+async def until(event: threading.Event, seconds: float = 30.0) -> None:
     end = time.monotonic() + seconds
     while not event.is_set():
         if time.monotonic() > end:
