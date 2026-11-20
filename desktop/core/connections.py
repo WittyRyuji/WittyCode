@@ -654,7 +654,7 @@ class ConnectionStore:
         command = self._mcp_command(entry)
         client = McpClient(command.name, command.command, command.args, command.env, cwd=str(project or Path(entry["source"]).parent))
         try:
-            await client.start(timeout=15)
+            await client.start()
             return {"ok": True, "text": f"连接成功 · {len(client.tools)} 个工具", "tools": [t.name for t in client.tools]}
         except Exception as error:
             causes = []
