@@ -1138,6 +1138,7 @@ function fakeBackend(config) {
     "shell.openExternal": () => null,
     "files.resolve": (p) => ({ path: `D:\\Work\\demo-project\\${String(p.path).replace(/:\d+(-\d+)?$/, "").replace(/\//g, "\\")}`, isDir: false, line: null }),
     "files.read": (p) => {
+      video = null;
       if (/missing/.test(p.path)) throw new Error("找不到这个文件：" + p.path);
       const name = p.path.split("/").pop();
       const media = config.office?.[name] ?? config.pictures?.[name];
