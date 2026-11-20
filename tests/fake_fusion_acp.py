@@ -64,10 +64,21 @@ class GuardedFake(Fake):
         call = {"toolCallId": name + ":0#1", "title": "Private MCP call", "kind": "other", "rawInput": arguments}
         if os.environ.get("FAKE_FUSION_BRIDGE_NOTICE") != "id-only":
             call["_meta"] = {"cognition.ai/inferenceToolName": name}
-        self.update(sid, {"sessionUpdate": "tool_call", **call})
-        answer = await self.ask("session/request_permission", {"sessionId": sid, "toolCall": call, "options": [
-            {"optionId": "always", "kind": "allow_always"}, {"optionId": "once", "kind": "allow_once"},
-        ]})
+        if os.environ.get("FAKE_FUSION_STAGED") == "1":
+            # A pending wrapper call is reported first; a later update completes its input.
+            pending = {"sessionUpdate": "tool_call", "toolCallId": call["toolCallId"], "title": call["title"],
+                       "kind": "other", "status": "pending"}
+            if "_meta" in call:
+                pending["_meta"] = call["_meta"]
+            self.update(sid, pending)
+            self.update(sid, {"sessionUpdate": "tool_call_update", "toolCallId": call["toolCallId"],
+                              "status": "in_progress", "rawInput": arguments})
+        else:
+            self.update(sid, {"sessionUpdate": "tool_call", **call})
+        # The real CLI repeats only the call id and approval meta here, never the raw input.
+        answer = await self.ask("session/request_permission", {"sessionId": sid, "options": [
+            {"optionId": "always", "kind": "allow_always"}, {"optionId": "once", "kind": "allow_once"}],
+            "toolCall": {"toolCallId": call["toolCallId"], "_meta": {"cognition.ai/permissionRule": "MCP"}}})
         assert answer == {"outcome": {"outcome": "selected", "optionId": "once"}}, answer
         assert await self.run_hook(sid, "PreToolUse", tool_name=name, tool_input=arguments) == (0, {})
 
@@ -149,6 +160,10 @@ class GuardedFake(Fake):
             elif action == "slow":
                 await turn["cancel"].wait()
                 stop = "cancelled"
+            elif action == "unresolved":
+                # A pending wrapper call that never completes its input; the turn must not pass unverified.
+                self.update(sid, {"sessionUpdate": "tool_call", "toolCallId": MCP_CALL + ":0#9", "title": "Private MCP call",
+                                  "kind": "other", "status": "pending", "_meta": {"cognition.ai/inferenceToolName": MCP_CALL}})
             if tool:
                 if os.environ.get("FAKE_FUSION_MCP_WRAPPERS") == "1":
                     await self.approve_tool(sid, MCP_LIST, {"server_name": SERVER})

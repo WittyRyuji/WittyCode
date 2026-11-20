@@ -19,20 +19,17 @@ from dataclasses import replace
 from typing import Any
 
 from desktop.core.chatgpt.errors import ChatGPTError
-from desktop.core.devin.items import native_name
+from desktop.core.devin.items import call_status, native_name
 from desktop.core.devin.models import current_value
 from desktop.core.devin.policy import CANCELLED
 from desktop.core.engine_errors import EngineRpcError
-from desktop.core.fusion.acp_server import ADDRESS, AUTH, MCP_CALL, MCP_LIST, MCP_WRAPPERS, PREFIX, SERVER, private_mcp_name
+from desktop.core.fusion.acp_server import (ADDRESS, AUTH, MCP_CALL, MCP_LIST, MCP_WRAPPERS, NATIVE_IO, PREFIX, SERVER,
+                                            private_mcp_name, tool_label)
 from desktop.core.fusion.tools import CHOOSE_MAP, RATE_RECORDS, READ_RECORD, SUBMIT_REPORT, SUBMIT_ROUTE, UPDATE_MAP
 from desktop.core.harness.loop import AgentLoop, Call, TurnEnd
 from desktop.core.memory.launch import PACKAGE_ROOT, console_python
 
 GUARD_SECONDS = 15.0
-NATIVE_IO = ("read", "write", "edit", "multi_edit", "apply_patch", "notebook_read", "notebook_edit", "grep", "glob",
-             "find_file_by_name", "exec", "get_output",
-             "write_to_process", "kill_shell", "webfetch", "fetch", "web_search", "ask_user_question", "todo_write", "exit_plan_mode",
-             "skill", "run_subagent", "read_subagent", "request_scope", "mcp_list_servers", "mcp_read_resource")
 IMPORTS = ("agents_standard", "cursor", "windsurf", "claude", "copilot", "codex", "kiro", "opencode", "zed", "cloud")
 
 
@@ -48,6 +45,11 @@ def guard_config(*, tool_free: bool = False) -> dict[str, Any]:
             "read_config_from": dict.fromkeys(IMPORTS, False),
             "hooks": {event: [{"matcher": "", "hooks": [{"type": "command", "command": command, "timeout": 10}]}]
                       for event in ("SessionStart", "PreToolUse")}}
+
+
+def _ended(update: Any) -> bool:
+    """A terminal tool status: a finished call may neither wait for input nor grant a target."""
+    return update.get("status") == "cancelled" or call_status(update.get("status")) is not None
 
 
 class AcpRun:
@@ -80,6 +82,8 @@ class AcpRun:
         self._cancel: asyncio.Task[Any] | None = None
         self._usage: dict[str, Any] = {}
         self._replies: dict[str, tuple[str, Any]] = {}
+        self._seen: dict[str, tuple[str, str]] = {}  # call id -> (wire name, verified private target), per turn
+        self._pending: dict[str, str] = {}  # call id -> recognized wrapper still missing its input, per turn
 
     async def _http(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         task = asyncio.current_task()
@@ -204,15 +208,35 @@ class AcpRun:
         self.watcher.history_grew([item])
         self._block = self._text = ""
 
-    def _allows_tool(self, name: Any, arguments: Any) -> bool:
-        if self.tool_free or self.tools is None:
-            return False
-        target = private_mcp_name(name, arguments)
-        return target == MCP_LIST or (target.startswith(PREFIX) and self.tools.known(target.removeprefix(PREFIX)))
+    def _allows_target(self, target: str) -> bool:
+        return (not self.tool_free and self.tools is not None
+                and (target == MCP_LIST or (target.startswith(PREFIX) and self.tools.known(target.removeprefix(PREFIX)))))
 
-    def _is_bridge_tool(self, update: Any) -> bool:
-        # Some Devin tool notifications encode the name only in the tool-call ID.
-        return isinstance(update, dict) and self._allows_tool(native_name(update), update.get("rawInput"))
+    def _allows_tool(self, name: Any, arguments: Any) -> bool:
+        return self._allows_target(private_mcp_name(name, arguments))
+
+    def _check_tool_call(self, update: Any, name: str = "") -> None:
+        name = native_name(update) or name
+        raw = update.get("rawInput")
+        call_id = update.get("toolCallId")
+        call_id = call_id if isinstance(call_id, str) and 0 < len(call_id) <= 200 else ""
+        # A fresh report for this id may not inherit an earlier verification or wait.
+        self._seen.pop(call_id, None)
+        self._pending.pop(call_id, None)
+        target = private_mcp_name(name, raw)
+        if self._allows_target(target):
+            if call_id and not _ended(update) and len(self._seen) < 512:
+                self._seen[call_id] = (name, target)  # A finished first report is verified but grants nothing.
+            return
+        if (call_id and name in MCP_WRAPPERS and raw is None and not self.tool_free
+                and not _ended(update) and len(self._pending) < 256):
+            self._pending[call_id] = name  # Only an unfinished recognized wrapper call may wait for a later input.
+            return
+        if target.startswith(PREFIX):
+            self.violation = f"The ACP model called unregistered Fusion tool {tool_label(name)} over the guarded bridge."
+        else:
+            self.violation = f"The ACP model attempted tool {tool_label(name)} outside the guarded bridge."
+        self._stop()
 
     def _notify(self, method: str, params: Any) -> None:
         if not self.active or not isinstance(params, dict) or params.get("sessionId") != self.session:
@@ -241,9 +265,35 @@ class AcpRun:
                 self.watcher.text_delta(self._item, text)
             else:
                 self.watcher.thinking_delta(self._item, text)
-        elif kind == "tool_call" and not self._is_bridge_tool(update):
-            self.violation = "The ACP model attempted a native tool or an unknown tool outside the guarded bridge."
-            self._stop()
+        elif kind == "tool_call":
+            call_id = update.get("toolCallId")
+            pending = self._pending.get(call_id) if isinstance(call_id, str) else None
+            self._check_tool_call(update, name=pending or "")
+        elif kind == "tool_call_update":
+            call_id = update.get("toolCallId")
+            if isinstance(call_id, str):
+                raw = update.get("rawInput")
+                if call_id in self._pending:
+                    name = self._pending[call_id]
+                    named = native_name(update) or name
+                    if isinstance(raw, dict):
+                        self._check_tool_call(update, name=name)
+                    elif named != name or raw is not None or update.get("status") == "completed":
+                        # A waiting call may only complete its input; a contradictory or unverifiable end is refused.
+                        self._pending.pop(call_id, None)
+                        self.violation = f"The ACP model ended unverified tool call {tool_label(name)} with a contradictory update."
+                        self._stop()
+                elif call_id in self._seen:
+                    wire, target = self._seen[call_id]
+                    named = native_name(update) or wire
+                    if named != wire or (raw is not None and (not isinstance(raw, dict) or private_mcp_name(named, raw) != target)):
+                        # A verified call may neither re-identify nor change its input afterwards.
+                        self._seen.pop(call_id, None)
+                        self.violation = f"The ACP model reported a contradictory update for tool {tool_label(wire)}."
+                        self._stop()
+                if _ended(update):
+                    self._seen.pop(call_id, None)
+                    self._pending.pop(call_id, None)
         elif kind == "usage_update":
             from desktop.core.context import ContextState
             used, size = update.get("used"), update.get("size")
@@ -251,10 +301,28 @@ class AcpRun:
                 self.host.context = ContextState(used=used, window=size, model=self.host.model)
                 self.host._notify("context")
 
+    def _permission_target(self, call: Any) -> bool:
+        # Devin permission requests repeat only the call id and approval meta, never the raw input; the earlier
+        # tool_call update already carried the verified target. Meta text is never a substitute for it.
+        if not isinstance(call, dict):
+            return False
+        call_id = call.get("toolCallId")
+        call_id = call_id if isinstance(call_id, str) and 0 < len(call_id) <= 200 else ""
+        self._pending.pop(call_id, None)  # A permission answer settles the call, allowed or denied.
+        recorded = self._seen.pop(call_id, None) if call_id else None
+        named = native_name(call)
+        if "rawInput" not in call:
+            # A sparse request spends the record once; an asserted name must be the same verified identity.
+            return (recorded is not None and (not named or named == recorded[0])
+                    and self._allows_target(recorded[1]))
+        # An explicit input is judged on its own and must match this call's verified (name, target), never the cache.
+        target = private_mcp_name(named, call.get("rawInput"))
+        return self._allows_target(target) and (recorded is None or (named, target) == recorded)
+
     async def _request(self, method: str, params: Any, request_id: Any) -> Any:
         if (method == "session/request_permission" and self.active and not self.violation and not self.boundary
                 and isinstance(params, dict) and params.get("sessionId") == self.session
-                and self._is_bridge_tool(params.get("toolCall"))):
+                and self._permission_target(params.get("toolCall"))):
             once = next((option.get("optionId") for option in params.get("options", []) if option.get("kind") == "allow_once"), None)
             if once is not None:
                 return {"outcome": {"outcome": "selected", "optionId": once}}
@@ -365,6 +433,8 @@ class AcpRun:
         self.steps, self.boundary, self.violation = steps_used, "", ""
         self.reported = False
         self._usage.clear()
+        self._seen.clear()
+        self._pending.clear()
         requested = False
         fusion = self.host._fusion or getattr(self.host._fusion_parent, "_fusion", None)
         if fusion is not None and fusion.registry.policy.max_tokens:
@@ -426,6 +496,9 @@ class AcpRun:
             requested = True
             result = await self.client.request("session/prompt", {"sessionId": self.session, "prompt": prompt_blocks(prompt, attachments)}, timeout=None)
             self._flush()
+            if not self.violation and self._pending:
+                pending = ", ".join(sorted({tool_label(name) for name in self._pending.values()}))
+                self.violation = f"The ACP turn ended with unverified tool calls ({pending})."
             if self.violation:
                 raise ChatGPTError(self.violation, code="fusion_acp_guard")
             if result.get("stopReason") not in ("end_turn", "cancelled"):

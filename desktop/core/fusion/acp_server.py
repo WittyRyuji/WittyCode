@@ -18,6 +18,10 @@ PREFIX = "mcp__" + SERVER + "__"
 MCP_LIST = "mcp_list_tools"
 MCP_CALL = "mcp_call_tool"
 MCP_WRAPPERS = (MCP_LIST, MCP_CALL)
+NATIVE_IO = ("read", "write", "edit", "multi_edit", "apply_patch", "notebook_read", "notebook_edit", "grep", "glob",
+             "find_file_by_name", "exec", "get_output",
+             "write_to_process", "kill_shell", "webfetch", "fetch", "web_search", "ask_user_question", "todo_write", "exit_plan_mode",
+             "skill", "run_subagent", "read_subagent", "request_scope", "mcp_list_servers", "mcp_read_resource")
 
 
 def private_mcp_name(name: Any, arguments: Any) -> str:
@@ -35,6 +39,16 @@ def private_mcp_name(name: Any, arguments: Any) -> str:
         if isinstance(tool, str) and isinstance(arguments["arguments"], dict):
             return PREFIX + tool
     return ""
+
+
+def tool_label(name: Any) -> str:
+    """A refusal-safe label: only known native tools and the bridge wrappers are named; the rest is a fixed class."""
+    if isinstance(name, str):
+        if name in NATIVE_IO or name in MCP_WRAPPERS:
+            return name
+        if name.startswith(PREFIX):
+            return "a private bridge tool"
+    return "an unrecognized tool"
 
 
 def request(method: str, params: Any = None) -> Any:
@@ -56,11 +70,12 @@ def hook(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
     if event == "SessionStart":
         request("guard", {"event": event})
         return {}, 0
+    name, arguments = payload.get("tool_name"), payload.get("tool_input")
     if event == "PreToolUse":
-        name, arguments = payload.get("tool_name"), payload.get("tool_input")
         if private_mcp_name(name, arguments) and request("guard", {"event": event, "name": name, "input": arguments}).get("allowed") is True:
             return {}, 0  # Execution and user approval still happen in the host's MCP bridge.
-    return {"decision": "block", "reason": "Fusion tools must run through WittyCode's permission bridge."}, 2
+    reason = f"Fusion refused tool {tool_label(name)}; tools must run through WittyCode's permission bridge."
+    return {"decision": "block", "reason": reason}, 2
 
 
 def main() -> int:

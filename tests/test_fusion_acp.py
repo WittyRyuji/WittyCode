@@ -10,7 +10,7 @@ import pytest
 
 from desktop.core.devin.policy import CANCELLED
 from desktop.core.fusion.acp import AcpRun, guard_config
-from desktop.core.fusion.acp_server import MCP_CALL, MCP_LIST, PREFIX, SERVER, hook
+from desktop.core.fusion.acp_server import MCP_CALL, MCP_LIST, MCP_WRAPPERS, PREFIX, SERVER, hook
 from desktop.core.fusion.registry import Policy
 from tests.app_support import ready_core
 from tests.chatgpt_support import finish_turn
@@ -57,7 +57,13 @@ def test_acp_wrappers_require_an_exact_private_target_at_every_check(monkeypatch
     payload = {"hook_event_name": "PreToolUse", "tool_name": name, "tool_input": arguments}
     assert hook(payload)[1] == (0 if allowed else 2)
     run._notify("session/update", {"sessionId": run.session, "update": {"sessionUpdate": "tool_call", **call}})
-    assert bool(run.violation) is not allowed
+    deferred = not allowed and name in MCP_WRAPPERS and not isinstance(arguments, dict)
+    assert bool(run.violation) is (not allowed and not deferred)
+    if deferred:  # A recognized wrapper may still complete its input on a later update.
+        assert run._pending[call["toolCallId"]] == name
+        run._notify("session/update", {"sessionId": run.session, "update": {
+            "sessionUpdate": "tool_call_update", "toolCallId": call["toolCallId"], "rawInput": {"server_name": "other"}}})
+        assert "mcp_list_tools" in run.violation and "other" not in run.violation
     run.active = False
     assert hook(payload)[1] == 2
     run.active, run.tool_free = True, True
@@ -167,6 +173,52 @@ def test_truncated_acp_tool_list_can_use_the_private_index(tmp_path):
             assert turn.status == "done", turn.error
             outputs = [item["output"] for item in main.saved.items if item.get("type") == "function_call_output"]
             assert any("INDEX_RECOVERY_EVIDENCE" in result for result in outputs)
+        finally:
+            await core.shutdown()
+    asyncio.run(go())
+
+
+def test_pending_acp_wrapper_call_is_approved_once_its_input_arrives(tmp_path):
+    from tests.fusion_acp_support import make_guarded_engine
+
+    async def go():
+        harness = make_guarded_engine(tmp_path, FAKE_FUSION_MCP_WRAPPERS="1", FAKE_FUSION_STAGED="1")
+        core, _, _, _, _ = await ready_core(tmp_path, devin_engine=harness.engine)
+        try:
+            await until(lambda: any(item["source"] == "devin" for item in core.catalog.models), timeout=20)
+            core.settings.fusion_main = core.settings.fusion_light = "devin:swe-2-high"
+            core.settings.fusion_workers = ["devin:swe-2-high"]
+            project = tmp_path / "proj"
+            (project / "evidence.txt").write_text("STAGED_EVIDENCE", encoding="utf-8")
+            cid = (await core.call("session.new", {"projectId": str(project), "fusion": True}))["id"]
+            main = core._by_cid[cid].controller
+            assert main.send_prompt("[fusion-read] Read the project note.")
+            await finish_turn(main, timeout=30)
+            turn = main.saved.turns[-1]
+            assert turn.status == "done", turn.error
+            outputs = [item["output"] for item in main.saved.items if item.get("type") == "function_call_output"]
+            assert any("STAGED_EVIDENCE" in result for result in outputs)
+        finally:
+            await core.shutdown()
+    asyncio.run(go())
+
+
+def test_acp_turn_fails_when_a_wrapper_call_is_never_completed(tmp_path):
+    from tests.fusion_acp_support import make_guarded_engine
+
+    async def go():
+        harness = make_guarded_engine(tmp_path)
+        core, _, _, _, _ = await ready_core(tmp_path, devin_engine=harness.engine)
+        try:
+            await until(lambda: any(item["source"] == "devin" for item in core.catalog.models), timeout=20)
+            core.settings.fusion_main = core.settings.fusion_light = "devin:swe-2-high"
+            core.settings.fusion_workers = ["devin:swe-2-high"]
+            cid = (await core.call("session.new", {"projectId": str(tmp_path / "proj"), "fusion": True}))["id"]
+            main = core._by_cid[cid].controller
+            assert main.send_prompt("[fusion-unresolved] Stall")
+            await finish_turn(main, timeout=30)
+            turn = main.saved.turns[-1]
+            assert turn.status == "failed" and "unverified tool calls" in turn.error
         finally:
             await core.shutdown()
     asyncio.run(go())

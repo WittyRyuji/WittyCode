@@ -671,8 +671,9 @@ class AppCore:
                 continue
             rows.append((saved.id, saved.modified.timestamp(), saved.id))
         for conv in open_here:
-            if conv.in_history and conv.sidebar_key not in self.settings.archived_sessions:
-                rows.append((conv.sidebar_key, conv.sidebar_active_at, conv.cid))
+            # A titled first draft already has its row: the first dispatch decides whether it stays or goes again.
+            if (conv.in_history or conv.draft_title) and conv.sidebar_key not in self.settings.archived_sessions:
+                rows.append((conv.sidebar_key or self._row_of(conv) or conv.cid, conv.sidebar_active_at, conv.cid))
         pins = {key: i for i, key in enumerate(self._project_pins(folder))}
         ranks = {key: i for i, key in enumerate(self.settings.session_order)}
 
@@ -2337,6 +2338,7 @@ class AppCore:
             if conv.engine == OWN_ENGINE and conv.controller.saved.title == conv.draft_title:
                 conv.controller.saved.title = ""
             conv.draft_title = ""
+            self._schedule_sidebar(conv.project)  # its row leaves again with the title it only borrowed
 
     def _needs_first_title(self, conv: Conversation) -> bool:
         # Factory's title is provided by the native conversation, never by another account.
@@ -2382,6 +2384,7 @@ class AppCore:
                     if own:
                         controller.saved.title = title  # Carry it in the first dispatch checkpoint, not in a draft archive.
                     self._flush(conv)  # Publish the title before dispatching the first main prompt.
+                    self._emit_sidebar()  # The named draft is a sidebar row at once, not after the reply.
                     return
                 if attempt == session_title.FIRST_RETRIES:
                     raise AppError(f"自动命名重试 {session_title.FIRST_RETRIES} 次后仍未成功，首条消息没有发出。{reason}")
