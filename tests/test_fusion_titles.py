@@ -9,7 +9,7 @@ import pytest
 
 from desktop.core.fusion.registry import FusionRegistry, Policy
 from desktop.core.fusion.title import ATTEMPT
-from desktop.core.session_title import SYSTEM, prompt as title_prompt
+from desktop.core.session_title import FIRST_SYSTEM, SYSTEM, prompt as title_prompt
 from desktop.core.transcript import TurnStatus
 from desktop.core.usage import Tokens
 from tests.app_support import MODEL, OTHER_MODEL, ready_core, save_conversation
@@ -34,7 +34,7 @@ async def reopen(core, events, project, cid, row):
     return opened["id"]
 
 
-def test_main_title_is_behind_the_main_budget_and_ahead_of_queued_work(tmp_path):
+def test_main_title_precedes_main_and_uses_the_fusion_budget(tmp_path):
     async def scenario():
         core, plan, events, _, engine = await ready_core(tmp_path)
         try:
@@ -47,17 +47,17 @@ def test_main_title_is_behind_the_main_budget_and_ahead_of_queued_work(tmp_path)
             plan.script([("hold", "main"), *say("主营结果", used=usage(400, 30))], say("后续结果", used=usage(600, 20)))
             plan.fake.title_turn = [("hold", "title"), *say("库存导入去重", used=usage(40, 5))]
             question = "我发现一个错误。\n批量导入库存时重复条目不该计数两次。"
-            await core.call("session.send", {"id": cid, "text": question})
-            await until(lambda: len(plan.requests) == 1)
-            assert not plan.fake.title_requests
-            assert (await core.call("session.send", {"id": cid, "text": "再看事务", "how": "queue"}))["queued"]
-            plan.release("main")
+            send = asyncio.create_task(core.call("session.send", {"id": cid, "text": question}))
             await until(lambda: len(plan.fake.title_requests) == 1)
-            assert len(plan.requests) == 1 and ctl.transcript.turns[-1].status is TurnStatus.DONE
+            assert not plan.requests and not ctl.transcript.turns
             request = plan.fake.title_requests[0]
             assert request["model"] == "gpt-6.1-sol" and request["store"] is False and not request.get("tools")
             assert "重复条目" in str(request["input"]) and "再看事务" not in str(request["input"])
             plan.release("title")
+            assert (await send)["ok"] and ctl._fusion.known_tokens() == 45
+            await until(lambda: len(plan.requests) == 1)
+            assert (await core.call("session.send", {"id": cid, "text": "再看事务", "how": "queue"}))["queued"]
+            plan.release("main")
             await until(lambda: len(plan.requests) == 2)
             await idle(core, cid)
             assert ctl._fusion.known_tokens() == 1095
@@ -93,6 +93,9 @@ def test_optional_title_respects_names_and_budget_without_failing_the_main_turn(
             cid = await new_session(core, events, project, fusion=True)
             conv = core._by_cid[cid]
             ctl, row = conv.controller, core._row_of(conv)
+            plan.script(say("Already discussed.", used=usage(0, 0)))
+            assert ctl.send_prompt("Previous question without a title.")  # Legacy archive.
+            await idle(core, cid)
             ctl._fusion.update_budget(1, 200_000, accept_unknown=False)
             main = say("Main task completed", used=usage(199_000 if outcome == "insufficient" else 400, 30))
             if outcome == "unknown":
@@ -112,7 +115,7 @@ def test_optional_title_respects_names_and_budget_without_failing_the_main_turn(
                 plan.release("title")
             await idle(core, cid)
             saved = engine.sessions.load(ctl.session_id)
-            assert saved.turns[-1].status == "done" and len(ctl.transcript.turns) == 1
+            assert saved.turns[-1].status == "done" and len(ctl.transcript.turns) == 2
             attempted = outcome in ("manual", "invalid", "missing usage")
             assert len(plan.fake.title_requests) == int(attempted)
             assert (ATTEMPT in saved.origin) == attempted and not saved.title
@@ -139,6 +142,9 @@ def test_slow_title_does_not_block_a_second_turn_or_overwrite_a_later_choice(tmp
             cid = await new_session(core, events, tmp_path / "proj", fusion=True)
             conv = core._by_cid[cid]
             ctl = conv.controller
+            plan.script(say("Previous answer."))
+            assert ctl.send_prompt("Previous question without a title.")  # Legacy archive.
+            await idle(core, cid)
             plan.fake.title_turn = [("hold", "title"), *say("库存导入")]
             await talk(core, plan, cid, "检查库存导入")
             await until(lambda: bool(plan.fake.title_requests))
@@ -239,19 +245,16 @@ def test_guarded_devin_main_titles_with_the_same_native_model(tmp_path):
             cid = await new_session(core, events, tmp_path / "proj", fusion=True)
             conv = core._by_cid[cid]
             ctl = conv.controller
-            await core.call("session.send", {"id": cid, "text": "[fusion-refuse] 不应对此命名"})
-            await idle(core, cid)
-            assert not conv.in_history and engine.sessions.load(ctl.session_id) is None
-            assert not ctl.fusion_title_attempted
             await core.call("session.send", {"id": cid, "text": "请检查库存重复行和事务"})
-            await until(lambda: sessions_of(events)[cid].get("title") == "库存事务与去重", timeout=10)
-            assert ctl.busy and ctl._acp.active and ctl.history_ready and conv.in_history
+            assert core._title_of(conv) == "库存事务与去重"
+            await until(lambda: ctl.history_ready and conv.in_history, timeout=10)
+            assert ctl.busy and ctl._acp.active and sessions_of(events)[cid].get("title") == "库存事务与去重"
             assert engine.sessions.load(ctl.session_id).title == "库存事务与去重"
             release.touch()
             await idle(core, cid)
             saved = engine.sessions.load(ctl.session_id)
             assert saved.title == "库存事务与去重" and len(saved.turns) == 1
-            assert [turn.status for turn in ctl.transcript.turns] == [TurnStatus.FAILED, TurnStatus.DONE]
+            assert [turn.status for turn in ctl.transcript.turns] == [TurnStatus.DONE]
             assert saved.turns[0].status == "done" and "ACP report." in str(saved.items)
             assert saved.title not in str(saved.items) and "[fusion-refuse]" not in str(saved.items)
             assert not plan.requests and not plan.fake.title_requests
@@ -261,12 +264,10 @@ def test_guarded_devin_main_titles_with_the_same_native_model(tmp_path):
             assert len(logs) == 2
             (name_log,) = [log for key, log in logs.items() if key.startswith("summary-")]
             for log in logs.values():
-                # The main selects its model on both attempts; the isolated title session only runs once.
-                count = 1 if log is name_log else 2
                 assert [r["params"]["value"] for r in log if r.get("method") == "session/set_config_option"
-                        and r["params"]["configId"] == "model"] == ["swe-2-high"] * count
+                        and r["params"]["configId"] == "model"] == ["swe-2-high"]
             (prompt,) = [r["params"]["prompt"] for r in name_log if r.get("method") == "session/prompt"]
-            assert len(prompt) == 1 and prompt[0]["text"].startswith(SYSTEM)
+            assert len(prompt) == 1 and prompt[0]["text"].startswith(FIRST_SYSTEM)
             assert "请检查库存重复行和事务" in prompt[0]["text"] and "ACP report." not in prompt[0]["text"]
             assert any(r.get("method") == "session/close" for r in name_log)
         finally:
@@ -298,13 +299,14 @@ def test_api_fusion_main_uses_its_provider_without_a_plan_account(tmp_path):
                 main = event_stream()
                 main.pieces = main_chunks()
                 api.script(main)
-                api.title_turn = says("Inventory import validation")
+                api.title_turn = says("Stock QC")
                 cid = await new_session(core, events, tmp_path / "proj", fusion=True)
                 ctl = core._by_cid[cid].controller
                 await core.call("session.send", {"id": cid, "text": "Check duplicate inventory imports"})
-                await until(lambda: ctl.saved.title == "Inventory import validation")
+                assert ctl.saved.title == "Stock QC"
+                await until(lambda: ctl.history_ready)
                 assert ctl.busy and ctl.history_ready and len(ctl.saved.turns) == 1
-                assert engine.sessions.load(ctl.session_id).title == "Inventory import validation"
+                assert engine.sessions.load(ctl.session_id).title == "Stock QC"
                 release.set()
                 await idle(core, cid)
                 (title,) = api.title_posts
@@ -331,9 +333,13 @@ def test_api_title_failure_only_locks_a_finite_budget_if_it_could_have_spent_tok
                 configure(core, model, model)
                 cid = await new_session(core, events, tmp_path / "proj", fusion=True)
                 ctl = core._by_cid[cid].controller
+                api.script(says("Prior answer.", used=(0, 0)))
+                assert ctl.send_prompt("Previous question without a title.")  # Legacy archive.
+                await idle(core, cid)
+                api.posts.clear()
                 ctl._fusion.update_budget(1, 200_000, accept_unknown=False)
                 api.script(says("First main answer."), says("Second main answer."))
-                # The fake's default empty title stream records the POST but reports no usage or start event.
+                api.title_turn = []  # Records the POST but reports no usage or start event.
                 key = store.api_key
                 key_lookups = 0
 
@@ -351,8 +357,8 @@ def test_api_title_failure_only_locks_a_finite_budget_if_it_could_have_spent_tok
                 assert (await core.call("session.send", {"id": cid, "text": "Check inventory imports"}))["ok"]
                 await idle(core, cid)
                 saved = engine.sessions.load(ctl.session_id)
-                assert saved.turns[0].status == "done" and "First main answer." in str(saved.items)
-                assert not saved.title and len(saved.turns) == len(ctl.transcript.turns) == 1
+                assert saved.turns[-1].status == "done" and "First main answer." in str(saved.items)
+                assert not saved.title and len(saved.turns) == len(ctl.transcript.turns) == 2
                 assert key_lookups == 2 and len(api.posts) == 1 and len(api.title_posts) == int(sent)
                 assert saved.fusion["unmetered"] == sent
                 assert len([entry for entry in saved.requests if entry.get("kind") == "title"]) == int(sent)

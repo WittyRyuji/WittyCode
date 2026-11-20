@@ -11,7 +11,7 @@ from collections.abc import AsyncIterator, Iterable, Mapping
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-from tests.fake_responses import http_error
+from tests.fake_responses import http_error, say, usage
 
 __all__ = ["FakeApi", "collect", "event_frame", "event_stream", "http_error", "kinds", "lines_of"]
 
@@ -56,7 +56,7 @@ class FakeApi:
     def __init__(self) -> None:
         self.posts: list[tuple[str, dict[str, str], dict[str, Any]]] = []
         self.title_posts: list[tuple[str, dict[str, str], dict[str, Any]]] = []
-        self.title_turn: list[Any] = []
+        self.title_turn: list[Any] | None = None
         self._turns: list[Any] = []
         self._lock = threading.Lock()
         self._server: ThreadingHTTPServer | None = None
@@ -82,16 +82,22 @@ class FakeApi:
             def do_POST(self) -> None:
                 length = int(self.headers.get("Content-Length") or 0)
                 body = json.loads(self.rfile.read(length) or b"{}")
-                from desktop.core.session_title import SYSTEM as TITLE_SYSTEM
+                from desktop.core.session_title import FIRST_SYSTEM, SYSTEM
 
                 system = body.get("instructions") or body.get("system") or next((m.get("content") for m in body.get("messages", []) if m.get("role") == "system"), "")
                 if isinstance(system, list):
                     system = "\n".join(part.get("text", "") for part in system)
                 with fake._lock:
                     post = (self.path, {key.lower(): value for key, value in self.headers.items()}, body)
-                    if system == TITLE_SYSTEM:
+                    if system in (FIRST_SYSTEM, SYSTEM):
                         fake.title_posts.append(post)
-                        turn = fake.title_turn
+                        if fake.title_turn is not None:
+                            turn = fake.title_turn
+                        elif self.path.endswith("/responses"):
+                            turn = say("Demo title", used=usage(0, 0))
+                        else:
+                            turn = [{"id": "title", "choices": [{"index": 0, "delta": {"content": "Demo title"}, "finish_reason": "stop"}]},
+                                    {"id": "title", "choices": [], "usage": {"prompt_tokens": 0, "completion_tokens": 0}}, "[DONE]"]
                     else:
                         fake.posts.append(post)
                         turn = fake._turns.pop(0) if fake._turns else []

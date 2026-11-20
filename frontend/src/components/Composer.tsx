@@ -226,7 +226,7 @@ export function Composer() {
     : dead
       ? "连接已断开，重新连接后才能继续。"
       : session.preparing
-        ? "正在交接，可先写下一条…"
+        ? "正在准备发送，可先写下一条…"
         : running
           ? runningPlaceholder(followUp)
           : READY_PLACEHOLDER;

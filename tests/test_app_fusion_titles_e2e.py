@@ -1,4 +1,4 @@
-"""Automatic titles appear in the real page before the first turn ends."""
+"""The page waits for a title before dispatching the first turn."""
 from __future__ import annotations
 
 import pytest
@@ -15,7 +15,7 @@ pytestmark = pytest.mark.ui
 
 @pytest.mark.parametrize("entry", ["project-new", "empty-tab"])
 @pytest.mark.parametrize("mode", ["plan", "fusion"])
-def test_new_session_titles_while_the_first_turn_still_streams(qapp, loop, tmp_path, entry, mode):
+def test_new_session_titles_before_the_first_turn(qapp, loop, tmp_path, entry, mode):
     async def scenario():
         rig = await open_rig(tmp_path)
         try:
@@ -38,10 +38,16 @@ def test_new_session_titles_while_the_first_turn_still_streams(qapp, loop, tmp_p
 
             main = say("正在核对入库记录。")
             rig.plan.script([*main[:-1], ("hold", "main"), main[-1]])
-            rig.plan.fake.title_answer = "库存导入去重"
+            rig.plan.fake.title_turn = [("hold", "title"), *say("库存导入去重")]
             await rig.send("导入库存时重复条目不应计数两次")
+            await rig.wait_text(".statusbar", "正在生成会话名称…")
+            await until(lambda: bool(rig.plan.fake.title_requests))
+            conv = rig.core.order[-1]
+            assert not rig.plan.requests and not conv.controller.transcript.turns
+            await rig.wait_text(".tab.current .tab-title", "新会话")
+            rig.plan.release("title")
             await rig.wait_text(".transcript", "正在核对入库记录。")
-            ctl = rig.core.order[-1].controller
+            ctl = conv.controller
             assert ctl.state is SessionState.RUNNING
             try:
                 await rig.wait_text(".tab.current .tab-title", "库存导入去重", timeout=4)
@@ -67,7 +73,36 @@ def test_new_session_titles_while_the_first_turn_still_streams(qapp, loop, tmp_p
             await rig.wait_text(".tab.current .tab-title", "库存导入去重")
             assert len(rig.plan.fake.title_requests) == 1
         finally:
+            rig.plan.release("title")
             rig.plan.release("main")
+            await rig.finish()
+
+    run(loop, scenario())
+
+
+def test_invalid_first_title_restores_draft_after_three_retries(qapp, loop, tmp_path):
+    async def scenario():
+        rig = await open_rig(tmp_path)
+        try:
+            await rig.core.call("session.new", {"projectId": str(rig.project)})
+            await rig.wait_text(".tab.current .tab-title", "新会话")
+            rig.plan.fake.title_answer = "不是\n单行标题"
+            question = "检查库存接口"
+            await rig.send(question)
+            await until(lambda: len(rig.plan.fake.title_requests) == 4)
+            await rig.wait_for(".preparing-turn", 0)
+            await until(lambda: not rig.core.order[-1].naming)
+            assert await rig.js("document.querySelector('.input').value") == question
+            assert not rig.plan.requests
+            await rig.wait_text(".tab.current .tab-title", "新会话")
+            rig.plan.fake.title_answer = "库存接口检查"
+            rig.plan.script(say("已检查库存接口。"))
+            await rig.focus_composer()
+            await rig.press("Enter")
+            await rig.wait_text(".srow.open .stitle", "库存接口检查")
+            await rig.wait_text(".transcript", "已检查库存接口。")
+            assert len(rig.plan.requests) == 1 and len(rig.plan.fake.title_requests) == 5
+        finally:
             await rig.finish()
 
     run(loop, scenario())

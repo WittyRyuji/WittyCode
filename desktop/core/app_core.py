@@ -229,6 +229,7 @@ class QueuedMessage:
     id: str
     text: str
     attachments: tuple[Attachment, ...] = ()
+    raw_text: str | None = None
 
 
 @dataclass(eq=False)
@@ -244,9 +245,8 @@ class Conversation:
     in_history: bool = False
     """An existing conversation or one with a retained first dispatch. Draft tabs are not project rows."""
     unsent_turns: set[str] = field(default_factory=set)
-    title_started: bool = False
-    title_candidate: tuple[Turn, str] | None = None
-    title_task: asyncio.Future[Any] | None = None
+    draft_title: str = ""
+    naming: bool = False
     sent_ids: list[str] = field(default_factory=list)
     sent_versions: dict[str, int] = field(default_factory=dict)
     meta: dict[str, Any] = field(default_factory=dict)
@@ -701,6 +701,9 @@ class AppCore:
             return
         conv.in_history = True
         self._sync_sidebar_key(conv)
+        if conv.draft_title:
+            self._remember_auto_title(conv, conv.sidebar_key, conv.draft_title)
+            conv.draft_title = ""
         self._promote_session(conv)
         self._schedule_sidebar(conv.project, reload=True)
 
@@ -1285,6 +1288,7 @@ class AppCore:
                 self._admit_history(conv)
             elif turn is not None and turn.status in (TurnStatus.FAILED, TurnStatus.INTERRUPTED):
                 conv.unsent_turns.add(turn.id)
+                self._discard_draft_title(conv)
         self._sync_sidebar_key(conv)
         if conv.history and not conv.switching and controller.state in (SessionState.READY, SessionState.RUNNING) and getattr(controller, "_history_loaded", True):
             prefix = conv.history["turns"]
@@ -1306,7 +1310,6 @@ class AppCore:
             self._schedule_sidebar(conv.project)
         if kind == "steer":
             self._return_steers(conv)
-        self._settle_title(conv)
         if controller.state is SessionState.RUNNING:
             conv.ran = True
         elif conv.queue or conv.ran:
@@ -1581,7 +1584,8 @@ class AppCore:
     def _title_of(self, conv: Conversation) -> str:
         """The name the user gave the conversation here, else the engine's title."""
         row = self._resolve_row(self._row_of(conv))
-        return self.settings.session_titles.get(row) or self.settings.session_auto_titles.get(row) or conv.controller.title
+        return (self.settings.session_titles.get(row) or conv.draft_title
+                or self.settings.session_auto_titles.get(row) or conv.controller.title)
 
     @staticmethod
     def _cache_fits(live: Mapping[str, Any], cached: Mapping[str, Any]) -> bool:
@@ -1636,7 +1640,7 @@ class AppCore:
             "projectId": conv.project,
             "title": self._title_of(conv),
             "mark": self._mark(conv),
-            "workingLabel": "正在压缩并切换模型…" if conv.switch_task is not None else ("本地缓存 · " if conv.preview else "") + controller.working_label,
+            "workingLabel": ("正在生成会话名称…" if conv.naming else "正在压缩并切换模型…") if conv.switch_task is not None else ("本地缓存 · " if conv.preview else "") + controller.working_label,
             "modified": format_relative(active),
             "modifiedAt": int(controller.active_at * 1000),
             "engine": conv.engine,
@@ -2110,9 +2114,9 @@ class AppCore:
         title = params.get("title")
         if not isinstance(title, str):
             raise AppError("名字不合法。")
+        name = " ".join(title.split())[:MAX_SESSION_TITLE]
         if conv is not None and not self._has_content(conv, row):
             raise AppError("这个会话还没有内容，发出第一条消息之后才能改名。")
-        name = " ".join(title.split())[:MAX_SESSION_TITLE]
         if name:
             self.settings.session_titles[row] = name
         else:  # (an empty name gives the engine's own title back)
@@ -2174,7 +2178,7 @@ class AppCore:
         controller = conv.controller
         if not text:
             return {"ok": False, "text": "用法：/goal 目标，例如 /goal 让所有测试通过。"}
-        if controller.state is not SessionState.READY:
+        if controller.state is not SessionState.READY or conv.switch_task is not None:
             return {"ok": False, "text": "会话还没就绪，或这一轮还在运行：结束后再设目标。"}
         if conv.queue:
             return {"ok": False, "text": "还有排队的消息没有发出：它们发完后再设目标。"}
@@ -2187,6 +2191,21 @@ class AppCore:
         if resuming and goal.rounds >= goals.ROUNDS:
             return {"ok": False, "text": "已保存目标已用完轮数：检查结果后，用 /goal 目标 明确开始新一批。"}
         await self._refresh_fusion_settings(conv)
+        controller = conv.controller
+        if self._needs_first_title(conv):
+            conv.switch_task = asyncio.current_task()
+            try:
+                await self._prepare_first_title(conv, goal.text)
+            except AppError as error:
+                return {"ok": False, "text": str(error)}
+            except asyncio.CancelledError:
+                if self._shutting_down:
+                    raise
+                return {"ok": False, "text": "命名已停止，目标没有启动。"}
+            finally:
+                conv.switch_task = None
+                conv.dirty = True
+                self._schedule_flush()
         previous = dict(getattr(getattr(controller, "saved", None), "goal", {}))
         if not self._checkpoint_goal(conv, goal):
             controller.saved.goal = previous
@@ -2291,64 +2310,76 @@ class AppCore:
     # ------------------------------------------------------------------ messages
 
     def _start_title(self, conv: Conversation, question: str) -> None:
+        """Only existing, unnamed Fusion sessions use the optional legacy path."""
         controller = conv.controller
-        if getattr(controller, "_fusion", None) is not None:
-            row = self._row_of(conv)
-
-            def unnamed() -> bool:
-                return (not self._shutting_down and self._by_cid.get(conv.cid) is conv and conv.controller is controller
-                        and row not in self.settings.session_titles and row not in self.settings.session_auto_titles
-                        and controller.title in ("", "新会话", "（无标题）"))
-
-            if unnamed() and question.strip() and not controller.fusion_title_attempted:
-                # Only name from this send: old text may belong to another model or account, even in the same tab.
-                controller.prepare_fusion_title(question, unnamed)
+        if not conv.in_history or getattr(controller, "_fusion", None) is None:
             return
-        turns = controller.transcript.turns
-        if not conv.title_started and turns and not any(t.user_block is not None and t.id not in conv.unsent_turns for t in turns[:-1]):
-            conv.title_candidate = (turns[-1], question)
-
-    def _settle_title(self, conv: Conversation) -> None:
-        candidate = conv.title_candidate
-        if candidate is None:
-            return
-        turn, question = candidate
-        # A retained dispatch alone may still have failed. Start alongside the first model output,
-        # or at successful completion if there was no output event to start from.
-        if turn.running and not (conv.in_history and any(b.kind in ("text", "thinking", "tool") for b in turn.blocks)):
-            return
-        conv.title_candidate = None
-        if not conv.in_history or not (turn.running or turn.status is TurnStatus.DONE):
-            return
-        conv.title_started = True
         row = self._row_of(conv)
-        if row in self.settings.session_auto_titles or row in self.settings.session_titles:
-            return
-        # Factory generates a title natively (session_title_updated); never send its question to another account.
-        if conv.engine == "factory":
-            return
-        conv.title_task = self._spawn(self._generate_title(conv, row, question, conv.engine, conv.controller.model), quiet=True)
 
-    async def _generate_title(self, conv: Conversation, row: str, question: str, engine: str, model: str) -> None:
-        prompt = session_title.prompt(question)
-        if engine == "chatgpt" and self.chatgpt is not None:
-            owner = conv.controller
-            def spent(usage: Any, used_model: str) -> None:
-                if owner.state is SessionState.CLOSED or not hasattr(owner, "_add_usage"):
-                    self.chatgpt.record_side_usage(usage, used_model)
-                    return
-                owner._add_usage(usage, measures_context=False, counts_speed=False, model=used_model)
-                owner.saved.requests.append({"kind": "title", "model": used_model, "usage": usage.tokens().to_json()})
-                owner._save_now(title_only=True)
-            answer = await chatgpt_side.ask(self.chatgpt, prompt, model_id=model, instructions=session_title.SYSTEM, timeout=30, on_usage=spent)
-        elif engine == "devin" and self.devin is not None:
-            answer = await devin_side.ask(self.devin, conv.project, session_title.SYSTEM + "\n\n" + prompt, timeout=30)
-        else:
+        def unnamed() -> bool:
+            return (not self._shutting_down and self._by_cid.get(conv.cid) is conv and conv.controller is controller
+                    and row not in self.settings.session_titles and session_title.is_default(self._title_of(conv)))
+
+        if unnamed() and question.strip() and not controller.fusion_title_attempted:
+            controller.prepare_fusion_title(question, unnamed)
+
+    def _discard_draft_title(self, conv: Conversation) -> None:
+        if not conv.in_history and conv.draft_title:
+            if conv.engine == OWN_ENGINE and conv.controller.saved.title == conv.draft_title:
+                conv.controller.saved.title = ""
+            conv.draft_title = ""
+
+    def _needs_first_title(self, conv: Conversation) -> bool:
+        # Factory's title is provided by the native conversation, never by another account.
+        return not conv.in_history and conv.engine in (OWN_ENGINE, "devin") and not conv.draft_title
+
+    async def _prepare_first_title(self, conv: Conversation, text: str,
+                                   *, current: Callable[[], bool] = lambda: True) -> None:
+        if not self._needs_first_title(conv):
             return
-        title = session_title.clean(answer)
-        if title is None or self._shutting_down:
-            return  # Keep a neutral title on failure; never pretend the first sentence was an LLM summary.
-        self._remember_auto_title(conv, self._resolve_row(row), title)
+        from desktop.core.fusion.title import generate, source
+
+        controller = conv.controller
+        own = conv.engine == OWN_ENGINE
+        model = controller.model
+        account = source(controller, model) if own else self.devin.cached_account().get("email")
+
+        def allowed() -> bool:
+            return (not self._shutting_down and current() and self._by_cid.get(conv.cid) is conv
+                    and conv.controller is controller and controller.state is SessionState.READY and controller.model == model
+                    and (source(controller, model) if own else self.devin.cached_account().get("email")) == account)
+
+        question = text if text.strip() else "（仅发送附件）"
+        prompt = session_title.FIRST_SYSTEM + "\n\n" + session_title.prompt(question, first=True)
+        conv.naming = True
+        self._flush(conv)
+        try:
+            for attempt in range(session_title.FIRST_RETRIES + 1):
+                if not allowed():
+                    break
+                reason = ""
+                try:
+                    if own:
+                        title = await generate(controller, question, model, account, allowed, draft=True) if account is not None else None
+                    else:
+                        title = session_title.clean(await devin_side.ask(self.devin, conv.project, prompt, timeout=12), first=True)
+                except ChatGPTError as error:
+                    title = None
+                    reason = " " + chatgpt_error_text(error)
+                if not allowed():
+                    break
+                if title:
+                    conv.draft_title = title
+                    if own:
+                        controller.saved.title = title  # Carry it in the first dispatch checkpoint, not in a draft archive.
+                    self._flush(conv)  # Publish the title before dispatching the first main prompt.
+                    return
+                if attempt == session_title.FIRST_RETRIES:
+                    raise AppError(f"自动命名重试 {session_title.FIRST_RETRIES} 次后仍未成功，首条消息没有发出。{reason}")
+                await asyncio.sleep(0.2)
+            raise AppError("会话已变化，首条消息没有发出。")
+        finally:
+            conv.naming = False
 
     def _remember_auto_title(self, conv: Conversation, row: str, title: str) -> None:
         self.settings.session_auto_titles[row] = title
@@ -2361,6 +2392,8 @@ class AppCore:
 
     async def _m_session_send(self, params: dict[str, Any]) -> dict[str, Any]:
         conv = self._conversation(params["id"])
+        if conv.naming:
+            raise AppError("正在生成会话名称，首条消息还没有发出。")
         if conv.switching or conv.switch_task is not None:
             raise AppError("模型正在切换，稍后再发送。")
         ids = params.get("attachmentIds")
@@ -2423,7 +2456,7 @@ class AppCore:
             # shown, and sent by itself in its turn, one message at a time.
             if not text and not attachments:
                 raise AppError("现在不能发送：没有内容。")
-            conv.queue.append(QueuedMessage(f"q{next(self._queue_ids)}", text, tuple(attachments)))
+            conv.queue.append(QueuedMessage(f"q{next(self._queue_ids)}", text, tuple(attachments), raw_text=draft))
             taken()
             conv.dirty = True
             self._schedule_flush()
@@ -2435,13 +2468,12 @@ class AppCore:
             return {"ok": True, "queued": True}
         if not text and not attachments:
             raise AppError("现在不能发送：没有内容。")
-        if state is not SessionState.READY or not changing:
+        if state is not SessionState.READY or not (changing or self._needs_first_title(conv)):
             await self._send_ready(conv, text, attachments, wanted)
             return {"ok": True}
 
-        # Publish the submitted message before waiting for the source summary. It is not a real turn yet: none of
-        # its contents may enter the summary, history, or the source runner. Keep the attachments reserved in drafts
-        # until the destination accepts them (also used when checking the cross-engine carry limits).
+        # Publish the submitted message during handoff or naming, without adding a real turn. Keep the attachments
+        # reserved in drafts until the destination accepts them (also used when checking the cross-engine carry limits).
         conv.preparing = QueuedMessage(f"q{next(self._queue_ids)}", draft, tuple(attachments))
         conv.switch_task = asyncio.current_task()
         try:
@@ -2451,7 +2483,7 @@ class AppCore:
             self._restore(conv, [(draft, ())])
             if isinstance(error, asyncio.CancelledError) and not self._shutting_down:
                 # QWebChannel does not reply to a bare cancellation; the composer would remain locked.
-                raise AppError("模型交接已停止；消息已放回输入框，未自动重试。") from None
+                raise AppError("已停止发送准备；消息已放回输入框，未自动重试。") from None
             raise
         finally:
             conv.preparing = None
@@ -2468,16 +2500,21 @@ class AppCore:
         problem = controller.attachment_problem(self._carried_attachments(conv) + tuple(attachments))
         if problem:
             raise AppError(problem)
+        if controller.state is not SessionState.READY:
+            raise AppError("现在不能发送：会话没有就绪。")
+        await self._prepare_first_title(conv, conv.preparing.text if conv.preparing is not None else text)
         pending = conv.pending_model
         if pending is not None:
             self._set_pending_model(conv, None)  # Persist before accepting the message; a disk failure must not invite replay.
         try:
             accepted = controller.send_prompt(text, attachments)
         except BaseException:
+            self._discard_draft_title(conv)
             if pending is not None:
                 self._set_pending_model(conv, pending)
             raise
         if not accepted:
+            self._discard_draft_title(conv)
             if pending is not None:
                 self._set_pending_model(conv, pending)
             raise AppError("现在不能发送：会话没有就绪。")
@@ -2512,8 +2549,8 @@ class AppCore:
         from desktop.core.fusion.registry import FusionError
         conv = self._conversation(params["id"])
         fusion, model = getattr(conv.controller, "_fusion", None), params.get("model")
-        if (fusion is None or conv.switching or conv.queue or conv.controller.state is not SessionState.READY
-                or not isinstance(model, str)):
+        if (fusion is None or conv.switching or conv.switch_task is not None or conv.queue
+                or conv.controller.state is not SessionState.READY or not isinstance(model, str)):
             raise AppError("会话未就绪，暂时不能更换 Fusion 主模型。")
         chosen = self.catalog.find(model)
         if not chosen or chosen.get("disabled") or self.catalog.target(model).engine not in ("chatgpt", "devin"):
@@ -2556,7 +2593,7 @@ class AppCore:
         if (fusion is None or conv.switching or conv.queue or conv.controller.state is not SessionState.READY
                 or not isinstance(unknown, bool)):
             raise AppError("会话未就绪，暂时不能调整 Fusion 预算。")
-        if conv.controller.fusion_title_running:
+        if conv.naming or conv.controller.fusion_title_running:
             raise AppError("正在记录会话标题的用量，请稍后再调整预算。")
         try:
             fusion.update_budget(params.get("maxCalls"), params.get("maxTokens"), accept_unknown=unknown)
@@ -2726,12 +2763,35 @@ class AppCore:
         if problem:
             self._unqueue_all(conv, problem)
             return
+        if self._needs_first_title(conv):
+            def current() -> bool:
+                return bool(conv.queue) and conv.queue[0] is head
+
+            async def name_then_pump() -> None:
+                try:
+                    await self._prepare_first_title(conv, head.raw_text if head.raw_text is not None else head.text, current=current)
+                except asyncio.CancelledError:
+                    self._unqueue_all(conv, "命名已停止，消息已放回输入框。")
+                    return
+                except Exception as error:
+                    if current():
+                        self._unqueue_all(conv, error_text(error))
+                finally:
+                    conv.switch_task = None
+                    conv.dirty = True
+                    self._schedule_flush()
+                self._pump(conv)
+
+            conv.switch_task = self._spawn(name_then_pump(), quiet=True)
+            return
         try:
             accepted = controller.send_prompt(head.text, head.attachments)
         except Exception as error:
+            self._discard_draft_title(conv)
             self._unqueue_all(conv, f"消息没有发出，已放回输入框：{error_text(error)}")
             return
         if not accepted:
+            self._discard_draft_title(conv)
             self._unqueue_all(conv, "会话没有就绪，排队消息已放回输入框。")
             return
         self._start_title(conv, head.text)
@@ -2812,10 +2872,10 @@ class AppCore:
         if index is None:
             return {"ok": False}  # (it went out, or was taken back, while the user was typing)
         item = conv.queue[index]
-        text = text.strip()
-        if not text and not item.attachments:
+        trimmed = text.strip()
+        if not trimmed and not item.attachments:
             raise AppError("消息不能是空的：不想发这条，请点取消。")
-        conv.queue[index] = dataclasses.replace(item, text=text)
+        conv.queue[index] = dataclasses.replace(item, text=trimmed, raw_text=text)
         conv.dirty = True
         self._schedule_flush()
         return {"ok": True}

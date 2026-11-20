@@ -3,7 +3,6 @@ import asyncio
 import json
 import threading
 
-import pytest
 
 from desktop.core.chatgpt import http, side
 from desktop.core.chatgpt.responses import Usage
@@ -69,8 +68,7 @@ def test_serial_compaction_still_counts_towards_turn_speed(tmp_path):
     asyncio.run(go())
 
 
-@pytest.mark.parametrize("title_first", [True, False])
-def test_title_usage_never_enters_main_turn_speed_even_after_reopening(tmp_path, title_first):
+def test_title_usage_never_enters_main_turn_speed_even_after_reopening(tmp_path):
     from desktop.core.session_state import SessionState
     from tests.app_support import ready_core
     from tests.chatgpt_support import finish_turn, until
@@ -80,18 +78,15 @@ def test_title_usage_never_enters_main_turn_speed_even_after_reopening(tmp_path,
         try:
             title = say("Demo title", used=usage(120, 400))
             main = say("Main answer", used=usage(100, 10))
-            plan.fake.title_turn = title if title_first else [("hold", "title"), *title]
-            plan.script([("hold", "main"), *main] if title_first else main)
+            plan.fake.title_turn = title
+            plan.script([("hold", "main"), *main])
             cid = await new(core, events, tmp_path)
             await core.call("session.send", {"id": cid, "text": "Verify the demo"})
             ctl = core._by_cid[cid].controller
-            if title_first:
-                await until(lambda: ctl.usage is not None and ctl.usage.output_tokens == 400)
-                plan.release("main")
+            assert ctl.usage.output_tokens == 400 and ctl.context.used is None
+            plan.release("main")
             await finish_turn(ctl)
             assert ctl.transcript.turns[-1].output_tokens == 10
-            if not title_first:
-                plan.release("title")
             await until(lambda: ctl.usage is not None and ctl.usage.output_tokens == 410)
             assert ctl.context.used == 110
             plan.script(say("Second answer", used=usage(100, 15)))

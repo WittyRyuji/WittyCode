@@ -72,17 +72,18 @@ def test_first_refusal_does_not_list_or_name_and_can_be_retried(tmp_path):
             await idle(core, cid)
             await until(lambda: events.of("restore"))
             assert events.last("restore")["text"] == "first attempt"
-            assert core.chatgpt.sessions.load(native) is None and not plan.fake.title_requests
+            assert core.chatgpt.sessions.load(native) is None and not core.settings.session_auto_titles
+            assert len(plan.fake.title_requests) == 1
             assert row not in core.settings.session_created
             await core.call("project.refresh", {"id": str(project)})
             assert project_ids(core) == ["cg:known"]
             await core.call("session.send", {"id": cid, "text": "retry instead"})
             await idle(core, cid)
-            await until(lambda: len(plan.fake.title_requests) == 1)
+            assert len(plan.fake.title_requests) == 2
             assert project_ids(core) == [cid, "cg:known"]
             saved = core.chatgpt.sessions.load(native)
             assert saved.messages == 1 and "first attempt" not in str(saved.items)
-            assert "retry instead" in str(plan.fake.title_requests[0]["input"])
+            assert "retry instead" in str(plan.fake.title_requests[-1]["input"])
             await core.call("session.close", {"id": cid})
             await core.call("project.refresh", {"id": str(project)})
             assert project_ids(core) == [row, "cg:known"]
@@ -113,8 +114,8 @@ def test_local_preparation_failure_does_not_create_an_archive_after_close_or_res
             monkeypatch.setattr(type(controller), "_ensure_tools", unavailable)
             await core.call("session.send", {"id": cid, "text": "cannot start"})
             await idle(core, cid)
-            await until(lambda: events.of("restore"))
-            assert events.last("restore")["text"] == "cannot start" and not plan.requests
+            await until(lambda: events.last("restore")["text"] == "cannot start")
+            assert not plan.requests
             await core.call("session.close", {"id": cid})
         finally:
             await core.shutdown()
@@ -141,6 +142,7 @@ def test_a_dispatched_first_message_is_recoverable_on_close_and_restart(tmp_path
             await until(lambda: len(plan.requests) == 1)
             checkpoint = core.chatgpt.sessions.load(native)
             assert checkpoint.turns[0].status == "running" and "possibly delivered" in str(checkpoint.items)
+            assert checkpoint.title == plan.fake.title_answer
         finally:
             await core.shutdown()
         again, _, _, _, _ = await ready_core(tmp_path)
@@ -189,7 +191,8 @@ def test_api_missing_key_is_a_draft_until_a_request_is_actually_sent(tmp_path):
             try:
                 cid = await api_session(core, events, tmp_path, api_model_id(events))
                 native = core._by_cid[cid].controller.session_id
-                await core.call("session.send", {"id": cid, "text": "without a key"})
+                with pytest.raises(AppError, match="首条消息没有发出"):
+                    await core.call("session.send", {"id": cid, "text": "without a key"})
                 await idle(core, cid)
                 await until(lambda: events.of("restore"))
                 assert project_ids(core) == [] and engine.sessions.load(native) is None and api.posts == []

@@ -275,13 +275,13 @@ def test_a_devin_session_opens_runs_and_reports_its_settings_and_total(tmp_path)
         assert patch["engine"] == "devin" and patch["nativeId"] == conv.controller.session_id
         # (the level is the one the user's defaults ask for, when the model offers it: Opus offers "medium")
         assert patch["settings"] == {"model": "devin:claude-opus-5-5-medium", "reasoning": "medium", "autonomy": "code", "mode": "auto"}
-        assert await core.call("session.send", {"id": cid, "text": "hello"}) == {"ok": True}
+        assert (await core.call("session.send", {"id": cid, "text": "hello"}))["ok"]
         await until(lambda: meta(events, cid).get("mark") == "ready" and answer_of(events, cid) == "echo: hello")
         # the figures of the prompt: input without the cache, output, the cache read; and the context of the last call
         await until(lambda: (meta(events, cid).get("usage") or {}).get("input") == 900)
         assert meta(events, cid)["usage"] == {"input": 900, "output": 12, "cacheWrite": None, "cacheRead": 300}
         assert meta(events, cid)["context"]["used"] == 1212 and meta(events, cid)["context"]["window"] == 1000000
-        assert meta(events, cid)["title"] == "hello"
+        assert meta(events, cid)["title"] == "会话主题摘要"
         await core.shutdown()
 
     run(scenario())
@@ -474,7 +474,7 @@ def test_saved_devin_sessions_are_in_the_sidebar_and_open_from_there(tmp_path):
         session_id = core._by_cid[cid].controller.session_id
         await core.call("session.close", {"id": cid})
         rows = await listed(core, events, tmp_path)
-        assert list(rows) == ["dv:" + session_id] and rows["dv:" + session_id]["title"] == "first question"
+        assert list(rows) == ["dv:" + session_id] and rows["dv:" + session_id]["title"] == "会话主题摘要"
         again = (await core.call("session.openSaved", {"id": "dv:" + session_id, "projectId": str(tmp_path / "proj"), "title": "first question"}))["id"]
         await until(lambda: meta(events, again).get("mark") == "ready")
         assert meta(events, again)["engine"] == "devin" and meta(events, again)["nativeId"] == session_id

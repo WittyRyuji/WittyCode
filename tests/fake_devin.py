@@ -43,6 +43,12 @@ from typing import Any
 HOME = Path(os.environ.get("FAKE_DEVIN_HOME") or Path.cwd() / ".fake-devin")
 STATE = HOME / "state.json"
 RECEIVED = HOME / "received.jsonl"
+
+
+def is_title_prompt(text: str) -> bool:
+    return text.startswith("Write a concise conversation title ")
+
+
 WORDS = ["cliff", "parrot", "magnetic", "stay", "lizard", "mechanic", "bold", "owner", "alpine", "jersey", "wood", "pullover"]
 
 # (value, name, images, thought levels, default level, window, free)
@@ -371,7 +377,7 @@ class Fake:
         text = texts[0] if texts else ""
         self.state["counter"] += 1
         message_id = f"msg-{self.state['counter']}"
-        if "[fail]" in text:
+        if "[fail]" in text and not is_title_prompt(text):
             raise RpcError(-32000, "Insufficient credits")
         turn = self.running.get(sid)
         user = {"user": {"id": message_id, "parts": list(params.get("prompt") or ()), "at": time.time()}}
@@ -446,7 +452,9 @@ class Fake:
     async def run_turn(self, sid: str, session: dict[str, Any], turn: dict[str, Any], text: str) -> None:
         stop = "end_turn"
         try:
-            if "[crash]" in text:
+            if is_title_prompt(text):
+                self.update(sid, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "会话主题摘要"}})
+            elif "[crash]" in text:
                 self.update(sid, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "about to crash"}})
                 await asyncio.sleep(0.05)
                 os._exit(3)

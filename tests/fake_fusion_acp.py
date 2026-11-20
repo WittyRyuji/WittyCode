@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 from desktop.core.fusion.acp_server import MCP_CALL, MCP_LIST, MCP_WRAPPERS, PREFIX, SERVER
-from desktop.core.session_title import SYSTEM as TITLE_SYSTEM
+from desktop.core.session_title import FIRST_SYSTEM, SYSTEM
 from tests.fake_devin import HOME, Fake, RpcError
 
 
@@ -95,7 +95,7 @@ class GuardedFake(Fake):
             match = re.search(r"\[fusion-([a-z-]+)\]", current)
             summary = "--agent-type" in sys.argv and sys.argv[sys.argv.index("--agent-type") + 1] == "summarizer"
             assert summary == ("Do not call any tools. Return only the summary." in text)
-            title = summary and text.startswith(TITLE_SYSTEM)
+            title = summary and text.startswith((FIRST_SYSTEM, SYSTEM))
             if title:
                 code, result = await self.run_hook(sid, "PreToolUse", tool_name=PREFIX + "read_file", tool_input={})
                 assert code == 2 and result["decision"] == "block"

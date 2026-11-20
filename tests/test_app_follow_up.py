@@ -363,7 +363,7 @@ def test_how_is_ignored_when_no_turn_is_running(tmp_path):
         core, plan, events, _, _ = await ready_core(tmp_path)
         plan.script(say("hi"))
         cid = await new_session(core, events, tmp_path / "proj")
-        assert await core.call("session.send", {"id": cid, "text": "hello", "how": "steer"}) == {"ok": True}
+        assert (await core.call("session.send", {"id": cid, "text": "hello", "how": "steer"}))["ok"]
         await until(lambda: len(plan.requests) == 1 and core._by_cid[cid].controller.state is SessionState.READY)
         assert user_text(plan.requests[0]) == "hello" and len(core._by_cid[cid].controller.transcript.turns) == 1
         await core.shutdown()
@@ -481,7 +481,9 @@ def test_a_message_sent_now_while_the_session_is_still_connecting_waits_and_the_
         assert any("还没连上" in n["text"] for n in events.of("notice"))
         assert [m.text for m in core._by_cid[cid].queue] == ["early"], "still waiting"
         await opening
-        await until(lambda: [r["prompt"][0]["text"] for r in harness.requests("session/prompt")] == ["early"], timeout=10)
+        await until(lambda: len(harness.requests("session/prompt")) == 2, timeout=10)
+        naming, main = [r["prompt"][0]["text"] for r in harness.requests("session/prompt")]
+        assert "at most 10 characters" in naming and '"early"' in naming and main == "early"
         await core.shutdown()
 
     run(scenario())
