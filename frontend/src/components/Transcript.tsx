@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from "react";
-import { ArrowDown, ArrowRightLeft, Copy, RotateCw, X } from "lucide-react";
+import { ArrowDown, ArrowRightLeft, Copy, HelpCircle, RotateCw, X } from "lucide-react";
 import type { Block, Session, Turn } from "../types";
 import { useStore } from "../store";
 import { selectedChatText } from "../lib/copyChat";
@@ -13,7 +13,7 @@ import { TurnNav } from "./TurnNav";
 import { activeTurnAt, turnLinks } from "../lib/turnNavigation";
 import { Menu, type Anchor } from "./ui";
 
-type OpenCopyMenu = (event: MouseEvent<HTMLDivElement>, text: string, markdown?: boolean) => void;
+type OpenCopyMenu = (event: MouseEvent<HTMLDivElement>, text: string) => void;
 
 function UserView({ block, onCopyMenu }: { block: Extract<Block, { kind: "user" }>; onCopyMenu?: OpenCopyMenu }) {
   const long = block.text.length > 520 || block.text.split("\n").length > 9;
@@ -60,7 +60,7 @@ function BlockView({ block, turn, sessionId, inlineMedia, onCopyMenu }: {
       return <UserView block={block} onCopyMenu={onCopyMenu} />;
     case "text":
       return block.markdown ? (
-        <div className="block text-block" onContextMenuCapture={onCopyMenu && ((e) => onCopyMenu(e, block.markdown, true))}>
+        <div className="block text-block" onContextMenuCapture={onCopyMenu && ((e) => onCopyMenu(e, block.markdown))}>
           <Markdown source={block.markdown} streaming={block.streaming} mediaSessionId={inlineMedia ? sessionId : undefined} />
         </div>
       ) : null;
@@ -166,12 +166,13 @@ export function Transcript({ session, positions }: { session: Session; positions
   const [away, setAway] = useState(!stick.current);
   const [scrolling, setScrolling] = useState(false);
   const [activeId, setActiveId] = useState<string | null>(null);
-  const [copyMenu, setCopyMenu] = useState<{ anchor: Anchor; label: string; text: string } | null>(null);
+  const [copyMenu, setCopyMenu] = useState<{ anchor: Anchor; text: string } | null>(null);
   const links = useMemo(() => turnLinks(session.turns), [session.turns]);
   const setDraft = useStore((s) => s.setDraft);
+  const askAboutChatText = useStore((s) => s.askAboutChatText);
   const say = useStore((s) => s.say);
 
-  const openCopyMenu: OpenCopyMenu = (e, body, markdown) => {
+  const openCopyMenu: OpenCopyMenu = (e, body) => {
     if (e.defaultPrevented || !(e.target instanceof Element)) return;
     if (e.target.closest("button, input, textarea, select, [contenteditable], .inline-media")) return;
     const anchor = { x: e.clientX, y: e.clientY };
@@ -181,7 +182,7 @@ export function Transcript({ session, positions }: { session: Session; positions
     e.preventDefault();
     e.stopPropagation();
     // Snapshot before a menu click can change the page selection or streaming updates can replace the text.
-    setCopyMenu({ anchor, label: selection ? "复制选中文字" : markdown ? "复制正文（Markdown）" : "复制正文", text: selection || body });
+    setCopyMenu({ anchor, text: selection || body });
   };
   const writeCopy = async (text: string) => {
     try {
@@ -354,7 +355,10 @@ export function Transcript({ session, positions }: { session: Session; positions
         <Menu
           anchor={copyMenu.anchor}
           minWidth={160}
-          items={[{ id: "copy-chat", label: copyMenu.label, icon: <Copy size={14} />, onSelect: () => void writeCopy(copyMenu.text) }]}
+          items={[
+            { id: "copy-chat", label: "复制", icon: <Copy size={14} />, onSelect: () => void writeCopy(copyMenu.text) },
+            { id: "ask-it", label: "Ask it", icon: <HelpCircle size={14} />, onSelect: () => askAboutChatText(session.id, copyMenu.text) },
+          ]}
           onClose={() => setCopyMenu(null)}
         />
       )}

@@ -244,7 +244,17 @@ export function Composer() {
   }, [draft, session?.id]);
 
   useEffect(() => {
-    const focus = () => area.current?.focus();
+    const focus = (event: Event) => {
+      const endFor = event instanceof CustomEvent ? event.detail?.endFor : undefined;
+      if (!endFor) return area.current?.focus();
+      // Wait for the controlled value to reflect the append, and don't move the caret in a different tab.
+      requestAnimationFrame(() => {
+        const el = area.current;
+        if (!el || useStore.getState().currentId !== endFor) return;
+        el.focus();
+        el.setSelectionRange(el.value.length, el.value.length);
+      });
+    };
     window.addEventListener("wc:focus-composer", focus);
     return () => window.removeEventListener("wc:focus-composer", focus);
   }, []);
@@ -261,6 +271,7 @@ export function Composer() {
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.defaultPrevented) return; // A context menu may have consumed Enter while this box still has focus.
     if (menu.length && !e.nativeEvent.isComposing) {
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
         e.preventDefault();

@@ -134,9 +134,10 @@ button.agent-flow-character:hover, button.agent-flow-character:focus-visible { b
 .agent-flow-name { font-size: 13px; font-weight: 600; }
 .agent-flow-model { font-size: 11px; color: var(--flow-model); }
 .agent-flow-edge { pointer-events: none; }
-.agent-flow-wire { fill: none; stroke: var(--flow-wire); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.agent-flow-wire { pointer-events: none; fill: none; stroke: var(--flow-wire); stroke-width: 1.5; stroke-dasharray: none; stroke-linecap: round; stroke-linejoin: round; }
+.agent-flow-trunk { stroke-linecap: square; }
+.agent-flow-spur { stroke-linecap: butt; }
 .agent-flow-edge.working .agent-flow-wire { stroke: var(--flow-live-wire); }
-.agent-flow-edge.failed .agent-flow-wire { stroke-dasharray: 5 5; }
 .agent-flow-edge.waiting .agent-flow-wire { animation: agent-flow-pulse 2.6s ease-in-out infinite; }
 .agent-flow-signal { fill: none; stroke: var(--flow-spark); stroke-linecap: round; stroke-linejoin: round; }
 .agent-flow-signal path {
@@ -159,8 +160,8 @@ button.agent-flow-character:hover, button.agent-flow-character:focus-visible { b
   animation: agent-flow-arrival var(--flow-spark-period) ease-out infinite;
 }
 @keyframes agent-flow-current {
-  from { stroke-dashoffset: var(--spark-lag); }
-  to { stroke-dashoffset: calc(var(--spark-lag) - var(--flow-spark-spacing)); }
+  from { stroke-dashoffset: calc(var(--spark-phase) + var(--spark-lag)); }
+  to { stroke-dashoffset: calc(var(--spark-phase) + var(--spark-lag) - var(--flow-spark-spacing)); }
 }
 @keyframes agent-flow-glint {
   0%, 19%, 29%, 33%, 43%, 100% { stroke: var(--flow-spark-core); stroke-width: 2; opacity: 0.45; }

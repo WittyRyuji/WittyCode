@@ -17,6 +17,7 @@ import { readFiles } from "./mock/attachments";
 import { cancelRun, runTurn, settlePrompt } from "./mock/simulator";
 import { bridge } from "./bridge-instance";
 import { engineLabel, engineOfSource, findModel } from "./lib/models";
+import { appendChatQuestion } from "./lib/copyChat";
 import { fusionEffort } from "./lib/fusionReasoning";
 import { handoffOf } from "./lib/handoff";
 import { quitWarning } from "./lib/quit";
@@ -184,6 +185,7 @@ export interface Store extends LiveData {
   /** show the project folder in Explorer */
   revealProject: (id: string) => void;
   setDraft: (id: string, draft: string) => void;
+  askAboutChatText: (id: string, text: string) => void;
   /** dropped or pasted files become attachments of the session's next message */
   attachFiles: (id: string, files: File[]) => Promise<void>;
   /** the paperclip in the live app: Windows' own file dialog */
@@ -675,6 +677,11 @@ export const useStore = create<Store>((set, get) => ({
   revealProject: () => get().say("（演示）这里会在资源管理器中打开文件夹。"),
 
   setDraft: (id, draft) => get().patchSession(id, (s) => ({ ...s, draft })),
+  askAboutChatText: (id, text) => {
+    if (get().currentId !== id) return;
+    get().patchSession(id, (s) => ({ ...s, draft: appendChatQuestion(s.draft, text) }));
+    window.dispatchEvent(new CustomEvent("wc:focus-composer", { detail: { endFor: id } }));
+  },
   attachFiles: async (id, files) => {
     const items = await readFiles(files, get().say);
     if (items.length) get().patchSession(id, (s) => ({ ...s, attachments: [...s.attachments, ...items] }));

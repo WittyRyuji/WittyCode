@@ -10,3 +10,8 @@ export function selectedChatText(body: HTMLElement, point?: { x: number; y: numb
   )) return "";
   return selection.toString();
 }
+
+export function appendChatQuestion(draft: string, text: string): string {
+  const separator = draft && !draft.endsWith("\n") ? "\n" : "";
+  return `${draft}${separator}这是什么意思，解释一下：${text}`;
+}

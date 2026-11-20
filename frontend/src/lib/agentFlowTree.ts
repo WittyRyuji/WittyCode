@@ -16,7 +16,15 @@ type BranchNode = Placement & (
   | { kind: "expert"; agent: AgentInfo; caption?: string }
 );
 type BranchEdge = { id: string; source: string; target: string; status: AgentInfo["status"] };
-export type FlowRoute = { path: string; length: number; endX: number; endY: number };
+export type FlowRoute = {
+  path: string;
+  spur: boolean;
+  trunk?: string;
+  length: number;
+  endX: number;
+  endY: number;
+  signal?: { path: string; prefix: number; epoch: string };
+};
 
 function routeEdges(edges: BranchEdge[], placements: Placement[]) {
   const byId = new Map(placements.map((node) => [node.id, node]));
@@ -32,21 +40,38 @@ function routeEdges(edges: BranchEdge[], placements: Placement[]) {
   for (const [id, siblings] of bySource) {
     const source = byId.get(id)!;
     const startX = source.x + FLOW_NODE_WIDTH - inset;
-    const span = siblings.length - 1;
-    const pitch = Math.min(10, 36 / Math.max(1, span));
-    const ports = siblings.map((edge) => ({ edge, target: byId.get(edge.target)! }))
-      .sort((a, b) => a.target.y - b.target.y)
-      .map(({ edge, target }, i) => ({ edge, endX: target.x + inset, endY: centerY(target), startY: centerY(source) + (i - span / 2) * pitch }));
-    // Match the order of the destination rows on the portrait edge. On either side
-    // of center, farther routes bend first, leaving room for the inner routes.
-    const rise = (port: typeof ports[number]) => Math.abs(port.endY - port.startY);
-    ports.sort((a, b) => rise(b) - rise(a)).forEach(({ edge, startY, endX, endY }, i) => {
-      const run = endX - startX;
-      const bendX = startX + run * (0.3 + 0.46 * i / Math.max(1, span));
-      const path = startY === endY ? `M${startX} ${startY} L${endX} ${endY}`
-        : `M${startX} ${startY} L${bendX} ${startY} L${bendX} ${endY} L${endX} ${endY}`;
-      routes.set(edge.id, { path, length: run + Math.abs(endY - startY), endX, endY });
-    });
+    const endX = byId.get(siblings[0].target)!.x + inset; // All destinations are in the next column.
+    const axis = (startX + endX) / 2;
+    const midY = centerY(source);
+    const aims = siblings.map((edge) => ({ edge, endY: centerY(byId.get(edge.target)!) }));
+    for (const side of [-1, 0, 1]) {
+      const taps = aims.filter(({ endY }) => Math.sign(endY - midY) === side)
+        .sort((a, b) => side * (a.endY - b.endY));
+      if (!taps.length) continue;
+      // Three ports for the typical up/straight/down fan. A higher fan-out on one
+      // side uses a single monotone trunk with a horizontal tap at each target row.
+      const startY = midY + side * Math.min(10, Math.abs(taps[0].endY - midY) / 2);
+      const start = `M${startX} ${startY}`;
+      const toTap = (endY: number) => `${start} L${axis} ${startY} L${axis} ${endY}`;
+      const spur = taps.length > 1;
+      const live = taps.filter(({ edge }) => edge.status === "working");
+      const lead = live.at(-1); // One signal owns the common prefix, up to the last working tap only.
+      // Restart this side's CSS clock together if a working path is added or removed.
+      const epoch = JSON.stringify(live.map(({ edge }) => edge.id));
+      for (const tap of taps) {
+        const { edge, endY } = tap;
+        const end = ` L${endX} ${endY}`;
+        const full = (side ? toTap(endY) : start) + end;
+        const branch = `M${axis} ${endY}${end}`;
+        routes.set(edge.id, {
+          path: spur ? branch : full, spur,
+          trunk: spur && tap === taps.at(-1) ? toTap(endY) : undefined,
+          length: endX - startX + Math.abs(endY - startY), endX, endY,
+          signal: edge.status === "working" ? { path: tap === lead ? full : branch,
+            prefix: tap === lead ? 0 : axis - startX + Math.abs(endY - startY), epoch } : undefined,
+        });
+      }
+    }
   }
   return edges.map((edge) => ({ ...edge, route: routes.get(edge.id)! }));
 }

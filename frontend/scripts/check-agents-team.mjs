@@ -47,18 +47,24 @@ export function agentFlowColours() {
   const particle = $(".agent-flow-particle") ? style(".agent-flow-particle").stroke : null;
   const core = particle ? style(".agent-flow-particle-core").stroke : null;
   const neutral = (colour) => new Set(rgb(colour)).size === 1;
+  const measureWire = (path) => {
+    const wire = getComputedStyle(path);
+    const opacity = Number(wire.opacity) * Number(wire.strokeOpacity);
+    return { id: path.closest(".react-flow__edge").dataset.id, stroke: wire.stroke, width: parseFloat(wire.strokeWidth),
+      dasharray: wire.strokeDasharray, opacity, visible: wire.display !== "none" && wire.visibility === "visible",
+      neutral: neutral(wire.stroke), contrast: contrast(wire.stroke, opacity) };
+  };
   const edges = {};
   for (const state of ["pending", "working", "waiting", "done", "stopped", "failed"]) {
-    const edge = $(`.agent-flow-edge.${state}`);
-    if (!edge) continue;
-    const wire = getComputedStyle(edge.querySelector(".agent-flow-wire"));
+    const paths = [...document.querySelectorAll(`.agent-flow-edge.${state} .agent-flow-wire`)];
+    if (!paths.length) continue;
     const ring = style(`.agent-flow-node.${state} .agent-flow-ring`).borderTopColor;
-    edges[state] = { stroke: wire.stroke, width: parseFloat(wire.strokeWidth), neutral: neutral(wire.stroke),
-      contrast: contrast(wire.stroke, Number(wire.opacity)), ring, ringContrast: contrast(ring) };
+    edges[state] = { wires: paths.map(measureWire), ring, ringContrast: contrast(ring) };
   }
+  const trunks = [...document.querySelectorAll('.agent-flow-trunk')].map(measureWire);
   return { background, contrastBackground, luminance: light(back), grid, gridContrast: contrast(grid), label, model,
     labelContrast: contrast(label), modelContrast: contrast(model), particle, core, particleContrast: particle && contrast(particle),
-    graphite: !!core && particle !== core && neutral(particle) && neutral(core), edges,
+    graphite: !!core && particle !== core && neutral(particle) && neutral(core), edges, trunks,
     transparentCanvas: [".react-flow", ".react-flow__background"].every((selector) => style(selector).backgroundColor === "rgba(0, 0, 0, 0)") };
 }
 
@@ -98,7 +104,7 @@ async function flowPixels(png, baseline, { x, y, width, height }) {
   // Mask wires with room for the round heads, arrival flash and antialiasing. Nodes may use the same grays.
   ctx.lineCap = ctx.lineJoin = 'round';
   ctx.strokeStyle = 'lime';
-  for (const wire of graph.querySelectorAll('.agent-flow-edge.working .agent-flow-wire')) {
+  for (const wire of graph.querySelectorAll('.agent-flow-particle')) {
     const m = wire.getScreenCTM();
     ctx.setTransform(m.a, m.b, m.c, m.d, m.e - x, m.f - y);
     ctx.lineWidth = 6 + 4 / m.a;
@@ -164,7 +170,7 @@ async function checkDraft(page, label, ok) {
       attached: particles.length === graph.querySelectorAll('.agent-flow-edge.working').length &&
         !graph.querySelector('.agent-flow-edge:not(.working) .agent-flow-signal') && particles.every((p) => {
           const edge = p.closest('.agent-flow-edge');
-          const d = edge.querySelector('.agent-flow-wire').getAttribute('d');
+          const d = p.getAttribute('d');
           return p.matches('.working .agent-flow-signal > path') && [...edge.querySelectorAll('.agent-flow-signal path')]
             .every((path) => !path.hasAttribute('pathLength') && path.getAttribute('d') === d);
         }) };
@@ -177,49 +183,111 @@ async function checkDraft(page, label, ok) {
     frames.map(({ sparkPixels, offWire }) => ({ sparkPixels: sparkPixels.length, offWire })));
 }
 
+export function agentFlowTopology(parents) {
+  const graph = document.querySelector('#conversation-team .agent-flow');
+  const rect = (el) => el.getBoundingClientRect();
+  const nodes = [...graph.querySelectorAll('.react-flow__node')];
+  const byId = new Map(nodes.map((n) => [n.dataset.id, n]));
+  const boxes = nodes.map(rect), chart = rect(graph);
+  const fits = boxes.every((b) => b.left >= chart.left && b.right <= chart.right && b.top >= chart.top && b.bottom <= chart.bottom);
+  const disjoint = boxes.every((a, i) => boxes.slice(i + 1).every((b) => a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top));
+  const pointsOf = (path) => path.getAttribute('d').slice(1).split(' L').map((xy) => xy.split(' ').map(Number));
+  const base = [], live = [], axes = { root: [], nests: [] }, screenAxes = { root: [], nests: [] };
+  const segments = (src, dst, path, into) => {
+    const points = pointsOf(path);
+    for (const [[x, y], [u, v]] of points.slice(1).map((p, i) => [points[i], p])) {
+      into.push({ src, dst, left: x, right: u, top: Math.min(y, v), bottom: Math.max(y, v) });
+      if (into === base && x === u && y !== v) {
+        const layer = src === 'team-main' ? 'root' : 'nests';
+        axes[layer].push(x);
+        screenAxes[layer].push(new DOMPoint(x, y).matrixTransform(path.getScreenCTM()).x);
+      }
+    }
+    return points;
+  };
+  const z = (path) => Number(getComputedStyle(path.ownerSVGElement).zIndex);
+  const trunks = [...graph.querySelectorAll('.agent-flow-trunk')].map((path) => {
+    const id = path.closest('.react-flow__edge').dataset.id, src = parents[id];
+    return { id, src, points: segments(src, id, path, base), taps: [], z: z(path) };
+  });
+  const wires = Object.entries(parents).map(([dst, src]) => {
+    const group = graph.querySelector('.react-flow__edge[data-id=' + CSS.escape(dst) + '] .agent-flow-edge');
+    const path = group?.querySelector('.agent-flow-wire');
+    const from = byId.get(src)?.querySelector('.agent-flow-ring'), to = byId.get(dst)?.querySelector('.agent-flow-ring');
+    if (!path || !from || !to) return { src, dst, correct: false, signalCorrect: false };
+    const points = segments(src, dst, path, base), end = points.at(-1), [ex, ey] = end;
+    const spur = path.classList.contains('agent-flow-spur');
+    const trunk = spur && trunks.find((t) => t.src === src && t.points[2] && t.points[1][0] === points[0][0] &&
+      (ey - t.points[1][1]) * (ey - t.points[2][1]) <= 0);
+    if (trunk) trunk.taps.push(dst);
+    const start = trunk ? trunk.points[0] : points[0];
+    const axis = (start[0] + ex) / 2;
+    const matrix = path.getScreenCTM(), a = new DOMPoint(...start).matrixTransform(matrix), b = new DOMPoint(...end).matrixTransform(matrix);
+    const fr = rect(from), tr = rect(to);
+    const close = (v, w) => Math.abs(v - w) < 0.6;
+    const correct = close(a.x, fr.right) && close(b.x, tr.left) && a.y > fr.top && a.y < fr.bottom && close(b.y, (tr.top + tr.bottom) / 2) &&
+      (spur ? trunk && points.length === 2 && points[0][0] === axis && points[0][1] === ey :
+        points.length === 2 || points.length === 4 && points[1][0] === axis && points[2][0] === axis);
+    const target = to.closest('.agent-flow-node');
+    const state = [...group.classList].find((c) => c !== 'agent-flow-edge');
+    const signal = group.querySelector('.agent-flow-signal'), head = signal?.querySelector('.agent-flow-particle');
+    const full = trunk ? [...trunk.points.slice(0, 2), [axis, ey], end] : points;
+    const fullLength = ex - start[0] + Math.abs(ey - start[1]);
+    let signalCorrect = !!state && target.classList.contains(state) && (state === 'working' ? !!head : !signal);
+    let otherTrunk = false;
+    if (head) {
+      const drawn = segments(src, dst, head, live), length = head.getTotalLength();
+      const paths = [...signal.querySelectorAll('path')];
+      const phase = parseFloat(getComputedStyle(signal).getPropertyValue('--spark-phase'));
+      const flash = signal.querySelector('.agent-flow-arrival');
+      otherTrunk = !!trunk && trunk.id !== dst && length > path.getTotalLength();
+      signalCorrect &&= (JSON.stringify(drawn) === JSON.stringify(full) || JSON.stringify(drawn) === JSON.stringify(points)) &&
+        paths.length === 3 && paths.every((p) => !p.hasAttribute('pathLength') && p.getAttribute('d') === head.getAttribute('d')) &&
+        Math.abs(phase - (fullLength - length) % 57) < 0.001 && flash?.cx.baseVal.value === ex && flash?.cy.baseVal.value === ey &&
+        (!otherTrunk || z(head) > trunk.z);
+    }
+    return { src, dst, axis, state, spur, length: fullLength, otherTrunk, correct: !!correct, signalCorrect };
+  });
+  const check = (segments) => {
+    const collisions = [];
+    let tees = 0;
+    for (const [i, a] of segments.entries()) for (const b of segments.slice(i + 1)) {
+      const x = Math.max(a.left, b.left), right = Math.min(a.right, b.right);
+      const y = Math.max(a.top, b.top), bottom = Math.min(a.bottom, b.bottom);
+      if (x > right || y > bottom) continue;
+      const inside = (s) => s.left < x && x < s.right || s.top < y && y < s.bottom;
+      const ai = inside(a), bi = inside(b);
+      if (x < right || y < bottom || a.src !== b.src || ai && bi) collisions.push([a.dst, b.dst]);
+      else if (ai || bi) {
+        const [v, h] = ai ? [a, b] : [b, a];
+        if (v.left === v.right && h.left === x && h.right > x) tees++;
+        else collisions.push([a.dst, b.dst]);
+      }
+    }
+    const orthogonal = segments.every((s) => (s.right > s.left) !== (s.bottom > s.top));
+    return { correct: orthogonal && collisions.length === 0, collisions, tees };
+  };
+  const paint = check(base), signalPaint = check(live);
+  const trunksCorrect = trunks.every(({ id, points, taps }) => points.length === 3 && taps.length > 1 && taps.includes(id));
+  const unique = (list) => [...new Set(list.map((n) => Number(n.toFixed(3))))];
+  for (const layer of ['root', 'nests']) {
+    axes[layer] = unique(axes[layer]);
+    screenAxes[layer] = unique(screenAxes[layer]);
+  }
+  return { fits, wires, axes, screenAxes, trunkSizes: trunks.map(({ src, taps }) => [src, taps.length]), paint, signalPaint,
+    correct: nodes.length === wires.length + 1 && disjoint && trunksCorrect && paint.correct && signalPaint.correct &&
+      wires.every((w) => w.correct && w.signalCorrect && w.axis === (w.src === 'team-main' ? 110 : 230)) &&
+      axes.root.every((x) => x === 110) && axes.nests.every((x) => x === 230) };
+}
+
 async function flowTopology(page, parents) {
-  const edges = Object.entries(parents);
+  const ids = Object.keys(parents);
   await page.waitFor(`(() => {
     const graph = document.querySelector('${flow}');
-    return graph?.querySelectorAll('.agent-flow-wire').length === ${edges.length} && ${JSON.stringify(Object.keys(parents))}.every((dst) =>
-      graph.querySelector('.react-flow__edge[data-id=' + CSS.escape(dst) + '] .agent-flow-wire'));
+    return graph?.querySelectorAll('.agent-flow-edge .agent-flow-wire').length === ${ids.length} && ${JSON.stringify(ids)}.every((dst) =>
+      graph.querySelector('.react-flow__edge[data-id=' + CSS.escape(dst) + '] .agent-flow-edge .agent-flow-wire'));
   })()`);
-  return page.eval(`(() => {
-    const graph = document.querySelector('${flow}');
-    const rect = (el) => el.getBoundingClientRect();
-    const nodes = [...graph.querySelectorAll('.react-flow__node')];
-    const rings = new Map(nodes.map((n) => [n.dataset.id, rect(n.querySelector('.agent-flow-ring'))]));
-    const boxes = nodes.map(rect);
-    const chart = rect(graph);
-    const fits = boxes.every((b) => b.left >= chart.left && b.right <= chart.right && b.top >= chart.top && b.bottom <= chart.bottom);
-    const disjoint = boxes.every((a, i) => boxes.slice(i + 1).every((b) => a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top));
-    const expected = ${JSON.stringify(edges)};
-    const wires = expected.map(([dst, src]) => {
-      const path = graph.querySelector('.react-flow__edge[data-id=' + CSS.escape(dst) + '] .agent-flow-wire');
-      const from = rings.get(src), to = rings.get(dst);
-      if (!path || !from || !to) return { src, dst, correct: false };
-      const matrix = path.getScreenCTM();
-      const start = path.getPointAtLength(0).matrixTransform(matrix), end = path.getPointAtLength(path.getTotalLength()).matrixTransform(matrix);
-      const points = path.getAttribute('d').slice(1).split(' L').map((xy) => xy.split(' ').map(Number));
-      const segments = points.slice(1).map(([x, y], i) => {
-        const [u, v] = points[i];
-        return { left: Math.min(x, u), right: Math.max(x, u), top: Math.min(y, v), bottom: Math.max(y, v) };
-      });
-      const orthogonal = points.length >= 2 && segments.every((s) => (s.right > s.left) !== (s.bottom > s.top));
-      return { src, dst, start: points[0], end: points.at(-1), segments,
-        correct: orthogonal && from.right < to.left && Math.abs(start.x - from.right) <= 0.5 && Math.abs(end.x - to.left) <= 0.5 &&
-          start.y > from.top + 2 * matrix.a && start.y < from.bottom - 2 * matrix.a && Math.abs(end.y - (to.top + to.height / 2)) < 0.5 };
-    });
-    const collisions = [];
-    for (const [i, a] of wires.entries()) for (const b of wires.slice(i + 1)) {
-      if (a.segments?.some((s) => b.segments?.some((t) => s.left <= t.right && t.left <= s.right && s.top <= t.bottom && t.top <= s.bottom)))
-        collisions.push([a.dst, b.dst]);
-    }
-    const orderedPorts = wires.every((a) => a.correct && wires.every((b) => a === b || a.src !== b.src ||
-      (a.start[1] - b.start[1]) * (a.end[1] - b.end[1]) > 0));
-    return { ids: nodes.map((n) => n.dataset.id), fits, disjoint, wires, orderedPorts, collisions,
-      correct: nodes.length === expected.length + 1 && disjoint && orderedPorts && collisions.length === 0 };
-  })()`);
+  return page.eval(`(${agentFlowTopology.toString()})(${JSON.stringify(parents)})`);
 }
 
 // Seek the real CSS animations and sample the browser's stroked geometry in flow units.
@@ -286,7 +354,40 @@ function flowSparkMetrics() {
       arrival, endpointError: Math.hypot(flash.cx.baseVal.value - end.x, flash.cy.baseVal.value - end.y),
       trailLength: parseFloat(trail.strokeDasharray), inFlight, synchronized, wireAnimations: wire.getAnimations().length };
   };
-  return { short: inspect(edges[0]), long: inspect(edges.at(-1)) };
+  const carriers = edges.filter(({ length }) => length > 35);
+  const spurs = edges.filter(({ length }) => length === 35).map(({ edge, head, length }) => {
+    const clock = animationOf(head, 'agent-flow-current');
+    const flash = edge.querySelector('.agent-flow-arrival'), arrival = animationOf(flash, 'agent-flow-arrival');
+    const delay = arrival.effect.getTiming().delay;
+    const period = clock.effect.getTiming().duration;
+    const start = head.getPointAtLength(0), end = head.getPointAtLength(length);
+    const carrier = carriers.find(({ head }) => {
+      const points = head.getAttribute('d').slice(1).split(' L').map((p) => p.split(' ').map(Number));
+      return points.length === 4 && points[1][0] === start.x &&
+        (start.y - points[1][1]) * (start.y - points[2][1]) < 0;
+    });
+    const synchronized = carrier && animationOf(carrier.head, 'agent-flow-current').startTime === clock.startTime;
+    const flashOn = seek(arrival, (a) => {
+      a.currentTime = delay + 10;
+      return Number(getComputedStyle(flash).opacity) > 0.5;
+    });
+    return seek(clock, (a) => {
+      a.currentTime = delay + period;
+      const headArc = (57 - parseFloat(getComputedStyle(head).strokeDashoffset)) % 57;
+      // Chromium can omit a zero-length dash exactly at the SVG endpoint. Check
+      // the phase against the endpoint and the rendered head just before arrival.
+      a.currentTime -= 4;
+      const atArrival = Math.abs(headArc - length) < 0.001 && head.isPointInStroke(end);
+      const sample = (lag) => {
+        a.currentTime = delay + period - lag;
+        return { arc: centers({ head, length })[0], offset: parseFloat(getComputedStyle(head).strokeDashoffset) };
+      };
+      const before = sample(120), after = sample(45);
+      return { id: edge.closest('.react-flow__edge').dataset.id, synchronized, atArrival, flashOn, before, after,
+        speed: (after.arc - before.arc) / 0.075, dashSpeed: (before.offset - after.offset) / 0.075 };
+    });
+  });
+  return { short: inspect(carriers[0]), long: inspect(carriers.at(-1)), spurs };
 }
 
 export function agentFlowScreen() {
@@ -443,16 +544,26 @@ async function checkFlow(page, theme, label, ok) {
 
   await page.waitFor(flowIsMoving);
   const colours = await js(`(${agentFlowColours.toString()})()`);
-  ok(label("1.5px neutral wires, graphite sparks and state rings contrast on both theme surfaces"), colours.transparentCanvas &&
+  const states = Object.values(colours.edges);
+  const wires = states.flatMap(({ wires }) => wires).concat(colours.trunks);
+  const solid = (wire) => wire.dasharray === "none" && wire.opacity === 1 && wire.visible && wire.width === 1.5 && wire.neutral;
+  ok(label(`${theme} theme: all branches and trunks are solid, opaque 1.5px gray, including the failed expert`),
+    states.length === 6 && colours.trunks.length === openTree.trunkSizes.length && colours.trunks.length > 0 &&
+    wires.length - colours.trunks.length === Object.keys(fullTree).length &&
+    colours.edges.failed?.wires.some(({ id }) => id === "expert:expert-3") && wires.every(solid), colours);
+  ok(label("neutral wires, graphite sparks and state rings contrast on both theme surfaces"), colours.transparentCanvas &&
     (theme === "light" ? colours.luminance > 0.85 : colours.luminance < 0.08) && colours.labelContrast >= 4.5 && colours.modelContrast >= 4.5 &&
-    colours.gridContrast > 1.5 && colours.graphite && colours.particleContrast >= 3 && Object.keys(colours.edges).length === 6 &&
-    Object.values(colours.edges).every((edge) => edge.neutral && edge.width === 1.5 && edge.contrast >= 3 && edge.ringContrast >= 3), colours);
-  ok(label("closed and expanded edges use right angles and separate ports with no shared or crossing segments"),
-    closed.correct && openTree.correct, { closed, openTree });
+    colours.gridContrast > 1.5 && colours.graphite && colours.particleContrast >= 3 &&
+    wires.every((wire) => wire.contrast >= 3) && states.every((edge) => edge.ringContrast >= 3), colours);
+  ok(label("closed and expanded bends stay on their layer axes; only T-shaped contacts, no duplicated trunks or signal paths"),
+    closed.correct && closed.trunkSizes.length === 0 && closed.axes.root.length === 1 && openTree.correct &&
+    openTree.axes.root.length === 1 && openTree.axes.nests.length === 1 && openTree.paint.tees > 0 && openTree.signalPaint.tees > 0,
+    { closed, openTree });
+  console.log(label(`wire axes ${JSON.stringify({ closed: closed.axes, expanded: openTree.axes, screen: openTree.screenAxes, trunks: openTree.trunkSizes })}`));
   const sparks = await js(`(${flowSparkMetrics.toString()})()`);
   const beats = [sparks.short, sparks.long];
   ok(label("short and long SVG strokes move at 105.56 flow px/s with 57px spark spacing, a short trail and a timed target flash"),
-    sparks.long.length > 2 * sparks.short.length && sparks.long.before.length >= 3 && sparks.long.after.length >= 3 &&
+    sparks.long.length > sparks.short.length && sparks.long.before.length >= 3 && sparks.long.after.length >= 3 &&
     beats.every(({ length, before, after, speed, dashSpeed, period, arrival, endpointError, trailLength }) =>
       before.length >= 2 && after.length >= 1 && Math.abs(speed - 105.56) < 1.5 && Math.abs(dashSpeed - 105.56) < 0.05 &&
       [before, after].every((dots) => dots.every((d, i) => i === 0 || Math.abs(d - dots[i - 1] - 57) <= 0.5)) &&
@@ -466,17 +577,34 @@ async function checkFlow(page, theme, label, ok) {
       beat.inFlight.every((s) => s.onWire && Math.abs(s.arc - s.ms * 57 / beat.period) < 0.01 &&
         s.base[0] === quiet.base[0] && s.base[1] === '1.5px' && s.base[2] === quiet.base[2]);
   }), sparks);
+  ok(label("working spurs keep their trunk phase, speed and flash at the actual endpoint"), sparks.spurs.length >= 2 &&
+    sparks.spurs.every((s) => s.synchronized && s.atArrival && s.flashOn && Math.abs(s.speed - 105.56) < 3 &&
+      Math.abs(s.dashSpeed - 105.56) < 0.05), sparks.spurs);
   console.log(label(`spark metrics ${JSON.stringify(sparks)}`));
   ok(label("only working edges move their sparks; waiting wires pulse in place and all other wires stay still"), await js(`(${flowIsMoving}) && (() => {
     const still = [...document.querySelectorAll('${flow} .agent-flow-edge:not(.working)')];
     return still.length > 0 && still.every((edge) => !edge.querySelector('.agent-flow-signal') &&
       edge.getAnimations({ subtree: true }).length === (edge.matches('.waiting') ? 1 : 0));
   })()`));
+  await setMotion(page, 'reduce');
+  await page.waitFor("matchMedia('(prefers-reduced-motion: reduce)').matches && document.querySelector('#conversation-team').getAnimations({ subtree: true }).length === 0");
+  const reduced = await flowTopology(page, fullTree);
+  ok(label('reduced motion keeps all shared trunks and branch axes but hides their signals'), reduced.correct &&
+    JSON.stringify(reduced.trunkSizes) === JSON.stringify(openTree.trunkSizes) && await js(`(() => {
+      const graph = document.querySelector('${flow}');
+      const signals = [...graph.querySelectorAll('.agent-flow-signal')];
+      return signals.length > 0 && signals.every((s) => getComputedStyle(s).display === 'none') &&
+        [...graph.querySelectorAll('.agent-flow-wire')].every((p) => getComputedStyle(p).strokeDasharray === 'none' && getComputedStyle(p).display !== 'none');
+    })()`), reduced);
+  await setMotion(page, 'no-preference');
   const xOut = runner.chart.x + runner.chart.width / 2, yOut = runner.chart.y + runner.chart.height / 2;
   await page.send('Input.dispatchMouseEvent', { type: 'mouseWheel', x: xOut, y: yOut, deltaX: 0, deltaY: 240 });
   await page.wait(200);
   const zoomedOut = await screenOf(page);
-  ok(label('wheel zoom can go below the automatic readable scale'), zoomedOut.zoom < 0.8, { before: runner.zoom, after: zoomedOut.zoom });
+  const zoomedTree = await flowTopology(page, fullTree);
+  ok(label('wheel zoom below the readable scale preserves both aligned axes'), zoomedOut.zoom < 0.8 && zoomedTree.correct &&
+    JSON.stringify(zoomedTree.axes) === JSON.stringify(openTree.axes) && zoomedTree.screenAxes.root.length === 1 && zoomedTree.screenAxes.nests.length === 1,
+    { before: runner.zoom, after: zoomedOut.zoom, axes: zoomedTree.screenAxes });
   await page.click(nestButton("Runner"));
   await page.waitFor(expanded("Runner", false));
 
@@ -555,6 +683,16 @@ async function checkGroupUpdates(page, patch, sessionId, label, ok) {
     ok(label('when a wider canvas can fit the open tree legibly, it still fits the whole tree'), wide.correct && wide.fits &&
       screen.zoom >= 0.8 && !screen.overview, { zoom: screen.zoom, chart: screen.chart });
   }
+  const many = agents.slice(0, 9).map((agent, i) => ({ ...agent, fusionIdentity: `Role-${i}`, status: i === 8 ? 'failed' : agent.status }));
+  await js(`__fake.patch(${JSON.stringify(otherSession)}, ${JSON.stringify({ agents: many })})`);
+  const fan = await flowTopology(page, Object.fromEntries(many.map(({ id }) => [`expert:${id}`, 'team-main'])));
+  ok(label('nine root rows share one trunk per side; a failed outer wire cannot cover its working neighbor’s signal'),
+    fan.correct && fan.paint.tees === 6 && fan.wires.some((w) => w.dst === 'expert:expert-7' && w.otherTrunk) &&
+    JSON.stringify(fan.trunkSizes) === JSON.stringify([['team-main', 4], ['team-main', 4]]) && await js(`
+    [...document.querySelectorAll('${flow} .agent-flow-trunk')].every((path) => {
+      const css = getComputedStyle(path);
+      return css.strokeWidth === '1.5px' && css.strokeDasharray === 'none' && css.strokeOpacity === '1' && path.getAnimations().length === 0;
+    })`), fan);
 }
 
 async function checkNestArt(page, patch, label, ok) {
@@ -708,6 +846,18 @@ export async function checkAgentsTeam({ url, scripts, ok }) {
         return !edge.querySelector('.agent-flow-signal') && edge.querySelector('.agent-flow-wire').getAnimations().some((a) => a.playState === 'running') &&
           ring?.[0] > ring?.[1] && ring?.[1] > ring?.[2];
       })()`));
+      const secondEdge = `${flow} .react-flow__edge[data-id="expert:${agents[1].id}"] .agent-flow-edge`;
+      const carrierLength = (selector) => `document.querySelector('${selector} .agent-flow-particle')?.getTotalLength()`;
+      const transferred = await js(`${carrierLength(secondEdge)} > 35`);
+      await patch({ agents });
+      const current = (selector) => `document.querySelector('${selector} .agent-flow-particle')?.getAnimations().find((a) => a.animationName === 'agent-flow-current')`;
+      const restoredClock = `(() => {
+        const lead = ${current(firstEdge)}, spur = ${current(secondEdge)};
+        return lead?.startTime != null && lead.startTime === spur?.startTime;
+      })()`;
+      await page.waitFor(`!!document.querySelector('${firstEdge}.working') && ${restoredClock}`);
+      ok(label('a status update hands the common current to the remaining worker and resynchronizes the spur when work resumes'), transferred &&
+        await js(`${carrierLength(firstEdge)} > 35 && ${carrierLength(secondEdge)} === 35 && ${restoredClock}`));
       await patch({ mark: "ready", agents: agents.map((agent) => ["working", "waiting"].includes(agent.status) ? { ...agent, status: "done", finishedAt: Date.now() } : agent) });
       await page.waitFor(`!!document.querySelector('${firstEdge}.done') && !document.querySelector('${flow} .agent-flow-edge.working, ${flow} .agent-flow-edge.waiting')`);
       await page.click("textarea.input");
