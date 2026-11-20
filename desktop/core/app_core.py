@@ -2310,12 +2310,16 @@ class AppCore:
 
     def _settle_title(self, conv: Conversation) -> None:
         candidate = conv.title_candidate
-        if candidate is None or candidate[0].running:
+        if candidate is None:
+            return
+        turn, question = candidate
+        # A retained dispatch alone may still have failed. Start alongside the first model output,
+        # or at successful completion if there was no output event to start from.
+        if turn.running and not (conv.in_history and any(b.kind in ("text", "thinking", "tool") for b in turn.blocks)):
             return
         conv.title_candidate = None
-        turn, question = candidate
-        if not conv.in_history or turn.status is not TurnStatus.DONE:
-            return  # a rejected first prompt must not launch a naming request or save a title
+        if not conv.in_history or not (turn.running or turn.status is TurnStatus.DONE):
+            return
         conv.title_started = True
         row = self._row_of(conv)
         if row in self.settings.session_auto_titles or row in self.settings.session_titles:
@@ -2335,7 +2339,7 @@ class AppCore:
                     return
                 owner._add_usage(usage, measures_context=False, counts_speed=False, model=used_model)
                 owner.saved.requests.append({"kind": "title", "model": used_model, "usage": usage.tokens().to_json()})
-                owner._save_now()
+                owner._save_now(title_only=True)
             answer = await chatgpt_side.ask(self.chatgpt, prompt, model_id=model, instructions=session_title.SYSTEM, timeout=30, on_usage=spent)
         elif engine == "devin" and self.devin is not None:
             answer = await devin_side.ask(self.devin, conv.project, session_title.SYSTEM + "\n\n" + prompt, timeout=30)

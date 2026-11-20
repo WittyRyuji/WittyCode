@@ -1741,7 +1741,7 @@ class ChatGPTController:
             self.manager.sessions.save(self._snapshot())
         except OSError as error:
             if title_only:
-                log.warning("could not checkpoint the optional Fusion title", exc_info=True)
+                log.warning("could not checkpoint the optional title", exc_info=True)
                 return False
             if not self._checkpoint_written:
                 self.saved.origin.pop(FIRST_PROMPT, None)

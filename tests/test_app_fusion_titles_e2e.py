@@ -1,4 +1,4 @@
-"""A Fusion title appears in the real page before the successful main request ends."""
+"""Automatic titles appear in the real page before the first turn ends."""
 from __future__ import annotations
 
 import pytest
@@ -14,13 +14,15 @@ pytestmark = pytest.mark.ui
 
 
 @pytest.mark.parametrize("entry", ["project-new", "empty-tab"])
-def test_project_new_fusion_titles_while_the_main_still_streams(qapp, loop, tmp_path, entry):
+@pytest.mark.parametrize("mode", ["plan", "fusion"])
+def test_new_session_titles_while_the_first_turn_still_streams(qapp, loop, tmp_path, entry, mode):
     async def scenario():
         rig = await open_rig(tmp_path)
         try:
-            for key, value in {"fusionMain": "chatgpt:gpt-6.1-sol", "fusionWorkers": ["chatgpt:gpt-6-luna"],
-                               "fusionLight": "chatgpt:gpt-6-luna"}.items():
-                await rig.core.call("settings.set", {"key": key, "value": value})
+            if mode == "fusion":
+                for key, value in {"fusionMain": "chatgpt:gpt-6-luna", "fusionWorkers": ["chatgpt:gpt-6.1-sol"],
+                                   "fusionLight": "chatgpt:gpt-6.1-sol"}.items():
+                    await rig.core.call("settings.set", {"key": key, "value": value})
             if entry == "project-new":
                 await rig.wait_for('button[aria-label="新会话"]')
                 await rig.click('button[aria-label="新会话"]')
@@ -28,8 +30,9 @@ def test_project_new_fusion_titles_while_the_main_still_streams(qapp, loop, tmp_
             else:
                 await rig.core.call("session.new", {"projectId": str(rig.project)})
                 await rig.wait_text(".tab.current .tab-title", "新会话")
-            await select_fusion(rig)
-            await rig.wait_text(".chip-model .chip-v", "Fusion")
+            if mode == "fusion":
+                await select_fusion(rig)
+                await rig.wait_text(".chip-model .chip-v", "Fusion")
             assert not rig.plan.requests and not rig.plan.fake.title_requests
             assert not await rig.exists(".srow.open")
 
@@ -48,7 +51,11 @@ def test_project_new_fusion_titles_while_the_main_still_streams(qapp, loop, tmp_
                                      f"sidebar={await rig.text('.srow.open .stitle')!r}; "
                                      f"title requests={len(rig.plan.fake.title_requests)}") from error
             assert ctl.state is SessionState.RUNNING
-            assert rig.engine.sessions.load(ctl.session_id).title == "库存导入去重"
+            expected_model = "gpt-6-luna" if mode == "fusion" else "gpt-6.1-sol"
+            (title_request,) = rig.plan.fake.title_requests
+            assert title_request["model"] == rig.plan.requests[0]["model"] == expected_model
+            if mode == "fusion":
+                assert rig.engine.sessions.load(ctl.session_id).title == "库存导入去重"
             rig.plan.release("main")
             await until(lambda: ctl.state is SessionState.READY)
             await rig.wait_for(".srow.open.m-ready")  # closeTab uses the rendered running state for its confirmation.
