@@ -9,6 +9,7 @@ import { chatgptReady, chatgptState, planUsage, usageLevel } from "../src/lib/ch
 import { buildModelMenu } from "../src/components/modelMenu.ts";
 import { formatRelative } from "../src/lib/time.ts";
 import { localTarget, parsePathRef } from "../src/lib/pathref.ts";
+import { normalizeMathSource } from "../src/lib/markdownMath.ts";
 import { carryOverage } from "../src/lib/carry.ts";
 import { API_EFFORTS, contextProblem, contextWindowOf, imagesAfterKindChange, imagesByDefault, modelSpecification, withRemoteFigures } from "../src/lib/providerDefaults.ts";
 import { CATEGORY_LABELS, groupSummary, toolLabel, usageTotal } from "../src/lib/format.ts";
@@ -1021,4 +1022,60 @@ test("the user's skills and commands join the menu after the page's own, and a n
   assert.deepEqual(parseSlash("/weekly-report 第三周"), { name: "weekly-report", args: "第三周", typing: false });
   assert.deepEqual(parseSlash("/his"), { name: "his", args: "", typing: true });
   assert.equal(parseSlash("/a_b"), null);
+});
+
+test("chat math: backslash delimiters become dollars, display stays display, and code/currency/links stay literal", () => {
+  assert.equal(normalizeMathSource("x \\(s\\) y"), "x $s$ y");
+  assert.equal(normalizeMathSource("\\[\nx = 1\n\\]"), "$$\nx = 1\n$$");
+  assert.equal(normalizeMathSource("`\\(x\\)` and\n\n```\n\\(y\\)\n```"), "`\\(x\\)` and\n\n```\n\\(y\\)\n```");
+  assert.equal(normalizeMathSource("    \\(x\\)"), "    \\(x\\)", "indented code keeps backslash delimiters");
+  assert.equal(normalizeMathSource("costs $5 and $10"), "costs \\$5 and \\$10");
+  assert.equal(normalizeMathSource("it is $2+2$ right"), "it is $2+2$ right", "a digit-led pair without spaces is math");
+  assert.equal(normalizeMathSource("答案 $42$"), "答案 $42$");
+  assert.equal(normalizeMathSource("单价 $5、合 $10/$20 USD"), "单价 \\$5、合 \\$10/\\$20 USD");
+  assert.equal(normalizeMathSource("价格 $5 和 $10，公式 $x$"), "价格 \\$5 和 \\$10，公式 $x$");
+  assert.equal(normalizeMathSource("$$x$$"), "$$\nx\n$$", "a standalone $$…$$ line is display math");
+  assert.equal(normalizeMathSource("a $$x$$ b"), "a $$\\displaystyle x$$ b");
+  assert.equal(normalizeMathSource("x\n$$a\nb$$\ny"), "x\n$$\na\nb\n$$\ny");
+  assert.equal(normalizeMathSource("\\[x\\]"), "$$\nx\n$$");
+  assert.equal(normalizeMathSource("a \\[x\\] b"), "a $$\\displaystyle x$$ b");
+  assert.equal(normalizeMathSource("\\(x\\)"), "$x$", "a standalone \\(…\\) stays inline");
+  assert.equal(normalizeMathSource("> ```\n> \\(x\\)\n> ```"), "> ```\n> \\(x\\)\n> ```", "a fenced block inside a blockquote is code");
+  assert.equal(normalizeMathSource("1. x\n   ```\n   \\(y\\)\n   ```"), "1. x\n   ```\n   \\(y\\)\n   ```", "a fenced block inside a list item is code");
+  assert.equal(normalizeMathSource("1. x\n\n        \\(y\\)"), "1. x\n\n        \\(y\\)", "indented code inside a list item is code");
+  assert.equal(normalizeMathSource("[t](http://u/?a=$5) and $x$"), "[t](http://u/?a=$5) and $x$", "a link destination is never rewritten");
+  assert.equal(normalizeMathSource("[t](u\\)v\\(x\\))"), "[t](u\\)v\\(x\\))", "a destination may carry escaped parens");
+  assert.equal(normalizeMathSource("[t][r\\(x\\)]"), "[t][r\\(x\\)]");
+  assert.equal(normalizeMathSource("see <http://u/?a=$5>"), "see <http://u/?a=$5>", "an autolink is never rewritten");
+  assert.equal(normalizeMathSource("broken \\( 和 $x"), "broken \\\\( 和 \\$x");
+  assert.equal(normalizeMathSource("\\\\(not math"), "\\\\(not math");
+  assert.equal(normalizeMathSource("$$\nx = \\frac{1}{2}\n$$"), "$$\nx = \\frac{1}{2}\n$$");
+  assert.equal(normalizeMathSource("1. 对 \\(s\\)\n2. 下"), "1. 对 $s$\n2. 下");
+  assert.equal(normalizeMathSource("\\(a\n\nb\\)"), "\\\\(a\n\nb\\)", "a pair cannot cross a blank line");
+  assert.equal(normalizeMathSource("a $ b $ c"), "a \\$ b \\$ c", "a $ after whitespace can only close, not open");
+  assert.equal(
+    normalizeMathSource("1. 公式：\n\n   \\[a+b\\]"),
+    "1. 公式：\n\n   $$\n   a+b\n   $$",
+    "a standalone \\[…\\] in a list item keeps the item's indent",
+  );
+  assert.equal(
+    normalizeMathSource("1. 公式：\n\n   $$a+b$$"),
+    "1. 公式：\n\n   $$\n   a+b\n   $$",
+    "a standalone $$…$$ in a list item keeps the item's indent",
+  );
+  assert.equal(
+    normalizeMathSource("1. x\n   \\[\n   a\n     b\n   \\]"),
+    "1. x\n   $$\n   a\n     b\n   $$",
+    "a multi-line \\[…\\] keeps the relative indent of its inner lines",
+  );
+  assert.equal(
+    normalizeMathSource("\\(a" + "x".repeat(3000)),
+    "\\\\(a" + "x".repeat(3000),
+    "an unclosed \\( stops searching well before the end of a long message",
+  );
+  assert.equal(
+    normalizeMathSource("\\(" + "x".repeat(3000) + "\\)"),
+    "\\\\(" + "x".repeat(3000) + "\\)",
+    "a pair further apart than the size cap reads as its literal source",
+  );
 });

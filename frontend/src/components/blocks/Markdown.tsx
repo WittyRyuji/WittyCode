@@ -1,12 +1,16 @@
-import { memo, useState, type ReactElement } from "react";
+import { memo, useMemo, useState, type ReactElement } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
 import { Check, Copy } from "lucide-react";
 import { highlight, LANGUAGE_LABEL } from "../../lib/highlight";
 import { inlineMediaTarget, localVideoLink } from "../../lib/inlineMedia";
+import { normalizeMathSource } from "../../lib/markdownMath";
 import { looksLikePath, localTarget } from "../../lib/pathref";
 import { InlinePicture, InlineVideo } from "./InlineMedia";
+import { MathFormula } from "./MathFormula";
 import { PathRef } from "./PathRef";
+import "../../styles/math.css";
 
 export function CodeBlock({ code, language }: { code: string; language: string }) {
   const [copied, setCopied] = useState(false);
@@ -39,16 +43,19 @@ export const Markdown = memo(function Markdown({ source, streaming, mediaSession
 }) {
   // A partial destination might still change as tokens arrive. Only finished transcript blocks opt in.
   const sessionId = streaming ? undefined : mediaSessionId;
+  const prepared = useMemo(() => normalizeMathSource(source), [source]);
   return (
     <div className={`text selectable${streaming ? " streaming" : ""}`}>
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={[remarkGfm, remarkMath]}
         components={{
           pre({ children }) {
             const child = (Array.isArray(children) ? children[0] : children) as ReactElement<{ className?: string; children?: unknown }>;
             const props = child?.props ?? {};
+            const code = String(props.children ?? "").replace(/\n$/, "");
+            if (/\bmath-display\b/.test(props.className ?? "")) return <MathFormula tex={code} display />;
             const language = /language-([\w+-]+)/.exec(props.className ?? "")?.[1] ?? "";
-            return <CodeBlock code={String(props.children ?? "").replace(/\n$/, "")} language={language} />;
+            return <CodeBlock code={code} language={language} />;
           },
           table({ children }) {
             return (
@@ -60,6 +67,7 @@ export const Markdown = memo(function Markdown({ source, streaming, mediaSession
           code({ className, children }) {
             // inline code only: a block's code is drawn by `pre` above, which never renders this
             const text = Array.isArray(children) ? children.join("") : String(children ?? "");
+            if (/\bmath-inline\b/.test(className ?? "")) return <MathFormula tex={text} />;
             if (!className && looksLikePath(text)) return <PathRef text={text.trim()} />;
             return <code className={className}>{children}</code>;
           },
@@ -91,7 +99,7 @@ export const Markdown = memo(function Markdown({ source, streaming, mediaSession
           },
         }}
       >
-        {source}
+        {prepared}
       </ReactMarkdown>
     </div>
   );

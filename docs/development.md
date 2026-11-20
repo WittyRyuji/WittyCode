@@ -32,6 +32,7 @@
 
 - 变异脚本 `sandbox/mutate_*.py` 有两种：**在副本里跑**的（`mutate_llm.py`、`mutate_commands.py`、`mutate_harness_g*.py`……，有 `--check`）可以直接跑；**直接改工作树**的老脚本（`mutate_compaction.py`、`mutate_chatgpt.py`、`mutate_curate.py`……）没有 `--check` 保护，`import` 就开跑，被超时杀掉会把变异留在源码里：要跑就完整地跑、不设短超时，最好在仓库的临时副本里跑，跑完用全量 pytest 确认工作树完好。只读地查模式串用 `sandbox/check_old_patterns.py`。细节见 `docs/knowledge.md`「变异脚本两种」。
 - 写 e2e 测试前先读 `docs/knowledge.md` 的「e2e 踩出的前三个坑」「e2e 的第四个坑」；崩溃排查见「崩溃排查流程（Windows）」。
+- 聊天公式（`frontend/src/lib/markdownMath.ts` 的分隔符归一化）改后跑 `cd frontend; npm run unit`；真 Qt 排版回归在 `tests/test_app_math_e2e.py`（需先 `npm run build:app`，KaTeX 输出 MathML 由 Qt Chromium 原生绘制），公式截图留在 `WITTYCODE_TEST_EVIDENCE/math-chat.png`。
 - 测试**不许碰用户的目录**：`tests/conftest.py` 的 autouse `_no_files_of_the_real_user` 把每个测试的 `WITTYCODE_SETTINGS` 指到临时目录；测默认位置的测试自己再 `monkeypatch` `WITTYCODE_SETTINGS` 和 `Path.home`（见 `docs/knowledge.md` 第 67 条）。
 - 往工具声明或系统提示里加东西会抬高每个请求的固定 token，按窗口大小调好的压缩测试可能要跟着调（`test_chatgpt_compaction.roomy`）。
 

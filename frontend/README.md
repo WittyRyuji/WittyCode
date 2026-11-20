@@ -48,7 +48,7 @@ Python 在 QWebChannel 上注册一个对象 `backend`（`desktop/ui/shell.py`�
 | `npm run build` | 类型检查 + 打包成单个 `dist/index.html`（脚本、样式、字体、图片全部内联；带 Content-Security-Policy，只允许内联脚本、样式和 `data:` 图片、字体，不许任何网络） |
 | `npm run build:app` | 同上，再检查它不引用任何外部文件、CSP 在所有脚本和样式之前，然后复制到 `../desktop/ui_dist/index.html`（WittyCode 加载的就是它） |
 | `npm run typecheck` | 只做类型检查 |
-| `node scripts/unit.mjs`（`npm run unit`） | `src/liveReducer.ts` 和 `src/lib/time.ts` 的单元测试，Node 直接跑 .ts，不用装别的 |
+| `node scripts/unit.mjs`（`npm run unit`） | `src/liveReducer.ts` 和 `src/lib/` 纯逻辑的单元测试（含公式分隔符归一化 `markdownMath.ts`），Node 直接跑 .ts，不用装别的 |
 | `node scripts/check.mjs` | 设计审阅页：用真实鼠标键盘事件（Edge + 自带的 CDP 驱动 `scripts/cdp.mjs`）检查 149 项交互（含 Codex 登录、API Provider 增删改测、环境变量状态、自绘标题栏、模型菜单分组、同对话换引擎、单文件和 CSP），需先 `npm run build` |
 | `node scripts/check-live.mjs` | 正式界面：Qt 自己的 `qwebchannel.js`（从 `../.venv` 的 PySide6 里读出来，没有就用一个同协议的替身）加上 `scripts/fake-backend.mjs`（照 `app_core.py` 回答、播放一段对话的假 Python），检查 114 项（没有演示数据、标签、流式文字、批准、提问、附件、换引擎、链接、快捷键、设置、缩放区、关窗口询问、时间刷新），截图 `shots/live-*.png` |
 | `node scripts/shots.mjs [过滤词]` | 设计审阅页深色 / 浅色各 42 张截图，输出到 `shots/` |
@@ -68,6 +68,7 @@ Python 在 QWebChannel 上注册一个对象 `backend`（`desktop/ui/shell.py`�
 | `src/lib/vocab.ts` | 推理档位、权限档位、模式、接口类型、Provider 预设的用词（两种模式共用） |
 | `src/mock/` | 模拟数据和模拟 Droid（`simulator.ts`：发消息后流式回答、申请批准；`attachments.ts`：在页面里读附件） |
 | `src/components/` | TitleBar（自绘标题栏）、ResizeHandles（无边框窗口的缩放区）、Sidebar、Tabs、Transcript（`blocks/`）、Composer、StatusBar、Settings、ProvidersPage、ProviderEditor、Overlays、Brand |
+| `src/components/blocks/MathFormula.tsx`、`src/lib/markdownMath.ts`、`src/styles/math.css` | 聊天公式：`$…$`、`$$…$$`、`\(…\)`、`\[…\]` 四种分隔符。归一化把后两种转成 `$`/`$$`（跳过代码、链接目标、保住货币；独占一行的 `$$…$$`/`\[…\]` 变成整行排版），`remark-math` 分词后交给 KaTeX 的 MathML 输出，Qt Chromium 原生排版、不打包字体；坏或写了一半的公式原地显示源码 |
 | `scripts/` | `cdp.mjs`（Edge 驱动）、`check.mjs`、`check-live.mjs`、`fake-backend.mjs`、`unit.mjs`、`shots.mjs`、`copy-app.mjs` 和 `selfcontained.mjs`（`build:app` 的复制和检查） |
 | `src/assets/brand/` | 方形图标（`LOGO_ICON.png`）和从「WITTY LOONG 白色LOGO.svg」抽出的龙头、字标路径 |
 
