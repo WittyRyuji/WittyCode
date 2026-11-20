@@ -218,9 +218,10 @@ def test_a_message_typed_while_the_session_connects_is_shown_and_sent_by_itself(
         await until(lambda: len(sessions_of(events)[conv.cid]["queued"]) == 2)
 
         await opening
-        await until(lambda: len(harness.requests("session/prompt")) == 2, timeout=10)
+        await until(lambda: len(harness.requests("session/prompt")) == 3, timeout=10)
         prompts = [request["prompt"][0]["text"] for request in harness.requests("session/prompt")]
-        assert prompts == ["hello while connecting", "and another"], "one at a time, in order, each a turn of its own"
+        assert prompts[0].startswith("Write a concise conversation title ") and '"hello while connecting"' in prompts[0]
+        assert prompts[1:] == ["hello while connecting", "and another"], "naming preflight, then one at a time, in order"
         await until(lambda: sessions_of(events)[conv.cid]["queued"] == [] and conv.controller.state is SessionState.READY)
         await core.shutdown()
 
