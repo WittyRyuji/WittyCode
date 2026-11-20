@@ -1239,6 +1239,18 @@ def test_the_stored_inline_key_is_used_for_a_test_but_never_returned(tmp_path):
     assert unknown["ok"] is False and SECRET not in json.dumps(unknown)
 
 
+def test_a_legacy_inline_key_cannot_follow_an_endpoint_edit(tmp_path):
+    opener = Opener({"data": []})
+    store = make_store(tmp_path, opener=opener)
+    legacy_settings(store)
+    (saved,) = store.list()
+    moved = {**saved, "baseUrl": "https://other.example/v1"}
+    with pytest.raises(ProviderError, match="已更改"):
+        store.save(moved)
+    assert not run(store.test(moved))["ok"] and not opener.requests
+    assert store.list() == [saved]
+
+
 def test_a_stored_secret_header_is_used_for_a_test_but_never_returned(tmp_path):
     opener = Opener({"data": []})
     store = make_store(tmp_path, opener=opener)

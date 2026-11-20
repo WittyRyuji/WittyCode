@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 import threading
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -41,10 +42,18 @@ def server(destination=None):
 
 
 @pytest.mark.parametrize("kind", ["openai", "anthropic"])
-def test_connection_test_refuses_redirects_without_sending_credentials_to_the_destination(tmp_path, monkeypatch, kind):
+@pytest.mark.parametrize("source", ["env", "unsaved", pytest.param("saved", marks=pytest.mark.skipif(sys.platform != "win32", reason="Windows DPAPI"))])
+def test_connection_test_refuses_redirects_without_sending_credentials_to_the_destination(tmp_path, monkeypatch, kind, source):
     monkeypatch.setenv("NO_PROXY", "*")
-    with server() as (destination, received), server(destination + "/models") as (origin, _):
-        store = make_store(tmp_path, environ={"DEMO_KEY": "demo-key-value"})
-        result = asyncio.run(store.test(draft(name="Demo", kind=kind, baseUrl=origin, keyHint="${DEMO_KEY}")))
+    with server() as (destination, received), server(destination + "/models") as (origin, original):
+        key = "demo-key-value"
+        store = make_store(tmp_path, environ={"DEMO_KEY": key})
+        config = draft(name="Demo", kind=kind, baseUrl=origin, keyHint="${DEMO_KEY}")
+        if source != "env":
+            config.update(keyMode="protected", keyHint="", newApiKey=key)
+        if source == "saved":
+            config = store.save(config)
+        result = asyncio.run(store.test(config))
         assert not result["ok"], "the inference transport refuses redirects, so its connection probe must too"
+        assert key in repr(original), "the expected credential did reach the configured endpoint"
         assert received == [], "neither Authorization nor x-api-key may be forwarded to another origin"

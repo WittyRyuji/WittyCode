@@ -167,7 +167,7 @@ for (const theme of ["light", "dark"]) {
     await page.waitFor("[...document.querySelectorAll('.segc button[aria-pressed=true]')].some(e => e.textContent === '大')", 3000);
     await page.shot(resolve(`shots/appearance-clean-${theme}.png`));
     await clickText(".snav", "关于");
-    assert.equal(await page.eval("document.querySelector('.about .kvs b').textContent"), "0.3.0");
+    assert.equal(await page.eval("document.querySelector('.about .kvs b').textContent"), "0.3.0b1");
     assert.equal(page.consoleErrors().length, 0);
     assert.equal(page.cspViolations().length, 0);
     console.log(`PASS stable alphabetical connection rows, repeated switches, clean appearance and version: ${theme}`);

@@ -22,6 +22,12 @@
   - 评测没有沙箱：批准的命令以当前用户在本机运行，所以只放不需要外部东西的小任务；任务文件夹之外的读写请求一律拒绝。
   - 改了 `evals/` 之后跑变异检查：`.\.venv\Scripts\python.exe sandbox\mutate_evals.py`（在临时副本里跑，约 25 分钟；`--check` 只查模式串）。
 
+## 关于页联系方式
+
+- 本机构建前，可在 Git 已忽略的 `frontend/.env.local` 中设置 `VITE_WITTYCODE_CONTACT_EMAIL=demo@example.com`，保留文件中的其他配置。修改后要重新运行 `npm run build:app`；未配置或配置不符合单个邮箱格式时，「联系方式」指向项目的 GitHub Issues。
+- GitHub 发布由维护者在仓库 **Settings → Secrets and variables → Actions → Variables** 中设置 `WITTYCODE_CONTACT_EMAIL`。Release 工作流将它映射为 `VITE_WITTYCODE_CONTACT_EMAIL`，注入执行 `scripts/check_ci.py --part all` 的步骤；该步骤构建随后打包的页面。变量未设置时，发布版一样可用 GitHub Issues 联系。邮箱会写进前端发布产物，只填愿意公开的地址；不要把真实地址放进 Git、示例或测试证据。
+- 定向验证（仓库根目录，使用项目 venv 的 Python）：`python desktop/core/test_runs.py -- node --test frontend/scripts/about.test.mjs`。整机验证先设 `$env:WITTYCODE_ABOUT_E2E='1'`，再运行 `python desktop/core/test_runs.py -- python -m pytest tests/test_about.py -q -p no:cacheprovider`；它在临时目录分别构建空配置和示例配置，不读取本机的 `.env.local`，也不覆盖 `desktop/ui_dist`。
+
 ## 测试的坑
 
 - 变异脚本 `sandbox/mutate_*.py` 有两种：**在副本里跑**的（`mutate_llm.py`、`mutate_commands.py`、`mutate_harness_g*.py`……，有 `--check`）可以直接跑；**直接改工作树**的老脚本（`mutate_compaction.py`、`mutate_chatgpt.py`、`mutate_curate.py`……）没有 `--check` 保护，`import` 就开跑，被超时杀掉会把变异留在源码里：要跑就完整地跑、不设短超时，最好在仓库的临时副本里跑，跑完用全量 pytest 确认工作树完好。只读地查模式串用 `sandbox/check_old_patterns.py`。细节见 `docs/knowledge.md`「变异脚本两种」。

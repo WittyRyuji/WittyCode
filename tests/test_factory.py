@@ -6,13 +6,16 @@ import os
 from pathlib import Path
 import sys
 
+import pytest
+
 from desktop.core.app_core import AppCore
 from desktop.core.factory import EXEC_ARGS, FactoryClient, FactoryEngine
 from desktop.core.session_state import SessionState
 from desktop.core.settings import AppSettings, settings_from_dict
-from desktop.core.transcript import TextBlockView
+from desktop.core.transcript import TextBlockView, TurnStatus
 from tests.app_support import Events, FakePlatform
 from tests.fakes import until
+from tests.test_app_core import png_upload
 
 
 def engine_for(tmp_path):
@@ -90,6 +93,83 @@ def test_permissions_questions_and_stopping_keep_user_control(tmp_path):
             assert controller.state is SessionState.READY
         finally:
             await engine.close_all()
+    asyncio.run(scenario())
+
+
+async def open_app(tmp_path):
+    engine, settings, project = engine_for(tmp_path)
+    events = Events()
+    core = AppCore(settings, FakePlatform(), factory=engine, persist=False, emit=events)
+    await core.call("app.init")
+    await until(lambda: bool(core.catalog.find("factory:demo-model")))
+    cid = (await core.call("session.new", {"projectId": str(project)}))["id"]
+    return core, engine, events, project, cid
+
+
+@pytest.mark.parametrize("failure", ["build", "rpc"])
+def test_factory_first_failure_remains_retryable_but_never_indexes_the_draft(tmp_path, monkeypatch, failure):
+    async def scenario():
+        core, engine, events, project, cid = await open_app(tmp_path)
+        controller = core._by_cid[cid].controller
+        try:
+            if failure == "build":
+                def cannot_build(*_):
+                    raise ValueError("Demo assembly failure")
+
+                monkeypatch.setattr(controller, "_message", cannot_build)
+            await core.call("session.send", {"id": cid, "text": "[reject] try again"})
+            await until(lambda: events.of("restore"))
+            assert events.last("restore")["text"] == "[reject] try again"
+            assert controller.state is SessionState.READY and controller.transcript.turns[-1].status is TurnStatus.FAILED
+            assert not controller.history_ready and not await engine.list_sessions(project)
+            rpc_log = (tmp_path / "peer" / "calls.jsonl").read_text(encoding="utf-8").splitlines()
+            count = sum(json.loads(line)["method"] == "droid.add_user_message" for line in rpc_log)
+            assert count == (failure == "rpc")
+            await core.call("session.close", {"id": cid})
+            await core.call("project.refresh", {"id": str(project)})
+            assert core.project_rows()[0]["sessionIds"] == []
+        finally:
+            await core.shutdown()
+        restarted, _, _ = engine_for(tmp_path)
+        assert not await restarted.list_sessions(project)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("stop_error", [False, True])
+def test_factory_acknowledged_first_prompt_survives_stop_and_restart_without_readding_draft(tmp_path, stop_error):
+    async def scenario():
+        core, engine, events, project, cid = await open_app(tmp_path)
+        conv = core._by_cid[cid]
+        controller = conv.controller
+        native = controller.session_id
+        text = "[hold]" + (" [stop-error]" if stop_error else "")
+        try:
+            await core.call("attachments.add", {"id": cid, "files": [png_upload("note.png")]})
+            await core.call("session.send", {"id": cid, "text": text})
+            await until(lambda: controller.history_ready)
+            assert controller.state is SessionState.RUNNING
+            assert core.project_rows()[0]["sessionIds"] == [cid]
+            assert [item.id for item in await engine.list_sessions(project)] == [native], "persist at ACK, before output"
+            await core.call("session.stop", {"id": cid})
+            expected = SessionState.DEAD if stop_error else SessionState.READY
+            await until(lambda: controller.state is expected and not controller.transcript.active_turn)
+            core._flush(conv)
+            assert not events.of("restore") and not conv.drafts
+            if stop_error:
+                await controller.reconnect()
+                assert controller.state is SessionState.READY
+                assert controller.transcript.turns[0].user_block.text == text
+        finally:
+            await core.shutdown()
+        restarted, _, _ = engine_for(tmp_path)
+        try:
+            assert [item.id for item in await restarted.list_sessions(project)] == [native]
+            reopened = await restarted.open_saved(project, native)
+            assert reopened.transcript.turns[0].user_block.text == text
+        finally:
+            await restarted.close_all()
+
     asyncio.run(scenario())
 
 

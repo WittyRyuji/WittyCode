@@ -27,7 +27,7 @@ from desktop.core.hooks import Hooks, PromptContext, PromptEvent
 from desktop.core.prompts import ActionView, OptionView, QuestionView, OPTION_LABELS, UNSUPPORTED_OPTIONS
 from desktop.core.session_state import LiveSettings, SessionState, SESSION_STATE_LABELS, SteerOutcome
 from desktop.core.settings import normalize_folder
-from desktop.core.transcript import Transcript, TurnStatus
+from desktop.core.transcript import Transcript, Turn, TurnStatus
 from desktop.core.usage import Tokens
 
 FACTORY_PERMISSIONS = ("off", "low", "medium", "high")
@@ -74,7 +74,7 @@ class FactoryEngine:
             return {}
 
     def _remember(self, controller):
-        if not controller.session_id or not controller.transcript.turns:
+        if not controller.session_id or not controller.history_ready or not controller._history_loaded:
             return
         self._index[controller.session_id] = {"title": controller.title, "project": str(controller.project), "modified": controller.active_at, "created": controller.created_at, "model": controller.model, "usage": controller._usage.to_json() if controller._usage else None, "models": {k: v.to_json() for k, v in controller._usage_models.items()}}
         self.root.mkdir(parents=True, exist_ok=True)
@@ -144,6 +144,7 @@ class FactoryEngine:
     async def open_saved(self, project, native, *, title=None, modified=None):
         raw = _mapping(self._index.get(native))
         controller = FactoryController(self, Path(normalize_folder(project)), session_id=native, saved_title=title or raw.get("title", ""), created_at=raw.get("created", time.time()))
+        controller.history_ready = native in self._index
         controller._usage = Tokens.of(raw.get("usage"))
         controller._usage_models = {k: v for k, item in _mapping(raw.get("models")).items() if (v := Tokens.of(item)) is not None}
         self.controllers.append(controller)
@@ -189,6 +190,10 @@ class FactoryController:
     _close_requested: bool = False
     _turn_model: str = ""
     _turn_usage: Tokens | None = None
+    history_ready: bool = False
+    _submitted_turn: Turn | None = None
+    _submit_task: asyncio.Task | None = None
+    _message_id: str = ""
     engine = "factory"
 
     @property
@@ -236,6 +241,7 @@ class FactoryController:
         return [{"name": c.name, "command": c.command, "args": list(c.args), "env": c.env} for c in commands]
 
     async def open(self, resume=False):
+        self._history_loaded = False
         self.state = SessionState.OPENING
         self._changed("state")
         try:
@@ -290,6 +296,7 @@ class FactoryController:
             message = _mapping(raw.get("message")) or raw
             content = message.get("content", [])
             if message.get("role") == "user":
+                self.history_ready = True
                 text = "\n".join(_text(block.get("text")) for block in content if isinstance(block, Mapping) and block.get("type") == "text")
                 if text:
                     typed, handoff = split_handoff(strip(text))
@@ -340,6 +347,14 @@ class FactoryController:
                 self.context = ContextState(used=used, window=self.context.window, model=self.model)
         turn = self.transcript.active_turn
         if turn is not None:
+            raw = _mapping(event.get("message"))
+            body = _mapping(raw.get("message")) or raw
+            if self._message_id and (
+                kind in ("assistant_text_delta", "thinking_text_delta", "tool_call", "tool_result")
+                or kind == "create_message" and (body.get("role") == "assistant" or raw.get("id") == self._message_id)
+                or kind == "agent_turn_completed" and event.get("reason") in ("completed", "spec_handoff")
+            ):
+                self._confirm_submission(turn)
             message = _text(event.get("messageId")) or "answer"
             index = event.get("blockIndex", 0)
             if kind == "assistant_text_delta":
@@ -417,23 +432,61 @@ class FactoryController:
         self.used_at = self.active_at = time.time()
         self._turn_model, self._turn_usage = self.model, self._usage
         handoff = (self.handoff.carried, self.handoff.truncated) if self.handoff is not None else None
-        self.transcript.start_turn("/compact" if getattr(self, "_switch_summary", False) else text, attachments, handoff=handoff)
+        turn = self.transcript.start_turn("/compact" if getattr(self, "_switch_summary", False) else text, attachments, handoff=handoff)
+        self._message_id = ""
+        self._submit_task = self._spawn(self._send(turn, text, attachments))
         self._changed("state")
-        self._spawn(self._send(text, attachments))
         return True
 
-    async def _send(self, text, attachments):
+    def prompt_submitted(self, turn: Turn | None) -> bool:
+        return turn is not None and self._submitted_turn is turn
+
+    def _confirm_submission(self, turn):
+        if self.prompt_submitted(turn):
+            return
+        self._submitted_turn = turn
+        if not self.history_ready:
+            self.history_ready = True
+            self.manager._remember(self)
+            self._changed("history")
+
+    def _reject_submission(self, turn, error):
+        if not self._close_requested and self.transcript.active_turn is turn:
+            self.state = SessionState.READY
+            self.transcript.fail_turn(f"Factory 未发送这条消息：{error}")
+            self._expire()
+            self._changed("state")
+
+    async def _send(self, turn, text, attachments):
         try:
-            await self._client.request("droid.add_user_message", self._message(text, attachments), timeout=30)
+            params = self._message(text, attachments)
+        except Exception as error:
+            self._reject_submission(turn, error)
+            return
+        self._message_id = params["messageId"]
+        try:
+            await self._client.request("droid.add_user_message", params, timeout=30)
+        except EngineRpcError as error:
+            if not self.prompt_submitted(turn):
+                self._reject_submission(turn, error)
+                return
+            # A peer may report an error after already streaming part of this turn.
+            if self.transcript.active_turn is turn:
+                self.transcript.fail_turn(f"Factory 本轮已提交，但未正常完成：{error}")
+                self.state = SessionState.READY
+                self._expire()
+                self._changed("state")
         except asyncio.CancelledError:
             raise
         except Exception as error:
-            if not self._close_requested and self.state is SessionState.RUNNING:
+            if not self._close_requested and self.transcript.active_turn is turn:
                 self.state = SessionState.DEAD
                 self.transcript.fail_turn(f"Factory 发送失败，结果未确认，请重新连接：{error}", recoverable=True)
                 self._expire()
                 await self._client.close()
                 self._changed("state")
+        else:
+            self._confirm_submission(turn)
 
     async def steer(self, text, attachments=()):
         # The application's queue remains available. Do not claim steering was adopted without a correlated CLI echo.
@@ -462,6 +515,9 @@ class FactoryController:
         params = _mapping(params)
         if self._close_requested or not self.busy or getattr(self, "_switch_summary", False):
             return {"selectedOption": "cancel"} if method == "droid.request_permission" else {"cancelled": True, "answers": []}
+        turn = self.transcript.active_turn
+        if self._message_id and turn is not None and method in ("droid.request_permission", "droid.ask_user"):
+            self._confirm_submission(turn)
         if method == "droid.request_permission":
             ids, actions = [], []
             for raw in params.get("toolUses", []):
@@ -529,6 +585,12 @@ class FactoryController:
         self.transcript.mark_stopping()
         self._changed()
         try:
+            # Do not interrupt an idle native session while our first message is still being prepared/rejected.
+            task = self._submit_task
+            if task is not None and not task.done() and not self.prompt_submitted(self.transcript.active_turn):
+                await asyncio.wait_for(asyncio.shield(task), 10)
+            if not self.busy:
+                return
             await self._client.request("droid.interrupt_session", {}, timeout=10)
             deadline = time.monotonic() + 10
             while self.busy and time.monotonic() < deadline:

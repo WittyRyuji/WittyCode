@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import type { ApiProvider, AttachmentView, Engine, FileView, MemoryState, ModelChoice, ProviderDraft, Session, SessionSettings, SkillItem, SwitchBlock, Turn } from "./types";
-import type { FollowUp, FusionSettingKey, HandoffChoice, QuestionAnswer, SavedRow, SettingValue, SoundKey, SoundKind, VideoCommand, VideoInfo, VideoUpdate } from "./protocol";
+import type { FollowUp, FusionSettingKey, HandoffChoice, InlineImageInfo, QuestionAnswer, SavedRow, SettingValue, SoundKey, SoundKind, VideoCommand, VideoInfo, VideoUpdate } from "./protocol";
 import {
   API_PROVIDERS,
   CHATGPT_ACCOUNT,
@@ -17,9 +17,11 @@ import { readFiles } from "./mock/attachments";
 import { cancelRun, runTurn, settlePrompt } from "./mock/simulator";
 import { bridge } from "./bridge-instance";
 import { engineLabel, engineOfSource, findModel } from "./lib/models";
+import { appendChatQuestion } from "./lib/copyChat";
 import { fusionEffort } from "./lib/fusionReasoning";
 import { handoffOf } from "./lib/handoff";
 import { quitWarning } from "./lib/quit";
+import { frontOfPartition, sameSessionPartition } from "./lib/sessionOrder";
 import { effortLabel, permissionsFor, startingLevel } from "./lib/vocab";
 import { COMPACT_AT_DEFAULT, clampCompactAt, emptyLiveData, type LiveData } from "./liveReducer";
 import { LIVE, liveSeed } from "./mode";
@@ -121,8 +123,11 @@ export interface Store extends LiveData {
   quit: () => void;
   select: (id: string | null) => void;
   openSaved: (id: string) => void;
-  /** move a sidebar row within its project; the live backend persists the order */
+  /** move a sidebar row within its project and pin partition; the live backend persists the order */
   reorderSession: (projectId: string, id: string, targetId: string, after: boolean) => void;
+  setSessionPinned: (projectId: string, id: string, pinned: boolean) => void;
+  /** Demo only: admit a first dispatch, or promote a listed ordinary row on significant activity. */
+  recordDemoActivity: (id: string) => void;
   /** show the first message box (in `projectId` when given); the conversation itself is made when the first message goes */
   newSession: (projectId?: string) => void;
   setLandingDraft: (draft: string) => void;
@@ -163,6 +168,8 @@ export interface Store extends LiveData {
   refreshPlanUsage: () => void;
   /** Preview data as a `data:` URI; null on failure unless the caller wants the bridge's error. */
   filePage: (ref: string, page: number, width: number, reportError?: boolean) => Promise<string | null>;
+  inlineImage: (sessionId: string, path: string) => Promise<InlineImageInfo>;
+  inlineVideoPoster: (sessionId: string, path: string, width: number) => Promise<VideoInfo>;
   fileVideo: (command: VideoCommand) => Promise<VideoInfo | null>;
   watchVideo: (token: string, receive: (event: VideoUpdate) => void) => () => void;
   closeFile: () => void;
@@ -178,6 +185,7 @@ export interface Store extends LiveData {
   /** show the project folder in Explorer */
   revealProject: (id: string) => void;
   setDraft: (id: string, draft: string) => void;
+  askAboutChatText: (id: string, text: string) => void;
   /** dropped or pasted files become attachments of the session's next message */
   attachFiles: (id: string, files: File[]) => Promise<void>;
   /** the paperclip in the live app: Windows' own file dialog */
@@ -395,11 +403,33 @@ export const useStore = create<Store>((set, get) => ({
   reorderSession: (projectId, id, targetId, after) => set((s) => ({
     projects: s.projects.map((p) => {
       if (p.id !== projectId || id === targetId || !p.sessionIds.includes(id) || !p.sessionIds.includes(targetId)) return p;
+      const target = s.sessions[targetId];
+      if (!target || !sameSessionPartition(s.sessions[id], target)) return p;
       const ids = p.sessionIds.filter((item) => item !== id);
       ids.splice(ids.indexOf(targetId) + Number(after), 0, id);
       return { ...p, sessionIds: ids };
     }),
   })),
+
+  setSessionPinned: (projectId, id, pinned) => set((s) => {
+    const row = s.sessions[id];
+    const project = s.projects.find((p) => p.id === projectId);
+    if (!row || row.projectId !== projectId || !project?.sessionIds.includes(id) || typeof pinned !== "boolean" || !!row.pinned === pinned) return s;
+    return {
+      sessions: { ...s.sessions, [id]: { ...row, pinned } },
+      projects: s.projects.map((p) => p !== project ? p : {
+        ...p, sessionIds: frontOfPartition(p.sessionIds, id, pinned, (item) => !!s.sessions[item]?.pinned),
+      }),
+    };
+  }),
+
+  recordDemoActivity: (id) => set((s) => {
+    const row = s.sessions[id];
+    if (!row?.mark || row.pinned) return s;
+    return { projects: s.projects.map((p) => p.id !== row.projectId ? p : {
+      ...p, sessionIds: frontOfPartition(p.sessionIds, id, false, (item) => !!s.sessions[item]?.pinned),
+    }) };
+  }),
 
   newSession: (projectId) => {
     // (from a conversation: its project is where the next one starts, as it always was)
@@ -436,14 +466,12 @@ export const useStore = create<Store>((set, get) => ({
     };
     set((s) => ({
       sessions: { ...s.sessions, [id]: session },
-      projects: s.projects.map((p) => (p.id === pid ? { ...p, collapsed: false, sessionIds: [id, ...p.sessionIds] } : p)),
+      projects: s.projects.map((p) => (p.id === pid ? { ...p, collapsed: false } : p)),
       tabs: [...s.tabs, id],
       currentId: id,
       lastProject: pid,
     }));
-    window.setTimeout(() => get().patchSession(id, (x) => ({ ...x, mark: "ready", workingLabel: "就绪" })), 600);
-    // (the demo connects in 0.6 s; the real application keeps a message sent before that, this one waits for it)
-    await new Promise((resolve) => window.setTimeout(resolve, 650));
+    window.setTimeout(() => get().patchSession(id, (x) => x.mark === "opening" ? { ...x, mark: "ready", workingLabel: "就绪" } : x), 600);
     return id;
   },
 
@@ -483,7 +511,7 @@ export const useStore = create<Store>((set, get) => ({
 
   archiveSession: (id) => {
     const s = get().sessions[id];
-    if (!s) return;
+    if (!s || !get().projects.some((p) => p.id === s.projectId && p.sessionIds.includes(id))) return;
     if (s.mark === "running" || s.mark === "attention") return get().say("这个会话还在运行：先停止它，再归档。");
     if (s.mark) get().closeTab(id, true);
     const row: SavedRow = {
@@ -493,6 +521,7 @@ export const useStore = create<Store>((set, get) => ({
       modified: s.modified,
       modifiedAt: s.modifiedAt ?? Date.now(),
       engine: s.engine ?? "chatgpt",
+      pinned: !!s.pinned,
       settings: { ...s.settings, model: "" },
       usage: null,
       context: { used: null, window: 0, model: "", compacted: false },
@@ -509,7 +538,9 @@ export const useStore = create<Store>((set, get) => ({
     if (!row) return;
     set((st) => ({
       archived: st.archived.filter((r) => r.id !== id),
-      projects: st.projects.map((p) => (p.id === row.projectId ? { ...p, sessionIds: [id, ...p.sessionIds] } : p)),
+      projects: st.projects.map((p) => p.id === row.projectId ? {
+        ...p, sessionIds: frontOfPartition(p.sessionIds, id, !!row.pinned, (item) => !!st.sessions[item]?.pinned),
+      } : p),
     }));
   },
   renameSession: (id) => {
@@ -536,7 +567,12 @@ export const useStore = create<Store>((set, get) => ({
         const at = st.tabs.indexOf(id);
         const tabs = st.tabs.filter((t) => t !== id);
         const currentId = st.currentId === id ? (tabs[Math.min(at, tabs.length - 1)] ?? null) : st.currentId;
-        const sessions = { ...st.sessions, [id]: { ...st.sessions[id]!, mark: undefined, draft: "" } };
+        const sessions = { ...st.sessions };
+        if (st.projects.some((p) => p.sessionIds.includes(id))) {
+          sessions[id] = { ...st.sessions[id]!, mark: undefined, draft: "", attachments: [] };
+        } else {
+          delete sessions[id]; // an unsent draft never became a saved row
+        }
         return { tabs, currentId, sessions };
       });
     };
@@ -612,6 +648,8 @@ export const useStore = create<Store>((set, get) => ({
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="595" height="842"><rect width="595" height="842" fill="#fff"/><text x="40" y="80" font-size="28" fill="#333" font-family="sans-serif">${label}</text></svg>`;
     return `data:image/svg+xml;base64,${btoa(svg)}`;
   },
+  inlineImage: async () => { throw new Error("演示中没有可预览的本地图片。"); },
+  inlineVideoPoster: async () => { throw new Error("演示中没有可预览的本地视频。"); },
   fileVideo: async () => null,
   watchVideo: () => () => {},
   closeFile: () => set({ filePanel: null }),
@@ -639,6 +677,11 @@ export const useStore = create<Store>((set, get) => ({
   revealProject: () => get().say("（演示）这里会在资源管理器中打开文件夹。"),
 
   setDraft: (id, draft) => get().patchSession(id, (s) => ({ ...s, draft })),
+  askAboutChatText: (id, text) => {
+    if (get().currentId !== id) return;
+    get().patchSession(id, (s) => ({ ...s, draft: appendChatQuestion(s.draft, text) }));
+    window.dispatchEvent(new CustomEvent("wc:focus-composer", { detail: { endFor: id } }));
+  },
   attachFiles: async (id, files) => {
     const items = await readFiles(files, get().say);
     if (items.length) get().patchSession(id, (s) => ({ ...s, attachments: [...s.attachments, ...items] }));
@@ -649,7 +692,7 @@ export const useStore = create<Store>((set, get) => ({
   send: (id) => {
     const s = get().sessions[id];
     if (!s) return;
-    if (s.mark !== "ready") return get().say("（演示）运行中可以排队或引导，设计稿里没有做；真实应用里 Enter 排队、Ctrl+Enter 立即引导。");
+    if (s.mark !== "ready" && s.mark !== "opening") return get().say("（演示）运行中可以排队或引导，设计稿里没有做；真实应用里 Enter 排队、Ctrl+Enter 立即引导。");
     if (!s.draft.trim() && s.attachments.length === 0) return;
     runTurn(id);
   },

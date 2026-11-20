@@ -11,7 +11,7 @@ import pytest
 from desktop.core import sounds
 from desktop.core.app_core import AppError
 from desktop.core.settings import settings_from_dict, settings_to_dict
-from tests.app_support import ready_core
+from tests.app_support import ready_core, save_conversation
 from tests.fake_responses import call, fail, say
 from tests.fakes import until
 from tests.test_app_core import idle, new_session, three_saved
@@ -35,8 +35,10 @@ def test_three_concurrent_streams_stay_put_but_each_final_result_promotes_within
             expected = list(reversed(ids))
             other = tmp_path / "other"
             other.mkdir()
+            other_row = save_conversation(core.chatgpt, other, "other", "Other history", minutes_ago=5)
             await core.call("project.add", {"path": str(other)})
-            other_cid = await new_session(core, events, other)
+            other_cid = (await core.call("session.openSaved", {"id": other_row, "projectId": str(other)}))["id"]
+            await idle(core, other_cid)
             for _ in range(3):
                 for cid in ids:
                     controller = core._by_cid[cid].controller

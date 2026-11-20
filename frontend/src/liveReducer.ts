@@ -203,6 +203,7 @@ export function savedSession(row: SavedRow): Session {
     modifiedAt: row.modifiedAt,
     engine: row.engine,
     fusion: row.fusion === true,
+    pinned: row.pinned === true,
     turns: [],
     usage: null,
     context: row.context,

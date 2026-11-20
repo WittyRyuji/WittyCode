@@ -216,7 +216,7 @@ def test_a_chatgpt_plan_session_opens_runs_and_reports_its_settings_and_total(tm
             assert conv.engine == "chatgpt" and meta(events, cid)["engine"] == "chatgpt"
             patch = meta(events, cid)
             assert patch["settings"]["model"] == "chatgpt:gpt-6.1-sol" and patch["settings"]["autonomy"] == "code"
-            assert await core.call("session.send", {"id": cid, "text": "hello"}) == {"ok": True}
+            assert (await core.call("session.send", {"id": cid, "text": "hello"}))["ok"]
             await until(lambda: meta(events, cid).get("mark") == "ready" and answer_of(events, cid) == "Hi from the plan.")
             await until(lambda: (meta(events, cid).get("usage") or {}).get("input") == 600)
             assert meta(events, cid)["usage"] == {"input": 600, "output": 12, "cacheWrite": None, "cacheRead": 300}
@@ -467,7 +467,7 @@ def test_a_question_of_the_model_reaches_the_page_as_a_card_and_the_answer_goes_
             fake.script(call("ask_user", ask, call_id="c1", text="One decision first."), say("SQLite then."))
             core, _, events, engine = await chatgpt_core(tmp_path, fake)
             cid = await new_chatgpt(core, events, tmp_path)
-            assert await core.call("session.send", {"id": cid, "text": "set up storage"}) == {"ok": True}
+            assert (await core.call("session.send", {"id": cid, "text": "set up storage"}))["ok"]
             await until(lambda: pending_card(events, cid) is not None)
             card = pending_card(events, cid)
             assert card["who"] == "ChatGPT Plan"

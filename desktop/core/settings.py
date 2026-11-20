@@ -156,6 +156,8 @@ class AppSettings:
     """Earlier native row ids -> the current native segment of the same WittyCode conversation."""
     session_order: list[str] = field(default_factory=list)
     """Sidebar row ids after dragging or promoting a sent/finished conversation; newly discovered sessions precede these."""
+    session_pins: dict[str, list[str]] = field(default_factory=dict)
+    """Canonical project folder -> ordered native row ids. Archiving hides a pinned row without losing its pin."""
     session_created: dict[str, float] = field(default_factory=dict)
     """Stable creation times, including old rows without one and conversations that changed engine."""
 
@@ -176,8 +178,12 @@ def normalize_folder(folder: str | Path) -> str:
     return str(Path(folder).expanduser().resolve(strict=False))
 
 
+def folder_key(folder: str | Path) -> str:
+    return os.path.normcase(normalize_folder(folder))
+
+
 def same_folder(a: str | Path, b: str | Path) -> bool:
-    return os.path.normcase(normalize_folder(a)) == os.path.normcase(normalize_folder(b))
+    return folder_key(a) == folder_key(b)
 
 
 def _roaming_folder(env: Mapping[str, str]) -> Path:
@@ -369,6 +375,18 @@ def settings_from_dict(raw: object) -> AppSettings:
     raw_order = raw.get("session_order")
     if isinstance(raw_order, list):
         order = list(dict.fromkeys(item for item in raw_order if isinstance(item, str) and item))[:MAX_REMEMBERED_SESSIONS]
+    pins: dict[str, list[str]] = {}
+    raw_pins = raw.get("session_pins")
+    if isinstance(raw_pins, dict):
+        for folder, items in raw_pins.items():
+            if not isinstance(folder, str) or not Path(folder).is_absolute() or "\0" in folder or not isinstance(items, list):
+                continue
+            # The writer stores canonical paths. Normalize spelling without visiting old/removed projects on load.
+            key = os.path.normcase(os.path.normpath(folder))
+            valid = (item for item in items if isinstance(item, str) and item.startswith(("cg:", "dv:", "fy:")) and item[3:].strip())
+            ordered = list(dict.fromkeys([*pins.get(key, ()), *valid]))[:MAX_REMEMBERED_SESSIONS]
+            if ordered:
+                pins[key] = ordered
     created: dict[str, float] = {}
     raw_created = raw.get("session_created")
     if isinstance(raw_created, dict):
@@ -437,6 +455,7 @@ def settings_from_dict(raw: object) -> AppSettings:
         session_auto_titles=auto_titles,
         session_links=links,
         session_order=order,
+        session_pins=pins,
         session_created=created,
     )
 

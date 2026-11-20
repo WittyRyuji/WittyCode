@@ -1,13 +1,13 @@
 // The accounts, providers and window part of the contract between this page and the Python side (the whole protocol is
-// in protocol.ts). The page keeps no secrets and starts no processes. In the real app `bridge` is `liveBridge`
+// in protocol.ts). The page starts no processes and does not retain credentials after editing. In the real app `bridge` is `liveBridge`
 // (liveBridge.ts: calls through QWebChannel); in the design page it is the mock in `mock/bridge.ts`.
 //
 // Python side, in short:
 //   providers.*  read and write `customModels` in WittyCode's own models file (models.json) and the provider names that
 //                WittyCode keeps; `test` sends one minimal request through the same base URL / key / headers the session would use.
-//                Keys are never written: `apiKey` is `${NAME}` (an environment variable) or absent, `apiKeyHelper` is a
-//                command. An existing plaintext `apiKey` is left alone until the user switches that provider to a variable
-//                (then it is removed). `envStatus` reads os.environ and, for "pending", HKCU\Environment.
+//                Env mode saves a variable reference; command mode saves the command; direct entry sends a write-only
+//                `newApiKey` to Python, which stores only current-user DPAPI ciphertext. Legacy inline values are never
+//                returned as plaintext. `envStatus` reads os.environ and, for "pending", HKCU\Environment.
 //   window.*     the frameless window's controls: the title bar is drawn by the page. Python: Qt.FramelessWindowHint,
 //                `QWindow.startSystemMove()` / `startSystemResize(edges)` so Windows snapping keeps working, and a push of
 //                the maximized state back to the page.

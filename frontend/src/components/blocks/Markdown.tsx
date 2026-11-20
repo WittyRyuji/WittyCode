@@ -3,7 +3,9 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Check, Copy } from "lucide-react";
 import { highlight, LANGUAGE_LABEL } from "../../lib/highlight";
+import { inlineMediaTarget, localVideoLink } from "../../lib/inlineMedia";
 import { looksLikePath, localTarget } from "../../lib/pathref";
+import { InlinePicture, InlineVideo } from "./InlineMedia";
 import { PathRef } from "./PathRef";
 
 export function CodeBlock({ code, language }: { code: string; language: string }) {
@@ -32,7 +34,11 @@ export function CodeBlock({ code, language }: { code: string; language: string }
 
 /** Assistant text. Raw HTML in the markdown is never rendered (react-markdown drops it), links are inert text until
  *  the Python side opens them. */
-export const Markdown = memo(function Markdown({ source, streaming }: { source: string; streaming?: boolean }) {
+export const Markdown = memo(function Markdown({ source, streaming, mediaSessionId }: {
+  source: string; streaming?: boolean; mediaSessionId?: string;
+}) {
+  // A partial destination might still change as tokens arrive. Only finished transcript blocks opt in.
+  const sessionId = streaming ? undefined : mediaSessionId;
   return (
     <div className={`text selectable${streaming ? " streaming" : ""}`}>
       <ReactMarkdown
@@ -58,6 +64,14 @@ export const Markdown = memo(function Markdown({ source, streaming }: { source: 
             return <code className={className}>{children}</code>;
           },
           a({ href, children }) {
+            const media = sessionId ? inlineMediaTarget(href) : null;
+            if (sessionId && media?.kind === "video") {
+              const label = typeof children === "string" && children.trim() ? children : media.path.split(/[\\/]/).pop()!;
+              return <InlineVideo key={media.path} sessionId={sessionId} path={media.path} label={label} />;
+            }
+            if (sessionId && localVideoLink(href)) {
+              return <span className="img-link" title="正文视频只支持项目内的相对路径">{children}</span>;
+            }
             const local = localTarget(href);
             if (local) return <PathRef text={local} label={children} />;
             return (
@@ -66,7 +80,13 @@ export const Markdown = memo(function Markdown({ source, streaming }: { source: 
               </a>
             );
           },
-          img({ alt }) {
+          img({ src, alt }) {
+            const media = sessionId ? inlineMediaTarget(src) : null;
+            if (sessionId && media) {
+              const label = alt || media.path.split(/[\\/]/).pop()!;
+              const Embed = media.kind === "image" ? InlinePicture : InlineVideo;
+              return <Embed key={media.path} sessionId={sessionId} path={media.path} label={label} />;
+            }
             return <span className="img-link">[图片：{alt || "未命名"}]</span>;
           },
         }}

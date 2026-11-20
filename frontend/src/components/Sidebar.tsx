@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from "react";
-import { Archive, ArchiveRestore, Brain, ChevronRight, ExternalLink, FolderPlus, MoreHorizontal, Pencil, Plus, RefreshCw, Settings as Gear, SquarePen, Trash2, Copy, FolderOpen } from "lucide-react";
+import { Archive, ArchiveRestore, Brain, ChevronRight, ExternalLink, FolderPlus, MoreHorizontal, Pencil, Pin, PinOff, Plus, RefreshCw, Settings as Gear, SquarePen, Trash2, Copy, FolderOpen } from "lucide-react";
 import { useStore } from "../store";
 import type { Project, Session } from "../types";
 import { MARK_TEXT } from "../lib/format";
 import { findModel, sourceLabel } from "../lib/models";
+import { sameSessionPartition } from "../lib/sessionOrder";
 import { formatRelative } from "../lib/time";
 import { Menu, StateDot, type Anchor, type MenuItem } from "./ui";
+import "../styles/sidebar.css";
 
 function midClip(path: string, max = 36) {
   if (path.length <= max) return path;
@@ -42,12 +44,13 @@ function SessionRow({ session, current, onMenu, dragging }: { session: Session; 
   // Measured from this moment, not from the last tick: a row that has just arrived is never a tick behind.
   const when = session.modifiedAt ? formatRelative(session.modifiedAt, Date.now()) : session.modified;
   const sub = [open ? MARK_TEXT[session.mark!] : "", when, from].filter(Boolean).join(" · ");
+  const canDrop = (id: string | null) => !!id && id !== session.id && sameSessionPartition(useStore.getState().sessions[id], session);
   return (
     <div
       className={`srow${current ? " current" : ""}${open ? " open" : ""}${session.mark ? ` m-${session.mark}` : ""}${drop ? ` drop-${drop}` : ""}`}
       data-session-id={session.id}
       draggable
-      title="拖动可调整本项目内的会话顺序"
+      title="拖动可调整本项目同一置顶分区内的会话顺序"
       onDragStart={(e) => {
         dragging.current = session.id;
         e.dataTransfer.setData(SESSION_DRAG, session.id);
@@ -55,7 +58,10 @@ function SessionRow({ session, current, onMenu, dragging }: { session: Session; 
       }}
       onDragEnd={() => { dragging.current = null; setDrop(null); }}
       onDragOver={(e) => {
-        if (!dragging.current || dragging.current === session.id || !e.dataTransfer.types.includes(SESSION_DRAG)) return;
+        if (!canDrop(dragging.current) || !e.dataTransfer.types.includes(SESSION_DRAG)) {
+          setDrop(null);
+          return;
+        }
         e.preventDefault();
         e.dataTransfer.dropEffect = "move";
         const r = e.currentTarget.getBoundingClientRect();
@@ -67,7 +73,7 @@ function SessionRow({ session, current, onMenu, dragging }: { session: Session; 
       onDrop={(e) => {
         setDrop(null);
         const id = e.dataTransfer.getData(SESSION_DRAG);
-        if (!id || id !== dragging.current || id === session.id) return;
+        if (!id || id !== dragging.current || !canDrop(id)) return;
         e.preventDefault();
         e.stopPropagation();
         const r = e.currentTarget.getBoundingClientRect();
@@ -92,6 +98,7 @@ function SessionRow({ session, current, onMenu, dragging }: { session: Session; 
         <div className="stitle">{session.title}</div>
         <div className="ssub">{sub}</div>
       </div>
+      {session.pinned && <span className="srow-pin" role="img" aria-label="已置顶" title="已置顶"><Pin size={13} aria-hidden="true" /></span>}
       <button
         type="button"
         className="more"
@@ -203,6 +210,7 @@ export function Sidebar() {
   const newSession = useStore((s) => s.newSession);
   const openSaved = useStore((s) => s.openSaved);
   const renameSession = useStore((s) => s.renameSession);
+  const setSessionPinned = useStore((s) => s.setSessionPinned);
   const archiveSession = useStore((s) => s.archiveSession);
   const removeProject = useStore((s) => s.removeProject);
   const refreshProjects = useStore((s) => s.refreshProjects);
@@ -220,6 +228,7 @@ export function Sidebar() {
       anchor,
       items: [
         { id: "open", label: "打开", onSelect: () => openSaved(s.id) },
+        { id: "pin", label: s.pinned ? "取消置顶" : "置顶", icon: s.pinned ? <PinOff size={14} /> : <Pin size={14} />, onSelect: () => setSessionPinned(s.projectId, s.id, !s.pinned) },
         { id: "rename", label: "重命名…", icon: <Pencil size={14} />, onSelect: () => renameSession(s.id) },
         { id: "copy", label: "复制会话 ID", icon: <Copy size={14} />, onSelect: () => { void navigator.clipboard?.writeText(nativeIdOf(s)); say("已复制会话 ID。"); } },
         { id: "sep", separator: true },

@@ -64,15 +64,19 @@ def test_video_bridge_lease_and_lifetime(tmp_path):
 
             await video("open", "t2", path="other.webm", width=650)
             assert platform.video_closes == 1
+            assert events.of("files.video")[-1] == {"token": "t1", "released": True}
             await video("close")  # the old panel's asynchronous cleanup is harmless
+            await video("play")
             old_callback({"position": 100})
-            assert platform.video_closes == 1 and len(events.of("files.video")) == 1
+            assert platform.video_closes == 1 and len(events.of("files.video")) == 2
+            assert len(platform.video_controls) == 4
             await core.call("files.read", {"id": cid, "path": "notes.txt"})
-            assert platform.video_closes == 2 and platform.video_publish is None
+            assert platform.video_closes == 1 and core._video_preview == (cid, "t2")
 
             with pytest.raises(AppError, match="无法解码"):
                 await video("open", "t3", path="broken.mov", width=500)
-            assert platform.video_closes == 3
+            assert events.of("files.video")[-1] == {"token": "t2", "released": True}
+            assert platform.video_closes == 3 and core._video_preview is None
             await video("open", "t4", path="other.webm", width=500)
             await core.call("session.close", {"id": cid})
             assert platform.video_closes == 4

@@ -51,6 +51,8 @@ cd ..
 | Devin（可选） | Devin CLI 或桌面应用；在 Fusion 中使用需要兼容的 ACP 配置 |
 | Factory（可选） | 单独登录的 Factory CLI，不依赖 Factory SDK |
 
+API Provider 默认推荐使用**环境变量**。如选择「**直接输入（不推荐）**」，WittyCode 会用当前 Windows 用户的加密机制保存密钥。编辑时留空保留；改接口类型或 Base URL 后，需重新输入密钥或选择其他来源。Bedrock 仍使用单独的 AWS 凭据设置。
+
 `Ctrl+N` 新建会话，`Ctrl+O` 添加项目，`Ctrl+L` 聚焦输入框，`Ctrl+B` 开关侧栏，`Ctrl+,` 打开设置。命令行支持 `--project DIR`、`--settings FILE`、`--debug`。也可以离线回放录制，不用调用模型；见[使用指南](docs/usage-details.md)。
 
 **数据与权限：** WittyCode 自己的会话和记忆默认保存在 `%APPDATA%\WittyCode\`，没有遥测。发给模型服务或连接器的内容仍会发送给对应服务。应用的工具权限与写入范围**不是操作系统级沙箱**。只运行信任的命令与扩展；不信任的项目不要开「完全访问」。Bedrock 和 Factory 尚未在真实账号上完成端到端验证。

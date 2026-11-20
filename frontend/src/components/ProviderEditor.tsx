@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, ArrowLeft, Check, ChevronRight, Copy, Loader2, Plus, Trash2, X } from "lucide-react";
 import { useStore } from "../store";
 import { bridge } from "../bridge-instance";
 import { KIND_INFO, PRESETS, REASONING, type Preset } from "../lib/vocab";
-import { envHintOf, envNameOf, envVarText } from "../lib/models";
+import { envHintOf, envNameOf, envVarText, sameProviderEndpoint } from "../lib/models";
+import { LIVE } from "../mode";
 import { API_EFFORTS, contextProblem, imagesAfterKindChange, imagesByDefault, modelSpecification, withRemoteFigures } from "../lib/providerDefaults";
 import { messageOf } from "../lib/errors";
 import { hasAdvancedProviderOptions, reasoningArgsProblem } from "../lib/reasoningArgs";
@@ -12,11 +13,11 @@ import type { ApiKind, ApiModel, EnvState, KeyMode, ProviderDraft, RemoteModel }
 import { Seg, Select, Stack, Switch, TextInput } from "./formkit";
 import type { MenuItem } from "./ui";
 
-/** There is no way to type a key in here: it lives in an environment variable, or comes from a command. */
 const KEY_MODES: { id: KeyMode; label: string }[] = [
   { id: "env", label: "环境变量" },
   { id: "command", label: "命令获取" },
   { id: "none", label: "不需要" },
+  { id: "protected", label: "直接输入（不推荐）" },
 ];
 
 /** The variable a provider at this address conventionally uses, so switching to "环境变量" starts from a sensible name. */
@@ -153,24 +154,58 @@ export function ProviderEditor({ editId }: { editId: string }) {
   const [suggest, setSuggest] = useState<RemoteModel[] | null>(null);
   const [advanced, setAdvanced] = useState(hasAdvancedProviderOptions(existing));
   const [saving, setSaving] = useState(false);
+  const [keyProblem, setKeyProblem] = useState("");
+  const keyInput = useRef<HTMLInputElement>(null);
+  const connectionRevision = useRef(0);
   const isNew = !existing;
+  const sameEndpoint = !!existing && sameProviderEndpoint(d, existing);
+  const keepKey = sameEndpoint && existing?.keyMode === d.keyMode;
   const errors = useMemo(() => validate(d), [d]);
   const shown = (k: string) => (tried ? errors[k] : undefined);
-  const set = <K extends keyof ProviderDraft>(k: K, v: ProviderDraft[K]) => setD((x) => ({ ...x, [k]: v }));
+  const resetConnection = (clearKey = false) => {
+    if (clearKey && keyInput.current) keyInput.current.value = "";
+    connectionRevision.current++;
+    setKeyProblem("");
+    setTest({ busy: false });
+    setSuggest(null);
+  };
+  const requestDraft = (): ProviderDraft | null => {
+    if (d.keyMode === "protected") {
+      const value = keyInput.current?.value.trim();
+      if (value) return { ...d, newApiKey: LIVE ? value : "demo-key" };
+      if (!keepKey) {
+        setKeyProblem(existing?.keyMode === "protected" ? "接口类型或 Base URL 已更改，请为新接口重新输入 API Key。" : "请输入 API Key。");
+        return null;
+      }
+    } else if (d.keyMode === "inline" && !keepKey) {
+      setKeyProblem("接口类型或 Base URL 已更改，请选择其他密钥来源。");
+      return null;
+    }
+    return d;
+  };
+  const set = <K extends keyof ProviderDraft>(k: K, v: ProviderDraft[K]) => {
+    if (["baseUrl", "keyHint", "bearer", "headers"].includes(k)) resetConnection(k === "baseUrl");
+    setD((x) => ({ ...x, [k]: v }));
+  };
   const setModel = (i: number, patch: Partial<ApiModel>) => setD((x) => ({ ...x, models: x.models.map((m, j) => (j === i ? { ...m, ...patch } : m)) }));
 
   const presetItems: MenuItem[] = PRESETS.map((p) => ({
     id: p.id,
     label: p.name,
     description: p.local ? "本机服务，不需要密钥" : p.baseUrl.replace(/^https?:\/\//, "") || undefined,
-    onSelect: () => setD(draftFrom(`new:${p.id}`, undefined)),
+    onSelect: () => {
+      resetConnection(true);
+      setD(draftFrom(`new:${p.id}`, undefined));
+    },
   }));
   const kindItems: MenuItem[] = (Object.keys(KIND_INFO) as ApiKind[]).map((k) => ({
     id: k,
     label: KIND_INFO[k].label,
     description: KIND_INFO[k].hint,
     checked: d.kind === k,
-    onSelect: () =>
+    onSelect: () => {
+      if (k === d.kind) return;
+      resetConnection(true);
       setD((x) => ({
         ...x,
         kind: k,
@@ -179,25 +214,35 @@ export function ProviderEditor({ editId }: { editId: string }) {
         reasoningArgs: k === "bedrock-converse" ? undefined : x.reasoningArgs,
         reasoningArgsMixed: k === "bedrock-converse" ? undefined : x.reasoningArgsMixed,
         bedrock: k === "bedrock-converse" ? (x.bedrock ?? { method: "aws-credentials", region: "us-west-2", profile: "" }) : undefined,
-        keyMode: k === "bedrock-converse" ? "none" : x.keyMode,
-      })),
+        keyMode: k === "bedrock-converse" ? "none" : x.kind === "bedrock-converse" ? "env" : x.keyMode,
+        keyHint: x.kind === "bedrock-converse" ? suggestedVariable(x.baseUrl) : x.keyHint,
+      }));
+    },
   }));
 
   const runTest = async () => {
+    const draft = requestDraft();
+    if (!draft) return;
+    const revision = ++connectionRevision.current;
     setTest({ busy: true });
     try {
-      const r = await bridge.providers.test(d);
-      setTest({ busy: false, ok: r.ok, text: r.text });
+      const r = await bridge.providers.test(draft);
+      if (revision === connectionRevision.current) setTest({ busy: false, ok: r.ok, text: r.text });
     } catch (error) {
+      if (revision !== connectionRevision.current) return;
       setTest({ busy: false });
       say(messageOf(error));
     }
   };
   const fetchModels = async () => {
+    const draft = requestDraft();
+    if (!draft) return;
+    const revision = ++connectionRevision.current;
     setSuggest(null);
     setTest({ busy: true });
     try {
-      const found = await bridge.providers.listModels(d);
+      const found = await bridge.providers.listModels(draft);
+      if (revision !== connectionRevision.current) return;
       const byId = new Map(found.map((m) => [m.id, m]));
       const filled = d.models.filter((m) => {
         const next = withFigures(m, byId);
@@ -207,24 +252,29 @@ export function ProviderEditor({ editId }: { editId: string }) {
       const serverWindows = found.filter((m) => m.contextWindow && m.contextSource !== "catalog").length;
       const catalogWindows = found.filter((m) => m.contextSource === "catalog").length;
       const text = !found.length
-        ? "这个服务没有列出模型：自己填模型 ID 和上下文窗口。"
+        ? "没有取得模型列表。可用「测试连接」查看原因，或手动填模型 ID 和上下文窗口。"
         : `服务端列出了 ${found.length} 个模型；${serverWindows} 个窗口来自服务端，${catalogWindows} 个由内置规格表补全` +
           "。其余未知模型需填写上下文窗口，不使用统一猜测值" +
           (filled ? `；已补上 ${filled} 行的空白项` : "");
       setTest({ busy: false, ok: found.length > 0, text });
       setSuggest(found);
     } catch (error) {
+      if (revision !== connectionRevision.current) return;
       setTest({ busy: false });
       say(messageOf(error));
     }
   };
   const save = async () => {
     setTried(true);
-    if (Object.keys(errors).length) return;
+    const draft = requestDraft();
+    if (!draft || Object.keys(errors).length) return;
     setSaving(true);
-    const ok = await saveProvider({ ...d, name: d.name.trim(), baseUrl: d.baseUrl.trim(), models: d.models.filter((m) => m.id.trim()).map((m) => ({ ...m, id: m.id.trim() })) });
+    const ok = await saveProvider({ ...draft, name: d.name.trim(), baseUrl: d.baseUrl.trim(), models: d.models.filter((m) => m.id.trim()).map((m) => ({ ...m, id: m.id.trim() })) });
     setSaving(false);
-    if (ok) setProviderEdit(null);
+    if (ok) {
+      if (keyInput.current) keyInput.current.value = "";
+      setProviderEdit(null);
+    }
   };
 
   const isBedrock = d.kind === "bedrock-converse";
@@ -283,15 +333,32 @@ export function ProviderEditor({ editId }: { editId: string }) {
               <div className="pe-warn" role="note">
                 <AlertTriangle size={15} />
                 <div>
-                  这个 Provider 的密钥现在以<b>明文</b>写在 settings.json 里（<code>{d.keyHint}</code>）。WittyCode 不再往配置里写密钥：选「环境变量」，填变量名，保存后配置里的明文密钥会被删掉。不改的话它照旧能用。
+                  这个 Provider 的旧密钥以<b>明文</b>写在 models.json 里（<code>{d.keyHint}</code>）。不改接口可以继续使用；建议切换到「环境变量」。保存其他密钥来源后，模型配置中的明文会被移除。{keyProblem && <div className="stack-err">{keyProblem}</div>}
                 </div>
               </div>
             )}
             <Seg
               value={d.keyMode}
               options={KEY_MODES}
-              onChange={(m) => setD((x) => ({ ...x, keyMode: m, keyHint: m === "env" ? suggestedVariable(x.baseUrl) : m === "command" ? "" : "" }))}
+              onChange={(m) => {
+                if (m === d.keyMode) return;
+                resetConnection(true);
+                setD((x) => ({ ...x, keyMode: m, keyHint: m === "env" ? suggestedVariable(x.baseUrl) : "" }));
+              }}
             />
+            {d.keyMode === "protected" && (
+              <>
+                <div className="pe-warn" role="note">
+                  <AlertTriangle size={15} />
+                  <div><b>不推荐直接输入。</b>优先用环境变量。保存时由当前 Windows 用户加密；换用户或电脑后可能需要重新输入。请只为你信任的接口提供密钥，远程服务建议使用 HTTPS。{!LIVE && "演示页请勿输入真实密钥。"}</div>
+                </div>
+                <Stack label="API Key" error={keyProblem} hint={keepKey
+                  ? "已保存加密密钥。留空保留，输入新密钥可替换；更改接口类型或 Base URL 后必须重新输入。"
+                  : "填写此接口的 API Key。保存前可以测试连接或获取模型列表。"}>
+                  <TextInput label="API Key" type="password" inputRef={keyInput} mono invalid={!!keyProblem} onChange={() => resetConnection()} />
+                </Stack>
+              </>
+            )}
             {d.keyMode === "env" && (
               <>
                 <Stack label="环境变量" error={shown("key")} hint="只写变量名，不用加 ${}。密钥放在这个环境变量里，配置文件里只记变量名，不记密钥。">

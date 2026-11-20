@@ -40,6 +40,8 @@ log = logging.getLogger("desktop.harness.store")
 VERSION = 1
 SESSIONS = "sessions"
 INDEX = "index.json"
+FIRST_PROMPT = "firstPromptPending"
+"""A new conversation's recovery checkpoint, written before its first request can reach the model."""
 _ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 LOST = (
@@ -502,6 +504,21 @@ class SessionStore:
         except (OSError, ValueError):
             return None
         return _session_from(raw)
+
+    def discard_first_prompt(self, session_id: str) -> None:
+        """Roll back our own rejected first dispatch, while still holding its writer lock.
+
+        Never act on an ordinary archive or on a checkpoint with model/tool output, even if the caller is mistaken.
+        """
+        saved = self.load(session_id)
+        if (saved is None or saved.origin.get(FIRST_PROMPT) is not True or len(saved.turns) != 1
+                or saved.turns[0].status != "running" or saved.turns[0].start != 0
+                or len(saved.items) != 1 or saved.items[0].get("role") != "user"):
+            return
+        index = self._index()  # take the existing index before unlinking, so it need not be rebuilt for this removal
+        self._path(session_id).unlink()
+        index.pop(session_id, None)
+        self._write_index(index)
 
     def delete(self, session_id: str) -> None:
         try:

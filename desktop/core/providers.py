@@ -20,6 +20,8 @@ Fields of one entry (``model`` is the only one that is always there):
   values and in ``bedrock.awsRegion`` / ``awsProfile`` / ``bedrockBaseUrl`` / ``requestMetadata``); an unset variable is
   an error naming it. The literal placeholders ``YOUR_API_KEY`` and ``YOUR_OPENAI_API_KEY`` make the entry unusable.
   Omit it for keyless endpoints.
+- ``wittycodeProtectedApiKey``: an opaque Windows current-user DPAPI value, bound to the interface kind and Base URL.
+  The editor writes this instead of ``apiKey`` / ``apiKeyHelper`` when a key is entered directly.
 - ``apiKeyHelper`` (str, optional): a shell command whose trimmed stdout is the key, run from the home directory; it wins
   over ``apiKey``. ``apiKeyHelperTtlMs`` (positive int, default 300000 = 5 min).
 - ``authMode``: ``bearer`` (send ``Authorization: Bearer`` instead of ``x-api-key``; only valid with
@@ -76,7 +78,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -84,6 +86,7 @@ from urllib.parse import urlsplit
 
 from desktop.core.llm.aws import Access, AwsError, BedrockSettings, Resolver
 from desktop.core.llm.model_specs import known_window
+from desktop.core.provider_secrets import PROTECTED_KEY_FIELD, ProviderSecretError, endpoint, seal, unseal, validate_key
 from desktop.core.settings import default_settings_path
 
 log = logging.getLogger(__name__)
@@ -116,6 +119,7 @@ _ENV_ANY = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _PLACEHOLDER_KEYS = ("YOUR_OPENAI_API_KEY", "YOUR_API_KEY")
 _HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 _SECRET_HEADER = re.compile(r"authorization|api[-_]?key|token|secret|passw|credential|cookie", re.IGNORECASE)
+_API_KEY_HEADER = re.compile(r"(?:^|[-_])api[-_]?key$", re.IGNORECASE)
 _AUTH_SCHEME = re.compile(r"^\s*(bearer|basic|token|digest)\s+", re.IGNORECASE)
 _BULLETS = "\u2022" * 8
 
@@ -294,6 +298,7 @@ class _Key:
     hint: str
     ttl: int | None = None
     secret: str | None = field(default=None, repr=False)
+    protected: str | None = field(default=None, repr=False)
 
 
 _NO_KEY = _Key("none", "")
@@ -369,6 +374,9 @@ def _check_metadata(pairs: Sequence[tuple[str, str]]) -> None:
 
 
 def _entry_key(entry: dict) -> _Key:
+    if PROTECTED_KEY_FIELD in entry and not isinstance(entry.get("bedrock"), dict):
+        # Invalid ciphertext is still a protected key, not a reason to try an older source.
+        return _Key("protected", "", protected=_text(entry[PROTECTED_KEY_FIELD]))
     helper = _text(entry.get("apiKeyHelper"))
     if helper:
         return _Key("command", helper, _positive_int(entry.get("apiKeyHelperTtlMs")))
@@ -386,6 +394,22 @@ def _group_key_info(members: Sequence[dict]) -> _Key:
         if info.mode != "none":
             return info
     return _NO_KEY
+
+
+def _protected_header_conflict(names: Iterable[str]) -> str:
+    for name in names:
+        if name.lower() == "host":
+            return "直接输入的 API Key 绑定到 Base URL，不允许覆盖 Host 请求头。"
+        if name.lower() == "authorization" or _API_KEY_HEADER.search(name):
+            return "直接输入的 API Key 不能与高级设置中的 Authorization 或 API Key 请求头并用；请移除冲突的请求头，或改用其他密钥来源。"
+    return ""
+
+
+def _open_key(info: _Key, kind: str, base_url: str) -> str:
+    try:
+        return unseal(info.protected, kind, base_url)
+    except ProviderSecretError as error:
+        raise ProviderError(str(error)) from None
 
 
 def _carries_secret(name: str, value: str) -> bool:
@@ -513,6 +537,7 @@ class _Draft:
     base_url: str
     key_mode: str
     key_hint: str
+    new_api_key: str = field(repr=False)
     ttl: int | None
     bearer: bool
     bedrock: dict[str, str] | None
@@ -520,6 +545,9 @@ class _Draft:
     extra_args: dict[str, Any]
     reasoning_args: dict[str, dict[str, Any]] | None
     models: list[_Row]
+
+    def header_conflict(self) -> str:
+        return _protected_header_conflict(name for name, _ in self.headers) if self.key_mode == "protected" else ""
 
     @property
     def key(self) -> tuple[str, str]:
@@ -560,15 +588,27 @@ def _parse_draft(draft: Any, *, connection_only: bool = False) -> _Draft:
             valid = False
         if not valid:
             raise ProviderError("Base URL 要以 http:// 或 https:// 开头。")
-        if parts.username or parts.password:
-            raise ProviderError("Base URL 里不要带用户名和密码，密钥放在环境变量里。")
+        if parts.username is not None or parts.password is not None:
+            raise ProviderError("Base URL 里不要带用户名和密码，请单独设置密钥来源。")
 
-    key_mode, key_hint, ttl = "none", "", None
+    key_mode, key_hint, new_api_key, ttl = "none", "", "", None
     if kind != BEDROCK:
         key_mode = draft.get("keyMode")
-        key_hint = _text(draft.get("keyHint")) if key_mode in ("env", "command") else (draft.get("keyHint") or "")
-        if key_mode not in ("env", "command", "none", "inline"):
+        if key_mode not in ("env", "command", "none", "inline", "protected"):
             raise ProviderError("密钥来源不对。")
+        key_hint = _text(draft.get("keyHint")) if key_mode in ("env", "command", "inline") else ""
+        raw_key = draft.get("newApiKey", "")
+        if key_mode == "protected":
+            if not isinstance(raw_key, str):
+                raise ProviderError("API Key 必须是文本。")
+            new_api_key = raw_key.strip(" \t")
+            if new_api_key:
+                try:
+                    validate_key(new_api_key)
+                except ProviderSecretError as error:
+                    raise ProviderError(str(error)) from None
+        elif raw_key:
+            raise ProviderError("仅「直接输入」模式接受 API Key。")
         if key_mode == "env" and not _ENV_REF.match(key_hint):
             raise ProviderError("环境变量要写成 ${变量名}：这里填的是变量名，不是密钥本身。")
         if key_mode == "command":
@@ -664,6 +704,7 @@ def _parse_draft(draft: Any, *, connection_only: bool = False) -> _Draft:
         base_url=base_url,
         key_mode=key_mode,
         key_hint=key_hint,
+        new_api_key=new_api_key,
         ttl=ttl,
         bearer=bearer,
         bedrock=bedrock,
@@ -681,7 +722,7 @@ def _set_or_drop(entry: dict, name: str, value: Any) -> None:
         entry[name] = value
 
 
-def _build_entry(existing: dict | None, draft: _Draft, row: _Row, headers: dict[str, str], inline_secret: str | None) -> dict:
+def _build_entry(existing: dict | None, draft: _Draft, row: _Row, headers: dict[str, str], credential: _Key) -> dict:
     """One customModels entry for a model row. Fields the editor does not own are kept from ``existing``."""
     entry = copy.deepcopy(existing) if existing is not None else {}
     entry["model"] = row.id
@@ -690,6 +731,7 @@ def _build_entry(existing: dict | None, draft: _Draft, row: _Row, headers: dict[
     elif existing is None or "displayName" in entry:
         entry["displayName"] = row.id
     is_bedrock = draft.kind == BEDROCK
+    entry.pop(PROTECTED_KEY_FIELD, None)
     if is_bedrock:
         entry.pop("baseUrl", None)
         for name in ("apiKey", "apiKeyHelper", "apiKeyHelperTtlMs"):
@@ -706,8 +748,12 @@ def _build_entry(existing: dict | None, draft: _Draft, row: _Row, headers: dict[
             _set_or_drop(entry, "apiKeyHelperTtlMs", draft.ttl)
         elif draft.key_mode == "inline":
             own = entry.get("apiKey")
-            keep = own if isinstance(own, str) and own.strip() and not _ENV_REF.match(own.strip()) else inline_secret
+            keep = own if isinstance(own, str) and own.strip() and not _ENV_REF.match(own.strip()) else credential.secret
             entry["apiKey"] = keep
+        elif draft.key_mode == "protected":
+            for name in ("apiKey", "apiKeyHelper", "apiKeyHelperTtlMs"):
+                entry.pop(name, None)
+            entry[PROTECTED_KEY_FIELD] = credential.protected
         else:
             for name in ("apiKey", "apiKeyHelper", "apiKeyHelperTtlMs"):
                 entry.pop(name, None)
@@ -1142,8 +1188,12 @@ class ProviderStore:
     def api_key(self, spec: ApiModelSpec) -> str | None:
         """The key for a request to this model, read now: from the environment or the user's registry variables (so one set after
         WittyCode started works at once, there being no process that needs a restart), or the key command's output (kept for
-        its time to live). ``None``: the provider needs no key. Raises ``ProviderError`` with a sentence for the user."""
+        its time to live), or decrypted from the model entry for this endpoint. ``None``: no key is needed."""
         key = spec.key
+        if key.mode == "protected":
+            if conflict := _protected_header_conflict(name for name, _ in spec.headers):
+                raise ProviderError(conflict)
+            return _open_key(key, spec.kind, spec.base_url)
         if key.mode == "env":
             return self._variable(key.hint[2:-1])
         if key.mode == "command":
@@ -1209,6 +1259,8 @@ class ProviderStore:
 
     def save(self, draft: dict) -> dict:
         spec = _parse_draft(draft)
+        if conflict := spec.header_conflict():
+            raise ProviderError(conflict)
         with self._lock:
             state = self._load(writing=True)
             target = next((g for g in state.groups if g.id == spec.id), None)
@@ -1217,16 +1269,21 @@ class ProviderStore:
                     raise ProviderError(f"已经有一个 Provider 用了同样的接口类型和地址：「{group.name}」，请直接编辑它。")
             members = [(i, state.entries[i]) for i in target.indices] if target else []
 
-            inline_secret = None
+            existing_entries = [entry for _, entry in members]
+            headers = self._draft_headers(spec, existing_entries)
+            credential = _NO_KEY
             if spec.key_mode == "inline":
-                stored = _group_key_info([m for _, m in members])
-                if stored.mode != "inline":
-                    raise ProviderError("这个 Provider 的配置里已经没有明文密钥了，请改用环境变量。")
-                if spec.key_hint not in ("", stored.hint):
-                    raise ProviderError("密钥不能直接写进配置：请改用环境变量。")
-                inline_secret = stored.secret
-            first_headers = members[0][1].get("extraHeaders") if members else None
-            headers = _resolve_headers(spec.headers, first_headers if isinstance(first_headers, dict) else {})
+                credential = self._retained_key(spec, existing_entries)
+            elif spec.key_mode == "protected":
+                if spec.new_api_key:
+                    try:
+                        protected = seal(spec.new_api_key, spec.kind, spec.base_url)
+                    except ProviderSecretError as error:
+                        raise ProviderError(str(error)) from None
+                    credential = _Key("protected", "", protected=protected)
+                else:
+                    credential = self._retained_key(spec, existing_entries)
+                    _open_key(credential, spec.kind, spec.base_url)  # refuse to save a key that is no longer usable
 
             pool = list(members)
             updated: dict[int, dict] = {}
@@ -1235,7 +1292,7 @@ class ProviderStore:
                 match = next((p for p in pool if p[1]["model"].strip() == row.id), None)
                 if match is not None:
                     pool.remove(match)
-                built = _build_entry(match[1] if match else None, spec, row, headers, inline_secret)
+                built = _build_entry(match[1] if match else None, spec, row, headers, credential)
                 if match is None:
                     added.append(built)
                 else:
@@ -1299,12 +1356,12 @@ class ProviderStore:
         return await asyncio.to_thread(self._probe, draft)
 
     async def list_models(self, draft: dict) -> list[str]:
-        result = await asyncio.to_thread(self._probe, draft)
+        result = await asyncio.to_thread(self._probe, draft, for_models=True)
         return list(result.get("models") or [])
 
     async def model_details(self, draft: dict) -> list[dict[str, Any]]:
         """The server's model ids and figures, with exact documented windows as a fallback and their source marked."""
-        result = await asyncio.to_thread(self._probe, draft)
+        result = await asyncio.to_thread(self._probe, draft, for_models=True)
         figures = {entry["id"]: entry for entry in result.get("details") or ()}
         models = []
         for model_id in result.get("models") or ():
@@ -1316,30 +1373,36 @@ class ProviderStore:
             models.append(entry)
         return models
 
-    def _probe(self, draft: Any) -> dict[str, Any]:
+    def _probe(self, draft: Any, *, for_models: bool = False) -> dict[str, Any]:
         try:
-            return self._probe_unchecked(draft)
+            spec = _parse_draft(draft, connection_only=True)
+            conflict = spec.header_conflict()
+            if not conflict:
+                return self._probe_unchecked(spec)
         except ProviderError as error:
             return _fail(str(error))
         except Exception as error:  # a test must never take the page down
             log.warning("provider test failed unexpectedly: %s", type(error).__name__)
             return _fail(f"测试时出了意外：{type(error).__name__}")
+        if for_models:
+            raise ProviderError(conflict)  # an invalid draft is not an empty model list
+        return _fail(conflict)
 
-    def _probe_unchecked(self, draft: Any) -> dict[str, Any]:
-        spec = _parse_draft(draft, connection_only=True)
+    def _probe_unchecked(self, spec: _Draft) -> dict[str, Any]:
         if spec.kind == BEDROCK:
             return {"ok": False, "text": BEDROCK_TEST_NOTE, "ms": None, "models": None}
-        key = self._credential(spec)
-        stored_headers: Mapping[str, Any] = {}
+        members = []
         with self._lock:
             try:
                 state = self._load()
             except ProviderError:
-                state = None
-            if state is not None:
+                pass  # a new, unsaved connection can still be tested
+            else:
                 group = next((g for g in state.groups if g.id == spec.id), None)
-                raw = state.entries[group.indices[0]].get("extraHeaders") if group else None
-                stored_headers = raw if isinstance(raw, dict) else {}
+                if group:
+                    members = [state.entries[i] for i in group.indices]
+        overrides = self._draft_headers(spec, members)
+        key = self._credential(spec, members)
         headers = {"Accept": "application/json", "User-Agent": "WittyCode"}
         if spec.kind == "anthropic":
             headers["anthropic-version"] = "2023-06-01"
@@ -1347,7 +1410,7 @@ class ProviderStore:
                 headers["Authorization" if spec.bearer else "x-api-key"] = f"Bearer {key}" if spec.bearer else key
         elif key:
             headers["Authorization"] = f"Bearer {key}"
-        for name, value in _resolve_headers(spec.headers, stored_headers).items():
+        for name, value in overrides.items():
             for existing in [k for k in headers if k.lower() == name.lower()]:
                 del headers[existing]
             headers[name] = self._expand(value, name)
@@ -1364,7 +1427,8 @@ class ProviderStore:
                 error.close()
             except Exception:  # an HTTPError built without a body has nothing to close
                 pass
-            return _fail(_http_problem(code, reason))
+            # Servers can put arbitrary text (including the supplied key) in the HTTP reason.
+            return _fail(_http_problem(code, "" if spec.key_mode == "protected" else reason))
         except (urllib.error.URLError, OSError) as error:
             return _fail(_network_problem(host, error))
         elapsed = max(0, int((time.perf_counter() - started) * 1000))
@@ -1374,22 +1438,47 @@ class ProviderStore:
             details = _model_details(payload)
         except ValueError:
             ids, details = None, []
+        if spec.key_mode == "protected" and key:
+            # A broken endpoint may reflect the Authorization header in its advertised model ids.
+            ids = [model_id for model_id in ids if key not in model_id] if ids is not None else None
+            details = [entry for entry in details if key not in entry["id"]]
         text = f"连接成功 · {elapsed} ms" + (f" · {len(ids)} 个模型" if ids is not None else "")
         return {"ok": True, "text": text, "ms": elapsed, "models": ids, "details": details}
 
-    def _credential(self, spec: _Draft) -> str | None:
+    @staticmethod
+    def _same_endpoint(spec: _Draft, members: Sequence[dict]) -> bool:
+        return bool(members) and not isinstance(members[0].get("bedrock"), dict) and (
+            endpoint(spec.kind, spec.base_url) == endpoint(members[0]["provider"], _text(members[0].get("baseUrl")))
+        )
+
+    def _draft_headers(self, spec: _Draft, members: Sequence[dict]) -> dict[str, str]:
+        # Do not carry a masked Config-file credential header to a different HTTP endpoint either.
+        use_stored_headers = (spec.kind == BEDROCK and members) or self._same_endpoint(spec, members)
+        raw = members[0].get("extraHeaders") if use_stored_headers else None
+        return _resolve_headers(spec.headers, raw if isinstance(raw, dict) else {})
+
+    def _retained_key(self, spec: _Draft, members: Sequence[dict]) -> _Key:
+        stored = _group_key_info(members)
+        if spec.key_mode == "inline":
+            if stored.mode != "inline":
+                raise ProviderError("这个 Provider 的配置里没有保存的明文密钥，请选择其他密钥来源。")
+            if spec.key_hint not in ("", stored.hint):
+                raise ProviderError("密钥不能直接写进配置：请改用环境变量或选择「直接输入」。")
+        elif stored.mode != "protected":
+            raise ProviderError("请先输入 API Key。")
+        if not self._same_endpoint(spec, members):
+            raise ProviderError("接口类型或 Base URL 已更改。请为新接口重新输入 API Key，或选择其他密钥来源。")
+        return stored
+
+    def _credential(self, spec: _Draft, members: Sequence[dict]) -> str | None:
         if spec.key_mode == "env":
             return self._env_value(spec.key_hint[2:-1], "请求没有带密钥")
         if spec.key_mode == "command":
             return self._run_command(spec.key_hint)
         if spec.key_mode == "inline":
-            with self._lock:
-                state = self._load()
-                group = next((g for g in state.groups if g.id == spec.id), None)
-                info = _group_key_info([state.entries[i] for i in group.indices]) if group else _NO_KEY
-            if info.secret is None:
-                raise ProviderError("配置里没有找到保存的密钥。")
-            return info.secret
+            return self._retained_key(spec, members).secret
+        if spec.key_mode == "protected":
+            return spec.new_api_key or _open_key(self._retained_key(spec, members), spec.kind, spec.base_url)
         return None
 
     def _env_value(self, name: str, consequence: str) -> str:
@@ -1460,7 +1549,16 @@ class ProviderStore:
         backup = path.with_name(path.name + BACKUP_SUFFIX)
         try:
             if path.exists() and not backup.exists():
-                shutil.copy2(path, backup)
+                before = self._read_settings()
+                rows = before.get("customModels", [])
+                if isinstance(rows, list) and any(isinstance(row, dict) and PROTECTED_KEY_FIELD in row for row in rows):
+                    # Do not give a replaced/deleted protected key a second home in the automatic backup.
+                    for row in rows:
+                        if isinstance(row, dict):
+                            row.pop(PROTECTED_KEY_FIELD, None)
+                    self._atomic_write(backup, json.dumps(before, indent=2, ensure_ascii=False) + "\n", "没法备份 models.json，所以没有改动它。")
+                else:
+                    shutil.copy2(path, backup)
         except OSError:
             raise ProviderError("没法备份 settings.json，所以没有改动它。") from None
         self._atomic_write(path, json.dumps(doc, indent=2, ensure_ascii=False) + "\n", "写不了 settings.json，可能被别的程序占用了。")

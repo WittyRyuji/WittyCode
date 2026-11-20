@@ -11,6 +11,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
+from desktop.core.app_core import AppError
 from desktop.core.chatgpt.http import HttpClient
 from desktop.core.llm.backend import ApiBackend
 from desktop.core.providers import ProviderStore
@@ -222,9 +225,9 @@ def test_a_refused_key_is_told_with_the_providers_name_and_a_missing_variable_wi
         with FakeApi() as api:
             core, _, events, _, _ = await api_core(tmp_path, api, key=None)
             cid = await new_session(core, events, tmp_path, api_model_id(events))
-            await core.call("session.send", {"id": cid, "text": "hi"})
-            await until(lambda: any(b["kind"] == "error" and "TEST_API_KEY" in json.dumps(b, ensure_ascii=False) for b in blocks(events, cid)))
-            assert api.posts == [], "nothing was sent without a key"
+            with pytest.raises(AppError, match="TEST_API_KEY"):
+                await core.call("session.send", {"id": cid, "text": "hi"})
+            assert api.posts == [] and api.title_posts == [], "nothing was sent without a key"
             await core.shutdown()
 
     run(scenario())
@@ -245,7 +248,7 @@ def test_the_conversation_is_in_the_sidebar_even_when_the_chatgpt_plan_is_switch
             assert [row.engine for row in rows] == ["chatgpt"], "the saved conversation is listed: it belongs to the own loop, not to the plan"
             model = api_model_id(events)
             assert rows[0].model == model
-            shown = core._saved_json(rows[0], str((tmp_path / "proj").resolve()))
+            shown = core._saved_json(rows[0], str((tmp_path / "proj").resolve()), pinned=False)
             assert shown["settings"]["model"] == model, "the row says which model it was on: opening it asks for that model, not for the default"
             await core.shutdown()
 

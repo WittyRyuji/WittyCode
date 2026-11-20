@@ -22,6 +22,25 @@ from desktop.core.settings import (
 )
 
 
+def test_session_pins_sanitize_and_round_trip_with_old_settings(tmp_path):
+    path = tmp_path / "settings.json"
+    a, b = (tmp_path / "a").resolve(), (tmp_path / "b").resolve()
+    raw = {"projects": [str(a), str(b)], "session_order": ["cg:second", "cg:first"]}
+    assert settings_from_dict(raw).session_pins == {}
+    raw["session_pins"] = {
+        str(a): ["cg:first", "c1", "cg:", "", None, "dv:next", "cg:first"],
+        str(b): ["cg:first"],
+        str(tmp_path / "invalid"): "cg:first",
+        "relative": ["cg:other"],
+        str(tmp_path / "empty"): [False, "nosuffix", []],
+    }
+    settings = settings_from_dict(raw)
+    assert settings.session_pins == {os.path.normcase(str(a)): ["cg:first", "dv:next"], os.path.normcase(str(b)): ["cg:first"]}
+    assert settings.session_order == ["cg:second", "cg:first"]
+    save_settings(settings, path)
+    assert load_settings(path) == settings
+
+
 def test_round_trip_keeps_every_field(tmp_path):
     original = AppSettings(
         devin_path=str(tmp_path / "devin.exe"),

@@ -492,27 +492,26 @@ def test_a_closed_session_keeps_the_time_of_its_last_message(tmp_path):
     run(scenario())
 
 
-def test_a_new_empty_session_is_the_newest_and_changing_engine_does_not_change_its_place(tmp_path):
+def test_changing_engine_in_a_draft_preserves_the_tab_without_creating_history(tmp_path):
     async def scenario():
         core, _, events, _, _ = await devin_core(tmp_path, projects=False)
-        proj, _ = await three_saved(core, events, tmp_path)
-        cid = await new_session(core, events, proj)
-        core._emit_sidebar()
-        assert listed(events) == [cid, "cg:new", "cg:mid", "cg:old"], "nothing is older than a session that was just made"
-
-        # a conversation last spoken to two hours ago, then moved to the other engine
-        controller = core._by_cid[cid].controller
-        spoken = time.time() - 7200
-        controller.active_at = spoken
-        core._emit_sidebar()
-        assert listed(events) == [cid, "cg:new", "cg:mid", "cg:old"]
-        assert (await core.call("session.choose", {"id": cid, "field": "model", "value": "devin:swe-2-high"}))["switched"]
-        after = core._by_cid[cid].controller
-        assert after is not controller and after.active_at == spoken
-        core._emit_sidebar()
-        assert listed(events) == [cid, "cg:new", "cg:mid", "cg:old"], "the switch keeps the original creation time"
-        assert sessions_of(events)[cid]["modifiedAt"] == int(spoken * 1000)
-        await core.shutdown()
+        try:
+            proj, _ = await three_saved(core, events, tmp_path)
+            cid = await new_session(core, events, proj)
+            controller = core._by_cid[cid].controller
+            created = dict(core.settings.session_created)
+            assert listed(events) == ["cg:new", "cg:mid", "cg:old"]
+            assert (await core.call("session.choose", {"id": cid, "field": "model", "value": "devin:swe-2-high"}))["switched"]
+            after = core._by_cid[cid].controller
+            assert after is not controller and after.active_at == controller.active_at
+            assert events.last("tabs")["tabs"] == [cid]
+            assert listed(events) == ["cg:new", "cg:mid", "cg:old"]
+            assert core.settings.session_created == created and not core.settings.session_links
+            await core.call("session.close", {"id": cid})
+            await core.call("project.refresh", {"id": str(proj)})
+            assert core.project_rows()[0]["sessionIds"] == ["cg:new", "cg:mid", "cg:old"]
+        finally:
+            await core.shutdown()
 
     run(scenario())
 

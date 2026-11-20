@@ -89,6 +89,12 @@ def encode(image: QImage, fmt: str, quality: int = -1) -> bytes:
     return bytes(buffer.data())
 
 
+def gif_poster_png(data: bytes) -> bytes:
+    """Read only the first GIF frame. PNG is a real still, with the original transparency."""
+    image = decode(data, at_most=MAX_SIDE)
+    return encode(image, "PNG") if image is not None else b""
+
+
 def _flatten(image: QImage) -> QImage:
     """JPEG has no transparency: put the picture on white."""
     if not image.hasAlphaChannel():

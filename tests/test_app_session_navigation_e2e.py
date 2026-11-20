@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 
 import pytest
@@ -10,7 +11,7 @@ from PySide6.QtCore import Qt
 
 from tests.devin_support import make_engine
 from tests.e2e_support import open_rig
-from tests.fake_responses import say
+from tests.fake_responses import fail, say
 from tests.test_app_e2e import devin_listed, new_conversation
 from tests.ui_support import run, wait_for
 
@@ -58,12 +59,110 @@ def test_typing_and_switching_sessions_keep_the_outline_and_each_reading_positio
             await rig.click(".tab", 1)
             await rig.click(".tab", 0)
             await wait_for(lambda: rig.js(AT_END), 5, "a switch during smooth scrolling keeps the latest intent")
-            screenshot = Path(__file__).resolve().parents[1] / "sandbox" / f"session-navigation-qt-{theme}.png"
-            screenshot.parent.mkdir(parents=True, exist_ok=True)
-            assert rig.window.grab().save(str(screenshot))
+            assert rig.window.grab().save(str(tmp_path / f"session-navigation-qt-{theme}.png"))
             await rig.press(",", Qt.KeyboardModifier.ControlModifier)
             await rig.wait_for(".settings")
             assert (await rig.texts(".snav"))[-1] == "关于"
+        finally:
+            await rig.finish()
+
+    run(loop, scenario())
+
+
+def test_sidebar_pin_menus_survive_opening_refresh_reload_and_archive(qapp, loop, tmp_path):
+    async def scenario():
+        rig = await open_rig(tmp_path, saved=[("new", "Newer", 5), ("mid", "Middle", 20), ("old", "Older", 60)])
+        try:
+            await rig.wait_for(".srow", 3)
+            old = '.srow[data-session-id="cg:old"]'
+            new = '.srow[data-session-id="cg:new"]'
+            await rig.click(old, right=True)
+            await rig.wait_for(".menu-item")
+            await rig.click_text(".menu-item", "置顶")
+            await rig.wait_for(old + " .srow-pin")
+            assert await rig.texts(".slist .stitle") == ["Older", "Newer", "Middle"]
+            await rig.click(new + " .more")
+            await rig.wait_for(".menu-item")
+            await rig.click_text(".menu-item", "置顶")
+            await rig.wait_for(".srow-pin", 2)
+            assert await rig.texts(".slist .stitle") == ["Newer", "Older", "Middle"]
+
+            await rig.click(old)
+            await rig.wait_for(".tab.current")
+            await rig.wait_for(".srow.open .srow-pin")
+            assert await rig.texts(".slist .stitle") == ["Newer", "Older", "Middle"]
+            await rig.click('.side-head-actions [aria-label="刷新会话列表"]')
+            await rig.js("window.__pinTestOldPage = true")
+            # The page rejects its own navigation; load a new document through the host.
+            rig.window._load_seen = False
+            rig.window.load()
+            await wait_for(lambda: rig.js("!window.__pinTestOldPage && !!document.querySelector('.srow.open .srow-pin')"), message="the pin on the reloaded page")
+            assert await rig.texts(".slist .stitle") == ["Newer", "Older", "Middle"]
+            if evidence := os.environ.get("WITTYCODE_TEST_EVIDENCE"):
+                await rig.js("document.querySelector('.ppath').textContent = 'C:\\\\Projects\\\\demo'")
+                await asyncio.sleep(0.05)
+                assert rig.window.grab().save(str(Path(evidence) / "session-pins-qt.png"))
+
+            await rig.click(".srow.open", right=True)
+            await rig.wait_for(".menu-item")
+            await rig.click_text(".menu-item", "归档")
+            await rig.wait_for(".tab", 0)
+            await rig.wait_for(".srow", 2)
+            assert await rig.texts(".slist .stitle") == ["Newer", "Middle"]
+            await rig.click(".archived .proj-toggle")
+            await rig.wait_text(".archived-row", "Older")
+            assert not await rig.count(".archived-row .srow-pin")
+            await rig.click(".archived-row .more")
+            await rig.wait_for(old + " .srow-pin")
+            await rig.click(new + " .more")
+            await rig.wait_for(".menu-item")
+            await rig.click_text(".menu-item", "取消置顶")
+            await rig.wait_for(".srow-pin", 1)
+            assert await rig.texts(".slist .stitle") == ["Older", "Newer", "Middle"]
+        finally:
+            await rig.finish()
+
+    run(loop, scenario())
+
+
+def test_draft_and_rejected_first_send_stay_out_of_the_project_sidebar(qapp, loop, tmp_path):
+    async def scenario():
+        rig = await open_rig(tmp_path)
+        try:
+            await rig.click(".newbtn")
+            await rig.focus_composer()
+            await rig.type("landing draft")
+            assert not rig.core.order, "a draft in the landing composer does not open an engine session"
+            await rig.wait_for(".srow", 0)
+            await rig.press("A", Qt.KeyboardModifier.ControlModifier)
+            await rig.press(Qt.Key.Key_Backspace)
+
+            await new_conversation(rig)
+            await rig.focus_composer()
+            await rig.type("draft only")
+            assert await rig.js("document.querySelector('.input').value") == "draft only"
+            await rig.wait_for(".srow", 0)
+            await rig.core.call("session.close", {"id": rig.core.order[0].cid})
+            await rig.wait_for(".tab", 0)
+            await rig.wait_for(".srow", 0)
+
+            model = await new_conversation(rig)
+            model.next(fail("subscription_sharing_usage_limit_exceeded"), hold=False)
+            await rig.send("first attempt")
+            await wait_for(lambda: rig.js("document.querySelector('.input').value === 'first attempt'"), 5, "draft restored")
+            await rig.wait_for(".srow", 0)
+            await rig.focus_composer()
+            await rig.press(Qt.Key.Key_End)
+            await rig.type(" edited")
+            assert await rig.js("document.querySelector('.input').value") == "first attempt edited"
+            model.next(say("answer accepted"), hold=False)
+            await rig.press(Qt.Key.Key_Return)
+            await rig.wait_text(".transcript", "first attempt edited")
+            await rig.wait_text(".transcript", "answer accepted")
+            await rig.wait_for(".srow", 1)
+            await rig.core.call("session.close", {"id": rig.core.order[0].cid})
+            await rig.wait_for(".tab", 0)
+            await rig.wait_for(".srow", 1)
         finally:
             await rig.finish()
 

@@ -13,12 +13,17 @@ import codecs
 import io
 import os
 import re
+import stat
 import struct
 import zipfile
 import zlib
+from contextlib import ExitStack
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+from typing import BinaryIO
 from urllib.parse import unquote, urlsplit
+
+from desktop.core.attachments import image_size, sniff_image
 
 PANEL_BYTES = 1_500_000
 """How much of a file the side panel reads."""
@@ -52,6 +57,12 @@ PREVIEW_IMAGES = {
 CONVERTED_IMAGES = frozenset(".tif .tiff .tga .pbm .pgm .ppm .xbm .xpm .icns .wbmp .svgz".split())
 _UNSUPPORTED_IMAGES = frozenset(".heic .heif .heics .heifs .hif .dng .cr2 .cr3 .nef .arw .raw .psd .eps .jxl .jp2 .j2k .dds .exr".split())
 PREVIEW_VIDEOS = frozenset(".mp4 .m4v .mov .webm .mkv .avi .wmv .mpg .mpeg .ogv .3gp .ts .m2ts".split())
+# The assistant body opts into a narrower set than an explicitly opened file inspector.
+INLINE_IMAGES = frozenset(".png .apng .jpg .jpeg .jfif .jpe .gif .webp".split())
+INLINE_VIDEOS = frozenset(".mp4 .m4v .mov .3gp .webm .mkv".split())
+INLINE_IMAGE_BYTES = 6 * 1024**2
+INLINE_IMAGE_PIXELS = 16_000_000
+INLINE_VIDEO_BYTES = 512 * 1024**2
 PREVIEW_IMAGE_BYTES = 25_000_000
 PREVIEW_PDF_BYTES = 80_000_000
 PREVIEW_OFFICE_BYTES = 30_000_000
@@ -143,6 +154,175 @@ def resolve(raw: str, project: str | Path) -> tuple[Path, Ref]:
     return path, ref
 
 
+_INLINE_PATH = "正文媒体必须是项目内的普通本地文件，不支持绝对路径、链接或网络位置。"
+_INLINE_NAME = re.compile(r'[^\x00-\x1f<>:"|?*#%]+\Z')
+
+
+def _inline_parts(raw: str, project: str | Path, suffixes: frozenset[str]) -> tuple[Path, tuple[str, ...]]:
+    # Do not use parse_ref/resolve: they intentionally accept paths suitable only for an explicit file-panel click.
+    if not isinstance(raw, str) or not 1 <= len(raw) <= 512 or raw != raw.strip():
+        raise FileProblem(_INLINE_PATH)
+    text = raw.replace("\\", "/").removeprefix("./")
+    parts = tuple(text.split("/"))
+    if len(parts) > 32 or any(
+        not _INLINE_NAME.fullmatch(part) or part in (".", "..") or part.endswith((" ", "."))
+        or part.startswith("~") or PureWindowsPath(part).is_reserved()
+        for part in parts
+    ):
+        raise FileProblem(_INLINE_PATH)
+    if Path(parts[-1]).suffix.lower() not in suffixes:
+        raise FileProblem("不支持这种正文媒体格式。")
+    root = Path(project)
+    if not root.is_absolute() or ".." in root.parts or str(root).startswith(("\\\\", "//")):
+        raise FileProblem(_INLINE_PATH)
+    return root, parts
+
+
+def _open_inline_windows(root: Path, parts: tuple[str, ...]) -> int:
+    import ctypes as c
+    import msvcrt
+    from ctypes import wintypes as w
+
+    kernel = c.WinDLL("kernel32", use_last_error=True)
+    drive_type, create, attrs, close = (kernel.GetDriveTypeW, kernel.CreateFileW,
+                                       kernel.GetFileInformationByHandleEx, kernel.CloseHandle)
+    drive_type.argtypes, drive_type.restype = [w.LPCWSTR], w.UINT
+    create.argtypes = [w.LPCWSTR, w.DWORD, w.DWORD, w.LPVOID, w.DWORD, w.DWORD, w.HANDLE]
+    create.restype = w.HANDLE
+    attrs.argtypes, attrs.restype = [w.HANDLE, c.c_int, w.LPVOID, w.DWORD], w.BOOL
+    close.argtypes, close.restype = [w.HANDLE], w.BOOL
+    # Including mapped drives: only removable, fixed, optical and RAM drives may be touched.
+    if not re.fullmatch(r"[A-Za-z]:", root.drive) or drive_type(root.anchor) not in (2, 3, 5, 6):
+        raise FileProblem(_INLINE_PATH)
+
+    def open_one(path: Path, directory: bool) -> int:
+        # OPEN_REPARSE_POINT opens each object itself, not its target (including junctions/cloud placeholders).
+        # Share read only while descending, so an ancestor cannot be swapped or retagged before the final open.
+        access, flags = (0x81, 0x02200000) if directory else (0x80000000, 0x00200000)
+        handle = create(str(path), access, 1, None, 3, flags, None)
+        if handle == c.c_void_p(-1).value:
+            raise c.WinError(c.get_last_error())
+        info = (w.DWORD * 2)()  # FILE_ATTRIBUTE_TAG_INFO
+        if not attrs(handle, 9, c.byref(info), c.sizeof(info)):
+            error = c.WinError(c.get_last_error())
+            close(handle)
+            raise error
+        if info[0] & stat.FILE_ATTRIBUTE_REPARSE_POINT or bool(info[0] & stat.FILE_ATTRIBUTE_DIRECTORY) != directory:
+            close(handle)
+            raise FileProblem(_INLINE_PATH)
+        return handle
+
+    path = Path(root.anchor)
+    with ExitStack() as ancestors:
+        for part in (*root.parts[1:], *parts[:-1]):
+            path /= part
+            ancestors.callback(close, open_one(path, True))
+        handle = open_one(path / parts[-1], False)
+        try:
+            return msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+        except BaseException:
+            close(handle)
+            raise
+
+
+def _open_inline_posix(root: Path, parts: tuple[str, ...]) -> int:
+    # The desktop target is Windows; keep descriptor-relative traversal for non-Windows core/test users too.
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+    directory = os.open(root.anchor, flags | os.O_DIRECTORY)
+    try:
+        for part in (*root.parts[1:], *parts[:-1]):
+            child = os.open(part, flags | os.O_DIRECTORY, dir_fd=directory)
+            os.close(directory)
+            directory = child
+        return os.open(parts[-1], flags, dir_fd=directory)
+    finally:
+        os.close(directory)
+
+
+def _open_inline(raw: str, project: str | Path, suffixes: frozenset[str], limit: int) -> tuple[Path, BinaryIO]:
+    root, parts = _inline_parts(raw, project, suffixes)
+    path = root.joinpath(*parts)
+    try:
+        fd = (_open_inline_windows if os.name == "nt" else _open_inline_posix)(root, parts)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise FileProblem(_INLINE_PATH)
+            if info.st_size > limit:
+                raise FileProblem(f"文件超过 {limit // 1024**2} MiB，不能在正文中预览。")
+            return path, os.fdopen(fd, "rb")
+        except BaseException:
+            os.close(fd)
+            raise
+    except FileNotFoundError as error:
+        raise FileProblem("在此会话的项目中找不到这个媒体文件。") from error
+    except OSError as error:
+        raise FileProblem("读不了此会话项目中的媒体文件。") from error
+
+
+def inline_image(raw: str, project: str | Path) -> dict[str, str]:
+    path, source = _open_inline(raw, project, INLINE_IMAGES, INLINE_IMAGE_BYTES)
+    try:
+        with source:
+            data = source.read(INLINE_IMAGE_BYTES + 1)
+    except OSError as error:
+        raise FileProblem("读不了此会话项目中的图片。") from error
+    if len(data) > INLINE_IMAGE_BYTES:
+        raise FileProblem("图片太大，不能在正文中预览。")
+    mime = PREVIEW_IMAGES[path.suffix.lower()]
+    actual = sniff_image(data)
+    dimensions = image_size(data) if actual == ("image/png" if mime == "image/apng" else mime) else None
+    if dimensions is None or min(dimensions) <= 0:
+        raise FileProblem("图片格式不符或文件已损坏，不能在正文中预览。")
+    if dimensions[0] * dimensions[1] > INLINE_IMAGE_PIXELS:
+        raise FileProblem("图片像素太多，不能在正文中预览。")
+    url = _image_url(data, mime)
+    if mime != "image/gif":
+        return {"url": url}
+    from desktop.ui.imaging import gif_poster_png
+
+    poster = gif_poster_png(data)
+    if not poster:
+        raise FileProblem("无法读取 GIF 的首帧，不能在正文中预览。")
+    # Both URLs are from the same checked read; only the static one is rendered before Play.
+    return {"url": _image_url(poster, "image/png"), "animation": url}
+
+
+class InlineVideoSource(str):
+    """A display path compatible with the platform bridge, plus the already verified open file for Qt.
+
+    The decoder must use ``file`` and never reopen the path (which could have been swapped since validation).
+    """
+    file: BinaryIO
+
+    def __new__(cls, path: Path, file: BinaryIO) -> InlineVideoSource:
+        result = super().__new__(cls, str(path))
+        result.file = file
+        return result
+
+
+def open_inline_video(raw: str, project: str | Path) -> InlineVideoSource:
+    path, source = _open_inline(raw, project, INLINE_VIDEOS, INLINE_VIDEO_BYTES)
+    try:
+        # Keep the Python buffer untouched: Qt will use a duplicate of this descriptor and its offset.
+        fd = source.fileno()
+        header = os.read(fd, 12)
+        if path.suffix.lower() in (".webm", ".mkv"):
+            valid = header.startswith(b"\x1a\x45\xdf\xa3")  # EBML
+        else:
+            valid = len(header) == 12 and header[4:8] == b"ftyp"  # require an ISO BMFF file-type box, not a playlist
+        if not valid:
+            raise FileProblem("这不是支持的本地视频容器，不能在正文中预览。")
+        os.lseek(fd, 0, os.SEEK_SET)
+        return InlineVideoSource(path, source)
+    except OSError as error:
+        source.close()
+        raise FileProblem("读不了此会话项目中的视频。") from error
+    except BaseException:
+        source.close()
+        raise
+
+
 def is_runnable(path: Path) -> bool:
     """Whether opening ``path`` with its default program may run it."""
     return path.suffix.lower() in RUNNABLE
@@ -207,10 +387,13 @@ def image_bytes(path: Path) -> bytes:
     return data
 
 
+def _image_url(data: bytes, mime: str) -> str:
+    return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
+
+
 def image_data_url(path: Path) -> str:
     """Send native pictures unchanged so animated images keep all of their frames."""
-    data = image_bytes(path)
-    return f"data:{PREVIEW_IMAGES[path.suffix.lower()]};base64,{base64.b64encode(data).decode('ascii')}"
+    return _image_url(image_bytes(path), PREVIEW_IMAGES[path.suffix.lower()])
 
 
 def _check_office_entry(data: bytes, archive: zipfile.ZipFile, entry: zipfile.ZipInfo) -> None:

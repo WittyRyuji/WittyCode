@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtCore import Qt
+from PySide6.QtWebEngineCore import QWebEngineSettings
 
 from desktop.core.app_core import AppCore
 from desktop.core import sounds
@@ -160,6 +161,20 @@ def test_the_page_cannot_navigate_away_open_windows_or_load_remote_content(qapp,
         assert await rig.js("window.ready === true") and rig.window.page_loaded, "a refused navigation leaves the page as it is"
         assert await rig.js("window.open('https://example.com') === null") is True, "no pop-up windows"
         await rig.finish()
+
+    run(loop, scenario())
+
+
+def test_shell_keeps_stock_context_menus_and_scripted_clipboard_reads_disabled(qapp, loop, tmp_path):
+    async def scenario():
+        rig = await open_rig(tmp_path)
+        try:
+            assert rig.window.view.contextMenuPolicy() == Qt.ContextMenuPolicy.NoContextMenu
+            settings = rig.window.page.settings()
+            assert settings.testAttribute(QWebEngineSettings.WebAttribute.JavascriptCanAccessClipboard)
+            assert not settings.testAttribute(QWebEngineSettings.WebAttribute.JavascriptCanPaste)
+        finally:
+            await rig.finish()
 
     run(loop, scenario())
 

@@ -14,7 +14,7 @@ import { API_EFFORTS, contextProblem, contextWindowOf, imagesAfterKindChange, im
 import { CATEGORY_LABELS, groupSummary, toolLabel, usageTotal } from "../src/lib/format.ts";
 import { changeVerb, isUnseen, parseTags, samePath, scopeLabel, sourceLine, whoConversation, whoName } from "../src/lib/memory.ts";
 import { PRESETS } from "../src/lib/vocab.ts";
-import { engineLabel, engineOfSource, envHintOf, envNameOf, envVarText, sourceLabel, sourceTag } from "../src/lib/models.ts";
+import { engineLabel, engineOfSource, envHintOf, envNameOf, envVarText, sameProviderEndpoint, sourceLabel, sourceTag } from "../src/lib/models.ts";
 import { effortLabel, permissionsFor, reasoningChoices, startingLevel } from "../src/lib/vocab.ts";
 import { CALL_TIMEOUT_MS, QWebChannelTransport } from "../src/transport.ts";
 import { COMMANDS, commandNamed, fromSkills, parseSlash, suggestions, unavailable } from "../src/lib/commands.ts";
@@ -35,6 +35,15 @@ import "./starmap.test.mjs";
 import "./skill-icons.test.mjs";
 import "./office.test.mjs";
 import "./media.test.mjs";
+import "./copy-chat.test.mjs";
+
+test("a saved literal credential can be retained only at the same API kind and endpoint", () => {
+  const saved = { baseUrl: "https://api.example.test/v1", kind: "anthropic" };
+  assert.equal(sameProviderEndpoint(saved, { ...saved, baseUrl: ` ${saved.baseUrl}/ ` }), true);
+  assert.equal(sameProviderEndpoint(saved, { ...saved, kind: "openai" }), false);
+  for (const baseUrl of ["http://api.example.test/v1", "https://api.example.test/v2", "https://other.example.test/v1"])
+    assert.equal(sameProviderEndpoint(saved, { ...saved, baseUrl }), false);
+});
 
 test("API windows use exact specifications, preserve overrides and require unknown limits", () => {
   const model = { id: "gpt-6.1-sol", displayName: "demo", images: true, reasoning: "max" };

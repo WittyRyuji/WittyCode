@@ -119,6 +119,7 @@ class FakeResponses:
         self.title_requests: list[dict[str, Any]] = []
         self.title_answer = "会话主题摘要"
         self.title_turn: Any = None
+        self.title_turns: list[Any] = []
         self.model_requests = 0
         self.models_status = 200
         """The HTTP status of the model list (its body is the list whatever the status: a client must not trust it)."""
@@ -183,14 +184,15 @@ class FakeResponses:
                     return
                 if not self._authorized():
                     return
-                from desktop.core.session_title import SYSTEM as TITLE_SYSTEM
+                from desktop.core.session_title import FIRST_SYSTEM, SYSTEM
 
                 with fake._lock:
-                    if body.get("instructions") == TITLE_SYSTEM:
+                    if body.get("instructions") in (FIRST_SYSTEM, SYSTEM):
                         # Independent scripts keep a title request from taking a main conversation's held answer.
                         fake.title_requests.append(body)
                         # Accounting scenarios specify title usage; unrelated main-loop tests use a zero-cost title fixture.
-                        turn = fake.title_turn if fake.title_turn is not None else say(fake.title_answer, used=usage(0, 0))
+                        turn = (fake.title_turns.pop(0) if fake.title_turns else
+                                fake.title_turn if fake.title_turn is not None else say(fake.title_answer, used=usage(0, 0)))
                     else:
                         fake.requests.append(body)
                         fake.headers.append({key.lower(): value for key, value in self.headers.items()})

@@ -3,6 +3,7 @@ import type { AgentIdentityGroup } from "./agentTeam";
 
 export const FLOW_MAIN = "team-main";
 export const FLOW_NODE_WIDTH = 100;
+export const FLOW_PORTRAIT_SIZE = 50;
 const PORTRAIT_ROW = 68;
 const CAPTION_ROW = 84;
 const COLUMN = 120;
@@ -15,6 +16,65 @@ type BranchNode = Placement & (
   | { kind: "expert"; agent: AgentInfo; caption?: string }
 );
 type BranchEdge = { id: string; source: string; target: string; status: AgentInfo["status"] };
+export type FlowRoute = {
+  path: string;
+  spur: boolean;
+  trunk?: string;
+  length: number;
+  endX: number;
+  endY: number;
+  signal?: { path: string; prefix: number; epoch: string };
+};
+
+function routeEdges(edges: BranchEdge[], placements: Placement[]) {
+  const byId = new Map(placements.map((node) => [node.id, node]));
+  const bySource = new Map<string, BranchEdge[]>();
+  for (const edge of edges) {
+    const siblings = bySource.get(edge.source);
+    if (siblings) siblings.push(edge);
+    else bySource.set(edge.source, [edge]);
+  }
+  const inset = (FLOW_NODE_WIDTH - FLOW_PORTRAIT_SIZE) / 2;
+  const centerY = (node: Placement) => node.y + FLOW_PORTRAIT_SIZE / 2;
+  const routes = new Map<string, FlowRoute>();
+  for (const [id, siblings] of bySource) {
+    const source = byId.get(id)!;
+    const startX = source.x + FLOW_NODE_WIDTH - inset;
+    const endX = byId.get(siblings[0].target)!.x + inset; // All destinations are in the next column.
+    const axis = (startX + endX) / 2;
+    const midY = centerY(source);
+    const aims = siblings.map((edge) => ({ edge, endY: centerY(byId.get(edge.target)!) }));
+    for (const side of [-1, 0, 1]) {
+      const taps = aims.filter(({ endY }) => Math.sign(endY - midY) === side)
+        .sort((a, b) => side * (a.endY - b.endY));
+      if (!taps.length) continue;
+      // Three ports for the typical up/straight/down fan. A higher fan-out on one
+      // side uses a single monotone trunk with a horizontal tap at each target row.
+      const startY = midY + side * Math.min(10, Math.abs(taps[0].endY - midY) / 2);
+      const start = `M${startX} ${startY}`;
+      const toTap = (endY: number) => `${start} L${axis} ${startY} L${axis} ${endY}`;
+      const spur = taps.length > 1;
+      const live = taps.filter(({ edge }) => edge.status === "working");
+      const lead = live.at(-1); // One signal owns the common prefix, up to the last working tap only.
+      // Restart this side's CSS clock together if a working path is added or removed.
+      const epoch = JSON.stringify(live.map(({ edge }) => edge.id));
+      for (const tap of taps) {
+        const { edge, endY } = tap;
+        const end = ` L${endX} ${endY}`;
+        const full = (side ? toTap(endY) : start) + end;
+        const branch = `M${axis} ${endY}${end}`;
+        routes.set(edge.id, {
+          path: spur ? branch : full, spur,
+          trunk: spur && tap === taps.at(-1) ? toTap(endY) : undefined,
+          length: endX - startX + Math.abs(endY - startY), endX, endY,
+          signal: edge.status === "working" ? { path: tap === lead ? full : branch,
+            prefix: tap === lead ? 0 : axis - startX + Math.abs(endY - startY), epoch } : undefined,
+        });
+      }
+    }
+  }
+  return edges.map((edge) => ({ ...edge, route: routes.get(edge.id)! }));
+}
 
 /** Forget groups that ceased to exist or became singletons; new nests start closed. */
 export function keepExpandedGroups(groups: readonly AgentIdentityGroup[], expanded: ReadonlySet<string>): ReadonlySet<string> {
@@ -56,14 +116,7 @@ export function buildAgentFlowTree(groups: readonly AgentIdentityGroup[], expand
     bounds.width = Math.max(bounds.width, node.x + FLOW_NODE_WIDTH);
     bounds.height = Math.max(bounds.height, node.y + node.height);
   }
-  const yOf = new Map([main, ...nodes].map((node) => [node.id, node.y]));
-  const distance = ({ source, target }: BranchEdge) => Math.abs(yOf.get(source)! - yOf.get(target)!);
-  const reach = new Map<string, number>();
-  for (const edge of edges) reach.set(edge.source, Math.max(reach.get(edge.source) ?? 0, distance(edge)));
-  // Farther branches turn sooner, so siblings share the start of the wire but not a
-  // vertical segment. The colour/current of one branch won't cover another branch.
-  const routedEdges = edges.map((edge) => ({ ...edge, step: 0.8 - 0.6 * distance(edge) / (reach.get(edge.source) || 1) }));
-  return { main, nodes, edges: routedEdges, bounds };
+  return { main, nodes, edges: routeEdges(edges, [main, ...nodes]), bounds };
 }
 
 /** A readable scene around the last toggled nest, with its nearest rows when open. */

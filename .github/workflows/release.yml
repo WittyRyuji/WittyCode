@@ -46,6 +46,9 @@ jobs:
         run: |
           python -c "import os, tomllib; from packaging.version import Version; v = tomllib.load(open('pyproject.toml', 'rb'))['project']['version']; t = os.environ['TAG'].removeprefix('v'); assert Version(t) == Version(v), f'tag {t} is not version {v}'; print('version', v)"
       - name: Validate with the same checks as local clean validation and CI
+        env:
+          # This step builds the frontend that is packaged by build_release.py.
+          VITE_WITTYCODE_CONTACT_EMAIL: ${{ vars.WITTYCODE_CONTACT_EMAIL }}
         run: python scripts/check_ci.py --part all
       - name: Build the release (with its offscreen smoke test)
         env:

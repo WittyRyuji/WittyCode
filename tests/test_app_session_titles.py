@@ -37,21 +37,114 @@ def test_first_question_is_summarized_once_without_polluting_the_turn_history(tm
     asyncio.run(scenario())
 
 
-def test_slow_title_does_not_block_a_turn_or_override_a_manual_name(tmp_path):
+def test_slow_title_blocks_the_first_turn_and_manual_rename_cannot_bypass_it(tmp_path):
+    from desktop.core.app_core import AppError
+
     async def scenario():
         core, plan, events, _, _ = await ready_core(tmp_path)
         try:
             plan.fake.title_turn = [("hold", "title"), *say("自动摘要")]
+            plan.script(say("检查接口。"))
             cid = await new_session(core, events, tmp_path / "proj")
-            await talk(core, plan, cid, "检查库存接口")
+            conv = core._by_cid[cid]
+            send = asyncio.create_task(core.call("session.send", {"id": cid, "text": "检查库存接口"}))
             await until(lambda: bool(plan.fake.title_requests))
-            await idle(core, cid)
-            assert core._by_cid[cid].controller.title == "新会话"
-            await core.call("session.rename", {"id": cid, "title": "用户自己的名字"})
+            assert not send.done() and not plan.requests and not conv.controller.transcript.turns
+            assert core._title_of(conv) == "新会话" and not conv.in_history
+            with pytest.raises(AppError, match="发出第一条消息之后"):
+                await core.call("session.rename", {"id": cid, "title": "手动命名"})
             plan.release("title")
-            await until(lambda: bool(core.settings.session_auto_titles))
-            assert core._title_of(core._by_cid[cid]) == "用户自己的名字"
+            assert (await send)["ok"]
+            await idle(core, cid)
+            assert len(plan.requests) == 1 and core._title_of(conv) == "自动摘要"
+            assert not core.settings.session_titles
         finally:
+            plan.release("title")
+            await core.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_exhausted_title_retries_do_not_dispatch_and_preserve_the_draft(tmp_path):
+    from desktop.core.app_core import AppError
+    from tests.test_app_core import png_upload
+
+    async def scenario():
+        core, plan, events, _, _ = await ready_core(tmp_path)
+        try:
+            cid = await new_session(core, events, tmp_path / "proj")
+            conv = core._by_cid[cid]
+            await core.call("attachments.add", {"id": cid, "files": [png_upload("draft.png")]})
+            plan.fake.title_answer = "两行\n无效标题"
+            message = {"id": cid, "text": "检查库存接口"}
+            with pytest.raises(AppError, match="重试 3 次后仍未成功，首条消息没有发出"):
+                await core.call("session.send", message)
+            assert len(plan.fake.title_requests) == 4
+            assert events.last("restore")["text"] == message["text"] and len(conv.drafts) == 1
+            assert not conv.in_history and not conv.controller.transcript.turns and not plan.requests
+            assert not core.settings.session_auto_titles and not core.chatgpt.sessions.load(conv.controller.session_id)
+            with pytest.raises(AppError, match="发出第一条消息之后"):
+                await core.call("session.rename", {"id": cid, "title": "手动命名"})
+            plan.fake.title_answer = "库存校验"
+            plan.script(say("收到。"))
+            assert (await core.call("session.send", message))["ok"]
+            await idle(core, cid)
+            assert len(plan.requests) == 1 and len(plan.fake.title_requests) == 5
+            assert core._title_of(conv) == "库存校验"
+            assert len(conv.controller.transcript.turns[0].user_block.attachments) == 1
+        finally:
+            await core.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_first_title_uses_raw_text_and_retries_invalid_answers_without_sending_main(tmp_path):
+    from desktop.core.session_title import FIRST_SYSTEM, prompt
+
+    async def scenario():
+        core, plan, events, _, _ = await ready_core(tmp_path)
+        try:
+            raw = "  检查库存导入\n并核对事务边界  "
+            name = "库存数据导入事务检查"
+            plan.fake.title_turns = [say("超长" * 6), say("两行\n标题"), say("新会话"), [("hold", "last-title"), *say(name)]]
+            plan.script(say("已检查。"))
+            cid = await new_session(core, events, tmp_path / "proj")
+            send = asyncio.create_task(core.call("session.send", {"id": cid, "text": raw}))
+            await until(lambda: len(plan.fake.title_requests) == 4)
+            assert not send.done() and not plan.requests
+            for request in plan.fake.title_requests:
+                assert request["instructions"] == FIRST_SYSTEM and not request.get("tools")
+                assert request["input"][0]["content"][0]["text"] == prompt(raw, first=True)
+            plan.release("last-title")
+            assert (await send)["ok"]
+            await idle(core, cid)
+            assert len(plan.requests) == 1 and core._title_of(core._by_cid[cid]) == name
+        finally:
+            plan.release("last-title")
+            await core.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_stopping_first_title_does_not_start_the_turn(tmp_path):
+    from desktop.core.app_core import AppError
+
+    async def scenario():
+        core, plan, events, _, _ = await ready_core(tmp_path)
+        try:
+            plan.fake.title_turn = [("hold", "title"), *say("库存接口")]
+            cid = await new_session(core, events, tmp_path / "proj")
+            send = asyncio.create_task(core.call("session.send", {"id": cid, "text": "核对库存接口"}))
+            await until(lambda: bool(plan.fake.title_requests))
+            await core.call("session.stop", {"id": cid})
+            with pytest.raises(AppError, match="已放回输入框"):
+                await send
+            conv = core._by_cid[cid]
+            assert events.last("restore")["text"] == "核对库存接口"
+            assert not plan.requests and not conv.in_history and not conv.controller.transcript.turns
+            assert conv.preparing is None and conv.switch_task is None
+        finally:
+            plan.release("title")
             await core.shutdown()
 
     asyncio.run(scenario())

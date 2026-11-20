@@ -108,14 +108,23 @@ def test_a_running_turn_is_cached_before_it_finishes(tmp_path):
         core, plan, events, _, _ = await ready_core(tmp_path, cache=cache)
         cid = (await core.call("session.new", {"projectId": str((tmp_path / "proj").resolve())}))["id"]
         conv = core._by_cid[cid]
-        plan.script([("hold", "answer"), *say("The eventual answer")])
+        reply = say("The eventual answer", chunks=1)
+        plan.script([reply[0], ("hold", "first-output"), *reply[1:-1], ("hold", "answer"), reply[-1]])
         await core.call("session.send", {"id": cid, "text": "Keep this even during a long turn"})
         try:
-            key = "cg:" + conv.controller.session_id
+            native = conv.controller.session_id
+            key = "cg:" + native
+            await until(lambda: len(plan.requests) == 1)
+            assert core.chatgpt.sessions.load(native).turns[0].status == "running", "crash recovery precedes transport"
+            assert cache.load_session(key) is None and not conv.in_history, "a response envelope alone may still be refused"
+            plan.release("first-output")
             await until(lambda: cache.load_session(key) is not None, timeout=6)
             assert conv.controller.state is SessionState.RUNNING
-            assert cache.load_session(key)["turns"][0]["blocks"][0]["text"] == "Keep this even during a long turn"
+            turn, = cache.load_session(key)["turns"]
+            assert turn["blocks"][0]["text"] == "Keep this even during a long turn"
+            assert any(block.get("markdown") == "The eventual answer" for block in turn["blocks"])
         finally:
+            plan.release("first-output")
             plan.release("answer")
             await core.shutdown()
 

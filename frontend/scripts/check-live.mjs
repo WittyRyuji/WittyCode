@@ -175,7 +175,8 @@ ok("the composer sends session.send with the text", isDeepStrictEqual(await last
 await page.waitFor("document.querySelector('.input').value === ''", 3000);
 ok("and the message box is empty again", true);
 await page.waitFor("[...document.querySelectorAll('.block.user .body')].some(e => e.textContent === 'hello')", 3000);
-ok("the message shows in the conversation", true);
+await page.waitFor("!!document.querySelector('.srow.open[data-session-id=\"c1\"]')", 3000);
+ok("the first message shows in the conversation and admits the row", true);
 await page.waitFor("document.querySelector('.text.streaming')?.textContent.length > 0", 3000);
 const early = await js("document.querySelector('.text.streaming').textContent.length");
 await page.wait(350);
@@ -907,8 +908,20 @@ await js(`__fake.reviewDue(true)`);
 await page.key("Escape");
 
 
-// ------------------------------------------------------------------------------------- 14c. rename and archive
+// ------------------------------------------------------------------------------------- 14c. pin, rename and archive
 const rowIndex = (text) => js(`[...document.querySelectorAll('.srow')].findIndex(r => r.textContent.includes(${JSON.stringify(text)}))`);
+// The saved row may be open here, so target its displayed id rather than its native id.
+const pinAt = await rowIndex("迁移脚本");
+const pinId = await js(`document.querySelectorAll('.srow')[${pinAt}].dataset.sessionId`);
+const pinSelector = `.srow[data-session-id="${pinId}"]`;
+await page.click(".srow", pinAt, { right: true });
+await clickText(".menu-item", "置顶");
+await page.waitFor(`!!document.querySelector('${pinSelector}.srow:first-child .srow-pin')`, 3000);
+ok("the context menu pins the open or saved row at the head of its own project", isDeepStrictEqual(await lastCall("session.pin"), { projectId: "D:\\Work\\demo-project", id: pinId, pinned: true }));
+await page.click(`${pinSelector} .more`);
+await clickText(".menu-item", "取消置顶");
+await page.waitFor(`!document.querySelector('${pinSelector} .srow-pin')`, 3000);
+ok("the more menu sends the explicit unpin flag", (await lastCall("session.pin")).pinned === false);
 await page.click(".srow", await rowIndex("旧的会话"), { right: true });
 await clickText(".menu-item", "重命名…");
 await page.waitFor("!!document.querySelector('.dialog input')", 2000);
@@ -948,6 +961,15 @@ await page.type("still here");
 await page.key("Enter");
 await page.waitFor("document.querySelector('.notice-text')?.textContent.includes('最多同时打开')", 3000);
 ok("a session that cannot start opens no tab, and what was typed is still in the message box", (await js("document.querySelectorAll('.tab').length")) === tabsNow && (await js("document.querySelector('.input').value")) === "still here");
+const rowsNow = await js("document.querySelectorAll('.srow').length");
+await js(`__fake.failNext("session.send", "测试：第一条消息未发出。")`);
+await page.click(".input");
+await page.key("Enter");
+await page.waitFor("document.querySelector('.notice-text')?.textContent.includes('第一条消息未发出')", 3000);
+await page.waitFor(`document.querySelectorAll('.tab').length === ${tabsNow + 1} && !!document.querySelector('.tab.current') && document.querySelector('.input').value === 'still here'`, 3000);
+ok("a refused first send keeps the text editable without adding the draft tab to the project", await js(`!document.querySelector('.input').disabled && document.querySelectorAll('.srow').length === ${rowsNow}`));
+await page.click(".tab.current .tab-x");
+await page.waitFor(`document.querySelectorAll('.tab').length === ${tabsNow}`, 3000);
 
 // ------------------------------------------------------------------------------------- 16. the window
 const handles = await js("[...document.querySelectorAll('.rz')].map(e => e.dataset.edge + ':' + getComputedStyle(e).cursor).join()");

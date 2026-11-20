@@ -79,6 +79,7 @@ from desktop.core.settings import (
     COMPACT_AT_RANGE,
     MAX_OPEN_SESSIONS_RANGE,
     MAX_STEPS_RANGE,
+    MAX_REMEMBERED_SESSIONS,
     MAX_SESSION_TITLE,
     MEMORY_ENGINES,
     SIDEBAR_WIDTH_RANGE,
@@ -87,12 +88,13 @@ from desktop.core.settings import (
     THEMES,
     AppSettings,
     default_settings_path,
+    folder_key,
     normalize_folder,
     same_folder,
     save_settings,
 )
 from desktop.core.timefmt import format_relative
-from desktop.core.transcript import Transcript, TurnStatus
+from desktop.core.transcript import Transcript, Turn, TurnStatus
 from desktop.core.speed import speed_of
 from desktop.core.usage import Tokens, UsageLedger
 from desktop.core.viewmodel import attachment_json, context_json, turn_json, usage_json
@@ -185,6 +187,9 @@ class Platform(Protocol):
         """A ``data:`` URI of the whole picture, for the big view."""
         ...
 
+    async def video_poster(self, path: filetools.InlineVideoSource, width: int) -> dict[str, Any]:
+        ...
+
     async def video_open(self, path: str, width: int, publish: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
         ...
 
@@ -224,6 +229,7 @@ class QueuedMessage:
     id: str
     text: str
     attachments: tuple[Attachment, ...] = ()
+    raw_text: str | None = None
 
 
 @dataclass(eq=False)
@@ -236,8 +242,11 @@ class Conversation:
     hidden: set[str] = field(default_factory=set)
     """Native ids of earlier engines' sessions of this conversation: not listed again in the sidebar."""
     history: dict[str, Any] | None = None
-    title_started: bool = False
-    title_task: asyncio.Future[Any] | None = None
+    in_history: bool = False
+    """An existing conversation or one with a retained first dispatch. Draft tabs are not project rows."""
+    unsent_turns: set[str] = field(default_factory=set)
+    draft_title: str = ""
+    naming: bool = False
     sent_ids: list[str] = field(default_factory=list)
     sent_versions: dict[str, int] = field(default_factory=dict)
     meta: dict[str, Any] = field(default_factory=dict)
@@ -386,6 +395,7 @@ class AppCore:
         self.skill_marketplace = SkillMarketplace(self.connections)
         self.history = ConversationHistory(default_settings_path().parent / "conversations")
         self._opening_history: dict[str, Any] | None = None
+        self._opening_saved_row: str | None = None
         for engine in (factory, devin, chatgpt):
             if engine is not None:
                 engine.connections = self.connections
@@ -485,6 +495,8 @@ class AppCore:
         self._models_loaded = False
         self._shutting_down = False
         self._video_preview: tuple[str, str] | None = None
+        self._inline_video_posters = asyncio.Lock()
+        self._inline_images = asyncio.Semaphore(2)
 
         if factory is not None:
             factory.add_listener(self._on_event)
@@ -631,76 +643,149 @@ class AppCore:
     def _visible_saved(self, folder: str) -> list[SavedRow]:
         return [row for row in self._saved.get(normalize_folder(folder), []) if self._resolve_row(row.id) == row.id]
 
+    def _project_pins(self, folder: str) -> list[str]:
+        return self.settings.session_pins.get(folder_key(folder), []) if self.settings.session_pins else []
+
     def _rows_for(self, folder: str) -> list[dict[str, Any]]:
         open_here = [c for c in self.order if same_folder(c.project, folder)]
         taken: set[str] = set()
         for conv in open_here:
             taken |= conv.hidden
+            taken.add(conv.sidebar_key)
             native = getattr(conv.controller, "session_id", None)
             if native:
                 taken.add(native)
                 taken.update(prefix + native for prefix in ROW_PREFIXES.values())
-        rows: list[tuple[str, float, dict[str, Any]]] = []
+        rows: list[tuple[str, float, str]] = []
         for saved in self._visible_saved(folder):
             if saved.native in taken or saved.id in taken or saved.id in self.settings.archived_sessions:
                 continue
-            rows.append((saved.id, saved.modified.timestamp(), self._saved_json(saved, folder)))
+            rows.append((saved.id, saved.modified.timestamp(), saved.id))
         for conv in open_here:
-            rows.append((conv.sidebar_key, conv.sidebar_active_at, {"id": conv.cid}))
+            if conv.in_history and conv.sidebar_key not in self.settings.archived_sessions:
+                rows.append((conv.sidebar_key, conv.sidebar_active_at, conv.cid))
+        pins = {key: i for i, key in enumerate(self._project_pins(folder))}
         ranks = {key: i for i, key in enumerate(self.settings.session_order)}
-        rows.sort(key=lambda row: (1, ranks[row[0]], row[0]) if row[0] in ranks else (0, -row[1], row[0]))
-        return [row for _, _, row in rows]
+
+        def rank(row: tuple[str, float, str]) -> tuple[int, float, str]:
+            key, active, _ = row
+            if key in pins:
+                return (0, pins[key], key)
+            if key in ranks:
+                return (2, ranks[key], key)
+            return (1, -active, key)
+
+        rows.sort(key=rank)
+        return [{"id": ident, "key": key, "pinned": key in pins} for key, _, ident in rows]
 
     def _sync_sidebar_key(self, conv: Conversation) -> None:
-        if conv.switching:
-            return  # a failed engine open must not migrate any persistent identity or title
-        key = self._row_of(conv) or conv.cid
+        if conv.switching or not conv.in_history:
+            return  # neither a draft nor a tentative engine replacement has a persistent sidebar identity
+        key = self._row_of(conv) or conv.sidebar_key or conv.cid
         if key == conv.sidebar_key:
             return
         previous = conv.sidebar_key
         conv.sidebar_key = key
         if previous in self.settings.session_order:
             self.settings.session_order = list(dict.fromkeys(key if item == previous else item for item in self.settings.session_order))
+        pins = self._project_pins(conv.project)
+        if previous in pins:
+            pins[:] = dict.fromkeys(key if item == previous else item for item in pins)
         if previous:
             self.settings.session_created.pop(previous, None)
         self.settings.session_created[key] = conv.created_at
         self._save()
 
-    def _promote_session(self, conv: Conversation) -> None:
-        """Move only this project's conversation to the top, not on incremental engine output."""
-        conv.sidebar_active_at = conv.controller.active_at
-        ids = [row["id"] for row in self._rows_for(conv.project)]
-        if conv.cid not in ids:
+    def _admit_history(self, conv: Conversation) -> None:
+        if conv.in_history or conv.switching:
             return
-        ids.remove(conv.cid)
-        ids.insert(0, conv.cid)
-        keys = [self._by_cid[item].sidebar_key if item in self._by_cid else item for item in ids]
-        self.settings.session_order = keys + [item for item in self.settings.session_order if item not in keys]
+        conv.in_history = True
+        self._sync_sidebar_key(conv)
+        if conv.draft_title:
+            self._remember_auto_title(conv, conv.sidebar_key, conv.draft_title)
+            conv.draft_title = ""
+        self._promote_session(conv)
+        self._schedule_sidebar(conv.project, reload=True)
+
+    def _remember_session_order(self, keys: list[str]) -> None:
+        known = set(keys)
+        self.settings.session_order = keys + [item for item in self.settings.session_order if item not in known]
+
+    def _promote_session(self, conv: Conversation) -> None:
+        """Move to the front of ordinary rows after significant activity; pinned order only changes by user action."""
+        conv.sidebar_active_at = conv.controller.active_at
+        keys = [row["key"] for row in self._rows_for(conv.project) if not row["pinned"]]
+        if conv.sidebar_key not in keys:
+            return
+        keys.remove(conv.sidebar_key)
+        self._remember_session_order([conv.sidebar_key, *keys])
         self._save()
         self._schedule_sidebar(conv.project)
 
+    def _sidebar_project(self, folder: Any) -> str:
+        if isinstance(folder, str) and folder.strip() and "\0" not in folder:
+            try:
+                key = folder_key(folder)
+                match = next((item for item in self.settings.projects if folder_key(item) == key), None)
+                if match is not None:
+                    return match
+            except (OSError, RuntimeError, ValueError):
+                pass
+        raise AppError("找不到这个项目。")
+
+    async def _m_session_pin(self, params: dict[str, Any]) -> dict[str, Any]:
+        folder = self._sidebar_project(params.get("projectId"))
+        ident, pinned = params.get("id"), params.get("pinned")
+        if not isinstance(ident, str) or not isinstance(pinned, bool):
+            raise AppError("置顶参数不合法。")
+        rows = self._rows_for(folder)
+        row = next((item for item in rows if item["id"] == ident), None)
+        if row is None or not row["key"].startswith(tuple(ROW_PREFIXES.values())):
+            raise AppError("只能置顶本项目列表中已保存的会话。")
+        if row["pinned"] == pinned:
+            return {"ok": True}
+        project_key, key = folder_key(folder), row["key"]
+        pins = self._project_pins(folder)
+        if pinned:
+            if len(pins) >= MAX_REMEMBERED_SESSIONS:
+                raise AppError("这个项目的置顶会话已达到上限。")
+            self.settings.session_pins[project_key] = [key, *pins]
+        else:
+            pins.remove(key)
+            if not pins:
+                self.settings.session_pins.pop(project_key)
+            self._remember_session_order([key, *(item["key"] for item in rows if not item["pinned"])])
+        self._save()
+        if ident in self._by_cid:
+            self.emit("session", {"id": ident, "patch": {"pinned": pinned}})
+        self._emit_sidebar()
+        return {"ok": True}
+
     async def _m_session_reorder(self, params: dict[str, Any]) -> dict[str, Any]:
-        folder = params.get("projectId")
+        folder = self._sidebar_project(params.get("projectId"))
         ident, target, after = params.get("id"), params.get("targetId"), params.get("after", False)
-        if not isinstance(folder, str) or not any(same_folder(folder, p) for p in self.settings.projects):
-            raise AppError("找不到这个项目。")
         if not isinstance(ident, str) or not isinstance(target, str) or not isinstance(after, bool):
             raise AppError("会话顺序不合法。")
         rows = self._rows_for(folder)
-        ids = [row["id"] for row in rows]
-        if ident not in ids or target not in ids:
+        by_id = {row["id"]: row for row in rows}
+        if ident not in by_id or target not in by_id:
             raise AppError("只能在同一个项目内拖动仍在列表中的会话。")
+        pinned = by_id[ident]["pinned"]
+        if pinned != by_id[target]["pinned"]:
+            raise AppError("只能在同一置顶分区内拖动会话。")
         if ident == target:
             return {"ok": True}
-        ids.remove(ident)
-        ids.insert(ids.index(target) + int(after), ident)
-        keys = [self._by_cid[item].sidebar_key if item in self._by_cid else item for item in ids]
-        self.settings.session_order = keys + [item for item in self.settings.session_order if item not in keys]
+        keys = self._project_pins(folder) if pinned else [row["key"] for row in rows if not row["pinned"]]
+        source_key, target_key = by_id[ident]["key"], by_id[target]["key"]
+        keys.remove(source_key)
+        keys.insert(keys.index(target_key) + int(after), source_key)
+        if not pinned:
+            self._remember_session_order(keys)
         self._save()
         self._emit_sidebar()
         return {"ok": True}
 
-    def _saved_json(self, saved: SavedRow, folder: str) -> dict[str, Any]:
+    def _saved_json(self, saved: SavedRow, folder: str, *, pinned: bool) -> dict[str, Any]:
         return {
             "id": saved.id,
             "projectId": folder,
@@ -709,6 +794,7 @@ class AppCore:
             "modifiedAt": int(saved.modified.timestamp() * 1000),
             "engine": saved.engine,
             "fusion": saved.fusion,
+            "pinned": pinned,
             "settings": {"model": saved.model, "reasoning": "", "autonomy": "", "mode": "auto"},
             "usage": None,
             "context": {"used": None, "window": 0, "model": "", "compacted": False},
@@ -718,19 +804,21 @@ class AppCore:
     def _saved_sessions_json(self) -> dict[str, Any]:
         sessions = {}
         for folder in self.settings.projects:
+            pins = set(self._project_pins(folder))
             for saved in self._visible_saved(folder):
                 if saved.id not in self.settings.archived_sessions:
-                    sessions[saved.id] = self._saved_json(saved, folder)
+                    sessions[saved.id] = self._saved_json(saved, folder, pinned=saved.id in pins)
         return sessions
 
     def _archived_json(self) -> list[dict[str, Any]]:
         """The archived conversations the engines still list, the one archived last first."""
         found: list[tuple[int, dict[str, Any]]] = []
         for folder in self.settings.projects:
+            pins = set(self._project_pins(folder))
             for saved in self._visible_saved(folder):
                 stamp = self.settings.archived_sessions.get(saved.id)
                 if stamp is not None:
-                    found.append((stamp, self._saved_json(saved, folder)))
+                    found.append((stamp, self._saved_json(saved, folder, pinned=saved.id in pins)))
         found.sort(key=lambda pair: pair[0], reverse=True)
         return [row for _, row in found]
 
@@ -766,6 +854,11 @@ class AppCore:
             with contextlib.suppress(Exception):
                 for item in await self.devin.list_sessions(folder, SESSION_LIST_LIMIT):
                     devin_row = DEVIN_ROW_PREFIX + item.id
+                    live = next((conv for conv in self.order if self._row_of(conv) == devin_row), None)
+                    if live is not None and not live.in_history:
+                        if not getattr(item, "has_user_messages", False):
+                            continue  # older ACPs can omit the flag; allocation alone says nothing about a live draft
+                        self._admit_history(live)
                     rows.append(SavedRow(devin_row, item.id, "devin", item.title or "", self._latest(devin_row, item.modified_at), item.message_count or 0, created=_aware(item.created_at)))
         if self.chatgpt is not None and (self.settings.chatgpt_enabled or self._has_api_models()):
             with contextlib.suppress(Exception):
@@ -1015,8 +1108,8 @@ class AppCore:
         """One conversation as the page shows it, for the cache (``None``: nothing worth keeping)."""
         controller = conv.controller
         native = getattr(controller, "session_id", None)
-        turns = controller.transcript.turns
-        if not native or not turns or conv.preview or not getattr(controller, "_history_loaded", True):
+        turns = [turn for turn in controller.transcript.turns if turn.id not in conv.unsent_turns]
+        if not conv.in_history or not native or not turns or conv.preview or not getattr(controller, "_history_loaded", True):
             return None  # a failed/incomplete load must never overwrite the last usable local history
         listed = []
         for turn in turns:
@@ -1107,6 +1200,7 @@ class AppCore:
             **conv.cached_meta,
             "settings": self._shown_settings(conv),
             "fusion": self._shown_fusion(conv),
+            "pinned": conv.sidebar_key in self._project_pins(conv.project),
         }
         self.emit("session", {"id": conv.cid, "patch": patch})
         self.emit("turns", {"id": conv.cid, "turns": list(snapshot["turns"]), "all": True})
@@ -1180,6 +1274,21 @@ class AppCore:
             return
         if controller.state is not SessionState.OPENING:
             conv.opening_row = None
+        if not conv.in_history and not conv.switching:
+            turns = controller.transcript.turns
+            turn = turns[-1] if turns else None
+            # The own loop knows when the first request has a durable history. For native clients, use
+            # conversation output or a completed user prompt, not merely RUNNING or a local error block.
+            ready = getattr(controller, "history_ready", None)
+            if ready is None:
+                ready = turn is not None and turn.user_block is not None and (
+                    turn.status is TurnStatus.DONE or any(b.kind in ("text", "thinking", "tool") for b in turn.blocks)
+                )
+            if ready:
+                self._admit_history(conv)
+            elif turn is not None and turn.status in (TurnStatus.FAILED, TurnStatus.INTERRUPTED):
+                conv.unsent_turns.add(turn.id)
+                self._discard_draft_title(conv)
         self._sync_sidebar_key(conv)
         if conv.history and not conv.switching and controller.state in (SessionState.READY, SessionState.RUNNING) and getattr(controller, "_history_loaded", True):
             prefix = conv.history["turns"]
@@ -1311,6 +1420,7 @@ class AppCore:
             conv.ledger = UsageLedger.from_json(conv.history["ledger"])
         key = self._row_of(conv)
         saved = next((row for row in self._saved.get(conv.project, []) if row.id == key), None)
+        conv.in_history = bool(key and (key == self._opening_saved_row or saved is not None))
         if controller.state is SessionState.OPENING:
             conv.opening_row = saved
         conv.created_at = self.settings.session_created.get(key) or (
@@ -1352,7 +1462,7 @@ class AppCore:
         controller = conv.controller
         native = getattr(controller, "session_id", None)
         active = getattr(controller, "active_at", None)
-        if native and active:
+        if conv.in_history and native and active:
             row = row_id(conv.engine, native)
             self._spoken[row] = max(self._spoken.get(row, 0.0), active)
 
@@ -1474,7 +1584,8 @@ class AppCore:
     def _title_of(self, conv: Conversation) -> str:
         """The name the user gave the conversation here, else the engine's title."""
         row = self._resolve_row(self._row_of(conv))
-        return self.settings.session_titles.get(row) or self.settings.session_auto_titles.get(row) or conv.controller.title
+        return (self.settings.session_titles.get(row) or conv.draft_title
+                or self.settings.session_auto_titles.get(row) or conv.controller.title)
 
     @staticmethod
     def _cache_fits(live: Mapping[str, Any], cached: Mapping[str, Any]) -> bool:
@@ -1529,11 +1640,12 @@ class AppCore:
             "projectId": conv.project,
             "title": self._title_of(conv),
             "mark": self._mark(conv),
-            "workingLabel": "正在压缩并切换模型…" if conv.switch_task is not None else ("本地缓存 · " if conv.preview else "") + controller.working_label,
+            "workingLabel": ("正在生成会话名称…" if conv.naming else "正在压缩并切换模型…") if conv.switch_task is not None else ("本地缓存 · " if conv.preview else "") + controller.working_label,
             "modified": format_relative(active),
             "modifiedAt": int(controller.active_at * 1000),
             "engine": conv.engine,
             "nativeId": controller.session_id or "",
+            "pinned": conv.sidebar_key in self._project_pins(conv.project),
             "settings": settings,
             "usage": usage,
             "usageModels": usage_models,
@@ -1622,7 +1734,13 @@ class AppCore:
         if turn.running:
             return
         conv.inflight = None
-        if turn.status is not TurnStatus.FAILED:
+        submitted = getattr(conv.controller, "prompt_submitted", None)
+        if submitted is not None and submitted(turn):
+            return  # an error stopping an accepted native turn is not a failed delivery
+        if turn.id not in conv.unsent_turns and (not attachments or turn.status is not TurnStatus.FAILED):
+            return
+        if not attachments:
+            self._restore(conv, [(text, ())], "这条消息没有发出，已放回输入框，可以重试。")
             return
         # All of them go back, whatever was put into the composer meanwhile: the notice promises a retry that is one
         # Enter away, so no attachment may stay behind. When the lot is more than a message usually holds the user is
@@ -1858,6 +1976,7 @@ class AppCore:
         self._preview = preview
         self._ledger_seed = seed
         self._opening_history = history
+        self._opening_saved_row = row_id
         try:
             if row_id.startswith("fy:"):
                 if self.factory is None:
@@ -1886,6 +2005,7 @@ class AppCore:
             self._preview = None
             self._ledger_seed = None
             self._opening_history = None
+            self._opening_saved_row = None
         conv = self._conv_of(controller)
         if conv is not None:
             pending = await asyncio.to_thread(self.history.load, "pending-switch:" + row_id)
@@ -1965,7 +2085,7 @@ class AppCore:
         """Something was said in it, or it is one of the engine's saved sessions: there is something to archive or name."""
         if not row:
             return False
-        return bool(conv.controller.transcript.turns) or any(item.id == row for rows in self._saved.values() for item in rows)
+        return conv.in_history
 
     async def _m_session_archive(self, params: dict[str, Any]) -> dict[str, Any]:
         row, conv = self._row_for(params.get("id"))
@@ -1975,6 +2095,7 @@ class AppCore:
             if not self._has_content(conv, row):
                 raise AppError("这个会话还没有内容，直接关闭就行。")
             await self._close_conversation(conv)
+            row = conv.sidebar_key or row  # closing may cancel a tentative engine replacement
         self.settings.archived_sessions[row] = int(time.time() * 1000)
         self._save()
         self._emit_sidebar()
@@ -1993,9 +2114,9 @@ class AppCore:
         title = params.get("title")
         if not isinstance(title, str):
             raise AppError("名字不合法。")
+        name = " ".join(title.split())[:MAX_SESSION_TITLE]
         if conv is not None and not self._has_content(conv, row):
             raise AppError("这个会话还没有内容，发出第一条消息之后才能改名。")
-        name = " ".join(title.split())[:MAX_SESSION_TITLE]
         if name:
             self.settings.session_titles[row] = name
         else:  # (an empty name gives the engine's own title back)
@@ -2057,7 +2178,7 @@ class AppCore:
         controller = conv.controller
         if not text:
             return {"ok": False, "text": "用法：/goal 目标，例如 /goal 让所有测试通过。"}
-        if controller.state is not SessionState.READY:
+        if controller.state is not SessionState.READY or conv.switch_task is not None:
             return {"ok": False, "text": "会话还没就绪，或这一轮还在运行：结束后再设目标。"}
         if conv.queue:
             return {"ok": False, "text": "还有排队的消息没有发出：它们发完后再设目标。"}
@@ -2070,12 +2191,33 @@ class AppCore:
         if resuming and goal.rounds >= goals.ROUNDS:
             return {"ok": False, "text": "已保存目标已用完轮数：检查结果后，用 /goal 目标 明确开始新一批。"}
         await self._refresh_fusion_settings(conv)
+        controller = conv.controller
+        if self._needs_first_title(conv):
+            conv.switch_task = asyncio.current_task()
+            try:
+                await self._prepare_first_title(conv, goal.text)
+            except AppError as error:
+                return {"ok": False, "text": str(error)}
+            except asyncio.CancelledError:
+                if self._shutting_down:
+                    raise
+                return {"ok": False, "text": "命名已停止，目标没有启动。"}
+            finally:
+                conv.switch_task = None
+                conv.dirty = True
+                self._schedule_flush()
         previous = dict(getattr(getattr(controller, "saved", None), "goal", {}))
         if not self._checkpoint_goal(conv, goal):
             controller.saved.goal = previous
             return {"ok": False, "text": "目标未启动：会话保存失败，请先检查存储空间和权限。"}
         conv.goal = goal
-        if not controller.send_prompt(goal.next_message() if resuming else goals.opening(text)):
+        try:
+            accepted = controller.send_prompt(goal.next_message() if resuming else goals.opening(text))
+        except BaseException:
+            conv.goal = None
+            self._checkpoint_goal(conv, goals.Goal.from_json(previous))
+            raise
+        if not accepted:
             conv.goal = None
             self._checkpoint_goal(conv, goals.Goal.from_json(previous))
             return {"ok": False, "text": "现在不能发送：会话没有就绪。"}
@@ -2092,7 +2234,7 @@ class AppCore:
         saved = getattr(conv.controller, "saved", None)
         if conv.engine == OWN_ENGINE and saved is not None:
             saved.goal = goal.to_json() if goal is not None else {}
-            return conv.controller._save_now()
+            return not conv.in_history or conv.controller._save_now()
         return True
 
     def _stop_goal(self, conv: Conversation, notice: str, *, finished: bool = False) -> None:
@@ -2168,50 +2310,76 @@ class AppCore:
     # ------------------------------------------------------------------ messages
 
     def _start_title(self, conv: Conversation, question: str) -> None:
+        """Only existing, unnamed Fusion sessions use the optional legacy path."""
         controller = conv.controller
-        if getattr(controller, "_fusion", None) is not None:
-            row = self._row_of(conv)
-
-            def unnamed() -> bool:
-                return (not self._shutting_down and self._by_cid.get(conv.cid) is conv and conv.controller is controller
-                        and row not in self.settings.session_titles and row not in self.settings.session_auto_titles
-                        and controller.title in ("", "新会话", "（无标题）"))
-
-            if unnamed() and question.strip() and not controller.fusion_title_attempted:
-                # Only name from this send: old text may belong to another model or account, even in the same tab.
-                controller.title_after_turn(question, unnamed)
+        if not conv.in_history or getattr(controller, "_fusion", None) is None:
             return
-        if conv.title_started or sum(t.user_block is not None for t in conv.controller.transcript.turns) != 1:
-            return
-        conv.title_started = True
         row = self._row_of(conv)
-        if row in self.settings.session_auto_titles or row in self.settings.session_titles:
-            return
-        # Factory generates a title natively (session_title_updated); never send its question to another account.
-        if conv.engine == "factory":
-            return
-        conv.title_task = self._spawn(self._generate_title(conv, row, question, conv.engine, conv.controller.model), quiet=True)
 
-    async def _generate_title(self, conv: Conversation, row: str, question: str, engine: str, model: str) -> None:
-        prompt = session_title.prompt(question)
-        if engine == "chatgpt" and self.chatgpt is not None:
-            owner = conv.controller
-            def spent(usage: Any, used_model: str) -> None:
-                if owner.state is SessionState.CLOSED or not hasattr(owner, "_add_usage"):
-                    self.chatgpt.record_side_usage(usage, used_model)
-                    return
-                owner._add_usage(usage, measures_context=False, counts_speed=False, model=used_model)
-                owner.saved.requests.append({"kind": "title", "model": used_model, "usage": usage.tokens().to_json()})
-                owner._save_now()
-            answer = await chatgpt_side.ask(self.chatgpt, prompt, model_id=model, instructions=session_title.SYSTEM, timeout=30, on_usage=spent)
-        elif engine == "devin" and self.devin is not None:
-            answer = await devin_side.ask(self.devin, conv.project, session_title.SYSTEM + "\n\n" + prompt, timeout=30)
-        else:
+        def unnamed() -> bool:
+            return (not self._shutting_down and self._by_cid.get(conv.cid) is conv and conv.controller is controller
+                    and row not in self.settings.session_titles and session_title.is_default(self._title_of(conv)))
+
+        if unnamed() and question.strip() and not controller.fusion_title_attempted:
+            controller.prepare_fusion_title(question, unnamed)
+
+    def _discard_draft_title(self, conv: Conversation) -> None:
+        if not conv.in_history and conv.draft_title:
+            if conv.engine == OWN_ENGINE and conv.controller.saved.title == conv.draft_title:
+                conv.controller.saved.title = ""
+            conv.draft_title = ""
+
+    def _needs_first_title(self, conv: Conversation) -> bool:
+        # Factory's title is provided by the native conversation, never by another account.
+        return not conv.in_history and conv.engine in (OWN_ENGINE, "devin") and not conv.draft_title
+
+    async def _prepare_first_title(self, conv: Conversation, text: str,
+                                   *, current: Callable[[], bool] = lambda: True) -> None:
+        if not self._needs_first_title(conv):
             return
-        title = session_title.clean(answer)
-        if title is None or self._shutting_down:
-            return  # Keep a neutral title on failure; never pretend the first sentence was an LLM summary.
-        self._remember_auto_title(conv, self._resolve_row(row), title)
+        from desktop.core.fusion.title import generate, source
+
+        controller = conv.controller
+        own = conv.engine == OWN_ENGINE
+        model = controller.model
+        account = source(controller, model) if own else self.devin.cached_account().get("email")
+
+        def allowed() -> bool:
+            return (not self._shutting_down and current() and self._by_cid.get(conv.cid) is conv
+                    and conv.controller is controller and controller.state is SessionState.READY and controller.model == model
+                    and (source(controller, model) if own else self.devin.cached_account().get("email")) == account)
+
+        question = text if text.strip() else "（仅发送附件）"
+        prompt = session_title.FIRST_SYSTEM + "\n\n" + session_title.prompt(question, first=True)
+        conv.naming = True
+        self._flush(conv)
+        try:
+            for attempt in range(session_title.FIRST_RETRIES + 1):
+                if not allowed():
+                    break
+                reason = ""
+                try:
+                    if own:
+                        title = await generate(controller, question, model, account, allowed, draft=True) if account is not None else None
+                    else:
+                        title = session_title.clean(await devin_side.ask(self.devin, conv.project, prompt, timeout=12), first=True)
+                except ChatGPTError as error:
+                    title = None
+                    reason = " " + chatgpt_error_text(error)
+                if not allowed():
+                    break
+                if title:
+                    conv.draft_title = title
+                    if own:
+                        controller.saved.title = title  # Carry it in the first dispatch checkpoint, not in a draft archive.
+                    self._flush(conv)  # Publish the title before dispatching the first main prompt.
+                    return
+                if attempt == session_title.FIRST_RETRIES:
+                    raise AppError(f"自动命名重试 {session_title.FIRST_RETRIES} 次后仍未成功，首条消息没有发出。{reason}")
+                await asyncio.sleep(0.2)
+            raise AppError("会话已变化，首条消息没有发出。")
+        finally:
+            conv.naming = False
 
     def _remember_auto_title(self, conv: Conversation, row: str, title: str) -> None:
         self.settings.session_auto_titles[row] = title
@@ -2224,6 +2392,8 @@ class AppCore:
 
     async def _m_session_send(self, params: dict[str, Any]) -> dict[str, Any]:
         conv = self._conversation(params["id"])
+        if conv.naming:
+            raise AppError("正在生成会话名称，首条消息还没有发出。")
         if conv.switching or conv.switch_task is not None:
             raise AppError("模型正在切换，稍后再发送。")
         ids = params.get("attachmentIds")
@@ -2286,7 +2456,7 @@ class AppCore:
             # shown, and sent by itself in its turn, one message at a time.
             if not text and not attachments:
                 raise AppError("现在不能发送：没有内容。")
-            conv.queue.append(QueuedMessage(f"q{next(self._queue_ids)}", text, tuple(attachments)))
+            conv.queue.append(QueuedMessage(f"q{next(self._queue_ids)}", text, tuple(attachments), raw_text=draft))
             taken()
             conv.dirty = True
             self._schedule_flush()
@@ -2298,13 +2468,12 @@ class AppCore:
             return {"ok": True, "queued": True}
         if not text and not attachments:
             raise AppError("现在不能发送：没有内容。")
-        if state is not SessionState.READY or not changing:
+        if state is not SessionState.READY or not (changing or self._needs_first_title(conv)):
             await self._send_ready(conv, text, attachments, wanted)
             return {"ok": True}
 
-        # Publish the submitted message before waiting for the source summary. It is not a real turn yet: none of
-        # its contents may enter the summary, history, or the source runner. Keep the attachments reserved in drafts
-        # until the destination accepts them (also used when checking the cross-engine carry limits).
+        # Publish the submitted message during handoff or naming, without adding a real turn. Keep the attachments
+        # reserved in drafts until the destination accepts them (also used when checking the cross-engine carry limits).
         conv.preparing = QueuedMessage(f"q{next(self._queue_ids)}", draft, tuple(attachments))
         conv.switch_task = asyncio.current_task()
         try:
@@ -2314,7 +2483,7 @@ class AppCore:
             self._restore(conv, [(draft, ())])
             if isinstance(error, asyncio.CancelledError) and not self._shutting_down:
                 # QWebChannel does not reply to a bare cancellation; the composer would remain locked.
-                raise AppError("模型交接已停止；消息已放回输入框，未自动重试。") from None
+                raise AppError("已停止发送准备；消息已放回输入框，未自动重试。") from None
             raise
         finally:
             conv.preparing = None
@@ -2331,22 +2500,27 @@ class AppCore:
         problem = controller.attachment_problem(self._carried_attachments(conv) + tuple(attachments))
         if problem:
             raise AppError(problem)
+        if controller.state is not SessionState.READY:
+            raise AppError("现在不能发送：会话没有就绪。")
+        await self._prepare_first_title(conv, conv.preparing.text if conv.preparing is not None else text)
         pending = conv.pending_model
         if pending is not None:
             self._set_pending_model(conv, None)  # Persist before accepting the message; a disk failure must not invite replay.
         try:
             accepted = controller.send_prompt(text, attachments)
         except BaseException:
+            self._discard_draft_title(conv)
             if pending is not None:
                 self._set_pending_model(conv, pending)
             raise
         if not accepted:
+            self._discard_draft_title(conv)
             if pending is not None:
                 self._set_pending_model(conv, pending)
             raise AppError("现在不能发送：会话没有就绪。")
         self._start_title(conv, text)
         conv.drafts = [a for a in conv.drafts if a.id not in wanted]
-        if attachments:
+        if attachments or not conv.in_history:
             conv.inflight = (controller.transcript.turns[-1], text, tuple(attachments))
 
     async def _m_session_approvePlan(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -2375,8 +2549,8 @@ class AppCore:
         from desktop.core.fusion.registry import FusionError
         conv = self._conversation(params["id"])
         fusion, model = getattr(conv.controller, "_fusion", None), params.get("model")
-        if (fusion is None or conv.switching or conv.queue or conv.controller.state is not SessionState.READY
-                or not isinstance(model, str)):
+        if (fusion is None or conv.switching or conv.switch_task is not None or conv.queue
+                or conv.controller.state is not SessionState.READY or not isinstance(model, str)):
             raise AppError("会话未就绪，暂时不能更换 Fusion 主模型。")
         chosen = self.catalog.find(model)
         if not chosen or chosen.get("disabled") or self.catalog.target(model).engine not in ("chatgpt", "devin"):
@@ -2419,6 +2593,8 @@ class AppCore:
         if (fusion is None or conv.switching or conv.queue or conv.controller.state is not SessionState.READY
                 or not isinstance(unknown, bool)):
             raise AppError("会话未就绪，暂时不能调整 Fusion 预算。")
+        if conv.naming or conv.controller.fusion_title_running:
+            raise AppError("正在记录会话标题的用量，请稍后再调整预算。")
         try:
             fusion.update_budget(params.get("maxCalls"), params.get("maxTokens"), accept_unknown=unknown)
         except FusionError as error:
@@ -2587,11 +2763,40 @@ class AppCore:
         if problem:
             self._unqueue_all(conv, problem)
             return
-        if not controller.send_prompt(head.text, head.attachments):
+        if self._needs_first_title(conv):
+            def current() -> bool:
+                return bool(conv.queue) and conv.queue[0] is head
+
+            async def name_then_pump() -> None:
+                try:
+                    await self._prepare_first_title(conv, head.raw_text if head.raw_text is not None else head.text, current=current)
+                except asyncio.CancelledError:
+                    self._unqueue_all(conv, "命名已停止，消息已放回输入框。")
+                    return
+                except Exception as error:
+                    if current():
+                        self._unqueue_all(conv, error_text(error))
+                finally:
+                    conv.switch_task = None
+                    conv.dirty = True
+                    self._schedule_flush()
+                self._pump(conv)
+
+            conv.switch_task = self._spawn(name_then_pump(), quiet=True)
+            return
+        try:
+            accepted = controller.send_prompt(head.text, head.attachments)
+        except Exception as error:
+            self._discard_draft_title(conv)
+            self._unqueue_all(conv, f"消息没有发出，已放回输入框：{error_text(error)}")
+            return
+        if not accepted:
+            self._discard_draft_title(conv)
+            self._unqueue_all(conv, "会话没有就绪，排队消息已放回输入框。")
             return
         self._start_title(conv, head.text)
         conv.queue.pop(0)
-        if head.attachments:
+        if head.attachments or not conv.in_history:
             conv.inflight = (controller.transcript.turns[-1], head.text, head.attachments)
         conv.dirty = True
         self._schedule_flush()
@@ -2667,10 +2872,10 @@ class AppCore:
         if index is None:
             return {"ok": False}  # (it went out, or was taken back, while the user was typing)
         item = conv.queue[index]
-        text = text.strip()
-        if not text and not item.attachments:
+        trimmed = text.strip()
+        if not trimmed and not item.attachments:
             raise AppError("消息不能是空的：不想发这条，请点取消。")
-        conv.queue[index] = dataclasses.replace(item, text=text)
+        conv.queue[index] = dataclasses.replace(item, text=trimmed, raw_text=text)
         conv.dirty = True
         self._schedule_flush()
         return {"ok": True}
@@ -2809,8 +3014,7 @@ class AppCore:
         return {"path": str(path), "isDir": path.is_dir(), "line": ref.line}
 
     async def _m_files_read(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Text or preview metadata; videos are streamed separately by ``files.video``."""
-        self._close_video_preview()
+        """Text or preview metadata; this read does not own the video player."""
         path, ref = await self._file_named(params)
         kind = await asyncio.to_thread(filetools.preview_kind, path)
         if kind is not None:
@@ -2882,10 +3086,67 @@ class AppCore:
             raise AppError(str(problem)) from problem
         return {"url": url}
 
-    def _close_video_preview(self) -> None:
-        if self._video_preview is not None:
-            self._video_preview = None
+    async def _m_files_inlineImage(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Automatic reads always use the message's own project and the restricted media reader."""
+        cid = params.get("id")
+        if not isinstance(cid, str):
+            raise AppError("没有指定媒体所属的会话。")
+        conv = self._conversation(cid)
+        async with self._inline_images:
+            if self._shutting_down or self._by_cid.get(cid) is not conv:
+                raise AppError("这个会话已经关闭。")
+            try:
+                image = await asyncio.to_thread(filetools.inline_image, params.get("path"), conv.project)
+            except filetools.FileProblem as problem:
+                raise AppError(str(problem)) from problem
+        if self._shutting_down or self._by_cid.get(cid) is not conv:
+            raise AppError("这个会话已经关闭。")
+        return image
+
+    async def _m_files_inlineVideoPoster(self, params: dict[str, Any]) -> dict[str, Any]:
+        """One short-lived, silent decode at a time, wholly separate from the playback lease."""
+        cid, width = params.get("id"), params.get("width")
+        if not isinstance(cid, str):
+            raise AppError("没有指定媒体所属的会话。")
+        if not _is_int(width) or width <= 0:
+            raise AppError("视频预览宽度不合法。")
+        conv = self._conversation(cid)
+
+        def check_session() -> None:
+            if self._shutting_down or self._by_cid.get(cid) is not conv:
+                raise AppError("这个会话已经关闭。")
+
+        async with self._inline_video_posters:
+            check_session()
+            try:
+                source = await self._open_inline_video(params.get("path"), conv.project)
+                with source.file:
+                    check_session()
+                    info = await self.platform.video_poster(source, min(width, 1280))
+                    check_session()
+                    return info
+            except filetools.FileProblem as problem:
+                raise AppError(str(problem)) from problem
+
+    def _close_video_preview(self, *, replaced: bool = False) -> None:
+        lease, self._video_preview = self._video_preview, None
+        if lease is not None:
             self.platform.video_close()
+            if replaced:
+                self.emit("files.video", {"token": lease[1], "released": True})
+
+    async def _open_inline_video(self, raw: Any, project: str) -> filetools.InlineVideoSource:
+        opening = asyncio.create_task(asyncio.to_thread(filetools.open_inline_video, raw, project))
+        try:
+            return await asyncio.shield(opening)
+        except asyncio.CancelledError:
+            # A thread already opening a file cannot be cancelled; reclaim its result if the bridge goes away.
+            def dispose(task: asyncio.Task[filetools.InlineVideoSource]) -> None:
+                if not task.cancelled() and task.exception() is None:
+                    task.result().file.close()
+
+            opening.add_done_callback(dispose)
+            raise
 
     async def _m_files_video(self, params: dict[str, Any]) -> dict[str, Any] | None:
         """Only the owning session and mount token may change or close a live video."""
@@ -2894,27 +3155,36 @@ class AppCore:
             raise AppError("没有指定视频预览。")
         lease = (cid, token)
         if action == "open":
-            self._conversation(cid)
+            conv = self._conversation(cid)
             width = params.get("width")
             if not _is_int(width) or width <= 0:
                 raise AppError("视频预览宽度不合法。")
+            inline = params.get("inline", False)
+            if type(inline) is not bool:
+                raise AppError("视频预览类型不合法。")
             if self._shutting_down:
                 raise AppError("视频预览已关闭。")
-            self._close_video_preview()
+            self._close_video_preview(replaced=True)
             self._video_preview = lease
 
             def publish(payload: dict[str, Any]) -> None:
                 if self._video_preview is lease:
                     self.emit("files.video", {**payload, "token": token})
 
+            source: filetools.InlineVideoSource | None = None
             try:
-                path, _ = await self._file_named(params)
-                kind = await asyncio.to_thread(filetools.preview_kind, path)
+                name: str
+                if inline:
+                    source = await self._open_inline_video(params.get("path"), conv.project)
+                    name = source
+                else:
+                    path, _ = await self._file_named(params)
+                    if await asyncio.to_thread(filetools.preview_kind, path) != "video":
+                        raise AppError("这不是可以在侧栏预览的视频文件。")
+                    name = str(path)
                 if self._video_preview is not lease:
                     raise AppError("视频预览已关闭。")
-                if kind != "video":
-                    raise AppError("这不是可以在侧栏预览的视频文件。")
-                info = await self.platform.video_open(str(path), min(width, 1280), publish)
+                info = await self.platform.video_open(name, min(width, 1280), publish)
                 if self._video_preview is not lease:
                     raise AppError("视频预览已关闭。")
                 return info
@@ -2924,6 +3194,9 @@ class AppCore:
                 if isinstance(problem, filetools.FileProblem):
                     raise AppError(str(problem)) from problem
                 raise
+            finally:
+                if source is not None:
+                    source.file.close()
         if action not in ("play", "pause", "seek", "volume", "close"):
             raise AppError("视频操作不合法。")
         if self._video_preview != lease:
@@ -3045,7 +3318,7 @@ class AppCore:
     def _set_pending_model(self, conv: Conversation, target: dict[str, Any] | None, *, row: str = "") -> None:
         # This intent is not a disposable UI cache or an engine setting. Reopening never executes it on its own.
         row = row or self._row_of(conv)
-        if row:
+        if row and conv.in_history:
             try:
                 self.history.save("pending-switch:" + row, {"project": conv.project, "turns": [], "target": target})
             except OSError as error:
@@ -3113,7 +3386,7 @@ class AppCore:
             raise AppError("模型切换已停止；消息和待切换选择保留，未自动重试。") from None
         finally:
             try:
-                if self._row_of(conv) != old_row:
+                if conv.in_history and self._row_of(conv) != old_row:
                     self._set_pending_model(conv, pending)
                     self.history.save("pending-switch:" + old_row, {"project": conv.project, "turns": [], "target": None})
             except OSError as error:
@@ -3127,6 +3400,8 @@ class AppCore:
 
     async def _compact_model_switch(self, conv: Conversation, page_model: str) -> str:
         """The old model owns the summary. No destination settings are committed before it succeeds."""
+        if not conv.in_history:
+            return ""  # no prompt was delivered to the source, so there is nothing to summarize
         from desktop.core.chatgpt.errors import ChatGPTError
         from desktop.core.model_switch import compact_native, recall_for_switch
         old = conv.controller
@@ -3454,6 +3729,7 @@ class AppCore:
         # only reported once the session is open, so the session opens with a hand-over for the figure known now
         # (nothing may be sent without one) and gets the final one when the window arrives.
         window = int(model.get("window") or 0)
+        prior_turns = [t for t in transcript.turns if t.id not in conv.unsent_turns]
         conv.switching = True
         try:
             summary = await self._compact_model_switch(conv, page_model)
@@ -3467,8 +3743,8 @@ class AppCore:
         handoff = (
             summary_handoff(summary, transcript, project=conv.project, memory=getattr(old.manager, "memory", None),
                             engine=self.catalog.target(page_model).engine, window=window, carry=chosen)
-            if summary else build_handoff(transcript.turns, window_tokens=window, carry=chosen)
-            if sent_as_files or conversation_messages(transcript.turns, carry={item.id for item in chosen}) else None
+            if summary else build_handoff(prior_turns, window_tokens=window, carry=chosen)
+            if sent_as_files or conversation_messages(prior_turns, carry={item.id for item in chosen}) else None
         )
         settings = self._open_settings(page_model, {**self._page_settings(conv),
                                                    **({"autonomy": ""} if self.catalog.target(page_model).engine != conv.engine else {})})
@@ -3510,7 +3786,7 @@ class AppCore:
             if handoff is not None and not window and not summary:
                 window = await self._window_of(controller, page_model)
                 if window and getattr(controller, "handoff", None) is handoff and controller.state is SessionState.READY:
-                    handoff = controller.handoff = build_handoff(transcript.turns, window_tokens=window, carry=chosen)
+                    handoff = controller.handoff = build_handoff(prior_turns, window_tokens=window, carry=chosen)
             if handoff is not None and handoff.carried:
                 transcript.add_switch(
                     from_model=was.get("label", ""), from_engine="Fusion" if getattr(old, "_fusion", None) is not None else engine_label(old.engine, was),
@@ -3519,13 +3795,16 @@ class AppCore:
                 )
             new_row = self._row_of(conv)
             history = {"project": conv.project, "title": previous_title, "activeAt": old.active_at, "created": conv.created_at,
-                       "turns": list(transcript.turns), "ledger": conv.ledger.to_json(), "handoff": handoff}
+                       "turns": [t for t in transcript.turns if t.id not in conv.unsent_turns],
+                       "ledger": conv.ledger.to_json(), "handoff": handoff}
             if retained is not None:
                 history["fusion"] = retained
-            await asyncio.to_thread(self.history.save, new_row, history)
-            if controller.engine == "chatgpt":
-                # Preserve even an empty native segment: its previous turns are in the engine-neutral archive.
-                await asyncio.to_thread(self.chatgpt.sessions.save, controller._snapshot())
+            if conv.in_history:
+                await asyncio.to_thread(self.history.save, new_row, history)
+                if controller.engine == "chatgpt":
+                    # Preserve even an empty native segment: its previous turns are in the engine-neutral archive.
+                    await asyncio.to_thread(self.chatgpt.sessions.save, controller._snapshot())
+                    controller._checkpoint_written = True
         except BaseException as error:
             self._rollback_switch(conv, old, controller)
             transcript.restore(before)  # a failed open writes its error into the shared transcript
@@ -3538,18 +3817,19 @@ class AppCore:
         finally:
             conv.switching = False
             self._adopt = None
-        if old.session_id:
-            conv.hidden.add(old.session_id)
-        aliases = [key for key in self.settings.session_links if self._resolve_row(key) == old_row]
-        for key in [*aliases, old_row]:
-            if key and key != new_row:
-                self.settings.session_links[key] = new_row
-        for names in (self.settings.session_titles, self.settings.session_auto_titles):
-            if old_row in names:
-                names[new_row] = names.pop(old_row)
-        conv.history = history
-        self._sync_sidebar_key(conv)
-        self._save()
+        if conv.in_history:
+            if old.session_id:
+                conv.hidden.add(old.session_id)
+            aliases = [key for key in self.settings.session_links if self._resolve_row(key) == old_row]
+            for key in [*aliases, old_row]:
+                if key and key != new_row:
+                    self.settings.session_links[key] = new_row
+            for names in (self.settings.session_titles, self.settings.session_auto_titles):
+                if old_row in names:
+                    names[new_row] = names.pop(old_row)
+            conv.history = history
+            self._sync_sidebar_key(conv)
+            self._save()
         transcript.model = controller.model
         self._spawn(old.close(), quiet=True)
         self._emit_sidebar()

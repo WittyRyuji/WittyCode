@@ -7,7 +7,12 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
+from desktop.core.app_core import AppError
 from desktop.core.cache import Cache
+from desktop.core.devin.controller import DevinController
+from desktop.core.devin.errors import DevinError
 from desktop.core.session_state import SessionState
 from tests.app_support import make_core, ready_core
 from tests.devin_support import make_engine
@@ -166,6 +171,100 @@ def test_the_program_path_is_a_setting_that_makes_the_engine_look_again(tmp_path
 # ---------------------------------------------------------------------------------------------- a session
 
 
+def test_a_devin_startup_failure_after_allocation_leaves_no_project_row(tmp_path, monkeypatch):
+    async def scenario():
+        core, _, events, harness = await devin_core(tmp_path)
+        project = str(tmp_path / "proj")
+        try:
+            allocated = []
+
+            async def rejected(controller, *args):
+                allocated.append(controller.session_id)
+                raise DevinError("demo configuration failure")
+
+            monkeypatch.setattr(DevinController, "_configure", rejected)
+            with pytest.raises(AppError, match="demo configuration failure"):
+                await core.call("session.new", {"projectId": project, "modelId": "devin:swe-2-high"})
+            assert events.last("tabs")["tabs"] == [] and not core.settings.session_created
+            await core.call("project.refresh", {"id": project})
+            assert core.project_rows()[0]["sessionIds"] == []
+            assert not await harness.engine.list_sessions(project)
+            assert not harness.engine.open_controllers() and not harness.engine._sessions
+            (native,) = allocated
+            assert all(item["sessionId"] != native for item in harness.requests("session/delete"))
+        finally:
+            await core.shutdown()
+
+    run(scenario())
+
+
+def test_a_rejected_devin_prompt_keeps_a_draft_until_retry_succeeds(tmp_path):
+    async def scenario():
+        core, _, events, harness = await devin_core(tmp_path)
+        project = str(tmp_path / "proj")
+        try:
+            cid = await new_devin(core, events, tmp_path)
+            native = core._by_cid[cid].controller.session_id
+            assert core.project_rows()[0]["sessionIds"] == []
+            await core.call("session.send", {"id": cid, "text": "[fail]"})
+            await until(lambda: events.of("restore"))
+            assert events.last("restore")["text"] == "[fail]"
+            await core.call("project.refresh", {"id": project})
+            assert not await harness.engine.list_sessions(project) and core.project_rows()[0]["sessionIds"] == []
+            await core.call("session.send", {"id": cid, "text": "successful retry"})
+            await until(lambda: answer_of(events, cid).startswith("echo: successful retry"))
+            assert core.project_rows()[0]["sessionIds"] == [cid]
+            await core.call("session.close", {"id": cid})
+            await core.call("project.refresh", {"id": project})
+            assert core.project_rows()[0]["sessionIds"] == ["dv:" + native]
+        finally:
+            await core.shutdown()
+
+    run(scenario())
+
+
+def test_old_devin_keeps_only_confirmed_new_rows_after_close_and_restart(tmp_path):
+    async def scenario():
+        options = {"env": {"FAKE_DEVIN_NO_HAS_USER_MESSAGES": 1}}
+        core, _, events, harness = await devin_core(tmp_path, **options)
+        project = str((tmp_path / "proj").resolve())
+        try:
+            async with harness.engine.keep_connection():
+                client = await harness.engine.connection()
+                unknown = (await client.request("session/new", {"cwd": project, "mcpServers": []}, timeout=10))["sessionId"]
+            blank = await new_devin(core, events, tmp_path)
+            blank_native = core._by_cid[blank].controller.session_id
+            await core.call("session.close", {"id": blank})
+            rejected = await new_devin(core, events, tmp_path)
+            rejected_native = core._by_cid[rejected].controller.session_id
+            await core.call("session.send", {"id": rejected, "text": "[fail]"})
+            await until(lambda: events.of("restore"))
+            assert events.last("restore")["text"] == "[fail]"
+            await core.call("session.close", {"id": rejected})
+            good = await new_devin(core, events, tmp_path)
+            controller = core._by_cid[good].controller
+            sent_native = controller.session_id
+            await core.call("session.send", {"id": good, "text": "actually used"})
+            await until(lambda: controller.history_ready and controller.state is SessionState.READY)
+            await core.call("session.close", {"id": good})
+            await core.call("project.refresh", {"id": project})
+            expected = {"dv:" + unknown, "dv:" + sent_native}
+            assert set(core.project_rows()[0]["sessionIds"]) == expected
+        finally:
+            await core.shutdown()
+        again, _, _, old_harness = await devin_core(tmp_path, **options)
+        try:
+            await again.call("project.refresh", {"id": project})
+            assert set(again.project_rows()[0]["sessionIds"]) == expected
+            assert not old_harness.requests("session/load"), "refresh never opens native histories"
+            native_rows = old_harness.state()["sessions"]
+            assert {unknown, blank_native, rejected_native, sent_native} <= set(native_rows), "no native history was deleted"
+        finally:
+            await again.shutdown()
+
+    run(scenario())
+
+
 def test_a_devin_session_opens_runs_and_reports_its_settings_and_total(tmp_path):
     async def scenario():
         core, _, events, harness = await devin_core(tmp_path)
@@ -176,13 +275,13 @@ def test_a_devin_session_opens_runs_and_reports_its_settings_and_total(tmp_path)
         assert patch["engine"] == "devin" and patch["nativeId"] == conv.controller.session_id
         # (the level is the one the user's defaults ask for, when the model offers it: Opus offers "medium")
         assert patch["settings"] == {"model": "devin:claude-opus-5-5-medium", "reasoning": "medium", "autonomy": "code", "mode": "auto"}
-        assert await core.call("session.send", {"id": cid, "text": "hello"}) == {"ok": True}
+        assert (await core.call("session.send", {"id": cid, "text": "hello"}))["ok"]
         await until(lambda: meta(events, cid).get("mark") == "ready" and answer_of(events, cid) == "echo: hello")
         # the figures of the prompt: input without the cache, output, the cache read; and the context of the last call
         await until(lambda: (meta(events, cid).get("usage") or {}).get("input") == 900)
         assert meta(events, cid)["usage"] == {"input": 900, "output": 12, "cacheWrite": None, "cacheRead": 300}
         assert meta(events, cid)["context"]["used"] == 1212 and meta(events, cid)["context"]["window"] == 1000000
-        assert meta(events, cid)["title"] == "hello"
+        assert meta(events, cid)["title"] == "会话主题摘要"
         await core.shutdown()
 
     run(scenario())
@@ -375,7 +474,7 @@ def test_saved_devin_sessions_are_in_the_sidebar_and_open_from_there(tmp_path):
         session_id = core._by_cid[cid].controller.session_id
         await core.call("session.close", {"id": cid})
         rows = await listed(core, events, tmp_path)
-        assert list(rows) == ["dv:" + session_id] and rows["dv:" + session_id]["title"] == "first question"
+        assert list(rows) == ["dv:" + session_id] and rows["dv:" + session_id]["title"] == "会话主题摘要"
         again = (await core.call("session.openSaved", {"id": "dv:" + session_id, "projectId": str(tmp_path / "proj"), "title": "first question"}))["id"]
         await until(lambda: meta(events, again).get("mark") == "ready")
         assert meta(events, again)["engine"] == "devin" and meta(events, again)["nativeId"] == session_id

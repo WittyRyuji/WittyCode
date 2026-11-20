@@ -96,7 +96,8 @@
 .agent-flow {
   --flow-bg: var(--bg-side); --flow-glow: var(--flow-bg); --flow-grid: #a2a8af;
   --flow-label: var(--fg); --flow-model: var(--fg-2); --flow-ring: var(--bg-raised); --flow-hover: #e3e8ed;
-  --flow-particle: #005440;
+  --flow-wire: #7c7c7c; --flow-live-wire: #707070;
+  --flow-spark: #383838; --flow-spark-core: #f0f0f0;
   --flow-idle: #536174; --flow-working: #006b53; --flow-waiting: #885000;
   --flow-done: #596b7b; --flow-stopped: #62666b; --flow-failed: #a62924;
   position: relative; isolation: isolate; width: 100%; height: clamp(150px, 25vh, 340px); margin-bottom: 10px; overflow: clip; overscroll-behavior: contain;
@@ -105,7 +106,8 @@
 html[data-theme="dark"] .agent-flow {
   --flow-bg: #090f1d; --flow-glow: #152437; --flow-grid: #52647c;
   --flow-label: #f3f6fd; --flow-model: #bac5d7; --flow-ring: #121b2a; --flow-hover: #22334a;
-  --flow-particle: #e2fff9;
+  --flow-wire: #909090; --flow-live-wire: #a0a0a0;
+  --flow-spark: #eeeeee; --flow-spark-core: #555555;
   --flow-idle: #8293a9; --flow-working: #56ecc7; --flow-waiting: #ffc264;
   --flow-done: #8098ad; --flow-stopped: #929398; --flow-failed: #ff776e;
   background-image: radial-gradient(ellipse at 48% 42%, var(--flow-glow), var(--flow-bg) 83%);
@@ -114,37 +116,66 @@ html[data-theme="dark"] .agent-flow {
 .agent-flow .react-flow__pane.dragging { cursor: grabbing; }
 .agent-flow-overview { position: absolute; top: 5px; left: 5px; z-index: 5; padding: 2px 5px; border: 1px solid var(--flow-idle); background: var(--flow-ring); color: var(--flow-label); font-size: 11px; line-height: 1.2; }
 .agent-flow-overview:hover { background: var(--flow-hover); }
-.agent-flow .react-flow__handle { top: 25px; opacity: 0; pointer-events: none; }
-.agent-flow .react-flow__handle-left { left: calc(50% - 25px); }
-.agent-flow .react-flow__handle-right { right: calc(50% - 25px); }
-.agent-flow-node, .agent-flow-edge { --agent-wire: var(--flow-idle); }
-.agent-flow-node.working, .agent-flow-edge.working { --agent-wire: var(--flow-working); }
-.agent-flow-node.waiting, .agent-flow-edge.waiting { --agent-wire: var(--flow-waiting); }
-.agent-flow-node.done, .agent-flow-edge.done { --agent-wire: var(--flow-done); }
-.agent-flow-node.stopped, .agent-flow-edge.stopped { --agent-wire: var(--flow-stopped); }
-.agent-flow-node.failed, .agent-flow-edge.failed { --agent-wire: var(--flow-failed); }
+.agent-flow .react-flow__handle { top: calc(var(--flow-portrait-size) / 2); opacity: 0; pointer-events: none; }
+.agent-flow .react-flow__handle-left { left: calc(50% - var(--flow-portrait-size) / 2); }
+.agent-flow .react-flow__handle-right { right: calc(50% - var(--flow-portrait-size) / 2); }
+.agent-flow-node { --agent-ring-stroke: var(--flow-idle); }
+.agent-flow-node.working { --agent-ring-stroke: var(--flow-working); }
+.agent-flow-node.waiting { --agent-ring-stroke: var(--flow-waiting); }
+.agent-flow-node.done { --agent-ring-stroke: var(--flow-done); }
+.agent-flow-node.stopped { --agent-ring-stroke: var(--flow-stopped); }
+.agent-flow-node.failed { --agent-ring-stroke: var(--flow-failed); }
 .agent-flow-character { display: flex; flex-direction: column; align-items: center; width: 100%; gap: 2px; padding: 0; border: 0; background: transparent; color: var(--flow-label); line-height: 1.2; }
 button.agent-flow-character { pointer-events: auto; }
-button.agent-flow-character:hover, button.agent-flow-character:focus-visible { background: var(--flow-hover); outline: 1px solid var(--agent-wire); outline-offset: 1px; }
-.agent-flow-ring { display: grid; place-items: center; width: 50px; height: 50px; border: 1px solid var(--agent-wire); border-radius: 0; background: var(--flow-ring); }
+button.agent-flow-character:hover, button.agent-flow-character:focus-visible { background: var(--flow-hover); outline: 1px solid var(--agent-ring-stroke); outline-offset: 1px; }
+.agent-flow-ring { display: grid; place-items: center; width: var(--flow-portrait-size); height: var(--flow-portrait-size); border: 1px solid var(--agent-ring-stroke); border-radius: 0; background: var(--flow-ring); }
 .agent-flow-nest-art, .agent-flow-nest-art img { display: block; image-rendering: pixelated; }
 .agent-flow-name, .agent-flow-model { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-flow-name { font-size: 13px; font-weight: 600; }
 .agent-flow-model { font-size: 11px; color: var(--flow-model); }
 .agent-flow-edge { pointer-events: none; }
-.agent-flow-wire, .agent-flow-signal { fill: none; stroke: var(--agent-wire); stroke-width: 2; stroke-linecap: round; }
-.agent-flow-wire { opacity: 0.82; }
-.agent-flow-edge.working .agent-flow-wire { opacity: 0.38; }
-.agent-flow-edge.failed .agent-flow-wire { opacity: 0.94; stroke-dasharray: 5 5; }
+.agent-flow-wire { pointer-events: none; fill: none; stroke: var(--flow-wire); stroke-width: 1.5; stroke-dasharray: none; stroke-linecap: round; stroke-linejoin: round; }
+.agent-flow-trunk { stroke-linecap: square; }
+.agent-flow-spur { stroke-linecap: butt; }
+.agent-flow-edge.working .agent-flow-wire { stroke: var(--flow-live-wire); }
 .agent-flow-edge.waiting .agent-flow-wire { animation: agent-flow-pulse 2.6s ease-in-out infinite; }
-.agent-flow-signal { stroke-dasharray: 5 19; animation: agent-flow-current 0.75s linear infinite; }
-.agent-flow-particle { fill: none; stroke: var(--flow-particle); stroke-width: 5.6; stroke-linecap: round; stroke-dasharray: 0 50; animation: agent-flow-particles 0.8s linear infinite; }
-@keyframes agent-flow-current { to { stroke-dashoffset: -24; } }
-@keyframes agent-flow-particles { to { stroke-dashoffset: -50; } }
-@keyframes agent-flow-pulse { 50% { opacity: 1; } }
+.agent-flow-signal { fill: none; stroke: var(--flow-spark); stroke-linecap: round; stroke-linejoin: round; }
+.agent-flow-signal path {
+  --spark-lag: 0px;
+  stroke-dasharray: 0 var(--flow-spark-spacing);
+  animation: agent-flow-current var(--flow-spark-period) linear infinite;
+}
+.agent-flow-signal .agent-flow-trail {
+  --spark-lag: 8px;
+  stroke-width: 2.3; opacity: 0.56; stroke-dasharray: 5px calc(var(--flow-spark-spacing) - 5px);
+}
+.agent-flow-particle { stroke-width: 4.8; }
+/* Both animations use the same beat; brighten only the tiny centers, not the wire. */
+.agent-flow-signal .agent-flow-particle-core {
+  stroke: var(--flow-spark-core); stroke-width: 2;
+  animation-name: agent-flow-current, agent-flow-glint;
+}
+.agent-flow-arrival {
+  stroke-width: 1; opacity: 0; transform-box: fill-box; transform-origin: center;
+  animation: agent-flow-arrival var(--flow-spark-period) ease-out infinite;
+}
+@keyframes agent-flow-current {
+  from { stroke-dashoffset: calc(var(--spark-phase) + var(--spark-lag)); }
+  to { stroke-dashoffset: calc(var(--spark-phase) + var(--spark-lag) - var(--flow-spark-spacing)); }
+}
+@keyframes agent-flow-glint {
+  0%, 19%, 29%, 33%, 43%, 100% { stroke: var(--flow-spark-core); stroke-width: 2; opacity: 0.45; }
+  23% { stroke: #fff; stroke-width: 3.3; opacity: 1; }
+  37% { stroke: #fff; stroke-width: 2.8; opacity: 0.9; }
+}
+@keyframes agent-flow-arrival {
+  from { opacity: 0.85; transform: scale(1); }
+  32%, to { opacity: 0; transform: scale(1.65); }
+}
+@keyframes agent-flow-pulse { 50% { stroke: var(--flow-live-wire); } }
 @media (prefers-reduced-motion: reduce) {
-  .dragon-sprite.playing, .agent-flow-edge .agent-flow-wire, .agent-flow-signal { animation: none; }
-  .agent-flow-particle { display: none; }
+  .dragon-sprite.playing, .agent-flow-edge .agent-flow-wire { animation: none; }
+  .agent-flow-signal { display: none; }
 }
 .agent-summary { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .agent-name, .agent-caption { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

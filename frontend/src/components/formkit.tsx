@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { ReactNode, Ref } from "react";
 import { ChevronDown } from "lucide-react";
 import { MenuButton, type MenuItem } from "./ui";
 
@@ -66,10 +66,12 @@ export function TextInput({
   invalid,
   width,
   autoFocus,
+  inputRef,
   onEnter,
 }: {
-  value: string;
-  onChange: (v: string) => void;
+  value?: string;
+  onChange?: (v: string) => void;
+  inputRef?: Ref<HTMLInputElement>;
   placeholder?: string;
   mono?: boolean;
   type?: "text" | "password" | "number";
@@ -82,6 +84,7 @@ export function TextInput({
 }) {
   return (
     <input
+      ref={inputRef}
       autoFocus={autoFocus}
       onKeyDown={onEnter ? (e) => e.key === "Enter" && !e.nativeEvent.isComposing && onEnter() : undefined}
       onFocus={autoFocus ? (e) => e.currentTarget.select() : undefined}
@@ -91,9 +94,9 @@ export function TextInput({
       placeholder={placeholder}
       aria-label={label}
       spellCheck={false}
-      autoComplete="off"
+      autoComplete={type === "password" ? "new-password" : "off"}
       style={width ? { width } : undefined}
-      onChange={(e) => onChange(e.target.value)}
+      onChange={onChange ? (e) => onChange(e.target.value) : undefined}
     />
   );
 }

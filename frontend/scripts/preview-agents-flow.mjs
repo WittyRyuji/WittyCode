@@ -1,20 +1,21 @@
-// Run via test_runs.py -- node frontend/scripts/preview-agents-flow.mjs <built index.html> [--narrow].
+// Run via test_runs.py -- node frontend/scripts/preview-agents-flow.mjs <built index.html> [--narrow | --axes].
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { openPage } from "./cdp.mjs";
 import { fakeBackendScripts } from "./fake-backend.mjs";
-import { agentFlowColours, agentFlowScreen, agents } from "./check-agents-team.mjs";
+import { agentFlowColours, agentFlowScreen, agentFlowTopology, agents } from "./check-agents-team.mjs";
 
 const narrow = process.argv.includes("--narrow");
+const axesOnly = process.argv.includes("--axes");
 const work = process.env.WITTYCODE_TEST_WORK;
 const out = resolve(process.env.WITTYCODE_TEST_EVIDENCE ?? work ?? "../outputs", "agents-flow-preview");
 const url = pathToFileURL(resolve(process.argv[2] ?? "dist/index.html")).href;
 if (work) process.chdir(work);
 mkdirSync(out, { recursive: true });
 const { scripts, client } = fakeBackendScripts();
-const report = { client, window: narrow ? { width: 1100, height: 600 } : { width: 1440, height: 900 },
+const report = { client, window: narrow ? { width: 1100, height: 600 } : { width: 1440, height: axesOnly ? 1360 : 900 },
   shots: {}, colours: {}, interaction: {}, consoleErrors: [], cspViolations: [] };
 const time = Date.now();
 const expert = (id, name, fusionIdentity, status, order, fusionRole = "worker") => ({
@@ -76,10 +77,11 @@ async function capture(theme, history, fn) {
     await page.waitFor("!!document.querySelector('.tab.current .dot-ready')");
     const id = await js("__fake.events.findLast(([name, payload]) => name === 'tabs' && payload.select)[1].select");
     const emit = (name, payload) => js(`__fake.emit(${JSON.stringify(name)}, ${JSON.stringify(payload)})`);
-    const team = narrow ? agents : history ? historical : active;
+    const team = axesOnly ? active.map((a) => a.id === "docs" ? { ...a, fusionIdentity: "QS", name: "质量抽样" } : a) :
+      narrow ? agents : history ? historical : active;
     const runs = Object.fromEntries(team.map((agent) => [agent.id, [{ id: "expert-run", status: "done", prompts: [], blocks: [
       block(1, "user", agent.task), block(2, "text", "已核对示例数据，结果已记录。") ] }]]));
-    await emit("settings", { settings: { maxOpen: 4, theme, fontScale: "md", sidebarWidth: 260, conversationWidth: 280 } });
+    await emit("settings", { settings: { maxOpen: 4, theme, fontScale: "md", sidebarWidth: 260, conversationWidth: axesOnly ? 420 : 280 } });
     await js(`__fake.patch(${JSON.stringify(id)}, ${JSON.stringify({ title: "示例项目 · 专家协作", mark: history ? "ready" : "running",
       workingLabel: history ? "就绪" : "正在检查样例…", agents: team, agentRuns: runs })})`);
     if (!narrow) await emit("turns", { id, all: true, turns: [{ id: "demo-plan", status: history ? "done" : "running", prompts: [],
@@ -100,14 +102,37 @@ async function capture(theme, history, fn) {
   }
 }
 
-if (!narrow) await capture("light", true, async ({ shot }) => shot("rail-light-history.png"));
-if (!narrow) await capture("dark", false, async ({ page, shot }) => {
+if (axesOnly) await capture("light", false, async ({ page, js, shot }) => {
+  const top = { "group:Coder": "team-main", "expert:docs": "team-main", "group:Runner": "team-main" };
+  const inspect = (parents) => js(`(${agentFlowTopology.toString()})(${JSON.stringify(parents)})`);
+  const collapsed = await inspect(top);
+  assert.ok(collapsed.correct && collapsed.fits);
+  assert.deepEqual(collapsed.axes, { root: [110], nests: [] });
+  await shot("rail-light-axes-collapsed.png");
+
+  await page.click('.agent-flow [data-id="group:Runner"] button');
+  const expanded = { ...top, "expert:guide": "group:Runner", "expert:preview": "group:Runner", "expert:tests": "group:Runner" };
+  await page.waitFor("document.querySelectorAll('.agent-flow-edge').length === 6");
+  if ((await screenOf()).overview) await page.click('.agent-flow-overview');
+  await page.mouse("mouseMoved", 0, 0, { button: "none", clickCount: 0 });
+  await page.wait(200);
+  const open = await inspect(expanded);
+  assert.ok(open.correct && open.fits);
+  assert.deepEqual(open.axes, { root: [110], nests: [230] });
+  await shot("rail-light-axes-expanded.png");
+  report.axes = { collapsed: { flow: collapsed.axes, screen: collapsed.screenAxes }, expanded: { flow: open.axes, screen: open.screenAxes } };
+  console.log(`Axes ${JSON.stringify(report.axes)}`);
+
+  async function screenOf() { return js(`(${agentFlowScreen.toString()})()`); }
+});
+if (!narrow && !axesOnly) await capture("light", true, async ({ shot }) => shot("rail-light-history.png"));
+if (!narrow && !axesOnly) await capture("dark", false, async ({ page, shot }) => {
   await shot("rail-dark-active.png");
   await page.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
   await page.waitFor(`document.querySelector('${coderNest} img').currentSrc.startsWith('data:image/png;')`);
   await shot("rail-dark-reduced.png");
 });
-if (!narrow) await capture("light", false, async ({ page, js, shot }) => {
+if (!narrow && !axesOnly) await capture("light", false, async ({ page, js, shot }) => {
   await shot("rail-light-active.png");
   const separator = await page.rect(".conversation-splitter");
   const handleX = separator.x + separator.w / 2, handleY = separator.y + 20;
@@ -154,7 +179,7 @@ if (!narrow) await capture("light", false, async ({ page, js, shot }) => {
   await page.waitFor("!!document.querySelector('.agentpanel .agent-chip.on .dragon-sprite') && document.querySelector('.agentpanel-run').textContent.includes('结果已记录')");
   await shot("inspector-light.png");
 });
-if (narrow) await capture("dark", false, async ({ page, js }) => {
+if (narrow && !axesOnly) await capture("dark", false, async ({ page, js }) => {
   await page.click(coderNest);
   await page.click('.agent-flow-overview');
   await page.click('.agent-flow [data-id="group:Runner"] button');
@@ -175,5 +200,5 @@ assert.deepEqual(report.consoleErrors, []);
 assert.deepEqual(report.cspViolations, []);
 if (!narrow) {
   writeFileSync(resolve(out, "report.json"), `${JSON.stringify(report, null, 2)}\n`);
-  console.log(`Wrote ${Object.keys(report.shots).length + 1} screenshots and report.json to ${out}`);
+  console.log(`Wrote ${Object.keys(report.shots).length + (axesOnly ? 0 : 1)} screenshots and report.json to ${out}`);
 }

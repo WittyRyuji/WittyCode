@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 from desktop.core.fusion.acp_server import MCP_CALL, MCP_LIST, MCP_WRAPPERS, PREFIX, SERVER
-from desktop.core.session_title import SYSTEM as TITLE_SYSTEM
+from desktop.core.session_title import FIRST_SYSTEM, SYSTEM
 from tests.fake_devin import HOME, Fake, RpcError
 
 
@@ -83,6 +83,11 @@ class GuardedFake(Fake):
         await self.bridge(params["sessionId"], params)
         return result
 
+    async def m_prompt(self, request_id, params):
+        if any("[fusion-refuse]" in text for text in self.texts(params)):
+            raise RpcError(-32602, "Rejected before dispatch")
+        return await super().m_prompt(request_id, params)
+
     async def run_turn(self, sid, session, turn, text):
         stop = "end_turn"
         try:
@@ -90,7 +95,7 @@ class GuardedFake(Fake):
             match = re.search(r"\[fusion-([a-z-]+)\]", current)
             summary = "--agent-type" in sys.argv and sys.argv[sys.argv.index("--agent-type") + 1] == "summarizer"
             assert summary == ("Do not call any tools. Return only the summary." in text)
-            title = summary and text.startswith(TITLE_SYSTEM)
+            title = summary and text.startswith((FIRST_SYSTEM, SYSTEM))
             if title:
                 code, result = await self.run_hook(sid, "PreToolUse", tool_name=PREFIX + "read_file", tool_input={})
                 assert code == 2 and result["decision"] == "block"
@@ -175,6 +180,11 @@ class GuardedFake(Fake):
                 answer = "ACP summary: earlier work and evidence are retained; continue from the checkpoint." if summary else "ACP report."
             self.update(sid, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": answer}})
             self.call(sid, session, turn, 1200, 20, 400)
+            if not summary and (release := os.environ.get("FAKE_FUSION_MAIN_RELEASE")):
+                while not Path(release).exists() and not turn["cancel"].is_set():
+                    await asyncio.sleep(0.02)
+                if turn["cancel"].is_set():
+                    stop = "cancelled"
         finally:
             await self.finish(sid, session, turn, stop)
 

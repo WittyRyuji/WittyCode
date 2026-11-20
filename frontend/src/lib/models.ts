@@ -48,6 +48,12 @@ export function envHintOf(typed: string): string {
   return name ? `\${${name}}` : "";
 }
 
+/** A saved literal key can be reused only at the same interface and Base URL (see provider_secrets.endpoint). */
+export function sameProviderEndpoint(a: Pick<ApiProvider, "kind" | "baseUrl">, b: Pick<ApiProvider, "kind" | "baseUrl">): boolean {
+  const clean = (url: string) => url.trim().replace(/\/+$/, "");
+  return a.kind === b.kind && clean(a.baseUrl) === clean(b.baseUrl);
+}
+
 /** The little tag on the model chip: where the model is billed. */
 export function sourceTag(source: string): string {
   return source === "devin" || source === "chatgpt" || source === "factory" ? "订阅" : "API";

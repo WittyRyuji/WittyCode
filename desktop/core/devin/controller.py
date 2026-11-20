@@ -148,6 +148,8 @@ class DevinController:
     _started: dict[str, float] = field(default_factory=dict)
     _unadopted: list[tuple[str, tuple[Attachment, ...]]] = field(default_factory=list)
     _history_loaded: bool = True
+    history_ready: bool = False
+    _draft_dispatch: bool = False
     _replay: Replay | None = None
     _pending: dict[str, asyncio.Future[Any]] = field(default_factory=dict)
     _requests: dict[Any, str] = field(default_factory=dict)
@@ -267,6 +269,7 @@ class DevinController:
         await self._opened(self._start_session())
 
     async def open_saved(self) -> None:
+        self.history_ready = True
         self._history_loaded = False
         await self._opened(self._resume_saved())
 
@@ -293,6 +296,7 @@ class DevinController:
             if not session_id:
                 raise DevinError("session/new returned no session id")
             self.session_id, self._client = session_id, client
+            self.manager._set_new_draft(session_id, True)
             self.manager._attach(self)
             options = await self._configure(client, result.get("configOptions"))
             self._learn(options, adopt=True)
@@ -494,6 +498,7 @@ class DevinController:
         if self._close_requested or self.state in (SessionState.CLOSED, SessionState.DEAD):
             return
         self._client = None
+        self._keep_possible_delivery()
         self.state = SessionState.DEAD
         self.last_error = friendly_failure(error)
         message = f"{self.last_error} 可以点击「重新连接」恢复会话。"
@@ -652,19 +657,36 @@ class DevinController:
         self._outstanding += 1
         failure: BaseException | None = None
         result: Any = None
+        first = False
+        native = self.session_id
         try:
             if client is None or not client.running:
                 raise DevinProcessError("devin acp is not running")
-            result = await client.request(
-                "session/prompt", {"sessionId": self.session_id, "prompt": items.prompt_blocks(sent, attachments)}, timeout=None
-            )
+            prompt = items.prompt_blocks(sent, attachments)
+            if native is not None and not self.history_ready and not self._draft_dispatch:
+                # Stop suppressing this ID before a prompt could reach ACP. A crash or a lost reply must not hide it.
+                self.manager._set_new_draft(native, False)
+                first = self._draft_dispatch = True
+            result = await client.request("session/prompt", {"sessionId": native, "prompt": prompt}, timeout=None)
         except asyncio.CancelledError:
             if self._turn is turn:
+                self._keep_possible_delivery()
                 self.transcript.abort_turn("本轮已取消。")
                 self._end_turn(turn)
             raise
         except Exception as error:  # the session must survive anything
             failure = error
+            if (first and native is not None and not self.history_ready and self._outstanding == 1
+                    and isinstance(error, DevinRpcError)):
+                self._draft_dispatch = False
+                try:
+                    self.manager._set_new_draft(native, True)
+                except OSError:
+                    log.warning("could not retain the Devin draft marker", exc_info=True)
+            elif not isinstance(error, DevinRpcError):
+                self._keep_possible_delivery()
+        else:
+            self._keep_possible_delivery()
         if self._turn is not turn:
             return  # (a stop that was not honoured in time ended the turn here already)
         self._outstanding -= 1
@@ -675,6 +697,11 @@ class DevinController:
             self._stop = result if isinstance(result, Mapping) else {}
         if self._outstanding <= 0:
             self._complete(turn)
+
+    def _keep_possible_delivery(self) -> None:
+        if self._draft_dispatch and not self.history_ready:
+            self.history_ready = True
+            self._notify("history")
 
     def _prompt_failed(self, turn: Turn, error: BaseException, steer: UserBlock | None) -> None:
         if isinstance(error, DevinProcessError):
@@ -843,6 +870,8 @@ class DevinController:
 
     def _on_update(self, update: Mapping[str, Any]) -> None:
         kind = update.get("sessionUpdate")
+        if kind in ("user_message_chunk", "agent_message_chunk", "agent_thought_chunk", "tool_call", "plan") and self._live():
+            self._keep_possible_delivery()
         if kind == "agent_message_chunk":
             self._on_words("text", update)
         elif kind == "agent_thought_chunk":

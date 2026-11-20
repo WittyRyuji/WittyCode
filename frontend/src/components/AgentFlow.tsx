@@ -1,18 +1,20 @@
-import { memo, useEffect, useMemo, useRef, useState, type RefObject } from "react";
-import { Background, BackgroundVariant, getSmoothStepPath, getViewportForBounds, Handle, Position, ReactFlow, useReactFlow, type Edge, type EdgeProps, type Node, type NodeProps, type Viewport } from "@xyflow/react";
+import { memo, useEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from "react";
+import { Background, BackgroundVariant, getViewportForBounds, Handle, Position, ReactFlow, useReactFlow, type Edge, type EdgeProps, type Node, type NodeProps, type Viewport } from "@xyflow/react";
 import "@xyflow/react/dist/base.css";
-import nestGif from "../assets/dragon-nest.gif";
-import nestPng from "../assets/dragon-nest.png";
 import type { AgentInfo, Session } from "../types";
 import { useStore } from "../store";
 import { AGENT_STATE, groupAgentIdentities } from "../lib/agentTeam";
-import { FLOW_NODE_WIDTH, buildAgentFlowTree, flowBranchBounds, keepExpandedGroups } from "../lib/agentFlowTree";
+import { FLOW_NODE_WIDTH, FLOW_PORTRAIT_SIZE, buildAgentFlowTree, flowBranchBounds, keepExpandedGroups, type FlowRoute } from "../lib/agentFlowTree";
+import { FLOW_SPARK_PERIOD_MS, FLOW_SPARK_SPACING, flowArrivalDelay, flowSparkPhase } from "../lib/agentFlowSignal";
+import { dragonNestArt } from "../lib/dragonNestArt";
 import { dragonIdentity, dragonPalette, type DragonIdentity, type DragonStatus } from "../lib/dragonSprites";
 import { DragonSprite } from "./DragonSprite";
 
 type DragonNode = Node<{ identity: DragonIdentity; paletteKey: string; status: DragonStatus; name: string; caption?: string; open?: () => void }, "dragon">;
 type NestNode = Node<{ identity: string; count: number; status: DragonStatus; expanded: boolean; toggle: () => void }, "nest">;
-type CurrentEdge = Edge<{ status: DragonStatus; step: number }, "current">;
+type CurrentEdge = Edge<{ status: DragonStatus; route: FlowRoute }, "current">;
+const FLOW_STYLE = { "--flow-portrait-size": `${FLOW_PORTRAIT_SIZE}px`,
+  "--flow-spark-spacing": `${FLOW_SPARK_SPACING}px`, "--flow-spark-period": `${FLOW_SPARK_PERIOD_MS}ms` } as CSSProperties;
 const FIT = { padding: 0.085, maxZoom: 1 };
 const MIN_ZOOM = 0.08; // Keep wheel zoom and the explicit overview unrestricted by the readable scale.
 const READABLE_FIT = 0.8;
@@ -36,13 +38,14 @@ function FlowDragon({ data }: NodeProps<DragonNode>) {
 
 function FlowNest({ data }: NodeProps<NestNode>) {
   const { identity, count, status, expanded, toggle } = data;
+  const { gif, png } = dragonNestArt(identity);
   const action = expanded ? "收起" : "展开";
   const label = `${action} ${identity} · ${count} 位成员 · ${AGENT_STATE[status].text}`;
   return <div className={`agent-flow-node ${status}`}>
     <button type="button" className="agent-flow-character" onClick={toggle} aria-expanded={expanded} aria-label={label} title={label}>
       <span className="agent-flow-ring"><picture className="agent-flow-nest-art">
-        <source media="(prefers-reduced-motion: reduce)" srcSet={nestPng} />
-        <img src={nestGif} width={48} height={48} alt="" draggable={false} />
+        <source media="(prefers-reduced-motion: reduce)" srcSet={png} />
+        <img src={gif} width={48} height={48} alt="" draggable={false} />
       </picture></span>
       <span className="agent-flow-name">{identity}</span>
       <span className="agent-flow-model">{count} 位 · {action} {expanded ? "▾" : "▸"}</span>
@@ -52,17 +55,23 @@ function FlowNest({ data }: NodeProps<NestNode>) {
   </div>;
 }
 
-function FlowCurrent(props: EdgeProps<CurrentEdge>) {
-  const [path] = getSmoothStepPath({ ...props, borderRadius: 0, offset: 10, stepPosition: props.data?.step });
-  const status = props.data?.status ?? "pending";
-  return <g className={`agent-flow-edge ${status}`}>
-    <path d={path} className="agent-flow-wire" />
-    {status === "working" && <>
-      <path d={path} className="agent-flow-signal" />
-      {/* The round dashes travel on the wire itself; there is no separate dot at an SVG origin. */}
-      <path d={path} pathLength={100} className="agent-flow-particle" />
-    </>}
-  </g>;
+function FlowCurrent({ data }: EdgeProps<CurrentEdge>) {
+  if (!data) return null;
+  const { status, route: { path, spur, trunk, length, endX, endY, signal } } = data;
+  return <>
+    {trunk && <path d={trunk} className="agent-flow-wire agent-flow-trunk" />}
+    <g className={`agent-flow-edge ${status}`}>
+      <path d={path} className={`agent-flow-wire${spur ? " agent-flow-spur" : ""}`} />
+      {signal && <g key={signal.epoch} className="agent-flow-signal" aria-hidden="true"
+        style={{ "--spark-phase": `${flowSparkPhase(signal.prefix)}px` } as CSSProperties}>
+        {/* Dashes are measured in flow pixels, including the distance already traveled on the common trunk. */}
+        <path d={signal.path} className="agent-flow-trail" />
+        <path d={signal.path} className="agent-flow-particle" />
+        <path d={signal.path} className="agent-flow-particle-core" />
+        <circle cx={endX} cy={endY} r={2.6} className="agent-flow-arrival" style={{ animationDelay: `${flowArrivalDelay(length)}ms` }} />
+      </g>}
+    </g>
+  </>;
 }
 
 const nodeTypes = { dragon: FlowDragon, nest: FlowNest };
@@ -159,8 +168,10 @@ function SessionFlow({ sessionId, modelId, mark, agents, onOpen }: FlowProps) {
         name: agent.name, caption, open: () => onOpen(agent.id) } });
     }
   }
-  const edges: CurrentEdge[] = tree.edges.map(({ status, step, ...edge }) => ({ ...edge, type: "current", data: { status, step } }));
-  return <div ref={chart} className="agent-flow" role="region" aria-label="专家流程图" title="滚轮缩放，按住鼠标中键拖动">
+  // A nonworking outer tap can own the neutral trunk. Keep it below the live carrier, and both below the portraits.
+  const edges: CurrentEdge[] = tree.edges.map(({ status, route, ...edge }) => ({ ...edge, type: "current",
+    zIndex: route.signal ? -1 : -2, data: { status, route } }));
+  return <div ref={chart} className="agent-flow" style={FLOW_STYLE} role="region" aria-label="专家流程图" title="滚轮缩放，按住鼠标中键拖动">
     <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes} proOptions={PRO_OPTIONS}
       nodesDraggable={false} nodesConnectable={false} elementsSelectable={false} nodesFocusable={false} edgesFocusable={false}
       disableKeyboardA11y deleteKeyCode={null} zoomOnScroll preventScrolling zoomOnDoubleClick={false} panOnDrag={PAN_BUTTONS}

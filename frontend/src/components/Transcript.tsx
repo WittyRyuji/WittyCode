@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ArrowRightLeft, RotateCw, X } from "lucide-react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import { ArrowDown, ArrowRightLeft, Copy, HelpCircle, RotateCw, X } from "lucide-react";
 import type { Block, Session, Turn } from "../types";
 import { useStore } from "../store";
+import { selectedChatText } from "../lib/copyChat";
 import { turnSummary } from "../lib/format";
 import { SUGGESTIONS } from "../lib/vocab";
 import { Markdown } from "./blocks/Markdown";
@@ -10,15 +11,18 @@ import { PermissionCard, QuestionCard } from "./blocks/Prompts";
 import { SentAttachments } from "./Attachments";
 import { TurnNav } from "./TurnNav";
 import { activeTurnAt, turnLinks } from "../lib/turnNavigation";
+import { Menu, type Anchor } from "./ui";
 
-function UserView({ block }: { block: Extract<Block, { kind: "user" }> }) {
+type OpenCopyMenu = (event: MouseEvent<HTMLDivElement>, text: string) => void;
+
+function UserView({ block, onCopyMenu }: { block: Extract<Block, { kind: "user" }>; onCopyMenu?: OpenCopyMenu }) {
   const long = block.text.length > 520 || block.text.split("\n").length > 9;
   const [expanded, setExpanded] = useState(false);
   return (
     <div className={`block user${long && !expanded ? " clamp" : ""}${block.steer ? " steer" : ""}${block.pending ? " pending" : ""}`}>
       <div className="who">{block.steer ? (block.pending ? "你 · 引导（等当前这一步结束后生效）" : "你 · 引导") : (block.who ?? "你")}</div>
       {block.attachments && <SentAttachments items={block.attachments} />}
-      <div className="body selectable">{block.text}</div>
+      <div className="body selectable" onContextMenuCapture={onCopyMenu && ((e) => onCopyMenu(e, block.text))}>{block.text}</div>
       {block.handoff && (
         <div className="handoff-note">
           <ArrowRightLeft size={11} /> 附带了之前 {block.handoff.carried} 条对话的文字{block.handoff.truncated ? "（节选）" : ""}
@@ -48,14 +52,16 @@ function ErrorView({ block, sessionId }: { block: Extract<Block, { kind: "error"
   );
 }
 
-function BlockView({ block, turn, sessionId }: { block: Block; turn: Turn; sessionId: string }) {
+function BlockView({ block, turn, sessionId, inlineMedia, onCopyMenu }: {
+  block: Block; turn: Turn; sessionId: string; inlineMedia: boolean; onCopyMenu?: OpenCopyMenu;
+}) {
   switch (block.kind) {
     case "user":
-      return <UserView block={block} />;
+      return <UserView block={block} onCopyMenu={onCopyMenu} />;
     case "text":
       return block.markdown ? (
-        <div className="block text-block">
-          <Markdown source={block.markdown} streaming={block.streaming} />
+        <div className="block text-block" onContextMenuCapture={onCopyMenu && ((e) => onCopyMenu(e, block.markdown))}>
+          <Markdown source={block.markdown} streaming={block.streaming} mediaSessionId={inlineMedia ? sessionId : undefined} />
         </div>
       ) : null;
     case "activity":
@@ -124,11 +130,13 @@ function Footer({ turn, label }: { turn: Turn; label: string }) {
   return text ? <div className={`turnfoot ${turn.status}`}>{text}</div> : null;
 }
 
-export function TurnView({ turn, session }: { turn: Turn; session: Session }) {
+export function TurnView({ turn, session, inlineMedia = false, onCopyMenu }: {
+  turn: Turn; session: Session; inlineMedia?: boolean; onCopyMenu?: OpenCopyMenu;
+}) {
   return (
     <section className="turn" data-turn-id={turn.id}>
       {turn.blocks.map((b) => (
-        <BlockView key={b.id} block={b} turn={turn} sessionId={session.id} />
+        <BlockView key={b.id} block={b} turn={turn} sessionId={session.id} inlineMedia={inlineMedia} onCopyMenu={onCopyMenu} />
       ))}
       {turn.prompts
         .filter((p) => p.status === "pending")
@@ -158,8 +166,32 @@ export function Transcript({ session, positions }: { session: Session; positions
   const [away, setAway] = useState(!stick.current);
   const [scrolling, setScrolling] = useState(false);
   const [activeId, setActiveId] = useState<string | null>(null);
+  const [copyMenu, setCopyMenu] = useState<{ anchor: Anchor; text: string } | null>(null);
   const links = useMemo(() => turnLinks(session.turns), [session.turns]);
   const setDraft = useStore((s) => s.setDraft);
+  const askAboutChatText = useStore((s) => s.askAboutChatText);
+  const say = useStore((s) => s.say);
+
+  const openCopyMenu: OpenCopyMenu = (e, body) => {
+    if (e.defaultPrevented || !(e.target instanceof Element)) return;
+    if (e.target.closest("button, input, textarea, select, [contenteditable], .inline-media")) return;
+    const anchor = { x: e.clientX, y: e.clientY };
+    const path = e.target.closest(".pathref");
+    const selection = selectedChatText(e.currentTarget, path ? anchor : undefined);
+    if (!selection && (path || !body.trim())) return;
+    e.preventDefault();
+    e.stopPropagation();
+    // Snapshot before a menu click can change the page selection or streaming updates can replace the text.
+    setCopyMenu({ anchor, text: selection || body });
+  };
+  const writeCopy = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      say("已复制。");
+    } catch {
+      say("无法写入剪贴板。");
+    }
+  };
 
   const behavior = (smooth: boolean): ScrollBehavior => smooth && !window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "smooth" : "auto";
   const remember = () => {
@@ -307,11 +339,11 @@ export function Transcript({ session, positions }: { session: Session; positions
           ) : (
             <>
               {session.turns.map((t) => (
-                <TurnView key={t.id} turn={t} session={session} />
+                <TurnView key={t.id} turn={t} session={session} inlineMedia={!!session.mark} onCopyMenu={openCopyMenu} />
               ))}
               {preparing && (
                 <section className="turn preparing-turn">
-                  <UserView block={{ kind: "user", ...preparing, pending: true }} />
+                  <UserView block={{ kind: "user", ...preparing, pending: true }} onCopyMenu={openCopyMenu} />
                   <div className="turnfoot live" role="status"><span className="pulse" />{session.workingLabel}</div>
                 </section>
               )}
@@ -319,6 +351,17 @@ export function Transcript({ session, positions }: { session: Session; positions
           )}
         </div>
       </div>
+      {copyMenu && (
+        <Menu
+          anchor={copyMenu.anchor}
+          minWidth={160}
+          items={[
+            { id: "copy-chat", label: "复制", icon: <Copy size={14} />, onSelect: () => void writeCopy(copyMenu.text) },
+            { id: "ask-it", label: "Ask it", icon: <HelpCircle size={14} />, onSelect: () => askAboutChatText(session.id, copyMenu.text) },
+          ]}
+          onClose={() => setCopyMenu(null)}
+        />
+      )}
       {away && (
         <button
           type="button"

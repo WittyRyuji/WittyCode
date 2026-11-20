@@ -2,7 +2,7 @@
 
 import type { Bridge, TestResult } from "../bridge";
 import type { ApiProvider, ChatGPTAccount, DevinAccount, EnvState, ProviderDraft } from "../types";
-import { envNameOf } from "../lib/models";
+import { envNameOf, sameProviderEndpoint } from "../lib/models";
 import { CHATGPT_ACCOUNT, DEVIN_ACCOUNT } from "./data";
 import { mockImporter } from "./importer";
 import { mockMemory } from "./memory";
@@ -20,8 +20,19 @@ let maximized = false;
 const ENV: Record<string, EnvState> = { OPENROUTER_API_KEY: "set", ANTHROPIC_API_KEY: "set", OPENAI_API_KEY: "pending" };
 const envState = (name: string): EnvState => ENV[name] ?? "unset";
 
+// Only demo metadata is kept: the editor sends a fixed placeholder, never the typed key.
+const protectedProviders = new Map<string, Pick<ApiProvider, "kind" | "baseUrl">>();
+const protectedProblem = (d: ProviderDraft): string => {
+  if (d.keyMode !== "protected" || d.newApiKey) return "";
+  const previous = protectedProviders.get(d.id);
+  if (!previous) return "请输入 API Key。";
+  return sameProviderEndpoint(d, previous) ? "" : "接口类型或 Base URL 已更改，请为新接口重新输入 API Key。";
+};
+
 /** What a server at this address would answer: the demo knows a few. */
 function fakeServer(d: ProviderDraft): TestResult {
+  const problem = protectedProblem(d);
+  if (problem) return { ok: false, text: problem };
   if (d.kind !== "bedrock-converse" && !/^https?:\/\/.+/.test(d.baseUrl)) return { ok: false, text: "Base URL 要以 http:// 或 https:// 开头" };
   if (/localhost|127\.0\.0\.1/.test(d.baseUrl)) return { ok: false, text: `连不上 ${d.baseUrl.replace(/^https?:\/\//, "").replace(/\/.*$/, "")}：服务没有运行？` };
   if (d.keyMode === "env") {
@@ -96,11 +107,17 @@ export const mockBridge: Bridge = {
   },
   providers: {
     async save(d) {
+      const problem = protectedProblem(d);
+      if (problem) throw new Error(problem);
+      const { newApiKey: _, ...view } = d;
       await sleep(250);
-      return { ...d, keyHint: d.keyMode === "none" ? "" : d.keyHint, status: undefined } satisfies ApiProvider;
+      if (view.keyMode === "protected") protectedProviders.set(view.id, { kind: view.kind, baseUrl: view.baseUrl });
+      else protectedProviders.delete(view.id);
+      return { ...view, keyHint: view.keyMode === "none" || view.keyMode === "protected" ? "" : view.keyHint, status: undefined } satisfies ApiProvider;
     },
-    async remove() {
+    async remove(id) {
       await sleep(150);
+      protectedProviders.delete(id);
     },
     async test(d) {
       await sleep(900);

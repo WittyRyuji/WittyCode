@@ -1,0 +1,2 @@
+.srow-pin { display: inline-flex; flex: none; color: var(--fg-2); }
+.srow.current .srow-pin { color: var(--paper); }

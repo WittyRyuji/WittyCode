@@ -16,7 +16,9 @@ from tests.fakes import until
 from tests.ui_support import run
 
 
-async def make_clip(path: Path) -> Path:
+async def make_clip(
+    path: Path, colors: tuple[int, int] = (0xFF2D709B, 0xFFB97A39), *, size: tuple[int, int] = (64, 48),
+) -> Path:
     parent = QObject()
     capture = QMediaCaptureSession(parent)
     input_ = QVideoFrameInput(parent)
@@ -46,8 +48,8 @@ async def make_clip(path: Path) -> Path:
             return
         if frame_index > 25:
             return
-        image = QImage(64, 48, QImage.Format.Format_RGB32)
-        image.fill(0xFF2D709B if frame_index < 12 else 0xFFB97A39)
+        image = QImage(size[0], size[1], QImage.Format.Format_RGB32)
+        image.fill(colors[0] if frame_index < 12 else colors[1])
         frame = QVideoFrame(image)
         frame.setStartTime(frame_index * 40_000)
         frame.setEndTime((frame_index + 1) * 40_000)

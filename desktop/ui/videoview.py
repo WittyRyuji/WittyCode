@@ -1,8 +1,9 @@
-"""One local video stream for the file inspector. Qt decodes both tracks; the page only sees JPEGs and controls."""
+"""Local Qt video playback and one-shot posters; the page only sees JPEGs and controls."""
 from __future__ import annotations
 
 import asyncio
 import base64
+import os
 import time
 from collections.abc import Callable
 from typing import Any
@@ -10,7 +11,7 @@ from typing import Any
 from PySide6.QtCore import QFile, QIODevice, QObject, QTimer, QUrl, Qt
 from PySide6.QtMultimedia import QAudioOutput, QMediaFormat, QMediaMetaData, QMediaPlayer, QVideoFrame, QVideoSink
 
-from desktop.core.files import FileProblem, transport_stream_header
+from desktop.core.files import FileProblem, InlineVideoSource, transport_stream_header
 from desktop.ui.imaging import encode
 
 OPEN_SECONDS = 8
@@ -36,7 +37,7 @@ def _local_container(header: bytes) -> bool:
 class VideoView(QObject):
     """A fresh player/sink per source: late Qt signals from the previous file cannot enter the new preview."""
 
-    def __init__(self, parent: QObject, width: int, publish: Callable[[dict[str, Any]], None]) -> None:
+    def __init__(self, parent: QObject, width: int, publish: Callable[[dict[str, Any]], None] | None) -> None:
         super().__init__(parent)
         self._publish = publish
         self._width = min(MAX_SIDE, max(240, width))
@@ -47,12 +48,15 @@ class VideoView(QObject):
         self._last_frame = float("-inf")
         self._last_state: tuple[int, bool, bool] | None = None
         self.source = QFile(self)
+        self._source_fd: int | None = None
         self.player = QMediaPlayer(self)
-        self.audio = QAudioOutput(self)
-        self.audio.setVolume(0.7)
-        self.audio.setMuted(True)
+        # A poster has no audio output at all. Interactive players also prime while muted.
+        self.audio = QAudioOutput(self) if publish is not None else None
+        if self.audio is not None:
+            self.audio.setVolume(0.7)
+            self.audio.setMuted(True)
+            self.player.setAudioOutput(self.audio)
         self.sink = QVideoSink(self)
-        self.player.setAudioOutput(self.audio)
         self.player.setVideoSink(self.sink)
         self.timer = QTimer(self)
         self.timer.setInterval(200)
@@ -63,12 +67,22 @@ class VideoView(QObject):
         self.sink.videoFrameChanged.connect(self._frame)
 
     async def load(self, path: str) -> dict[str, Any]:
-        self.source.setFileName(path)
-        if not self.source.open(QIODevice.OpenModeFlag.ReadOnly) or not _local_container(bytes(self.source.peek(1024))):
+        mode = QIODevice.OpenModeFlag.ReadOnly
+        if isinstance(path, InlineVideoSource):
+            # QMediaPlayer keeps reading after load() returns. Own a duplicate until the source is cleared.
+            # Do not give the demuxer a pathname or a base URL for resolving other locations.
+            self._source_fd = os.dup(path.file.fileno())
+            opened = self.source.open(self._source_fd, mode, QFile.FileHandleFlag.DontCloseHandle)
+            url = QUrl()
+        else:
+            self.source.setFileName(path)
+            opened = self.source.open(mode)
+            url = QUrl.fromLocalFile(path)
+        if not opened or not _local_container(bytes(self.source.peek(1024))):
             self._ready.cancel()
             raise FileProblem(_BAD_VIDEO)
         # Use a seekable, local device. Qt reads from disk on demand rather than buffering the clip.
-        self.player.setSourceDevice(self.source, QUrl.fromLocalFile(path))
+        self.player.setSourceDevice(self.source, url)
         try:
             return await asyncio.wait_for(self._ready, OPEN_SECONDS)
         except TimeoutError as error:
@@ -84,6 +98,9 @@ class VideoView(QObject):
         # stop() can hang on the FFmpeg backend during a quick replay of the same source.
         self.player.setSource(QUrl())
         self.source.close()
+        if self._source_fd is not None:
+            os.close(self._source_fd)
+            self._source_fd = None
         self.deleteLater()
 
     def control(self, action: str, args: dict[str, Any]) -> None:
@@ -98,7 +115,7 @@ class VideoView(QObject):
         elif action == "seek" and self.player.isSeekable():
             self.player.setPosition(min(args["position"], self.player.duration()))
             self._state()
-        elif action == "volume":
+        elif action == "volume" and self.audio is not None:
             self.audio.setVolume(args["volume"])
             self.audio.setMuted(args["muted"])
 
@@ -139,7 +156,7 @@ class VideoView(QObject):
     def _failed(self, message: str) -> None:
         if self._closed:
             return
-        if self._opened:
+        if self._opened and self._publish is not None:
             self._opened = False
             self.timer.stop()
             self._publish({"position": self.player.position(), "playing": False, "ended": False, "error": message})
@@ -148,7 +165,7 @@ class VideoView(QObject):
             self._ready.set_exception(FileProblem(message))
 
     def _state(self, *, ended: bool = False, url: str | None = None) -> None:
-        if not self._opened or self._closed:
+        if not self._opened or self._closed or self._publish is None:
             return
         ended = ended or self.player.mediaStatus() == Status.EndOfMedia
         position = max(0, self.player.duration() if ended else self.player.position())
@@ -187,13 +204,15 @@ class VideoView(QObject):
         if self._opened:
             self._state(url=url)
         else:
-            self.player.pause()
-            self.audio.setMuted(False)
+            if self.audio is not None:
+                self.player.pause()
+                self.audio.setMuted(False)
+                self._opened = True
+            # For posters the caller closes the source as soon as this one JPEG is ready.
             meta = self.player.metaData()
             keys = QMediaMetaData.Key
             video = meta.value(keys.VideoCodec)
             audio = meta.value(keys.AudioCodec)
-            self._opened = True
             self._ready.set_result({
                 "duration": max(0, self.player.duration()), "width": width, "height": height,
                 "videoCodec": QMediaFormat.videoCodecName(video) if isinstance(video, QMediaFormat.VideoCodec) else "",

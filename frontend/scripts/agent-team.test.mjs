@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { groupAgentIdentities, groupAgents } from "../src/lib/agentTeam.ts";
-import { FLOW_MAIN, FLOW_NODE_WIDTH, buildAgentFlowTree, flowBranchBounds, keepExpandedGroups } from "../src/lib/agentFlowTree.ts";
+import { FLOW_MAIN, FLOW_NODE_WIDTH, FLOW_PORTRAIT_SIZE, buildAgentFlowTree, flowBranchBounds, keepExpandedGroups } from "../src/lib/agentFlowTree.ts";
+import { FLOW_SPARK_PERIOD_MS, FLOW_SPARK_SPACING, flowArrivalDelay, flowSparkPhase } from "../src/lib/agentFlowSignal.ts";
+
+const pointsOf = (path) => path.slice(1).split(" L").map((xy) => xy.split(" ").map(Number));
 
 const agent = (id, status, startedAt, finishedAt = null) => ({ id, status, startedAt, finishedAt });
 
@@ -66,8 +69,10 @@ test("singletons connect directly; expanded nests fan out in disjoint bands to s
   assert.ok(main.x < find("group:Coder").x && find("group:Coder").x < find("expert:a").x);
   assert.equal(find("expert:a").x, find("expert:f").x);
   assert.ok(find("expert:b").y + find("expert:b").height < find("expert:d").y);
-  const stepTo = (id) => edges.find((e) => e.target === id).step;
-  assert.ok(stepTo("group:Coder") < stepTo("expert:c"), "the outer branch bends earlier than the inner branch");
+  const exits = closed.edges.map((edge) => pointsOf(edge.route.path));
+  assert.deepEqual(exits.map((points) => points.length), [4, 2, 4]);
+  assert.deepEqual(exits.map((points) => points[0][1] - closed.main.y), [15, 25, 35]);
+  assert.equal(exits[0][1][0], exits[2][1][0], "upper and lower turns share one axis around the straight middle wire");
 
   const moved = groupAgentIdentities([expert("a", "Coder"), expert("b", "Runner"), expert("c", "Observer"),
     expert("d", "Runner"), expert("e", "Runner"), expert("f", "Runner")]);
@@ -77,6 +82,95 @@ test("singletons connect directly; expanded nests fan out in disjoint bands to s
   assert.equal(after.edges.find((e) => e.target === "expert:a").source, FLOW_MAIN);
   assert.equal(after.edges.find((e) => e.target === "expert:b").source, "group:Runner");
   assert.ok(!buildAgentFlowTree(groups, remaining).nodes.some((n) => n.id === "expert:a"), "a re-formed nest starts closed");
+});
+
+// Allow a corner or an endpoint meeting a trunk (T), not a positive-length overlap or a crossing.
+function checkSegments(segments) {
+  let tees = 0;
+  for (const [i, a] of segments.entries()) for (const b of segments.slice(i + 1)) {
+    const x = Math.max(a.left, b.left), right = Math.min(a.right, b.right);
+    const y = Math.max(a.top, b.top), bottom = Math.min(a.bottom, b.bottom);
+    if (x > right || y > bottom) continue;
+    assert.ok(x === right && y === bottom && a.src === b.src, "no segment doubles back, redraws another, or touches another fan");
+    const inside = (s) => s.left < x && x < s.right || s.top < y && y < s.bottom;
+    assert.ok(!inside(a) || !inside(b), "no two interiors cross");
+    if (inside(a) || inside(b)) tees++;
+  }
+  return tees;
+}
+
+const pathLength = (points) => points.slice(1).reduce((length, [x, y], i) =>
+  length + Math.abs(x - points[i][0]) + Math.abs(y - points[i][1]), 0);
+
+test("both levels keep fixed mid-gap axes, unique trunks and status-aware signals at high fan-out", () => {
+  const group = (identity, n) => Array.from({ length: n }, (_, i) => expert(`${identity}-${i}`, identity,
+    i === 0 ? "failed" : i === 1 && n > 1 ? "waiting" : "working"));
+  const groups = groupAgentIdentities([...group("Coder", 12), ...group("QualitySampler", 6), ...group("Runner", 5),
+    ...Array.from({ length: 8 }, (_, i) => group(`Role-${i}`, 1)).flat()]);
+  for (const expanded of [[], ["group:Coder"], groups.map((g) => g.id)]) {
+    const { main, nodes, edges } = buildAgentFlowTree(groups, new Set(expanded));
+    const nodeOf = new Map([main, ...nodes].map((node) => [node.id, node]));
+    const inset = (FLOW_NODE_WIDTH - FLOW_PORTRAIT_SIZE) / 2;
+    const trunks = edges.filter(({ route }) => route.trunk).map(({ source, route }) => ({ source, points: pointsOf(route.trunk) }));
+    const base = [], signals = [];
+    let clippedBranch = false, phasedBranch = false;
+    for (const { source, target, status, route } of edges) {
+      const src = nodeOf.get(source), dst = nodeOf.get(target);
+      const sx = src.x + FLOW_NODE_WIDTH - inset, ex = dst.x + inset, ey = dst.y + FLOW_PORTRAIT_SIZE / 2;
+      const axis = (sx + ex) / 2;
+      assert.equal(axis, source === FLOW_MAIN ? 110 : 230);
+      assert.equal(status, dst.kind === "nest" ? dst.group.status : dst.agent.status);
+      const collect = (points, into) => {
+        for (let i = 1; i < points.length; i++) {
+          const [x, y] = points[i - 1], [u, v] = points[i];
+          assert.ok((x === u && x === axis && y !== v) || (y === v && x < u));
+          into.push({ src: source, left: x, right: u, top: Math.min(y, v), bottom: Math.max(y, v) });
+        }
+      };
+      const points = pointsOf(route.path);
+      const trunk = trunks.find((t) => t.source === source && route.spur &&
+        (ey - t.points[1][1]) * (ey - t.points[2][1]) <= 0);
+      const start = trunk ? trunk.points[0] : points[0];
+      assert.equal(start[0], sx);
+      assert.ok(Math.abs(start[1] - (src.y + FLOW_PORTRAIT_SIZE / 2)) <= 10);
+      assert.deepEqual(points.at(-1), [ex, ey]);
+      assert.deepEqual([route.endX, route.endY], [ex, ey]);
+      assert.equal(!!trunk, route.spur);
+      if (trunk) assert.deepEqual(points, [[axis, ey], [ex, ey]]);
+      const full = trunk ? [...trunk.points.slice(0, 2), [axis, ey], [ex, ey]] : points;
+      assert.equal(route.length, pathLength(full));
+      collect(points, base);
+      if (route.trunk) collect(pointsOf(route.trunk), base);
+      assert.equal(!!route.signal, status === "working");
+      if (route.signal) {
+        const { path, prefix } = route.signal;
+        const drawn = pointsOf(path);
+        assert.deepEqual(drawn, prefix ? points : full);
+        assert.equal(prefix + pathLength(drawn), route.length);
+        collect(drawn, signals);
+        phasedBranch ||= prefix > 0;
+        clippedBranch ||= !!trunk && prefix === 0 && ey !== trunk.points[2][1];
+      }
+    }
+    assert.ok(checkSegments(base) >= 6, "high fan-out really has T junctions");
+    checkSegments(signals);
+    if (expanded.length) assert.ok(phasedBranch && clippedBranch, "working taps share a phase but do not animate a failed outer tap");
+  }
+});
+
+test("sparks use one 57px beat for short and long arcs, with the flash timed at the target", () => {
+  assert.equal(FLOW_SPARK_SPACING, 57);
+  const speed = FLOW_SPARK_SPACING / (FLOW_SPARK_PERIOD_MS / 1000);
+  assert.ok(Math.abs(speed - 105.56) < 0.01);
+  for (const prefix of [0, 38, 72, 140.5, 465]) {
+    const tail = 35, length = prefix + tail;
+    const delay = flowArrivalDelay(length);
+    assert.ok(delay >= 0 && delay < FLOW_SPARK_PERIOD_MS);
+    const lead = Math.floor(length / 57) * 57;
+    assert.ok(Math.abs(lead + speed * delay / 1000 - length) < 1e-9);
+    // The dash clock on the spur locates a head at its endpoint at the same beat.
+    assert.ok(Math.abs((tail + flowSparkPhase(prefix) - speed * delay / 1000) % 57) < 1e-9);
+  }
 });
 
 test('the focused bounds track the toggled nest and fit its nearest member rows at readable scale', () => {

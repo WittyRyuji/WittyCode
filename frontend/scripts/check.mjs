@@ -19,6 +19,71 @@ const built = readFileSync(resolve("dist/index.html"), "utf8");
 ok("the built page refers to nothing outside itself (src / href / url() are data: only)", externalReferences(built).length === 0);
 ok("the built page carries its Content-Security-Policy, ahead of every script and style", declaredCsp(built) === EXPECTED_CSP && cspComesFirst(built));
 
+async function checkDirectProviderKey() {
+  const editor = await openPage(`${index}?scene=done&settings=providers&provider=new:openai&theme=light&review=0`);
+  const password = '.pe input[aria-label="API Key"]';
+  const save = '.pe-foot .btn.primary';
+  const edit = '.provs .prov:last-child .prov-actions .btn:last-child';
+  const primary = '.pe .segc button:last-child';
+  const fakeKey = 'demo-' + 'typed-key-not-for-storage';
+  const setInput = (selector, text) => editor.eval(`(() => { const e = document.querySelector(${JSON.stringify(selector)}); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(e, ${JSON.stringify(text)}); e.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  const clickText = async (selector, text) => {
+    const n = await editor.eval(`[...document.querySelectorAll(${JSON.stringify(selector)})].findIndex(e => e.textContent.trim() === ${JSON.stringify(text)})`);
+    if (n < 0) throw new Error(`No Provider button: ${text}`);
+    await editor.click(selector, n);
+  };
+  try {
+    await editor.waitFor("document.querySelector('.pe .segc .on')", 3000);
+    ok("direct entry is opt-in; the OpenAI preset still defaults to env", await editor.eval(`document.querySelector('.pe .segc .on').textContent === '环境变量' && !document.querySelector(${JSON.stringify(password)})`));
+    await editor.click(primary);
+    ok("direct entry warns and uses a password field", await editor.eval("document.querySelector('.pe-warn').textContent.includes('不推荐') && document.querySelector('.pe input[type=password]').value === ''"));
+    const selectedEvidence = process.argv.includes("--provider-key") && process.env.WITTYCODE_TEST_EVIDENCE;
+    if (selectedEvidence) await editor.shot(resolve(selectedEvidence, "provider-direct-entry.png"));
+    await editor.click(save);
+    ok("a new direct-entry provider requires a key", await editor.eval("document.querySelector('.stack-err')?.textContent.includes('输入 API Key')"));
+    await editor.click(password);
+    await editor.type(fakeKey);
+    ok("the typed secret is not serialized in the input markup", await editor.eval(`!document.querySelector('.pe').outerHTML.includes(${JSON.stringify(fakeKey)})`));
+    await clickText(".pe-foot .btn", "测试连接");
+    await editor.waitFor("document.querySelector('.test-res.ok')", 4000);
+    await clickText(".pe-btns .btn", "从服务端获取列表");
+    await editor.waitFor("document.querySelector('.id-chip')", 4000);
+    ok("unsaved direct entry can test and fetch models", true);
+    await editor.click(save);
+    await editor.waitFor("!document.querySelector('.pe')", 3000);
+    ok("the provider list shows only the encrypted key status", await editor.eval(`document.querySelector('.provs .prov:last-child .prov-meta').textContent.includes('已保存加密 API Key') && !document.body.textContent.includes(${JSON.stringify(fakeKey)})`));
+    await editor.click(edit);
+    ok("reopening leaves the field empty and explains how to retain or replace it", await editor.eval("document.querySelector('.pe input[type=password]').value === '' && document.querySelector('.pe').textContent.includes('留空保留')"));
+    await editor.click(save);
+    await editor.waitFor("!document.querySelector('.pe')", 3000);
+    await editor.click(edit);
+    await clickText(".pe-foot .btn", "测试连接");
+    await editor.waitFor("document.querySelector('.test-res.ok')", 4000);
+    ok("saving blank retains the credential for connection tests", true);
+    await setInput('input[aria-label="Base URL"]', "https://different.example.test/v1");
+    await clickText(".pe-foot .btn", "测试连接");
+    ok("changing the endpoint blocks reuse of a saved key", await editor.eval("document.querySelector('.stack-err')?.textContent.includes('重新输入') && !document.querySelector('.test-res.ok')"));
+    await editor.click(password);
+    await editor.type("demo-replacement");
+    await editor.click(save);
+    await editor.waitFor("!document.querySelector('.pe')", 3000);
+    await editor.click(edit);
+    await clickText(".pe .segc button", "不需要");
+    await editor.click(save);
+    await editor.waitFor("!document.querySelector('.pe')", 3000);
+    await editor.click(edit);
+    await editor.click(primary);
+    await editor.click(save);
+    ok("a replacement works, and switching modes removes the saved key", await editor.eval("document.querySelector('.stack-err')?.textContent.includes('输入 API Key') && document.querySelector('.pe input[type=password]').value === ''"));
+    ok("no console errors (direct entry)", editor.consoleErrors().length === 0);
+  } finally {
+    await editor.close();
+  }
+}
+
+await checkDirectProviderKey();
+if (process.argv.includes("--provider-key")) process.exit(failed ? 1 : 0);
+
 let page = await openPage(`${index}?scene=ask&theme=light&review=0`);
 
 /** Every element the selector matches is on a line of its own: each one below the one before it, all starting at the same left edge. */
@@ -67,17 +132,31 @@ ok("a dead session reconnects", true);
 
 // 新会话 from the sidebar button shows the first message box; nothing is opened until a message is sent from it
 const tabsAtStart = await page.eval("document.querySelectorAll('.tab').length");
+const rowsAtStart = await page.eval("document.querySelectorAll('.srow').length");
 await page.click(".newbtn");
 await page.waitFor("document.querySelector('.emptypage')", 3000);
 ok("新会话 shows the first message box: no tab was added and none is current", await page.eval(`document.querySelectorAll('.tab').length === ${tabsAtStart} && !document.querySelector('.tab.current')`));
 ok("it can be typed in at once, with the project chosen on the line under the box", await page.eval("!document.querySelector('.input').disabled && [...document.querySelectorAll('.controls .chip-k')].map(e => e.textContent).join(',') === '模式' && document.querySelector('.hint .chip-k').textContent === '项目'"));
 ok("and the send button waits for a message", await page.eval("document.querySelector('.send').disabled"));
+await page.eval(`(() => {
+  const data = new DataTransfer();
+  data.items.add(new File(['draft only'], 'draft.txt', { type: 'text/plain' }));
+  document.querySelector('.input').dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }));
+})()`);
+await page.waitFor(`document.querySelectorAll('.tab').length === ${tabsAtStart + 1} && !!document.querySelector('.att-row .att')`, 3000);
+await page.click(".input");
+await page.type("still editable");
+ok("an attachment-only draft has an editable tab but no sidebar row", await page.eval(`document.querySelector('.input').value === 'still editable' && document.querySelectorAll('.srow').length === ${rowsAtStart}`));
+await page.click(".tab.current .tab-x");
+await page.waitFor(`document.querySelectorAll('.tab').length === ${tabsAtStart}`);
+await page.click(".newbtn");
 await page.click(".chip-suggest", 0);
 ok("a suggestion fills the message box", await page.eval("document.querySelector('.input').value.length > 0 && !document.querySelector('.send').disabled"));
 await page.click(".input");
 await page.key("Enter");
 await page.waitFor(`document.querySelectorAll('.tab').length === ${tabsAtStart + 1} && !!document.querySelector('.tab.current') && document.querySelectorAll('.block.user').length === 1`, 5000);
-ok("sending it opens the conversation: a tab, and the message in it", true);
+await page.waitFor(`document.querySelectorAll('.srow').length === ${rowsAtStart + 1} && !!document.querySelector('.srow.current.open')`, 3000);
+ok("the first send adds a tab with the message and admits a project row", true);
 await page.click(".newbtn");
 ok("and the first message box is empty again for the next one", await page.eval("document.querySelector('.input').value === ''"));
 
@@ -126,7 +205,7 @@ const pickMenu = async (text) => {
 const title0 = await page.eval("document.querySelector('.srow:not(.open) .stitle').textContent");
 const rows0 = await page.eval("document.querySelectorAll('.srow').length");
 await page.click(".srow:not(.open)", 0, { right: true });
-ok("a session's menu offers 重命名… and 归档", await page.eval("(() => { const m = [...document.querySelectorAll('.menu-label')].map(e => e.textContent); return m.includes('重命名…') && m.includes('归档'); })()"));
+ok("the session menu includes 置顶 without losing rename, copy ID or archive", await page.eval("[...document.querySelectorAll('.menu-label')].map(e => e.textContent).join('|') === '打开|置顶|重命名…|复制会话 ID|归档'"));
 await pickMenu("重命名…");
 await page.waitFor("!!document.querySelector('.dialog input')", 2000);
 ok("重命名… asks for the name, with the present one filled in", await page.eval(`document.querySelector('.dialog input').value === ${JSON.stringify(title0)}`));
@@ -701,7 +780,7 @@ await setValue('input[aria-label="Base URL"]', "groq.com");
 await page.click(".pe-foot .btn.primary");
 ok("a Base URL without http(s):// is refused", await page.eval("document.querySelector('.stack-err')?.textContent.includes('http')"));
 await setValue('input[aria-label="Base URL"]', "https://api.groq.com/openai/v1");
-ok("there is no place to type a key: only 环境变量 / 命令获取 / 不需要", await page.eval("[...document.querySelectorAll('.pe .segc button')].map(e => e.textContent).join() === '环境变量,命令获取,不需要' && !document.querySelector('.pe input[type=password]')"));
+ok("environment variables are the default and direct entry is explicitly discouraged", await page.eval("document.querySelector('.pe .segc .on')?.textContent === '环境变量' && [...document.querySelectorAll('.pe .segc button')].map(e => e.textContent).join() === '环境变量,命令获取,不需要,直接输入（不推荐）' && !document.querySelector('.pe input[type=password]')"));
 await page.waitFor("document.querySelector('.envline.unset')", 2000);
 ok("a variable that is not set says so and gives the setx line to run", await page.eval("document.querySelector('.envline.unset').textContent.includes('setx GROQ_API_KEY')"));
 await page.click(".pe-foot .btn:not(.primary)");
