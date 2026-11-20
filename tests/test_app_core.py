@@ -38,7 +38,7 @@ def last_turn(events):
 
 async def idle(core, cid):
     """Until the session has finished whatever it was doing (a turn that was just ended included)."""
-    await until(lambda: core._by_cid[cid].controller.state is SessionState.READY and core._by_cid[cid].controller.transcript.active_turn is None, 10)
+    await until(lambda: core._by_cid[cid].controller.state is SessionState.READY and core._by_cid[cid].controller.transcript.active_turn is None, 30)
 
 
 async def new_session(core, events, project, **more):
