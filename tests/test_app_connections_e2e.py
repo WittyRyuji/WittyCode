@@ -101,9 +101,8 @@ def test_qt_import_requires_consent_and_really_tests_the_stdio_server(qapp, loop
             # Neutralize fixture locations before retaining a screenshot; never retain real profile paths.
             await rig.js("document.querySelectorAll('.connection-source').forEach(e => e.textContent = 'C:/Users/me/.codex/config.toml'); document.querySelector('.connection-import input').value = 'C:/Users/me/.codex/config.toml'")
             await asyncio.sleep(0.1)
-            folder = Path(__file__).resolve().parents[1] / "sandbox"
-            folder.mkdir(exist_ok=True)
-            assert rig.window.grab().save(str(folder / "connections-qt.png"))
+            if evidence := os.environ.get("WITTYCODE_TEST_EVIDENCE"):
+                assert rig.window.grab().save(str(Path(evidence) / "connections-qt.png"))
         finally:
             await rig.finish()
     run(loop, scenario())
@@ -161,8 +160,8 @@ def test_qt_opens_a_real_catalog_without_counting_cached_copies_or_covering_it_w
             await rig.wait_for(".settings")
             await rig.click_text(".snav", "插件")
             await rig.click_text(".connection-tabs button", "Skills")
-            await rig.wait_for(".connection-row", 2)
-            assert await rig.texts(".connection-tabs .num") == ["2", "2", "1", "0", "0"]
+            await rig.wait_for(".connection-row", 3)
+            assert await rig.texts(".connection-tabs .num") == ["2", "3", "1", "0", "0"]
             assert await rig.text(".connection-issues summary") == "发现提示 · 2"
             assert await rig.js("!document.querySelector('.connection-issues').open")
             assert not await rig.exists(".connection-error[role=alert]")
@@ -178,9 +177,8 @@ def test_qt_opens_a_real_catalog_without_counting_cached_copies_or_covering_it_w
             assert not rig.core.connections.file.exists()
             await rig.js("document.querySelectorAll('.connection-source').forEach(e => e.textContent = 'C:/Users/me/.codex/plugins/local-demo')")
             await asyncio.sleep(0.1)
-            folder = Path(__file__).resolve().parents[1] / "sandbox"
-            folder.mkdir(exist_ok=True)
-            assert rig.window.grab().save(str(folder / f"connections-discovery-qt-{theme}.png"))
+            if evidence := os.environ.get("WITTYCODE_TEST_EVIDENCE"):
+                assert rig.window.grab().save(str(Path(evidence) / f"connections-discovery-qt-{theme}.png"))
             assert not any(line.startswith("error:") for line in rig.window.page.console)
         finally:
             await rig.finish()
@@ -216,9 +214,11 @@ def test_qt_skill_switches_keep_sorted_rows_scroll_and_runtime_state_and_setting
             await rig.wait_for(".settings")
             await rig.click_text(".snav", "插件")
             await rig.click_text(".connection-tabs button", "Skills")
-            await rig.wait_for(".connection-row", len(expected))
-            assert await rig.texts(".connection-info b") == expected
-            at = expected.index("middle")
+            # The bundled official ``numbered-reply`` row leads the list; the user's skills follow it, sorted.
+            shown = ["numbered-reply", *expected]
+            await rig.wait_for(".connection-row", len(shown))
+            assert await rig.texts(".connection-info b") == shown
+            at = shown.index("middle")
             selector = f".connection-row:nth-child({at + 1}) .switch"
             await rig.js(f"document.querySelector({selector!r}).scrollIntoView({{block:'center'}})")
             await asyncio.sleep(.1)
@@ -226,22 +226,22 @@ def test_qt_skill_switches_keep_sorted_rows_scroll_and_runtime_state_and_setting
             for enabled in (False, True, False, True):
                 await rig.click(selector)
                 await wait_for(lambda: rig.js(f"!document.querySelector({selector!r}).disabled && document.querySelector({selector!r}).getAttribute('aria-checked') === '{str(enabled).lower()}'"), 5, "skill switch result")
-                assert await rig.texts(".connection-info b") == expected
+                assert await rig.texts(".connection-info b") == shown
                 assert await rig.js("__skillRows.every((e, i) => e === document.querySelectorAll('.connection-row')[i])")
                 assert await rig.js("Math.abs(document.querySelector('.settings-scroll').scrollTop - __skillScroll) < 2")
-                assert await rig.text('.connection-tabs [aria-selected="true"] .num') == str(len(expected))
+                assert await rig.text('.connection-tabs [aria-selected="true"] .num') == str(len(shown))
                 available = skills.discover(rig.project, home)
                 assert ("middle" in [item.name for item in available]) is enabled
                 assert next(item.path for item in available if item.name == "shared") == selected
             await rig.click_text(".connection-toolbar .btn", "刷新发现")
-            assert await rig.texts(".connection-info b") == expected
+            assert await rig.texts(".connection-info b") == shown
             await rig.press("Escape")
             await rig.wait_for(".settings", 0)
             await rig.press(",", Qt.KeyboardModifier.ControlModifier)
             await rig.click_text(".snav", "插件")
             await rig.click_text(".connection-tabs button", "Skills")
-            await rig.wait_for(".connection-row", len(expected))
-            assert await rig.texts(".connection-info b") == expected
+            await rig.wait_for(".connection-row", len(shown))
+            assert await rig.texts(".connection-info b") == shown
             await rig.click_text(".snav", "外观")
             assert await rig.texts(".field-label") == ["主题", "文字大小"]
             assert not await rig.exists(".preview, .preview-k")
@@ -249,6 +249,44 @@ def test_qt_skill_switches_keep_sorted_rows_scroll_and_runtime_state_and_setting
             await rig.click_text(".snav", "关于")
             assert await rig.text(".about .kvs b") == "0.3.0b1"
             assert rig.plan.requests == []
+            assert not any(line.startswith("error:") for line in rig.window.page.console)
+        finally:
+            await rig.finish()
+
+    run(loop, scenario())
+
+
+def test_qt_switches_the_official_numbered_reply_skill(qapp, loop, tmp_path, monkeypatch):
+    """The bundled ``numbered-reply`` row leads the Skills tab; its switch is the persisted settings key, live."""
+    from desktop.core.harness import skills
+    from tests.ui_support import wait_for
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(skills, "USER_HOME", home)
+
+    async def scenario():
+        rig = await open_rig(tmp_path)
+        try:
+            await rig.press(",", Qt.KeyboardModifier.ControlModifier)
+            await rig.wait_for(".settings")
+            await rig.click_text(".snav", "插件")
+            await rig.click_text(".connection-tabs button", "Skills")
+            row = '.connection-list [data-builtin-skill="numbered-reply"]'
+            await rig.wait_for(row, 1)
+            assert await rig.text(f"{row} b") == "numbered-reply"
+            assert await rig.text(f"{row} .connection-state") == "WittyCode 官方内置 · 已启用"
+            assert await rig.text('.connection-tabs [data-kind="skill"] .num') == "1", "the fixed row counts once"
+            assert await rig.text(".connection-row b") == "numbered-reply", "the official row leads the list"
+            assert "没有发现外部技能" in await rig.text(".connection-list .snote")
+            for enabled in (False, True):
+                await rig.click(f"{row} .switch")
+                await wait_for(lambda: rig.js(f"document.querySelector({f'{row} [role=switch]'!r}).getAttribute('aria-checked') === '{str(enabled).lower()}'"), 5, "official skill switch")
+                assert rig.core.settings.numbered_reply is enabled
+                assert await rig.text(f"{row} .connection-state") == f"WittyCode 官方内置 · {'已启用' if enabled else '已停用'}"
+            await rig.js("document.querySelectorAll('.connection-source').forEach(e => e.textContent = 'C:/Users/me/skills')")
+            if evidence := os.environ.get("WITTYCODE_TEST_EVIDENCE"):
+                await rig.shot(".settings", Path(evidence) / "builtin-numbered-reply-skill.png")
             assert not any(line.startswith("error:") for line in rig.window.page.console)
         finally:
             await rig.finish()

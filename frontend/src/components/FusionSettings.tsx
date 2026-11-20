@@ -6,6 +6,7 @@ import { fusionEffort, withFusionEffort, type FusionRole } from "../lib/fusionRe
 import type { FusionSettingKey, SettingValue } from "../protocol";
 import { Field, Select } from "./formkit";
 import { fusionChoices, fusionDisabledReason } from "./fusionModels";
+import { FusionStepBudget } from "./FusionStepBudget";
 import type { MenuItem } from "./ui";
 
 function BudgetInput({ label, value, max, onChange }: { label: string; value: number; max: number; onChange: (value: number) => void }) {
@@ -87,6 +88,10 @@ export function FusionSettings() {
       </Field>
       <Field label="单个专家最长运行秒数" hint="超时会停止并保留记录；未确认的任务不会自动重做。">
         <BudgetInput label="单个专家最长运行秒数" value={s.fusionMaxSeconds} max={86400} onChange={(v) => set("fusionMaxSeconds", v)} />
+      </Field>
+      <Field label="委派步数范围" hint="对每次专家委派（Coder、Runner、QualitySampler）生效；勾选 Adaptive 的一侧由 Fusion 按任务规模自动计算，取消勾选可手填（数字会记住）。主代理请求的步数夹在区间内，全局单轮步数上限始终优先；只给秒预算时按有效最大步数；专家可提前交报告。">
+        <FusionStepBudget min={s.fusionStepsMin} minAdaptive={s.fusionStepsMinAdaptive} max={s.fusionStepsMax} maxAdaptive={s.fusionStepsMaxAdaptive}
+          onSave={(lo, loAd, hi, hiAd) => set("fusionSteps", { min: lo, minAdaptive: loAd, max: hi, maxAdaptive: hiAd })} />
       </Field>
       <p className="page-note">主代理决定委派次数；首次启用不设调用次数或 Token 上限，实际费用取决于模型和用量。已隐藏的模型不会出现在选择菜单；已选模型仍保留。</p>
       <p className="page-note">主代理和专家共用 WittyCode 权限、Plan 审批与证据保存。Devin 通过独立 ACP 工具桥接入，启动时必须确认原生工具保护已加载；不兼容的 CLI 会拒绝运行。权限不是操作系统沙箱，独立 Devin 会话不受影响。</p>

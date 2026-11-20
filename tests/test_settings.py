@@ -110,6 +110,39 @@ def test_the_step_limit_defaults_to_80_and_accepts_larger_positive_integers():
         assert settings_from_dict({"max_steps": value}).max_steps == 80
 
 
+def test_the_delegation_step_band_stands_or_falls_together(tmp_path):
+    from desktop.core.settings import STEP_BUDGET_DEFAULT, STEP_BUDGET_RANGE
+
+    assert STEP_BUDGET_DEFAULT == (16, 32) and STEP_BUDGET_RANGE == (1, 1000)
+    defaults = settings_from_dict({})
+    band = (defaults.fusion_steps_min, defaults.fusion_steps_min_adaptive, defaults.fusion_steps_max, defaults.fusion_steps_max_adaptive)
+    assert band == (16, True, 32, True), "both sides start adaptive, remembering the base numbers"
+    kept = settings_from_dict({"fusion_steps_min": 5, "fusion_steps_min_adaptive": False,
+                               "fusion_steps_max": 15, "fusion_steps_max_adaptive": True})
+    assert (kept.fusion_steps_min, kept.fusion_steps_min_adaptive, kept.fusion_steps_max, kept.fusion_steps_max_adaptive) == (5, False, 15, True)
+    # A manual floor above an adaptive ceiling is no inversion; a disabled input's number is still remembered.
+    loose = settings_from_dict({"fusion_steps_min": 90, "fusion_steps_min_adaptive": False,
+                                "fusion_steps_max": 10, "fusion_steps_max_adaptive": True})
+    assert (loose.fusion_steps_min, loose.fusion_steps_max_adaptive) == (90, True)
+    # A malformed group or a both-manual inversion resets every side to the adaptive defaults.
+    for raw in (
+        {"fusion_steps_min": 41, "fusion_steps_min_adaptive": False, "fusion_steps_max": 40, "fusion_steps_max_adaptive": False},
+        {"fusion_steps_min": 5, "fusion_steps_max": 15},
+        {"fusion_steps_min": 0, "fusion_steps_min_adaptive": False, "fusion_steps_max": 15, "fusion_steps_max_adaptive": False},
+        {"fusion_steps_min": 5, "fusion_steps_min_adaptive": False, "fusion_steps_max": 1001, "fusion_steps_max_adaptive": False},
+        {"fusion_steps_min": True, "fusion_steps_min_adaptive": False, "fusion_steps_max": 15, "fusion_steps_max_adaptive": False},
+        {"fusion_steps_min": 5, "fusion_steps_min_adaptive": "yes", "fusion_steps_max": 15, "fusion_steps_max_adaptive": False},
+        {"fusion_steps_min": 5.0, "fusion_steps_min_adaptive": False, "fusion_steps_max": 15, "fusion_steps_max_adaptive": False},
+        {"fusion_steps_min": None, "fusion_steps_min_adaptive": None, "fusion_steps_max": None, "fusion_steps_max_adaptive": None},
+    ):
+        settings = settings_from_dict(raw)
+        assert (settings.fusion_steps_min, settings.fusion_steps_min_adaptive,
+                settings.fusion_steps_max, settings.fusion_steps_max_adaptive) == (STEP_BUDGET_DEFAULT[0], True, STEP_BUDGET_DEFAULT[1], True), raw
+    saved = AppSettings(fusion_steps_min=3, fusion_steps_min_adaptive=False, fusion_steps_max=12, fusion_steps_max_adaptive=False)
+    save_settings(saved, tmp_path / "settings.json")
+    assert load_settings(tmp_path / "settings.json") == saved, "the group survives a restart"
+
+
 def test_archived_sessions_their_names_and_the_last_project_survive_the_file_and_bad_entries_fall_away(tmp_path):
     original = AppSettings(last_project="D:/work/p", archived_sessions={"s-1": 5, "cx:t-2": 9}, session_titles={"s-1": "名字"})
     target = tmp_path / "settings.json"

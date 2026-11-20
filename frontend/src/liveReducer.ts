@@ -68,10 +68,17 @@ export interface LiveData {
   fusionMaxCalls: number;
   fusionMaxTokens: number;
   fusionMaxSeconds: number;
+  /** per-delegation step band shared by all experts; each side is adaptive or the remembered number */
+  fusionStepsMin: number;
+  fusionStepsMinAdaptive: boolean;
+  fusionStepsMax: number;
+  fusionStepsMaxAdaptive: boolean;
   /** every model is asked to write its thinking in Chinese */
   thinkChinese: boolean;
   answerLanguage: "auto" | "zh-CN" | "en";
   thinkingLanguage: "auto" | "zh-CN" | "en";
+  /** the bundled numbered-reply skill injected into user-facing messages */
+  numberedReply: boolean;
   soundEnabled: boolean;
   soundQuestion: string;
   soundComplete: string;
@@ -156,9 +163,14 @@ export function emptyLiveData(theme: ThemeChoice = "system", fontScale: FontScal
     fusionMaxCalls: 8,
     fusionMaxTokens: 500000,
     fusionMaxSeconds: 900,
+    fusionStepsMin: 16,
+    fusionStepsMinAdaptive: true,
+    fusionStepsMax: 32,
+    fusionStepsMaxAdaptive: true,
     thinkChinese: true,
     answerLanguage: "auto",
     thinkingLanguage: "zh-CN",
+    numberedReply: true,
     soundEnabled: true,
     soundQuestion: "",
     soundComplete: "",
@@ -255,9 +267,14 @@ export function settingsFields(v: SettingsView): Partial<LiveData> {
     fusionMaxCalls: v.fusionMaxCalls ?? 8,
     fusionMaxTokens: v.fusionMaxTokens ?? 500000,
     fusionMaxSeconds: v.fusionMaxSeconds ?? 900,
+    fusionStepsMin: v.fusionStepsMin ?? 16,
+    fusionStepsMinAdaptive: v.fusionStepsMinAdaptive ?? true,
+    fusionStepsMax: v.fusionStepsMax ?? 32,
+    fusionStepsMaxAdaptive: v.fusionStepsMaxAdaptive ?? true,
     thinkChinese: v.thinkChinese ?? true,
     answerLanguage: v.answerLanguage ?? "auto",
     thinkingLanguage: v.thinkingLanguage ?? (v.thinkChinese === false ? "auto" : "zh-CN"),
+    numberedReply: v.numberedReply ?? true,
     soundEnabled: v.soundEnabled ?? true,
     soundQuestion: v.soundQuestion ?? "",
     soundComplete: v.soundComplete ?? "",

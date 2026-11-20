@@ -52,6 +52,10 @@ MAX_OPEN_SESSIONS_RANGE = (1, 16)
 DEFAULT_MAX_OPEN_SESSIONS = 4
 DEFAULT_MAX_STEPS = 80
 MAX_STEPS_RANGE = (1, 2**53 - 1)  # positive integers that survive the JSON/JavaScript bridge exactly
+STEP_BUDGET_RANGE = (1, 1000)
+"""Bounds of one delegation's step budget; the global per-turn cap still applies on top of it."""
+STEP_BUDGET_DEFAULT = (16, 32)
+"""Remembered manual floor/ceiling before the user picks their own; both sides start adaptive."""
 MAX_REMEMBERED_SESSIONS = 5000
 """Archived and renamed conversations kept in the settings file; a file with more is cut here."""
 MAX_SESSION_TITLE = 120
@@ -120,6 +124,12 @@ class AppSettings:
     fusion_max_calls: int = 8  # Legacy defaults are kept for settings compatibility, not applied to new sessions.
     fusion_max_tokens: int = 500_000
     fusion_max_seconds: int = 900
+    fusion_steps_min: int = STEP_BUDGET_DEFAULT[0]
+    """Manual floor for a delegation's step budget, remembered while its Adaptive box is checked."""
+    fusion_steps_min_adaptive: bool = True
+    fusion_steps_max: int = STEP_BUDGET_DEFAULT[1]
+    """Manual ceiling for a delegation's step budget; an adaptive side ignores its stored number."""
+    fusion_steps_max_adaptive: bool = True
     fusion_gates: dict[str, bool] = field(default_factory=dict)
     fusion_drive_shared: bool = False
     fusion_drive_warm: float = 0.5
@@ -132,6 +142,9 @@ class AppSettings:
     """Legacy fallback for thinking_language when no explicit language has been saved."""
     answer_language: str = "auto"
     thinking_language: str = ""
+    numbered_reply: bool = True
+    """The bundled official skill ``numbered-reply`` (``desktop/assets/skills``): every engine's user-facing answer leads
+    with the conclusion and numbers each matter; off stops the injection, nothing else."""
     sound_enabled: bool = True
     sound_question: str = ""
     sound_complete: str = ""
@@ -325,6 +338,14 @@ def settings_from_dict(raw: object) -> AppSettings:
         fusion_reasoning = {}
     raw_gates = raw.get("fusion_gates")
     fusion_gates = {name: raw_gates[name] for name in GATES if isinstance(raw_gates.get(name), bool)} if isinstance(raw_gates, dict) else {}
+    steps_min, steps_max = raw.get("fusion_steps_min"), raw.get("fusion_steps_max")
+    min_adaptive, max_adaptive = raw.get("fusion_steps_min_adaptive"), raw.get("fusion_steps_max_adaptive")
+    # The group stands or falls together: a half-saved or both-manual-inverted range must not clamp a delegation sideways.
+    if not (type(steps_min) is int and type(steps_max) is int and type(min_adaptive) is bool and type(max_adaptive) is bool
+            and STEP_BUDGET_RANGE[0] <= steps_min <= STEP_BUDGET_RANGE[1]
+            and STEP_BUDGET_RANGE[0] <= steps_max <= STEP_BUDGET_RANGE[1]
+            and (min_adaptive or max_adaptive or steps_min <= steps_max)):
+        steps_min, steps_max, min_adaptive, max_adaptive = STEP_BUDGET_DEFAULT[0], STEP_BUDGET_DEFAULT[1], True, True
 
     def fusion_float(name: str, low: float, high: float) -> float:
         value = raw.get(name)
@@ -429,6 +450,10 @@ def settings_from_dict(raw: object) -> AppSettings:
         fusion_max_calls=raw.get("fusion_max_calls") if isinstance(raw.get("fusion_max_calls"), int) and not isinstance(raw.get("fusion_max_calls"), bool) and 1 <= raw["fusion_max_calls"] <= 1000 else defaults.fusion_max_calls,
         fusion_max_tokens=raw.get("fusion_max_tokens") if isinstance(raw.get("fusion_max_tokens"), int) and not isinstance(raw.get("fusion_max_tokens"), bool) and 1 <= raw["fusion_max_tokens"] <= 2**53 - 1 else defaults.fusion_max_tokens,
         fusion_max_seconds=raw.get("fusion_max_seconds") if isinstance(raw.get("fusion_max_seconds"), int) and not isinstance(raw.get("fusion_max_seconds"), bool) and 1 <= raw["fusion_max_seconds"] <= 86_400 else defaults.fusion_max_seconds,
+        fusion_steps_min=steps_min,
+        fusion_steps_min_adaptive=min_adaptive,
+        fusion_steps_max=steps_max,
+        fusion_steps_max_adaptive=max_adaptive,
         fusion_gates=fusion_gates,
         fusion_drive_shared=raw.get("fusion_drive_shared") if isinstance(raw.get("fusion_drive_shared"), bool) else defaults.fusion_drive_shared,
         fusion_drive_warm=fusion_float("fusion_drive_warm", 0, 1),
@@ -440,6 +465,7 @@ def settings_from_dict(raw: object) -> AppSettings:
         think_chinese=think_chinese,
         answer_language=text("answer_language", LANGUAGES),
         thinking_language=text("thinking_language", ("", *LANGUAGES)),
+        numbered_reply=raw.get("numbered_reply") if isinstance(raw.get("numbered_reply"), bool) else defaults.numbered_reply,
         sound_enabled=raw.get("sound_enabled") if isinstance(raw.get("sound_enabled"), bool) else defaults.sound_enabled,
         sound_question=text("sound_question").strip(),
         sound_complete=text("sound_complete").strip(),

@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import threading
+from pathlib import Path
 
 import pytest
 from PySide6.QtCore import QRect, Qt
@@ -305,6 +307,69 @@ def test_fusion_model_menus_respect_visibility_and_include_devin(qapp, loop, tmp
             await until(lambda: rig.core.settings.fusion_workers == ["devin:swe-2-high"])
             assert not harness.requests("session/prompt")
             assert rig.window.grab().save(str(tmp_path / "fusion-models.png"))
+        finally:
+            await rig.finish()
+    run(loop, scenario())
+
+
+def test_the_step_band_saves_as_one_group_in_fusion_settings(qapp, loop, tmp_path):
+    from desktop.core.app_core import AppError
+
+    async def scenario():
+        rig = await open_rig(tmp_path)
+        try:
+            await rig.press(Qt.Key.Key_Comma, Qt.KeyboardModifier.ControlModifier)
+            await rig.wait_for(".settings")
+            await rig.click_text(".snav", "Fusion")
+            await rig.wait_for(".fusion-step-budget")
+            box = '.fusion-step-budget input[aria-label="委派最小步数 Adaptive"]'
+            low = '.fusion-step-budget input[aria-label="委派最小步数"]'
+            hi_box = '.fusion-step-budget input[aria-label="委派最大步数 Adaptive"]'
+            high = '.fusion-step-budget input[aria-label="委派最大步数"]'
+            button = ".fusion-step-budget .btn"
+            state = f"JSON.stringify([document.querySelector({json.dumps(box)}).checked," \
+                    f"document.querySelector({json.dumps(hi_box)}).checked," \
+                    f"document.querySelector({json.dumps(low)}).disabled, document.querySelector({json.dumps(low)}).value," \
+                    f"document.querySelector({json.dumps(high)}).disabled, document.querySelector({json.dumps(high)}).value])"
+            assert json.loads(await rig.js(state)) == [True, True, True, "16", True, "32"], "both sides adaptive, inputs off, base numbers"
+            if evidence := os.environ.get("WITTYCODE_TEST_EVIDENCE"):
+                await rig.js('document.querySelector(".fusion-step-budget").scrollIntoView()')
+                await rig.shot(".settings", Path(evidence) / "fusion-step-budget.png")
+            # Unchecking lets the user type; checking again remembers the typed number.
+            await rig.click(box)
+            await rig.click(low)
+            await rig.press(Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
+            await rig.type("60")
+            await rig.click(box)
+            await rig.click(box)
+            assert await rig.js(f'document.querySelector({json.dumps(low)}).value') == "60", "the typed number is remembered"
+            # A both-manual inversion disables the save; a manual floor beside an adaptive ceiling does not.
+            await rig.click(hi_box)
+            await rig.click(high)
+            await rig.press(Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
+            await rig.type("30")
+            assert await rig.js(f'document.querySelector({json.dumps(button)}).disabled')
+            await rig.click(hi_box)  # back to adaptive: no inversion, save works again
+            assert not await rig.js(f'document.querySelector({json.dumps(button)}).disabled')
+            await rig.click(hi_box)
+            await rig.click(high)
+            await rig.press(Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
+            await rig.type("90")
+            await rig.click(button)
+            await until(lambda: rig.core.settings.fusion_steps_min == 60 and not rig.core.settings.fusion_steps_min_adaptive
+                        and rig.core.settings.fusion_steps_max == 90 and not rig.core.settings.fusion_steps_max_adaptive)
+            # The backend refuses a crafted bad group on its own and keeps the last valid one.
+            for value in ({"min": 91, "minAdaptive": False, "max": 90, "maxAdaptive": False},
+                          {"min": 5, "minAdaptive": False, "max": 15}):
+                with pytest.raises(AppError):
+                    await rig.core.call("settings.set", {"key": "fusionSteps", "value": value})
+            assert (rig.core.settings.fusion_steps_min, rig.core.settings.fusion_steps_max) == (60, 90)
+            await rig.press("Escape")
+            await rig.press(Qt.Key.Key_Comma, Qt.KeyboardModifier.ControlModifier)
+            await rig.wait_for(".settings")
+            await rig.click_text(".snav", "Fusion")
+            await rig.wait_for(".fusion-step-budget")
+            assert json.loads(await rig.js(state)) == [False, False, False, "60", False, "90"]
         finally:
             await rig.finish()
     run(loop, scenario())

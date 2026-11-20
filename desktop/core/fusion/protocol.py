@@ -33,7 +33,8 @@ BRIEF_PARAMETERS: dict[str, Any] = {
             "steps": {"type": "integer", "minimum": 1},
             "seconds": {"type": "integer", "minimum": 1},
         }, "anyOf": [{"required": ["steps"]}, {"required": ["seconds"]}], "additionalProperties": False,
-            "description": "Limit on steps, seconds, or both."},
+            "description": "Requested limit on steps, seconds, or both; steps are clamped into the configured "
+                           "min/max or the adaptive suggestion for the task's size, under the global per-turn cap."},
         "resume": {"type": "boolean", "default": False, "description": "Continue an interrupted workstream only after inspecting the evidence; give a new brief."},
     },
     "required": ["workstream", "identity", "goal", "constraints", "acceptance", "paths", "budget"],
@@ -118,17 +119,21 @@ class Brief:
     budget: dict[str, int]
     read_only: bool = False
     resume: bool = False
+    budget_note: str = ""
 
-    def text(self) -> str:
-        """Render the brief body; the caller supplies identity and write scope separately."""
+    def budget_label(self) -> str:
         parts = []
         for unit in ("steps", "seconds"):
             if unit in self.budget:
                 count = self.budget[unit]
                 parts.append(f"{count} {unit[:-1] if count == 1 else unit}")
-        budget = ", ".join(parts)
+        label = ", ".join(parts)
+        return f"{label} ({self.budget_note})" if self.budget_note else label
+
+    def text(self) -> str:
+        """Render the brief body; the caller supplies identity and write scope separately."""
         return (f"Goal:\n{self.goal}\n\nConstraints:\n{self.constraints}\n\n"
-                f"Acceptance criteria:\n{self.acceptance}\n\nBudget: {budget}")
+                f"Acceptance criteria:\n{self.acceptance}\n\nBudget: {self.budget_label()}")
 
 
 @dataclass(frozen=True, slots=True)

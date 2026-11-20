@@ -13,7 +13,7 @@ from tests.chatgpt_support import finish_turn
 from tests.fake_responses import call, say
 from tests.fakes import until
 from tests.fusion_acp_support import make_guarded_engine
-from tests.test_fusion_identity_runtime import DEVIN, LEGACY, LIGHT, WORKER, _brief, _fusion, _gates, _identity_folder, _output, _turn
+from tests.test_fusion_identity_runtime import DEVIN, LEGACY, LIGHT, WORKER, _brief, _fusion, _gates, _identity_folder, _manual_steps, _output, _turn
 
 ROUTE_GATES = ("drive", "brief", "report", "route")
 pytestmark = pytest.mark.fusion_gates("drive", "brief", "report", "route")
@@ -106,6 +106,8 @@ def test_approved_plan_is_a_route_and_is_recorded(tmp_path):
 def test_next_reroute_counts_once_and_survives_reopening(tmp_path, over_budget):
     async def go():
         async with _fusion(tmp_path, active=ROUTE_GATES) as (main, fake):
+            if over_budget:
+                _manual_steps(main)
             delegate = _delegate(budget={"steps": 1}) if over_budget else _delegate()
             worker = call("list_dir", {"directory_path": "."}) if over_budget else _report("blocked")
             await _turn(main, fake, _route(), delegate, worker,

@@ -58,6 +58,11 @@ export interface SettingsView {
   fusionMaxCalls?: number;
   fusionMaxTokens?: number;
   fusionMaxSeconds?: number;
+  /** per-delegation step band shared by all experts; each side is adaptive or the remembered number; missing on an older sender: 16/adaptive, 32/adaptive */
+  fusionStepsMin?: number;
+  fusionStepsMinAdaptive?: boolean;
+  fusionStepsMax?: number;
+  fusionStepsMaxAdaptive?: boolean;
   devinPath: string;
   /** page model ids the user left out of the conversation's model menu */
   hiddenModels: string[];
@@ -85,6 +90,8 @@ export interface SettingsView {
   thinkChinese?: boolean;
   answerLanguage?: Language;
   thinkingLanguage?: Language;
+  /** the bundled numbered-reply skill injected into user-facing messages; missing on an older sender: on */
+  numberedReply?: boolean;
   soundEnabled?: boolean;
   /** Resolved paths, including bundled defaults (never an ambiguous empty selection). */
   soundQuestion?: string;
@@ -95,11 +102,11 @@ export interface SettingsView {
 }
 export type FollowUp = "queue" | "steer";
 export type Language = "auto" | "zh-CN" | "en";
-export type FusionSettingKey = "fusionMain" | "fusionWorkers" | "fusionLight" | "fusionReasoning" | "fusionPreference" | "fusionMaxSeconds";
-export type SettingKey = "theme" | "fontScale" | "followUp" | "maxOpen" | "maxSteps" | "sidebarWidth" | "conversationWidth" | "inspectorWidth" | "devinPath" | "memoryEnabled" | "memoryRecall" | "memoryCapture" | "memoryCurate" | "memoryEngines" | "compactAuto" | "compactAt" | "thinkChinese" | "answerLanguage" | "thinkingLanguage" | "soundEnabled" | SoundKey | FusionSettingKey;
+export type FusionSettingKey = "fusionMain" | "fusionWorkers" | "fusionLight" | "fusionReasoning" | "fusionPreference" | "fusionMaxSeconds" | "fusionSteps";
+export type SettingKey = "theme" | "fontScale" | "followUp" | "maxOpen" | "maxSteps" | "sidebarWidth" | "conversationWidth" | "inspectorWidth" | "devinPath" | "memoryEnabled" | "memoryRecall" | "memoryCapture" | "memoryCurate" | "memoryEngines" | "compactAuto" | "compactAt" | "thinkChinese" | "answerLanguage" | "thinkingLanguage" | "numberedReply" | "soundEnabled" | SoundKey | FusionSettingKey;
 export type SoundKind = "question" | "complete" | "error";
 export type SoundKey = "soundQuestion" | "soundComplete" | "soundError";
-export type SettingValue = string | number | boolean | string[] | Record<string, string>;
+export type SettingValue = string | number | boolean | string[] | Record<string, string> | Record<string, number | boolean>;
 
 /** What `memory.list` can be narrowed by (all optional). `query`: words to look for; `status` "all" lists forgotten notes too. */
 export interface MemoryFilter {

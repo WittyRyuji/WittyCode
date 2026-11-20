@@ -848,7 +848,8 @@ class ChatGPTController:
                 raise
         # A Fusion pack already carries brief-based recall instead of the memory preface.
         preface = "" if packed_context else self.preface
-        context = self.manager.hooks.prompt(PromptEvent(self.engine, self.project, text, frozenset(self.recalled), first=bool(preface)))
+        context = self.manager.hooks.prompt(PromptEvent(self.engine, self.project, text, frozenset(self.recalled), first=bool(preface),
+                                                        internal=self._fusion_parent is not None))
         sent, carried, outgoing = text, None, attachments
         handoff = self.handoff if self.handoff is not None and not self.handoff.empty else None
         if handoff is not None:

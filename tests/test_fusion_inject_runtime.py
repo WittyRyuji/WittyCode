@@ -32,7 +32,7 @@ def test_coder_pack_precedes_delegation_envelope(tmp_path):
             assert prompt.startswith("## Identity: Coder\n")
             sections = ("## Task", "### Goal\nVerify stock totals.", "### Constraints\nStay in the project.",
                         "### Acceptance criteria\nCounts match the inventory.", "### Write paths\ninventory.txt",
-                        "### Budget\n8 steps", "### Original request\nCheck the inventory.",
+                        "### Budget\n20 steps (adaptive 20-40; requested 8)", "### Original request\nCheck the inventory.",
                         "Your responsibility / deliverable: Coder-Inventory.", "Declared write paths: inventory.txt.",
                         "Finish with submit_report.")
             assert [prompt.index(section) for section in sections] == sorted(prompt.index(section) for section in sections)

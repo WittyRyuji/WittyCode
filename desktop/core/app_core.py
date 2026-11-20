@@ -60,7 +60,7 @@ from desktop.core import files as filetools
 from desktop.core.handoff import AS_TEXT, CarryOption, attachment_text, build_handoff, carry_options, carry_overage, conversation_messages
 from desktop.core.harness import goal as goals
 from desktop.core import customization, language, session_title, sounds
-from desktop.core.harness import skills
+from desktop.core.harness import official_skill, skills
 from desktop.core.import_bridge import ImportBridge
 from desktop.core.chatgpt import side as chatgpt_side
 from desktop.core.devin import side as devin_side
@@ -82,6 +82,7 @@ from desktop.core.settings import (
     MAX_REMEMBERED_SESSIONS,
     MAX_SESSION_TITLE,
     MEMORY_ENGINES,
+    STEP_BUDGET_RANGE,
     SIDEBAR_WIDTH_RANGE,
     CONVERSATION_WIDTH_RANGE,
     valid_inspector_width,
@@ -412,6 +413,9 @@ class AppCore:
                     engine.memory = memory
         # Skills and custom commands (harness/skills): the same hook for every engine, with or without the memory.
         self.hooks.on_prompt(skills.prompt_hook)
+        # The bundled numbered-reply skill (harness/official_skill): every engine's user-facing message, until the
+        # settings switch turns it off; internal delegation prompts are left to their own protocol.
+        self.hooks.on_prompt(official_skill.prompt_hook(lambda: self.settings.numbered_reply))
         # The language of the models' thinking (core/language): the own loop has it in its instructions.
         self.hooks.on_prompt(language.prompt_hook(lambda: self.settings.think_chinese, lambda: self.settings.answer_language, lambda: self.settings.thinking_language))
         self.hooks.on_prompt(customization.prompt_hook)
@@ -610,9 +614,14 @@ class AppCore:
             "fusionMaxCalls": self.settings.fusion_max_calls,
             "fusionMaxTokens": self.settings.fusion_max_tokens,
             "fusionMaxSeconds": self.settings.fusion_max_seconds,
+            "fusionStepsMin": self.settings.fusion_steps_min,
+            "fusionStepsMinAdaptive": self.settings.fusion_steps_min_adaptive,
+            "fusionStepsMax": self.settings.fusion_steps_max,
+            "fusionStepsMaxAdaptive": self.settings.fusion_steps_max_adaptive,
             "thinkChinese": self.settings.think_chinese,
             "answerLanguage": self.settings.answer_language,
             "thinkingLanguage": self.settings.thinking_language or ("zh-CN" if self.settings.think_chinese else "auto"),
+            "numberedReply": self.settings.numbered_reply,
             "soundEnabled": self.settings.sound_enabled,
             "soundQuestion": sounds.sound_path("question", self.settings.sound_question),
             "soundComplete": sounds.sound_path("complete", self.settings.sound_complete),
@@ -4118,6 +4127,21 @@ class AppCore:
             s.fusion_max_tokens = value
         elif key == "fusionMaxSeconds" and _is_int(value) and 1 <= value <= 86_400:
             s.fusion_max_seconds = value
+        elif key == "fusionSteps":
+            pair = value if isinstance(value, Mapping) else {}
+            low, high = pair.get("min"), pair.get("max")
+            low_adaptive, high_adaptive = pair.get("minAdaptive"), pair.get("maxAdaptive")
+            valid = (set(pair) == {"min", "minAdaptive", "max", "maxAdaptive"}
+                     and _is_int(low) and _is_int(high)
+                     and STEP_BUDGET_RANGE[0] <= low <= STEP_BUDGET_RANGE[1]
+                     and STEP_BUDGET_RANGE[0] <= high <= STEP_BUDGET_RANGE[1]
+                     and type(low_adaptive) is bool and type(high_adaptive) is bool
+                     # A disabled input never counts as inverted; a both-manual inversion is refused whole.
+                     and (low_adaptive or high_adaptive or low <= high))
+            if not valid:
+                raise AppError("这个设置的值不合法。")
+            s.fusion_steps_min, s.fusion_steps_min_adaptive = low, low_adaptive
+            s.fusion_steps_max, s.fusion_steps_max_adaptive = high, high_adaptive
         elif key == "thinkChinese" and isinstance(value, bool):
             s.think_chinese = value
             s.thinking_language = "zh-CN" if value else "auto"
@@ -4127,6 +4151,8 @@ class AppCore:
             else:
                 s.thinking_language = value
                 s.think_chinese = value == "zh-CN"
+        elif key == "numberedReply" and isinstance(value, bool):
+            s.numbered_reply = value
         elif key == "soundEnabled" and isinstance(value, bool):
             s.sound_enabled = value
             if not value:

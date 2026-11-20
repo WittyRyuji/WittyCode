@@ -79,6 +79,13 @@ def _names(tools):
     return {item["name"] for item in tools}
 
 
+def _manual_steps(main, low=1, high=1):
+    """Only a both-manual band can give an expert a tiny real step limit; adaptive sizing floors at 16."""
+    settings = main.manager.settings
+    settings.fusion_steps_min, settings.fusion_steps_min_adaptive = low, False
+    settings.fusion_steps_max, settings.fusion_steps_max_adaptive = high, False
+
+
 def test_structured_models_reuse_and_batch_ownership(tmp_path):
     async def go():
         async with _fusion(tmp_path) as (main, fake):
@@ -194,6 +201,7 @@ def test_expert_memory_is_read_only_and_external_mcp_follows_identity(tmp_path, 
 def test_step_budget_interrupts_the_expert(tmp_path):
     async def go():
         async with _fusion(tmp_path) as (main, fake):
+            _manual_steps(main)
             await _turn(main, fake, call("delegate_task", _brief(budget={"steps": 1}), call_id="delegate"),
                         call("list_dir", {"directory_path": "."}, call_id="read"), say("Reviewed the interruption."))
             expert = next(iter(main.agents.values()))
@@ -290,7 +298,9 @@ def test_drive_retains_rendered_brief_with_the_expert_label(tmp_path):
             records = await asyncio.to_thread(drive.candidates, shared=False, retention=Retention())
             brief = next(item.record for item in records if item.record.kind == "brief")
             assert brief.summary.startswith("Coder-Inventory:") and not brief.open
-            assert await asyncio.to_thread(drive.read, brief.pointers[0]) == parse_brief(args)[0].text()
+            # The record keeps the rendered brief with the resolved budget and its origin, not the raw request.
+            text = await asyncio.to_thread(drive.read, brief.pointers[0])
+            assert text.startswith("Goal:\nVerify stock totals.") and text.endswith("Budget: 20 steps (adaptive 20-40; requested 8)")
     asyncio.run(go())
 
 

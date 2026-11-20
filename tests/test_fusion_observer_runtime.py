@@ -8,7 +8,7 @@ import pytest
 from desktop.core.fusion import observer
 from tests.fake_responses import call, calls, say
 from tests.test_fusion_acceptance_runtime import _verdict
-from tests.test_fusion_identity_runtime import _brief, _fusion, _output, _turn
+from tests.test_fusion_identity_runtime import _brief, _fusion, _manual_steps, _output, _turn
 from tests.test_fusion_inject_runtime import _prompt, _rated_report
 from tests.test_fusion_route_runtime import _report, _route
 
@@ -156,6 +156,8 @@ def test_budget_stops_keep_existing_outcome_and_are_counted_once(tmp_path, unit,
     async def go():
         async with _fusion(tmp_path, active=_ACTIVE) as (main, fake):
             budget = {"steps": 1} if unit == "step" else {"seconds": 1}
+            if unit == "step":
+                _manual_steps(main)
             events = _edits("inventory.txt") if unit == "step" else [("hold", "expert"), *say("Late report.")]
             try:
                 await _turn(main, fake, _delegate(budget=budget), events, say("Reviewed."))

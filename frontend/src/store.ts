@@ -333,9 +333,14 @@ function mockData(): LiveData {
     fusionMaxCalls: 8,
     fusionMaxTokens: 500000,
     fusionMaxSeconds: 900,
+    fusionStepsMin: 16,
+    fusionStepsMinAdaptive: true,
+    fusionStepsMax: 32,
+    fusionStepsMaxAdaptive: true,
     thinkChinese: true,
     answerLanguage: "auto",
     thinkingLanguage: "zh-CN",
+    numberedReply: true,
     soundEnabled: true,
     soundQuestion: "C:\\Apps\\WittyCode\\app\\desktop\\assets\\sounds\\question.wav",
     soundComplete: "C:\\Apps\\WittyCode\\app\\desktop\\assets\\sounds\\complete.wav",
@@ -846,7 +851,14 @@ export const useStore = create<Store>((set, get) => ({
   setMemoryCurate: (memoryCurate) => set({ memoryCurate }),
   setMemoryEngines: (memoryEngines) => set({ memoryEngines }),
   setCompactAuto: (compactAuto) => set({ compactAuto }),
-  setFusionSetting: (key, value) => set({ [key]: value } as Partial<LiveData>),
+  setFusionSetting: (key, value) => {
+    if (key !== "fusionSteps") return set({ [key]: value } as Partial<LiveData>);
+    if (typeof value !== "object" || Array.isArray(value)) return;
+    const { min, minAdaptive, max, maxAdaptive } = value;
+    if (typeof min === "number" && typeof max === "number" && typeof minAdaptive === "boolean" && typeof maxAdaptive === "boolean") {
+      set({ fusionStepsMin: min, fusionStepsMinAdaptive: minAdaptive, fusionStepsMax: max, fusionStepsMaxAdaptive: maxAdaptive });
+    }
+  },
   setThinkChinese: (thinkChinese) => set({ thinkChinese, thinkingLanguage: thinkChinese ? "zh-CN" : "auto" }),
   setLanguage: (key, value) => set({ [key]: value, ...(key === "thinkingLanguage" ? { thinkChinese: value === "zh-CN" } : {}) }),
   setSoundEnabled: (soundEnabled) => set({ soundEnabled }),

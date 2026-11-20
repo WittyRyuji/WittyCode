@@ -12,7 +12,7 @@ from tests.app_support import ready_core
 from tests.fake_responses import call, fail, say
 from tests.fakes import until
 from tests.fusion_acp_support import make_guarded_engine
-from tests.test_fusion_identity_runtime import DEVIN, LIGHT, MAIN, WORKER, _brief, _fusion, _gates, _identity_folder, _output, _turn
+from tests.test_fusion_identity_runtime import DEVIN, LIGHT, MAIN, WORKER, _brief, _fusion, _gates, _identity_folder, _manual_steps, _output, _turn
 
 _ACTIVE = ("drive", "brief", "report")
 pytestmark = pytest.mark.fusion_gates(*_ACTIVE)
@@ -173,6 +173,8 @@ def test_expert_without_identity_is_unchanged_even_with_report_gate_on(tmp_path)
 def test_failed_or_over_budget_expert_returns_no_report_and_is_not_retried(tmp_path, step_limit):
     async def go():
         async with _fusion(tmp_path, active=_ACTIVE) as (main, fake):
+            if step_limit:
+                _manual_steps(main)
             delegate = _delegate(budget={"steps": 1}) if step_limit else _delegate()
             worker = call("list_dir", {"directory_path": "."}, call_id="read") if step_limit else fail("bad_request")
             await _turn(main, fake, delegate, worker, say("Reviewed."))

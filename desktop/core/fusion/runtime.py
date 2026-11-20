@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from weakref import WeakValueDictionary
 
-from desktop.core.fusion import gates, identity, inject, map as project_map, metrics, observer
+from desktop.core.fusion import gates, identity, inject, map as project_map, metrics, observer, step_budget
 from desktop.core.fusion.drive.fingerprint import Manifest, _GitError, _head, changed_since, fingerprint, workspace_kind
 from desktop.core.fusion.drive.retention import Retention
 from desktop.core.fusion.drive.store import Drive, DriveError, Record, SessionUsage
@@ -795,9 +795,7 @@ class FusionRuntime:
                            own_brief: Record | None) -> inject.Pack:
         memory = (await asyncio.to_thread(self._brief_memory, brief)
                   if profile.name != "Observer" and self.parent.manager.memory is not None else [])
-        budget = ", ".join(f"{count} {unit[:-1] if count == 1 else unit}"
-                           for unit in ("steps", "seconds") if (count := brief.budget.get(unit)) is not None)
-        task = inject.Task(brief.goal, brief.constraints, brief.acceptance, brief.paths, budget, request=current)
+        task = inject.Task(brief.goal, brief.constraints, brief.acceptance, brief.paths, brief.budget_label(), request=current)
         if self.drive_enabled and profile.name in ("Coder", "QualitySampler"):
             try:
                 return await asyncio.to_thread(self._inject_from_drive, profile, task, brief.workstream, own_brief, memory)
@@ -1345,12 +1343,29 @@ class FusionRuntime:
         return next((block.text for block in reversed(turn.blocks)
                      if isinstance(block, TextBlockView) and block.text.strip()), "") if turn else ""
 
+    def _step_band(self, *, paths: int, acceptance: str, text: str) -> step_budget.Band:
+        settings = self.parent.manager.settings
+        return step_budget.resolve_band(
+            step_budget.Side(settings.fusion_steps_min_adaptive, settings.fusion_steps_min),
+            step_budget.Side(settings.fusion_steps_max_adaptive, settings.fusion_steps_max),
+            step_budget.task_size(paths=paths, acceptance=acceptance, text=text),
+            settings.max_steps)
+
+    def _bounded_brief(self, brief: Brief) -> Brief:
+        """Clamp the requested steps into the configured band and record where the number came from."""
+        band = self._step_band(paths=len(set(brief.paths)), acceptance=brief.acceptance,
+                               text=brief.goal + brief.acceptance)
+        requested = brief.budget.get("steps")
+        return replace(brief, budget={**brief.budget, "steps": step_budget.effective_steps(requested, band)},
+                       budget_note=step_budget.note(band, requested))
+
     async def delegate_brief(self, brief: Brief, *, tool_call: Call | None = None) -> Outcome:
         if not self.brief_enabled:
             return Outcome("Structured Fusion delegation is unavailable.", True)
         profile = self.identities.get(brief.identity)
         if profile is None or profile.name == "Observer":
             return Outcome("This identity cannot be delegated by the main agent.", True)
+        brief = self._bounded_brief(brief)
         policy = self.registry.policy
         model = policy.workers[0] if profile.role == "worker" else policy.light
         return await self.delegate(brief.workstream, model, profile.role, brief.text(), brief.paths, brief.resume,
@@ -1375,6 +1390,12 @@ class FusionRuntime:
         native = native_model(model)
         if self.parent.manager.model_info(native) is None:
             return Outcome("The requested expert model is unavailable; no fallback was selected.", True)
+        legacy_steps: int | None = None
+        if brief is None:
+            # The legacy entry has no estimate of its own: it always gets the band's ceiling.
+            band = self._step_band(paths=len(set(paths or ())), acceptance="", text=task)
+            legacy_steps = step_budget.effective_steps(None, band)
+            task += f"\n\nBudget: {legacy_steps} steps ({step_budget.note(band, None)})"
         known = set(self.registry.agents)
         snapshots = {key: replace(expert) for key, expert in self.registry.agents.items()}
         calls = self.registry.calls
@@ -1452,7 +1473,7 @@ class FusionRuntime:
             # running the checks (not a read-only command) is its job: with a real model the main agent marked its
             # Runners read-only because they had no write paths, and they came back blocked.
             child._fusion_read_only = bool(brief is not None and brief.read_only and profile is not None and "edit" in profile.tools)
-            child._fusion_step_limit = brief.budget.get("steps") if brief is not None else None
+            child._fusion_step_limit = brief.budget.get("steps") if brief is not None else legacy_steps
             parent_tools = await self.parent._ensure_tools()
             child_tools = await child._ensure_tools()
             child_tools.permission_parent = parent_tools
@@ -1493,7 +1514,7 @@ class FusionRuntime:
                     prompt += (" The records given above must each be rated, whether or not they helped: "
                                + ", ".join(sorted(reporting.used)) + ".")
             if self.gate("observer"):
-                budget = brief.budget if brief is not None else {}
+                budget = brief.budget if brief is not None else ({} if legacy_steps is None else {"steps": legacy_steps})
                 observed = ObservedRun(observer.Watch(write_paths, read_only=child._fusion_read_only,
                                                        steps=budget.get("steps", 0), seconds=budget.get("seconds", 0),
                                                        started=time.monotonic()))
