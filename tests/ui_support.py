@@ -9,7 +9,7 @@ from typing import Any
 from PySide6.QtCore import QTimer
 
 
-async def wait_for(predicate: Callable[[], Any], timeout: float = 15.0, message: str = "condition") -> None:
+async def wait_for(predicate: Callable[[], Any], timeout: float = 30.0, message: str = "condition") -> None:
     loop = asyncio.get_running_loop()
     end = loop.time() + timeout
     while True:

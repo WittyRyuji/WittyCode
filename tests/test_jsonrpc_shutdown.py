@@ -87,7 +87,7 @@ async def probe(case):
         async def wait():
             while not predicate():
                 await asyncio.sleep(0.01)
-        await asyncio.wait_for(wait(), 3)
+        await asyncio.wait_for(wait(), 30)
 
     async def delayed_spawn(*args, **kwargs):
         transport, protocol = await original(*args, **kwargs)

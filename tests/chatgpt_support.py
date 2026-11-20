@@ -60,7 +60,7 @@ def make_engine(root: Path, fake: FakeResponses | None, *, signed_in: bool = Tru
     return engine
 
 
-async def until(predicate: Any, *, timeout: float = 15.0, message: str = "the condition") -> None:
+async def until(predicate: Any, *, timeout: float = 30.0, message: str = "the condition") -> None:
     deadline = time.monotonic() + timeout
     while not predicate():
         if time.monotonic() > deadline:

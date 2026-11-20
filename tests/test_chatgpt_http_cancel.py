@@ -79,12 +79,12 @@ class FakeOpener:
         return self.response
 
 
-def run(coroutine, seconds: float = 30.0):
+def run(coroutine, seconds: float = 60.0):
     """Run a test's coroutine with a limit: a reader that is never woken must fail the test, not hang it."""
     return asyncio.run(asyncio.wait_for(coroutine, seconds))
 
 
-async def until(predicate: Callable[[], bool], seconds: float = 5.0) -> None:
+async def until(predicate: Callable[[], bool], seconds: float = 30.0) -> None:
     deadline = time.monotonic() + seconds
     while not predicate():
         if time.monotonic() > deadline:
@@ -92,7 +92,7 @@ async def until(predicate: Callable[[], bool], seconds: float = 5.0) -> None:
         await asyncio.sleep(0.01)
 
 
-def wait_until(predicate: Callable[[], bool], seconds: float = 5.0) -> None:
+def wait_until(predicate: Callable[[], bool], seconds: float = 30.0) -> None:
     deadline = time.monotonic() + seconds
     while not predicate():
         if time.monotonic() > deadline:

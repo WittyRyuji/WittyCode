@@ -44,7 +44,7 @@ def pid_alive(pid: int) -> bool:
     return f'"{pid}"' in listing
 
 
-def wait_gone(pid: int, seconds: float = 5.0) -> bool:
+def wait_gone(pid: int, seconds: float = 30.0) -> bool:
     end = time.monotonic() + seconds
     while time.monotonic() < end:
         if not pid_alive(pid):

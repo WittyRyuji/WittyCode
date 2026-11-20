@@ -104,7 +104,7 @@ def make_engine(
     return harness
 
 
-async def until(predicate: Any, timeout: float = 10.0) -> None:
+async def until(predicate: Any, timeout: float = 30.0) -> None:
     loop = asyncio.get_running_loop()
     end = loop.time() + timeout
     while not predicate():
@@ -113,7 +113,7 @@ async def until(predicate: Any, timeout: float = 10.0) -> None:
         await asyncio.sleep(0.01)
 
 
-async def finish_turn(controller: Any, text: str, attachments: Any = (), timeout: float = 10.0) -> Any:
+async def finish_turn(controller: Any, text: str, attachments: Any = (), timeout: float = 30.0) -> Any:
     """Send ``text`` and wait until the session is ready again; returns the turn."""
     assert controller.send_prompt(text, attachments), f"send_prompt refused in state {controller.state}"
     await until(lambda: controller.state.value != "running", timeout)

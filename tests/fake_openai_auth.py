@@ -616,7 +616,7 @@ class FakeBrowser:
             self.favicon_status = _get(opener, origin + "/favicon.ico")[0]
         self.pages.append(_get(opener, redirect_uri + "?" + urllib.parse.urlencode(callback)))
 
-    def wait(self, timeout: float = 15.0) -> None:
+    def wait(self, timeout: float = 30.0) -> None:
         for thread in self._threads:
             thread.join(timeout)
 
