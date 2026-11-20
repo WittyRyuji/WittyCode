@@ -132,6 +132,7 @@ def test_release_copies_the_ico_and_brands_only_its_own_gui_interpreter(tmp_path
     target = tmp_path / "release"
     target.mkdir()
     monkeypatch.setattr(build_release, "ROOT", root)
+    monkeypatch.setattr(build_release, "build_venv_python", lambda: root / ".venv-build" / "Scripts" / "python.exe")
     calls = []
     monkeypatch.setattr(build_release.subprocess, "run", lambda argv, **kwargs: calls.append((argv, kwargs)))
     build_release.brand_gui_runtime(target)

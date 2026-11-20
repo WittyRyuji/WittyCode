@@ -1,7 +1,12 @@
 """Local clean validation, CI and releases share one list of commands, not drifting copies."""
 
+import base64
+import fnmatch
 import json
+import os
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -112,3 +117,97 @@ def test_clean_entry_reaps_the_copy_when_dependency_install_fails(tmp_path, monk
     report, = (tmp_path / "outputs" / "test-runs").glob("*/result.json")
     saved = json.loads(report.read_text(encoding="utf-8"))
     assert (saved["status"], saved["exit_code"], saved["cleanup"]) == ("failed", 42, "done")
+
+
+RELEASE_VERSION = "1.2.3"
+RELEASE_ASSETS = tuple(f"WittyCode-{RELEASE_VERSION}-win-x64{suffix}" for suffix in (".zip", ".zip.sha256", ".exe", ".exe.sha256"))
+
+
+def release_attest_subjects() -> list[str]:
+    block = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8").split("subject-path: |", 1)[1]
+    subjects = []
+    for line in block.splitlines()[1:]:
+        if line.strip() and not line.startswith(" " * 12):
+            break
+        if line.strip():
+            subjects.append(line.strip())
+    return subjects
+
+
+def release_publish_script() -> str:
+    block = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8").split("- name: Publish", 1)[1]
+    script = []
+    for line in block.split("run: |", 1)[1].splitlines()[1:]:
+        if line.strip() and not line.startswith(" " * 10):
+            break
+        script.append(line[10:])
+    return "\n".join(script)
+
+
+def release_repo(tmp_path: Path) -> Path:
+    # The non-ASCII folder keeps the gh log's asset paths on the UTF-8 decoding path.
+    return tmp_path / "发布"
+
+
+def run_release_publish(tmp_path: Path, version: str, tag: str) -> tuple[subprocess.CompletedProcess, Path]:
+    # The Publish step is PowerShell; record the arguments the gh stub receives instead of publishing.
+    repo = release_repo(tmp_path)
+    (repo / "pyproject.toml").write_text(f'[project]\nversion = "{version}"\n', encoding="utf-8")
+    shell = shutil.which("pwsh") or shutil.which("powershell")
+    assert shell, "no PowerShell found to exercise the Publish step"
+    log = repo / "gh-argv.txt"
+    stub = "function gh { [IO.File]::WriteAllLines('" + str(log).replace("'", "''") + "', [string[]]($args | ForEach-Object { $_ })) }"
+    encoded = base64.b64encode((stub + "\n" + release_publish_script()).encode("utf-16-le")).decode("ascii")
+    env = dict(os.environ, TAG=tag, GH_TOKEN="stubbed")
+    path_key = next(key for key in env if key.lower() == "path")
+    env[path_key] = str(Path(sys.executable).parent) + os.pathsep + env[path_key]
+    done = subprocess.run([shell, "-NoProfile", "-EncodedCommand", encoded], cwd=repo, env=env, capture_output=True, text=True, errors="replace")
+    return done, log
+
+
+def stage_release_dist(tmp_path: Path, assets: list[str]) -> None:
+    dist = release_repo(tmp_path) / "dist"
+    dist.mkdir(parents=True)
+    for name in assets:
+        (dist / name).write_text(name + "\n", encoding="ascii")
+
+
+def test_release_attest_globs_cover_exactly_the_zip_and_exe():
+    # The pinned attest action expands subject-path with @actions/glob nobrace, so braces never expand.
+    subjects = release_attest_subjects()
+    assert subjects == ["dist/WittyCode-*-win-x64.zip", "dist/WittyCode-*-win-x64.exe"]
+    names = [f"WittyCode-{RELEASE_VERSION}-win-x64{suffix}" for suffix in ("", ".txt", ".zip", ".zip.sha256", ".exe", ".exe.sha256")]
+    attested = {name for name in names for pattern in subjects if fnmatch.fnmatch(name, pattern.removeprefix("dist/"))}
+    assert attested == {f"WittyCode-{RELEASE_VERSION}-win-x64.zip", f"WittyCode-{RELEASE_VERSION}-win-x64.exe"}
+
+
+def test_release_publish_uploads_only_the_tagged_versions_four_assets(tmp_path):
+    stage_release_dist(tmp_path, [*RELEASE_ASSETS, "WittyCode-0.0.1-win-x64.zip", "notes.txt"])
+    (release_repo(tmp_path) / "dist" / f"WittyCode-{RELEASE_VERSION}-win-x64").mkdir()
+    done, log = run_release_publish(tmp_path, RELEASE_VERSION, "v1.2.3")
+    assert done.returncode == 0, done.stderr
+    argv = log.read_text(encoding="utf-8").splitlines()
+    assert argv[:3] == ["release", "create", "v1.2.3"]
+    assert [Path(arg).name for arg in argv[3:7]] == list(RELEASE_ASSETS)
+    assert argv[7:] == ["--verify-tag", "--title", "WittyCode v1.2.3", "--generate-notes"]
+
+
+def test_release_publish_marks_dash_tags_prerelease_and_names_assets_by_pyproject(tmp_path):
+    version = "1.2.3b1"
+    assets = [f"WittyCode-{version}-win-x64{suffix}" for suffix in (".zip", ".zip.sha256", ".exe", ".exe.sha256")]
+    stage_release_dist(tmp_path, assets)
+    done, log = run_release_publish(tmp_path, version, "v1.2.3-beta.1")
+    assert done.returncode == 0, done.stderr
+    argv = log.read_text(encoding="utf-8").splitlines()
+    assert argv[:3] == ["release", "create", "v1.2.3-beta.1"]
+    assert [Path(arg).name for arg in argv[3:7]] == assets
+    assert argv[-1] == "--prerelease"
+
+
+@pytest.mark.parametrize("missing", RELEASE_ASSETS, ids=[name.split("-win-x64", 1)[1] for name in RELEASE_ASSETS])
+def test_release_publish_fails_before_creating_a_release_when_an_asset_is_missing(tmp_path, missing):
+    stage_release_dist(tmp_path, [name for name in RELEASE_ASSETS if name != missing])
+    done, log = run_release_publish(tmp_path, RELEASE_VERSION, "v1.2.3")
+    assert done.returncode != 0, "the step must fail instead of publishing an incomplete release"
+    assert missing in done.stderr
+    assert not log.exists(), "gh release create must not run when an asset is missing"
