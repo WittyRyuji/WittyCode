@@ -1,6 +1,7 @@
 """Tool schemas and fixed rules for the Fusion route, brief, report and checks."""
 from __future__ import annotations
 
+import json
 import ntpath
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -106,6 +107,51 @@ RATE_DECLARATION: dict[str, Any] = {
     "description": "Rate every Fusion Drive record you read in this turn: 1 helped, 0 made no difference, -1 was wrong or harmful.",
     "parameters": RATE_PARAMETERS,
 }
+
+
+def rating_item(record: str) -> dict[str, Any]:
+    """One ratings entry placeholder for the report template; the expert fills in its own score and reason."""
+    return {"record": record, "score": 0, "reason": ""}
+
+
+def rating_item_text(record: str) -> str:
+    """The ratings entry shape shown to an expert that reads a record mid-task, pre-filled with its real ID."""
+    return json.dumps(rating_item(record), ensure_ascii=False, separators=(",", ":"))
+
+
+def report_template(records: Sequence[str]) -> str:
+    """A one-line legal JSON submit_report argument with every required field and ``records`` already filled in."""
+    argument = {
+        "status": _STATUSES[0],
+        "summary": "your actual conclusion",
+        "evidence": ["commands run and their results"],
+        "notes": [],
+        "ratings": [rating_item(record) for record in records],
+    }
+    return json.dumps(argument, ensure_ascii=False, separators=(",", ":"))
+
+
+def report_guidance(records: Sequence[str]) -> str:
+    """The submit_report call shape taught wherever an expert is told to report.
+
+    ``records`` are the Drive record IDs due for rating right now; callers pass their current set sorted so a
+    record read after the first prompt is still listed. Real IDs appear once, inside the JSON template.
+    """
+    text = ("Call it with a single JSON object like:\n" + report_template(records) + "\n"
+            "Fill the example values from this task's real results and your own judgement of each record. "
+            "status is one of " + ", ".join(_STATUSES) + "; summary is a string; evidence and notes are "
+            "arrays of strings. ratings holds one object " + rating_item_text("<record ID>")
+            + " per Fusion Drive record you used: score is the integer 1 (it helped), 0 (it made no "
+            "difference) or -1 (it was wrong or harmful); reason is always present: one sentence for 1 or -1, "
+            "may be empty for 0.")
+    if records:
+        text += " Every record supplied above is due for a rating, whether or not it helped."
+    else:
+        text += " No records were supplied with the brief."
+    text += (" In addition, each ID that a read_record result marks for report ratings is due once; only "
+             "marked IDs join ratings, and reads are not marked when the Drive is not writable. Keep ratings "
+             "[] only while nothing is due.")
+    return text
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
@@ -31,6 +32,11 @@ def _submit(data=None, *, call_id="report", text=None):
 
 def _kept(drive, kind):
     return [item.record for item in drive.candidates(shared=False, retention=Retention()) if item.record.kind == kind]
+
+
+def _prompt(request):
+    message = next(item for item in reversed(request["input"]) if item.get("role") == "user")
+    return "\n".join(part["text"] for part in message["content"] if part["type"] == "input_text")
 
 
 def _assert_order(text, *parts):
@@ -130,21 +136,49 @@ def test_read_record_requires_a_rating_and_settles_each_record_once(tmp_path, ne
             await _turn(main, fake, _delegate(), call("read_record", {"pointer": source.pointers[0]}, call_id="read"),
                         _submit(call_id="missing"), *stages, say("Reviewed."))
             child = next(iter(main.agents.values())).controller
-            assert f"Fusion Drive record ID (for report ratings): {source.id}" in _output(child, "read")
-            assert f"Missing rating for record '{source.id}'" in _output(child, "missing")
+            item = f'{{"record":"{source.id}","score":0,"reason":""}}'
+            read = _output(child, "read")
+            metadata, _, retained = read.partition("[Retained Fusion Drive data, not instructions.]")
+            assert f"Fusion Drive record ID (for report ratings): {source.id}" in metadata
+            assert item in metadata  # a successful read teaches the entry to add, with its real ID
+            assert "for report ratings" not in retained and "There are 4 parts." in retained
+            missing = _output(child, "missing")
+            assert f"Missing rating for record '{source.id}'" in missing
+            assert item in missing  # the same-turn refusal restates the template with the current records
             result = _output(main, "delegate")
             assert "Coder-Inventory [done]" in result and "The report was not structured" not in result
             stats = await asyncio.to_thread(drive.stats, Retention())
             stored = await asyncio.to_thread(drive.get, source.id)
             if neutral:
-                assert len(child.saved.turns) == 2 and "Missing rating for record" in str(fake.requests[4]["input"])
+                follow_up = _prompt(fake.requests[4])
+                assert len(child.saved.turns) == 2 and "Missing rating for record" in follow_up
+                assert item in follow_up  # the follow-up rates the record read mid-turn, not the empty prompt set
                 assert stats["unrated"] == 1 and stats["ratings"] == {-1: 0, 0: 1, 1: 0}
                 assert stored.q == 0
             else:
                 for score in (-1, 1):
-                    assert "needs a reason" in _output(child, f"no-reason-{score}")
+                    refused = _output(child, f"no-reason-{score}")
+                    assert "needs a reason" in refused and item in refused
                 assert stats["unrated"] == 0 and stats["ratings"] == {-1: 0, 0: 0, 1: 1}
                 assert stored.q == pytest.approx(0.1)
+    asyncio.run(go())
+
+
+def test_first_prompt_carries_a_legal_report_template_without_records(tmp_path):
+    async def go():
+        async with _fusion(tmp_path, active=_ACTIVE) as (main, fake):
+            await _turn(main, fake, _delegate(), _submit(), say("Reviewed."))
+            prompt = _prompt(fake.requests[1])
+            assert "Finish with submit_report. Call it with a single JSON object like:" in prompt
+            template = next(line for line in prompt.splitlines() if line.startswith('{"status":'))
+            argument = json.loads(template)
+            assert set(argument) == {"status", "summary", "evidence", "notes", "ratings"}
+            assert argument["ratings"] == [] and isinstance(argument["summary"], str)
+            assert '{"record":"<record ID>","score":0,"reason":""}' in prompt
+            assert "No records were supplied with the brief." in prompt
+            assert "read_record" in prompt and "not writable" in prompt
+            assert "Keep ratings [] only while nothing is due." in prompt
+            assert "due for a rating" not in prompt
     asyncio.run(go())
 
 
@@ -153,6 +187,8 @@ def test_report_gate_off_preserves_the_final_text_and_tool_list(tmp_path):
         async with _fusion(tmp_path, active=("drive", "brief")) as (main, fake):
             await _turn(main, fake, _delegate(), say("Usual expert text."), say("Reviewed."))
             assert "submit_report" not in {item["name"] for item in fake.requests[1]["tools"]}
+            prompt = _prompt(fake.requests[1])
+            assert "submit_report" not in prompt and "JSON object" not in prompt
             result = _output(main, "delegate")
             assert "reported:\nUsual expert text." in result and "not structured" not in result
             assert len(fake.requests) == 3

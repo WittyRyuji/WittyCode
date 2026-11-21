@@ -1,10 +1,12 @@
 """The fixed gates reject malformed model calls before runtime work begins."""
+import json
+
 import pytest
 
 from desktop.core.fusion.protocol import (
     BRIEF_PARAMETERS, DELEGATE_DECLARATION, REPORT_DECLARATION, REPORT_PARAMETERS, REPORT_TOKENS,
     ROUTE_DECLARATION, ROUTE_PARAMETERS, Route, brief_writes, checks_after, parse_brief, parse_report, parse_route,
-    required_checks, risk_signals, route_refusal, settle_ratings,
+    rating_item_text, report_guidance, report_template, required_checks, risk_signals, route_refusal, settle_ratings,
 )
 from desktop.core.harness.compact import estimate_text
 from desktop.core.harness.tools import validate_arguments
@@ -194,6 +196,53 @@ def test_settle_ratings_keeps_explicit_zero_and_counts_defaulted_records_once():
         "missing": (0, ""), "invalid": (0, ""), "no-reason": (0, ""),
     }, 3)
     assert settle_ratings(ratings, ()) == ({}, 0)
+
+
+@pytest.mark.parametrize("records", [(), ("clock",), ("clock", "map")])
+def test_report_template_is_one_legal_json_line_with_required_fields(records):
+    line = report_template(records)
+    assert "\n" not in line
+    argument = json.loads(line)
+    assert set(argument) == set(REPORT_PARAMETERS["required"])
+    assert argument["status"] in REPORT_PARAMETERS["properties"]["status"]["enum"]
+    assert isinstance(argument["summary"], str)
+    assert all(isinstance(item, str) for item in [*argument["evidence"], *argument["notes"]])
+    for index, item in enumerate(argument["ratings"]):
+        assert set(item) == {"record", "score", "reason"} and item["record"] == records[index]
+        assert type(item["score"]) is int and item["score"] in (-1, 0, 1)
+        assert isinstance(item["reason"], str)
+    # The template stays acceptable to the tool schema and the parser once the real record IDs stand in it.
+    assert validate_arguments(REPORT_DECLARATION["parameters"], argument) == argument
+    report, problems = parse_report(argument, records)
+    assert report is not None and not problems
+
+
+def test_rating_item_text_prefills_the_real_record_id():
+    assert rating_item_text("clock") == '{"record":"clock","score":0,"reason":""}'
+    assert json.loads(rating_item_text("map"))["record"] == "map"
+
+
+def test_report_guidance_restates_the_template_and_every_rule():
+    guidance = report_guidance(("clock", "map"))
+    assert json.loads(guidance.splitlines()[1]) == json.loads(report_template(("clock", "map")))
+    for snippet in ("done", "concerns", "needs_context", "blocked", "summary is a string", "arrays of strings",
+                    "score is the integer", "reason is always present", "your own judgement",
+                    "Every record supplied above is due for a rating, whether or not it helped.",
+                    "marks for report ratings is due once", "not writable",
+                    "Keep ratings [] only while nothing is due."):
+        assert snippet in guidance
+    # The real IDs appear once, inside the legal JSON; the prose does not list them again.
+    assert all("clock" not in line and "map" not in line for line in guidance.splitlines()[2:])
+
+
+def test_report_guidance_without_records_still_teaches_the_rating_item():
+    guidance = report_guidance(())
+    assert json.loads(guidance.splitlines()[1])["ratings"] == []
+    assert '{"record":"<record ID>","score":0,"reason":""}' in guidance
+    assert "No records were supplied with the brief." in guidance
+    assert "read_record" in guidance and "not writable" in guidance
+    assert "Keep ratings [] only while nothing is due." in guidance
+    assert "due for a rating" not in guidance
 
 
 @pytest.mark.parametrize("changes, writes", [({}, True), ({"read_only": True, "paths": []}, False),
