@@ -28,7 +28,7 @@ The **Agents Team** panel shows a zoomable, animated task graph and pixel dragon
 
 **Windows 10/11 x64 · Alpha · Chinese interface.** When a build is available on [GitHub Releases](https://github.com/WittyRyuji/WittyCode/releases), download the `WittyCode-<version>-win-x64.zip` and its `.sha256`, verify the checksum, then unzip and run `WittyCode.exe`. The ZIP includes Python and the runtime dependencies. Builds are not code-signed yet. There is no in-app updater; download new builds manually.
 
-**Run from source** with Python **3.11.9** and Node.js **24.20.0**. The feature list describes the development source; `main` and any tagged downloads may not include all of it. Use `git switch dev` after cloning to follow the current development branch.
+**Run from source** with Python **3.11.9** and Node.js **24.22.3**. The feature list describes the development source; `main` and any tagged downloads may not include all of it. Use `git switch dev` after cloning to follow the current development branch.
 
 ```powershell
 git clone https://github.com/WittyRyuji/WittyCode.git

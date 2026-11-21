@@ -17,7 +17,7 @@ import sys
 import time
 
 PYTHON_VERSION = (3, 11, 9)
-NODE_VERSION = "v24.20.0"
+NODE_VERSION = "v24.22.3"
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
