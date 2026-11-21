@@ -151,14 +151,14 @@ for (const theme of ["light", "dark"]) {
     await page.waitFor(`document.documentElement.dataset.theme === '${theme}'`, 3000);
     await clickText(".snav", "插件");
     await page.click('.connection-tabs [data-kind=skill]');
-    await page.waitFor("document.querySelectorAll('.connection-row').length === 3", 6000);
-    assert.deepEqual(await page.eval("[...document.querySelectorAll('.connection-info b')].map(e => e.textContent)"), ["alpha", "Beta", "Zeta"], "sorting must not depend on discovery order or case");
+    await page.waitFor("document.querySelectorAll('.connection-row').length === 4", 6000);
+    assert.deepEqual(await page.eval("[...document.querySelectorAll('.connection-info b')].map(e => e.textContent)"), ["numbered-reply", "alpha", "Beta", "Zeta"], "the built-in skill stays first and sorting must not depend on discovery order or case");
     await page.eval("window.__orderRows = [...document.querySelectorAll('.connection-row')]; true");
     for (const enabled of [false, true, false, true]) {
       await page.click('.connection-row .switch', 1);
       await page.waitFor(`!document.querySelector('.connection-row .switch').disabled && document.querySelectorAll('.connection-row .switch')[1].getAttribute('aria-checked') === '${enabled}'`, 3000);
-      assert(await page.eval("document.querySelectorAll('.connection-row').length === 3 && __orderRows.every((e, i) => e === document.querySelectorAll('.connection-row')[i])"), "switches keep the same DOM rows in the same order");
-      assert.equal(await page.eval("document.querySelector('.connection-tabs [aria-selected=true] .num').textContent"), "3");
+      assert(await page.eval("document.querySelectorAll('.connection-row').length === 4 && __orderRows.every((e, i) => e === document.querySelectorAll('.connection-row')[i])"), "switches keep the same DOM rows in the same order");
+      assert.equal(await page.eval("document.querySelector('.connection-tabs [aria-selected=true] .num').textContent"), "4");
     }
     await clickText(".snav", "外观");
     assert.deepEqual(await page.eval("[...document.querySelectorAll('.settings-scroll .field-label')].map(e => e.textContent)"), ["主题", "文字大小"]);
