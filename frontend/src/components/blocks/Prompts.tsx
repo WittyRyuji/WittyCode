@@ -74,6 +74,15 @@ export function QuestionCard({ sessionId, prompt }: { sessionId: string; prompt:
     answer(sessionId, prompt.id, prompt.questions.map((q, i) => (q.multiSelect ? value(i) : value(i).join("、"))));
   };
 
+  // A plain Enter in the own-answer box is the 提交回答 button. An Enter that confirms an IME composition (isComposing,
+  // or the keyCode 229 Chromium gives keys it handed to the input method), an auto-repeat, or one with modifiers is not.
+  const otherKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key !== "Enter" || e.repeat || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
+    e.preventDefault();
+    e.stopPropagation();
+    submit();
+  };
+
   return (
     <section className="prompt ask" aria-label={`${who} 的提问`}>
       <div className="phead">
@@ -97,7 +106,7 @@ export function QuestionCard({ sessionId, prompt }: { sessionId: string; prompt:
           })}
           <label className="opt other">
             <span className="otherlabel">其他：</span>
-            <input type="text" className="otherinput selectable" placeholder="自己写一个答案" value={other[i] ?? ""} onChange={(e) => setOther((o) => ({ ...o, [i]: e.target.value }))} />
+            <input type="text" className="otherinput selectable" placeholder="自己写一个答案" value={other[i] ?? ""} onChange={(e) => setOther((o) => ({ ...o, [i]: e.target.value }))} onKeyDown={otherKey} />
           </label>
           {tried && missing(i) && <div className="qerr">请回答这个问题。</div>}
         </div>

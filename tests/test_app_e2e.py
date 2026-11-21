@@ -1567,6 +1567,9 @@ async def chatgpt_rig(tmp_path, fake, *, welcomed: bool = True, **options):
 
 def test_a_chatgpt_plan_model_can_ask_a_question_mid_turn_and_goes_on_with_the_answer(qapp, loop, tmp_path):
     async def scenario():
+        import os
+        from pathlib import Path
+
         from tests.chatgpt_support import ACCESS_TOKEN
         from tests.fake_responses import FakeResponses, call, say
 
@@ -1593,6 +1596,48 @@ def test_a_chatgpt_plan_model_can_ask_a_question_mid_turn_and_goes_on_with_the_a
                 assert "Postgres" in await rig.text(".block.qa"), "the page keeps what was asked and answered"
                 output = [item for item in fake.requests[-1]["input"] if item.get("type") == "function_call_output"][-1]["output"]
                 assert output.startswith("The user answered:") and "Answer: Postgres" in output, "the model was given the answer"
+
+                # The own-answer box takes a plain Enter for the same submit (clicking stays the other way).
+                ask = {"questions": [{"question": "Which region?", "header": "Region", "options": ["EU", "US"]},
+                                     {"question": "Which protocol?", "header": "Wire", "options": ["HTTP", "gRPC"]}]}
+                fake.script(call("ask_user", ask, call_id="c2"), say("Region and protocol noted."))
+                await rig.send("now the region and protocol")
+                await rig.wait_for(".prompt.ask", 1, timeout=20)
+                sent = len(fake.requests)
+                if evidence := os.environ.get("WITTYCODE_TEST_EVIDENCE"):
+                    await rig.shot(".prompt.ask", Path(evidence) / "question-card-enter.png")
+
+                # Enter on an empty box only marks the questions missing: nothing is sent to the model.
+                await rig.click(".prompt.ask .otherinput", 0)
+                await rig.press("Enter")
+                await rig.wait_for(".prompt.ask .qerr", 2)
+                assert len(fake.requests) == sent, "an incomplete answer does not reach the model"
+
+                # One typed answer still leaves the second question required.
+                await rig.type("a region of my own")
+                await rig.press("Enter")
+                await rig.wait_for(".prompt.ask .qerr", 1)
+                assert len(fake.requests) == sent, "every question still needs an answer"
+                await rig.click_text(".prompt.ask .opt", "gRPC")
+
+                # An Enter that only confirms an IME composition, a held key's repeat and a modified Enter are not submits.
+                box = "document.querySelectorAll('.prompt.ask .otherinput')[0]"
+                await rig.click(".prompt.ask .otherinput", 0)
+                await rig.js(f"{box}.dispatchEvent(new KeyboardEvent('keydown', {{key: 'Enter', keyCode: 229, isComposing: true, bubbles: true}}))")
+                await rig.js(f"{box}.dispatchEvent(new KeyboardEvent('keydown', {{key: 'Enter', repeat: true, bubbles: true}}))")
+                await rig.press("Enter", Qt.KeyboardModifier.ControlModifier)
+                assert len(fake.requests) == sent and await rig.exists(".prompt.ask"), "no composing, repeat or modified Enter submits"
+
+                # A plain Enter submits like the button: the model gets each answer, once.
+                await rig.press("Enter")
+                await rig.wait_text(".transcript", "Region and protocol noted.", timeout=30)
+                await rig.wait_for(".prompt.ask", 0)
+                await rig.wait_text(".statusbar .st-left", "就绪", timeout=15)
+                assert len(fake.requests) == sent + 1, "the answers went out exactly once"
+                outputs = [item for item in fake.requests[-1]["input"] if item.get("type") == "function_call_output" and item.get("call_id") == "c2"]
+                assert len(outputs) == 1, "the model was given the answers exactly once"
+                output = outputs[0]["output"]
+                assert "Answer: a region of my own" in output and "Answer: gRPC" in output, "the model was given the answers"
             finally:
                 await rig.finish()
 
