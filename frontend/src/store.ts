@@ -21,7 +21,8 @@ import { appendChatQuestion } from "./lib/copyChat";
 import { fusionEffort } from "./lib/fusionReasoning";
 import { handoffOf } from "./lib/handoff";
 import { quitWarning } from "./lib/quit";
-import { frontOfPartition, sameSessionPartition } from "./lib/sessionOrder";
+import { frontOfPartition, pinnedOrder, sameSessionPartition } from "./lib/sessionOrder";
+import { moveBefore, orderProjects } from "./lib/projectOrder";
 import { effortLabel, permissionsFor, startingLevel } from "./lib/vocab";
 import { COMPACT_AT_DEFAULT, clampCompactAt, emptyLiveData, type LiveData } from "./liveReducer";
 import { LIVE, liveSeed } from "./mode";
@@ -123,8 +124,11 @@ export interface Store extends LiveData {
   quit: () => void;
   select: (id: string | null) => void;
   openSaved: (id: string) => void;
-  /** move a sidebar row within its project and pin partition; the live backend persists the order */
+  /** move a sidebar row within its partition — the pinned strip is one partition across projects,
+   *  ordinary rows stay inside their project; `projectId` is the dragged row's own project */
   reorderSession: (projectId: string, id: string, targetId: string, after: boolean) => void;
+  /** move a project next to another one in the sidebar; the live backend persists the order */
+  reorderProject: (id: string, targetId: string, after: boolean) => void;
   setSessionPinned: (projectId: string, id: string, pinned: boolean) => void;
   /** Demo only: admit a first dispatch, or promote a listed ordinary row on significant activity. */
   recordDemoActivity: (id: string) => void;
@@ -299,6 +303,7 @@ function mockData(): LiveData {
   return {
     projects: PROJECTS,
     sessions: index(SESSIONS),
+    pinnedSessionIds: pinnedOrder(PROJECTS, index(SESSIONS)),
     archived: [],
     tabs: OPEN_TABS,
     currentId: "s-file-ops",
@@ -405,16 +410,20 @@ export const useStore = create<Store>((set, get) => ({
     window.setTimeout(() => get().patchSession(id, (x) => ({ ...x, mark: "ready", workingLabel: "就绪" })), 700);
   },
 
-  reorderSession: (projectId, id, targetId, after) => set((s) => ({
-    projects: s.projects.map((p) => {
-      if (p.id !== projectId || id === targetId || !p.sessionIds.includes(id) || !p.sessionIds.includes(targetId)) return p;
-      const target = s.sessions[targetId];
-      if (!target || !sameSessionPartition(s.sessions[id], target)) return p;
-      const ids = p.sessionIds.filter((item) => item !== id);
-      ids.splice(ids.indexOf(targetId) + Number(after), 0, id);
-      return { ...p, sessionIds: ids };
-    }),
-  })),
+  reorderSession: (projectId, id, targetId, after) => set((s) => {
+    const source = s.sessions[id];
+    const target = s.sessions[targetId];
+    if (!source || !target || id === targetId || source.projectId !== projectId || !sameSessionPartition(source, target)) return s;
+    if (source.pinned) return { pinnedSessionIds: moveBefore(s.pinnedSessionIds, id, targetId, after) };
+    const project = s.projects.find((p) => p.id === projectId);
+    if (!project?.sessionIds.includes(id) || !project.sessionIds.includes(targetId)) return s;
+    return { projects: s.projects.map((p) => (p.id === projectId ? { ...p, sessionIds: moveBefore(p.sessionIds, id, targetId, after) } : p)) };
+  }),
+
+  reorderProject: (id, targetId, after) => set((s) => {
+    if (id === targetId || !s.projects.some((p) => p.id === id) || !s.projects.some((p) => p.id === targetId)) return s;
+    return { projects: orderProjects(s.projects, moveBefore(s.projects.map((p) => p.id), id, targetId, after)) };
+  }),
 
   setSessionPinned: (projectId, id, pinned) => set((s) => {
     const row = s.sessions[id];
@@ -422,8 +431,10 @@ export const useStore = create<Store>((set, get) => ({
     if (!row || row.projectId !== projectId || !project?.sessionIds.includes(id) || typeof pinned !== "boolean" || !!row.pinned === pinned) return s;
     return {
       sessions: { ...s.sessions, [id]: { ...row, pinned } },
-      projects: s.projects.map((p) => p !== project ? p : {
-        ...p, sessionIds: frontOfPartition(p.sessionIds, id, pinned, (item) => !!s.sessions[item]?.pinned),
+      // a new pin goes to the top of the strip; unpinning puts the row back at the head of its project's ordinary rows
+      pinnedSessionIds: pinned ? [id, ...s.pinnedSessionIds.filter((x) => x !== id)] : s.pinnedSessionIds.filter((x) => x !== id),
+      projects: pinned ? s.projects : s.projects.map((p) => p !== project ? p : {
+        ...p, sessionIds: frontOfPartition(p.sessionIds, id, false, (item) => !!s.sessions[item]?.pinned),
       }),
     };
   }),
@@ -534,6 +545,7 @@ export const useStore = create<Store>((set, get) => ({
     };
     set((st) => ({
       archived: [row, ...st.archived.filter((r) => r.id !== id)],
+      pinnedSessionIds: st.pinnedSessionIds.filter((x) => x !== id),
       projects: st.projects.map((p) => ({ ...p, sessionIds: p.sessionIds.filter((x) => x !== id) })),
     }));
     get().say("已归档，可以在侧栏底部的「已归档」里找回。");
@@ -543,6 +555,7 @@ export const useStore = create<Store>((set, get) => ({
     if (!row) return;
     set((st) => ({
       archived: st.archived.filter((r) => r.id !== id),
+      pinnedSessionIds: row.pinned ? [id, ...st.pinnedSessionIds.filter((x) => x !== id)] : st.pinnedSessionIds,
       projects: st.projects.map((p) => p.id === row.projectId ? {
         ...p, sessionIds: frontOfPartition(p.sessionIds, id, !!row.pinned, (item) => !!st.sessions[item]?.pinned),
       } : p),
@@ -667,7 +680,7 @@ export const useStore = create<Store>((set, get) => ({
   addProject: () => {
     const id = `p-new-${++projectCounter}`;
     set((s) => ({
-      projects: [...s.projects, { id, name: `my-project-${projectCounter}`, path: `D:\\Projects\\my-project-${projectCounter}`, collapsed: false, sessionIds: [] }],
+      projects: [{ id, name: `my-project-${projectCounter}`, path: `D:\\Projects\\my-project-${projectCounter}`, collapsed: false, sessionIds: [] }, ...s.projects],
     }));
     get().say("已添加项目文件夹（演示）。");
   },
@@ -675,7 +688,7 @@ export const useStore = create<Store>((set, get) => ({
   removeProject: (id) =>
     confirmRemoveProject(id, (open) => {
       open.forEach((sid) => get().closeTab(sid, true));
-      set((s) => ({ projects: s.projects.filter((x) => x.id !== id) }));
+      set((s) => ({ projects: s.projects.filter((x) => x.id !== id), pinnedSessionIds: s.pinnedSessionIds.filter((x) => s.sessions[x]?.projectId !== id) }));
     }),
 
   refreshProjects: () => get().say("已刷新会话列表。"),

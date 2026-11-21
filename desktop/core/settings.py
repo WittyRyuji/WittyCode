@@ -20,6 +20,7 @@ from typing import Any
 
 from desktop.core.fusion.gates import GATES
 from desktop.core.fusion.reasoning import reasoning_map
+from desktop.core.sidebar_order import merge_pins
 
 log = logging.getLogger("desktop.settings")
 
@@ -170,7 +171,11 @@ class AppSettings:
     session_order: list[str] = field(default_factory=list)
     """Sidebar row ids after dragging or promoting a sent/finished conversation; newly discovered sessions precede these."""
     session_pins: dict[str, list[str]] = field(default_factory=dict)
-    """Canonical project folder -> ordered native row ids. Archiving hides a pinned row without losing its pin."""
+    """Canonical project folder -> ordered native row ids. Archiving hides a pinned row without losing its pin.
+    A mirror of ``pinned_sessions`` per project: kept written so a file read by an older build loses nothing."""
+    pinned_sessions: list[str] = field(default_factory=list)
+    """The pinned rows' native ids in the pin zone's order, across projects: project folds, reorders and
+    removals never change it. A file written before this field has its per-project ``session_pins`` merged in."""
     session_created: dict[str, float] = field(default_factory=dict)
     """Stable creation times, including old rows without one and conversations that changed engine."""
 
@@ -178,7 +183,7 @@ class AppSettings:
         normalized = normalize_folder(folder)
         if any(same_folder(normalized, existing) for existing in self.projects):
             return False
-        self.projects.append(normalized)
+        self.projects.insert(0, normalized)
         return True
 
     def remove_project(self, folder: str | Path) -> bool:
@@ -408,6 +413,26 @@ def settings_from_dict(raw: object) -> AppSettings:
             ordered = list(dict.fromkeys([*pins.get(key, ()), *valid]))[:MAX_REMEMBERED_SESSIONS]
             if ordered:
                 pins[key] = ordered
+    raw_pinned = raw.get("pinned_sessions")
+    mirrored = {item for keys in pins.values() for item in keys}
+    seen: set[str] = set()
+    valid_pinned: list[str] = []
+    for item in raw_pinned if isinstance(raw_pinned, list) else ():
+        if not (isinstance(item, str) and item.startswith(("cg:", "dv:", "fy:")) and item[3:].strip()) or item in seen:
+            continue
+        seen.add(item)
+        # The field alone caps at MAX; a verified mirror member past it keeps its global slot, not a re-appended tail.
+        if len(seen) <= MAX_REMEMBERED_SESSIONS or item in mirrored:
+            valid_pinned.append(item)
+
+    def pin_folder_key(folder: str) -> str:
+        try:
+            return os.path.normcase(os.path.normpath(folder))  # stored spelling only: do not resolve an old project on load
+        except (OSError, RuntimeError, ValueError):
+            return ""  # never a legacy pin key: the folder's pins are taken as leftovers below
+
+    # Each input keeps its own legal cap — the merged zone may top MAX when several projects each had a full list.
+    pinned_sessions = merge_pins(valid_pinned, pins, projects, pin_folder_key)
     created: dict[str, float] = {}
     raw_created = raw.get("session_created")
     if isinstance(raw_created, dict):
@@ -482,6 +507,7 @@ def settings_from_dict(raw: object) -> AppSettings:
         session_links=links,
         session_order=order,
         session_pins=pins,
+        pinned_sessions=pinned_sessions,
         session_created=created,
     )
 

@@ -95,6 +95,7 @@ from desktop.core.settings import (
     save_settings,
 )
 from desktop.core.timefmt import format_relative
+from desktop.core.sidebar_order import move_relative, pin_mirror
 from desktop.core.transcript import Transcript, Turn, TurnStatus
 from desktop.core.speed import speed_of
 from desktop.core.usage import Tokens, UsageLedger
@@ -652,8 +653,18 @@ class AppCore:
     def _visible_saved(self, folder: str) -> list[SavedRow]:
         return [row for row in self._saved.get(normalize_folder(folder), []) if self._resolve_row(row.id) == row.id]
 
-    def _project_pins(self, folder: str) -> list[str]:
-        return self.settings.session_pins.get(folder_key(folder), []) if self.settings.session_pins else []
+    def _mirror_pins(self, folder: str, *, add: str = "", drop: str = "") -> None:
+        """Keep this project's legacy ``session_pins`` a mirror of the global pin list, in its order."""
+        key = folder_key(folder)
+        known = {row["key"] for row in self._rows_for(folder) if row["pinned"]} | set(self.settings.session_pins.get(key, ()))
+        if add:
+            known.add(add)
+        known.discard(drop)
+        mirror = pin_mirror(self.settings.pinned_sessions, known)
+        if mirror:
+            self.settings.session_pins[key] = mirror
+        else:
+            self.settings.session_pins.pop(key, None)
 
     def _rows_for(self, folder: str) -> list[dict[str, Any]]:
         open_here = [c for c in self.order if same_folder(c.project, folder)]
@@ -674,7 +685,7 @@ class AppCore:
             # A titled first draft already has its row: the first dispatch decides whether it stays or goes again.
             if (conv.in_history or conv.draft_title) and conv.sidebar_key not in self.settings.archived_sessions:
                 rows.append((conv.sidebar_key or self._row_of(conv) or conv.cid, conv.sidebar_active_at, conv.cid))
-        pins = {key: i for i, key in enumerate(self._project_pins(folder))}
+        pins = {key: i for i, key in enumerate(self.settings.pinned_sessions)}
         ranks = {key: i for i, key in enumerate(self.settings.session_order)}
 
         def rank(row: tuple[str, float, str]) -> tuple[int, float, str]:
@@ -698,9 +709,11 @@ class AppCore:
         conv.sidebar_key = key
         if previous in self.settings.session_order:
             self.settings.session_order = list(dict.fromkeys(key if item == previous else item for item in self.settings.session_order))
-        pins = self._project_pins(conv.project)
-        if previous in pins:
-            pins[:] = dict.fromkeys(key if item == previous else item for item in pins)
+        if previous in self.settings.pinned_sessions:
+            self.settings.pinned_sessions = list(dict.fromkeys(key if item == previous else item for item in self.settings.pinned_sessions))
+        for mirror in self.settings.session_pins.values():
+            if previous in mirror:
+                mirror[:] = dict.fromkeys(key if item == previous else item for item in mirror)
         if previous:
             self.settings.session_created.pop(previous, None)
         self.settings.session_created[key] = conv.created_at
@@ -754,16 +767,15 @@ class AppCore:
             raise AppError("只能置顶本项目列表中已保存的会话。")
         if row["pinned"] == pinned:
             return {"ok": True}
-        project_key, key = folder_key(folder), row["key"]
-        pins = self._project_pins(folder)
+        key, pins = row["key"], self.settings.pinned_sessions
         if pinned:
             if len(pins) >= MAX_REMEMBERED_SESSIONS:
-                raise AppError("这个项目的置顶会话已达到上限。")
-            self.settings.session_pins[project_key] = [key, *pins]
+                raise AppError("置顶会话已达到上限。")
+            pins.insert(0, key)  # the newest pin leads the zone
+            self._mirror_pins(folder, add=key)
         else:
             pins.remove(key)
-            if not pins:
-                self.settings.session_pins.pop(project_key)
+            self._mirror_pins(folder, drop=key)
             self._remember_session_order([key, *(item["key"] for item in rows if not item["pinned"])])
         self._save()
         if ident in self._by_cid:
@@ -778,18 +790,27 @@ class AppCore:
             raise AppError("会话顺序不合法。")
         rows = self._rows_for(folder)
         by_id = {row["id"]: row for row in rows}
-        if ident not in by_id or target not in by_id:
-            raise AppError("只能在同一个项目内拖动仍在列表中的会话。")
-        pinned = by_id[ident]["pinned"]
-        if pinned != by_id[target]["pinned"]:
-            raise AppError("只能在同一置顶分区内拖动会话。")
+        source = by_id.get(ident)
+        if source is None:
+            raise AppError("只能拖动仍在列表中的会话。")
         if ident == target:
             return {"ok": True}
-        keys = self._project_pins(folder) if pinned else [row["key"] for row in rows if not row["pinned"]]
-        source_key, target_key = by_id[ident]["key"], by_id[target]["key"]
-        keys.remove(source_key)
-        keys.insert(keys.index(target_key) + int(after), source_key)
-        if not pinned:
+        if source["pinned"]:
+            found = next(
+                ((other, row) for other in self.settings.projects for row in self._rows_for(other) if row["id"] == target), None
+            )
+            if found is None or not found[1]["pinned"]:
+                raise AppError("只能在同一置顶分区内拖动会话。")
+            move_relative(self.settings.pinned_sessions, source["key"], found[1]["key"], after)
+            self._mirror_pins(folder)
+            if not same_folder(found[0], folder):
+                self._mirror_pins(found[0])
+        else:
+            target_row = by_id.get(target)
+            if target_row is None or target_row["pinned"]:
+                raise AppError("只能在同一个项目内拖动仍在列表中的会话。")
+            keys = [row["key"] for row in rows if not row["pinned"]]
+            move_relative(keys, source["key"], target_row["key"], after)
             self._remember_session_order(keys)
         self._save()
         self._emit_sidebar()
@@ -813,8 +834,8 @@ class AppCore:
 
     def _saved_sessions_json(self) -> dict[str, Any]:
         sessions = {}
+        pins = set(self.settings.pinned_sessions)
         for folder in self.settings.projects:
-            pins = set(self._project_pins(folder))
             for saved in self._visible_saved(folder):
                 if saved.id not in self.settings.archived_sessions:
                     sessions[saved.id] = self._saved_json(saved, folder, pinned=saved.id in pins)
@@ -823,8 +844,8 @@ class AppCore:
     def _archived_json(self) -> list[dict[str, Any]]:
         """The archived conversations the engines still list, the one archived last first."""
         found: list[tuple[int, dict[str, Any]]] = []
+        pins = set(self.settings.pinned_sessions)
         for folder in self.settings.projects:
-            pins = set(self._project_pins(folder))
             for saved in self._visible_saved(folder):
                 stamp = self.settings.archived_sessions.get(saved.id)
                 if stamp is not None:
@@ -832,8 +853,17 @@ class AppCore:
         found.sort(key=lambda pair: pair[0], reverse=True)
         return [row for _, row in found]
 
+    def _pinned_ids(self) -> list[str]:
+        """The pinned rows' public ids (an open conversation's cid), in the zone's order; hidden ones stay out."""
+        if not self.settings.pinned_sessions:
+            return []
+        rank = {key: i for i, key in enumerate(self.settings.pinned_sessions)}
+        rows = [row for folder in self.settings.projects for row in self._rows_for(folder) if row["key"] in rank]
+        rows.sort(key=lambda row: rank[row["key"]])
+        return [row["id"] for row in rows]
+
     def _emit_sidebar(self) -> None:
-        self.emit("sidebar", {"projects": self.project_rows(), "sessions": self._saved_sessions_json(), "archived": self._archived_json()})
+        self.emit("sidebar", {"projects": self.project_rows(), "pinnedSessionIds": self._pinned_ids(), "sessions": self._saved_sessions_json(), "archived": self._archived_json()})
 
     def _schedule_sidebar(self, folder: str | Path, *, reload: bool = False) -> None:
         if not any(same_folder(folder, item) for item in self.settings.projects):
@@ -1210,7 +1240,7 @@ class AppCore:
             **conv.cached_meta,
             "settings": self._shown_settings(conv),
             "fusion": self._shown_fusion(conv),
-            "pinned": conv.sidebar_key in self._project_pins(conv.project),
+            "pinned": conv.sidebar_key in self.settings.pinned_sessions,
         }
         self.emit("session", {"id": conv.cid, "patch": patch})
         self.emit("turns", {"id": conv.cid, "turns": list(snapshot["turns"]), "all": True})
@@ -1243,6 +1273,7 @@ class AppCore:
             "version": 1,
             "memory": memory,
             "projects": self.project_rows(),
+            "pinnedSessionIds": self._pinned_ids(),
             "sessions": self._saved_sessions_json(),
             "archived": self._archived_json(),
             "tabs": [c.cid for c in self.order],
@@ -1655,7 +1686,7 @@ class AppCore:
             "modifiedAt": int(controller.active_at * 1000),
             "engine": conv.engine,
             "nativeId": controller.session_id or "",
-            "pinned": conv.sidebar_key in self._project_pins(conv.project),
+            "pinned": conv.sidebar_key in self.settings.pinned_sessions,
             "settings": settings,
             "usage": usage,
             "usageModels": usage_models,
@@ -1768,7 +1799,7 @@ class AppCore:
     async def _m_project_add(self, params: dict[str, Any]) -> dict[str, Any]:
         folder = params.get("path")
         if not folder:
-            start = self.settings.projects[-1] if self.settings.projects else str(Path.home())
+            start = self.settings.projects[0] if self.settings.projects else str(Path.home())
             folder = await self.platform.pick_folder(start)
             if not folder:
                 return {"added": False}
@@ -1777,7 +1808,7 @@ class AppCore:
         if not self.settings.add_project(folder):
             raise AppError("这个文件夹已经在项目列表里了。")
         self._save()
-        added = self.settings.projects[-1]
+        added = self.settings.projects[0]
         self._spawn(self._reload_project(added), quiet=True)
         self._emit_sidebar()
         return {"added": True, "id": added}
@@ -1794,6 +1825,29 @@ class AppCore:
     async def _m_project_refresh(self, params: dict[str, Any]) -> None:
         folders = [params["id"]] if params.get("id") else list(self.settings.projects)
         await asyncio.gather(*(self._reload_project(f) for f in folders), return_exceptions=True)
+
+    async def _m_project_reorder(self, params: dict[str, Any]) -> dict[str, Any]:
+        ident, target, after = params.get("id"), params.get("targetId"), params.get("after", False)
+        if not isinstance(ident, str) or not isinstance(target, str) or not isinstance(after, bool):
+            raise AppError("项目顺序不合法。")
+        try:
+            source_key, target_key = folder_key(ident), folder_key(target)
+        except (OSError, RuntimeError, ValueError):
+            raise AppError("项目顺序不合法。") from None
+        keys: dict[str, str] = {}
+        for item in self.settings.projects:
+            try:
+                keys.setdefault(folder_key(item), item)
+            except (OSError, RuntimeError, ValueError):
+                continue
+        source, mark = keys.get(source_key), keys.get(target_key)
+        if source is None or mark is None:
+            raise AppError("只能拖动列表中的项目。")
+        if source != mark:
+            move_relative(self.settings.projects, source, mark, after)
+            self._save()
+            self._emit_sidebar()
+        return {"ok": True}
 
     async def _m_project_reveal(self, params: dict[str, Any]) -> None:
         self.platform.reveal(params["id"])
@@ -3927,7 +3981,7 @@ class AppCore:
         result = await self._import_call("commit", params)
         projects = result.pop("projects", [])
         added = False
-        for folder in projects:
+        for folder in reversed(projects):  # new projects lead the list: keep the import's own order there
             added = self.settings.add_project(folder) or added
         if added:
             self._save()

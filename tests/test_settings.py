@@ -15,6 +15,7 @@ from desktop.core.settings import (
     legacy_settings_path,
     load_settings,
     migrate_legacy_settings,
+    normalize_folder,
     same_folder,
     save_settings,
     settings_from_dict,
@@ -36,9 +37,75 @@ def test_session_pins_sanitize_and_round_trip_with_old_settings(tmp_path):
     }
     settings = settings_from_dict(raw)
     assert settings.session_pins == {os.path.normcase(str(a)): ["cg:first", "dv:next"], os.path.normcase(str(b)): ["cg:first"]}
+    assert settings.pinned_sessions == ["cg:first", "dv:next"], "legacy per-project pins merge into the zone in project order"
     assert settings.session_order == ["cg:second", "cg:first"]
     save_settings(settings, path)
     assert load_settings(path) == settings
+
+
+def test_pinned_sessions_sanitize_and_stay_ahead_of_the_legacy_lists(tmp_path):
+    path = tmp_path / "settings.json"
+    a, b = (tmp_path / "a").resolve(), (tmp_path / "b").resolve()
+    settings = settings_from_dict({
+        "projects": [str(a), str(b)],
+        "pinned_sessions": ["cg:z", "dv:w", "cg:z", "", "nope", None, "fy:", 7],
+        "session_pins": {str(b): ["cg:b1"], str(a): ["cg:a1"]},
+    })
+    assert settings.pinned_sessions == ["cg:z", "dv:w", "cg:a1", "cg:b1"], "the field wins; untouched legacy pins follow in project order"
+    assert settings.session_pins == {os.path.normcase(str(a)): ["cg:a1"], os.path.normcase(str(b)): ["cg:b1"]}
+    save_settings(settings, path)
+    assert load_settings(path) == settings
+
+
+def test_pins_of_projects_no_longer_listed_survive_the_merge(tmp_path):
+    orphan = (tmp_path / "gone").resolve()
+    settings = settings_from_dict({
+        "projects": [str(tmp_path / "kept")],
+        "session_pins": {str(orphan): ["cg:lost"], str(tmp_path / "kept"): []},
+    })
+    assert settings.pinned_sessions == ["cg:lost"]
+    assert settings_from_dict(settings_to_dict(settings)).pinned_sessions == ["cg:lost"]
+
+
+def test_legacy_pins_match_a_projects_stored_spelling_without_resolving(tmp_path):
+    kept = (tmp_path / "kept").resolve()
+    settings = settings_from_dict({
+        "projects": [str(tmp_path / "never_there" / ".." / "kept")],  # same folder once the spelling is normalized
+        "session_pins": {str(kept): ["cg:a"]},
+    })
+    assert settings.pinned_sessions == ["cg:a"], "the merge keys by the stored spelling, no folder need exist"
+    assert settings.session_pins == {os.path.normcase(str(kept)): ["cg:a"]}
+
+
+def test_each_projects_full_pin_list_merges_past_the_single_cap(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings_module, "MAX_REMEMBERED_SESSIONS", 3)
+    path = tmp_path / "settings.json"
+    a, b = (tmp_path / "a").resolve(), (tmp_path / "b").resolve()
+    settings = settings_from_dict({
+        "projects": [str(b), str(a)],
+        "pinned_sessions": ["cg:p1", "cg:p2", "cg:p3", "cg:p4"],  # one config input still keeps its own cap
+        "session_pins": {str(a): ["cg:a1", "cg:a2", "cg:a3"], str(b): ["cg:b1", "cg:b2", "cg:b3"]},
+    })
+    assert settings.pinned_sessions == ["cg:p1", "cg:p2", "cg:p3", "cg:b1", "cg:b2", "cg:b3", "cg:a1", "cg:a2", "cg:a3"], (
+        "the zone inherits each project's legal cap, not one shared cap")
+    save_settings(settings, path)
+    assert load_settings(path) == settings, "save and reload keep every pin in place"
+
+
+def test_the_pin_zone_keeps_its_interleaved_order_past_the_single_cap(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings_module, "MAX_REMEMBERED_SESSIONS", 2)
+    path = tmp_path / "settings.json"
+    a, b = (tmp_path / "a").resolve(), (tmp_path / "b").resolve()
+    settings = settings_from_dict({
+        "projects": [str(b), str(a)],  # mirror fill alone would reorder B's leftovers ahead of A's
+        "pinned_sessions": ["cg:a1", "cg:b1", "cg:a2", "cg:b2"],
+        "session_pins": {str(a): ["cg:a1", "cg:a2"], str(b): ["cg:b1", "cg:b2"]},
+    })
+    assert settings.pinned_sessions == ["cg:a1", "cg:b1", "cg:a2", "cg:b2"], "mirror members past the cap keep their global slots"
+    save_settings(settings, path)
+    assert load_settings(path) == settings, "save and reload keep the interleaved order"
+    lone = settings_from_dict({"pinned_sessions": ["cg:x1", "cg:x2", "cg:x3"]})
+    assert lone.pinned_sessions == ["cg:x1", "cg:x2"], "with no mirror the field alone stays capped"
 
 
 def test_round_trip_keeps_every_field(tmp_path):
@@ -230,8 +297,12 @@ def test_projects_are_deduplicated_when_loading_and_adding(tmp_path):
     settings = AppSettings()
     assert settings.add_project(folder) is True
     assert settings.add_project(str(folder) + os.sep) is False
+    later = tmp_path / "later"
+    assert settings.add_project(later) is True
+    assert settings.projects == [normalize_folder(later), normalize_folder(folder)], "new projects lead the list"
     assert settings.remove_project(folder) is True
     assert settings.remove_project(folder) is False
+    assert settings.remove_project(later) is True
     assert settings.projects == []
 
 

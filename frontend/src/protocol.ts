@@ -197,6 +197,8 @@ export interface InitResult {
   memory: MemoryState | null;
   projects: Project[];
   sessions: Record<string, SavedRow>;
+  /** the pinned strip, in order: visible row ids across projects; missing on an older sender */
+  pinnedSessionIds?: string[];
   /** the saved conversations the user archived, the one archived last first */
   archived?: SavedRow[];
   /** the open conversations, in tab order */
@@ -340,6 +342,8 @@ export interface Calls {
   /** no id: every project */
   "project.refresh": { params: { id?: string }; result: null };
   "project.reveal": { params: { id: string }; result: null };
+  /** move `id` next to `targetId` in the project list (after it when `after`) */
+  "project.reorder": { params: { id: string; targetId: string; after: boolean }; result: { ok: boolean } };
   /** `fromId`: the conversation whose project to use when there is no `projectId` */
   "session.new": { params: { projectId?: string; modelId?: string; fromId?: string; settings?: SessionSettings; fusion?: boolean }; result: { id: string | null } };
   "session.openSaved": { params: { id: string; projectId: string; title?: string }; result: { id: string | null } };
@@ -492,8 +496,10 @@ export interface Events {
   notice: { text: string };
   /** the open conversations in tab order; `select`: show this one (a conversation the page just opened) */
   tabs: { tabs: string[]; select: string | null };
-  /** every project with its rows (saved sessions and open conversations, newest first) and all saved rows */
-  sidebar: { projects: Project[]; sessions: Record<string, SavedRow>; archived?: SavedRow[] };
+  /** every project with its rows (saved sessions and open conversations, newest first) and all saved rows.
+   *  `pinnedSessionIds`: the pinned strip in order, of visible row ids; `project.sessionIds` still lists every
+   *  member — the page leaves the pinned ones out of the project groups. Missing on an older sender. */
+  sidebar: { projects: Project[]; sessions: Record<string, SavedRow>; archived?: SavedRow[]; pinnedSessionIds?: string[] };
   models: { models: ModelChoice[]; defaults: SessionSettings };
   defaults: { defaults: SessionSettings };
   /** merge `patch` into the conversation `id` */

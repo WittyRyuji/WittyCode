@@ -1,2 +1,11 @@
 .srow-pin { display: inline-flex; flex: none; color: var(--fg-2); }
 .srow.current .srow-pin { color: var(--paper); }
+
+/* The global pinned strip between 新会话 and the project list: a bounded, own-scrolling region
+   that never pushes the projects out of view. */
+.side-pinned { flex: none; }
+.pinned-list { max-height: 280px; overflow-y: auto; overscroll-behavior: contain; padding: 0 12px 6px; }
+
+/* A project being dropped before or after another one. */
+.proj.drop-before { box-shadow: 0 -2px 0 var(--fg); }
+.proj.drop-after { box-shadow: 0 2px 0 var(--fg); }

@@ -79,25 +79,28 @@ def test_sidebar_pin_menus_survive_opening_refresh_reload_and_archive(qapp, loop
             await rig.click(old, right=True)
             await rig.wait_for(".menu-item")
             await rig.click_text(".menu-item", "置顶")
-            await rig.wait_for(old + " .srow-pin")
-            assert await rig.texts(".slist .stitle") == ["Older", "Newer", "Middle"]
+            await rig.wait_for(".side-pinned " + old)
+            assert await rig.texts(".side-pinned .srow .stitle") == ["Older"]
+            assert await rig.texts(".proj .slist .stitle") == ["Newer", "Middle"]
             await rig.click(new + " .more")
             await rig.wait_for(".menu-item")
             await rig.click_text(".menu-item", "置顶")
             await rig.wait_for(".srow-pin", 2)
-            assert await rig.texts(".slist .stitle") == ["Newer", "Older", "Middle"]
+            assert await rig.texts(".side-pinned .srow .stitle") == ["Newer", "Older"]
+            assert await rig.texts(".proj .slist .stitle") == ["Middle"]
 
             await rig.click(old)
             await rig.wait_for(".tab.current")
             await rig.wait_for(".srow.open .srow-pin")
-            assert await rig.texts(".slist .stitle") == ["Newer", "Older", "Middle"]
+            assert await rig.texts(".side-pinned .srow .stitle") == ["Newer", "Older"]
             await rig.click('.side-head-actions [aria-label="刷新会话列表"]')
             await rig.js("window.__pinTestOldPage = true")
             # The page rejects its own navigation; load a new document through the host.
             rig.window._load_seen = False
             rig.window.load()
             await wait_for(lambda: rig.js("!window.__pinTestOldPage && !!document.querySelector('.srow.open .srow-pin')"), message="the pin on the reloaded page")
-            assert await rig.texts(".slist .stitle") == ["Newer", "Older", "Middle"]
+            assert await rig.texts(".side-pinned .srow .stitle") == ["Newer", "Older"]
+            assert await rig.texts(".proj .slist .stitle") == ["Middle"]
             if evidence := os.environ.get("WITTYCODE_TEST_EVIDENCE"):
                 await rig.js("document.querySelector('.ppath').textContent = 'C:\\\\Projects\\\\demo'")
                 await asyncio.sleep(0.05)
@@ -108,7 +111,8 @@ def test_sidebar_pin_menus_survive_opening_refresh_reload_and_archive(qapp, loop
             await rig.click_text(".menu-item", "归档")
             await rig.wait_for(".tab", 0)
             await rig.wait_for(".srow", 2)
-            assert await rig.texts(".slist .stitle") == ["Newer", "Middle"]
+            assert await rig.texts(".side-pinned .srow .stitle") == ["Newer"]
+            assert await rig.texts(".proj .slist .stitle") == ["Middle"]
             await rig.click(".archived .proj-toggle")
             await rig.wait_text(".archived-row", "Older")
             assert not await rig.count(".archived-row .srow-pin")
@@ -118,7 +122,8 @@ def test_sidebar_pin_menus_survive_opening_refresh_reload_and_archive(qapp, loop
             await rig.wait_for(".menu-item")
             await rig.click_text(".menu-item", "取消置顶")
             await rig.wait_for(".srow-pin", 1)
-            assert await rig.texts(".slist .stitle") == ["Older", "Newer", "Middle"]
+            assert await rig.texts(".side-pinned .srow .stitle") == ["Older"]
+            assert await rig.texts(".proj .slist .stitle") == ["Newer", "Middle"]
         finally:
             await rig.finish()
 

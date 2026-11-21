@@ -361,6 +361,7 @@ export interface Project {
   name: string;
   path: string;
   collapsed: boolean;
+  /** every member row, the pinned ones included; the sidebar leaves those out of the group (they are in the pinned strip) */
   sessionIds: string[];
 }
 

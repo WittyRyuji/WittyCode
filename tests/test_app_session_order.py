@@ -131,6 +131,7 @@ def test_manual_order_and_creation_identity_follow_an_engine_change(tmp_path, pi
         assert conv.created_at == core.settings.session_created[key] == created
         assert "cg:old" not in core.settings.session_created
         if pinned:
+            assert core.settings.pinned_sessions == [key]
             assert core.settings.session_pins == {folder_key(proj): [key]}
             assert core._session_meta(conv)["pinned"] is True
             await core.call("session.close", {"id": cid})
@@ -157,6 +158,7 @@ def test_pins_partition_activity_drag_archive_and_restart(tmp_path, monkeypatch)
             for row in ("cg:old", "cg:mid"):
                 assert await core.call("session.pin", {**project, "id": row, "pinned": True}) == {"ok": True}
             assert listed(events) == ["cg:mid", "cg:old", "cg:new"]
+            assert events.last("sidebar")["pinnedSessionIds"] == ["cg:mid", "cg:old"]
             assert events.last("sidebar")["sessions"]["cg:old"]["pinned"] is True
 
             await core.call("session.reorder", {**project, "id": "cg:old", "targetId": "cg:mid", "after": False})

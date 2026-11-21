@@ -22,11 +22,14 @@ import type {
   TurnUpdate,
 } from "./types";
 import type { Events, FollowUp, InitResult, SavedRow, SettingsView } from "./protocol";
+import { pinnedOrder } from "./lib/sessionOrder.ts"; // (with the extension: scripts/unit.mjs runs this file in Node)
 
 /** The part of the store that Python owns in the live app. */
 export interface LiveData {
   projects: Project[];
   sessions: Record<string, Session>;
+  /** the pinned strip's rows in order (Python's `pinnedSessionIds`, or derived from the flags): one partition across projects */
+  pinnedSessionIds: string[];
   /** saved conversations the user archived (hidden from the project lists), the one archived last first */
   archived: SavedRow[];
   tabs: string[];
@@ -129,6 +132,7 @@ export function emptyLiveData(theme: ThemeChoice = "system", fontScale: FontScal
   return {
     projects: [],
     sessions: {},
+    pinnedSessionIds: [],
     archived: [],
     tabs: [],
     currentId: null,
@@ -330,9 +334,12 @@ function withTabs(s: LiveData, tabs: string[], sessions: Record<string, Session>
 
 /** `app.init`: the snapshot replaces whatever the page had. */
 export function applyInit(s: LiveData, init: InitResult): Partial<LiveData> {
+  const sessions = withSavedRows(s.sessions, init.sessions ?? {});
+  const projects = mergeProjects(s.projects, init.projects);
   return {
-    ...withTabs(s, [...init.tabs], withSavedRows(s.sessions, init.sessions ?? {}), null),
-    projects: mergeProjects(s.projects, init.projects),
+    ...withTabs(s, [...init.tabs], sessions, null),
+    projects,
+    pinnedSessionIds: pinnedOrder(projects, sessions, init.pinnedSessionIds),
     archived: init.archived ?? [],
     models: init.models,
     defaults: init.defaults,
@@ -351,6 +358,7 @@ function onSession(s: LiveData, e: Events["session"]): Partial<LiveData> {
   const before = s.sessions[e.id] ?? newConversation(e.id);
   const { handoff, queued, preparing, ...rest } = e.patch;
   const next: Session = { ...before, ...rest, id: e.id };
+  if (rest.pinned === undefined && s.pinnedSessionIds.includes(e.id)) next.pinned = true; // the strip's declared order already knows this row
   if ("handoff" in e.patch) next.handoff = handoff ?? undefined;
   if ("queued" in e.patch) next.queued = queued && queued.length > 0 ? queued : undefined;
   if ("preparing" in e.patch) {
@@ -415,7 +423,9 @@ export function applyEvent(s: LiveData, name: string, payload: unknown): Applied
     }
     case "sidebar": {
       const e = payload as Events["sidebar"];
-      return done({ projects: mergeProjects(s.projects, e.projects), sessions: withSavedRows(s.sessions, e.sessions), archived: e.archived ?? s.archived });
+      const projects = mergeProjects(s.projects, e.projects);
+      const sessions = withSavedRows(s.sessions, e.sessions);
+      return done({ projects, sessions, pinnedSessionIds: pinnedOrder(projects, sessions, e.pinnedSessionIds), archived: e.archived ?? s.archived });
     }
     case "models": {
       const e = payload as Events["models"];
