@@ -17,6 +17,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from desktop.core.engine_items import user_message_parts
+from desktop.core.fusion.candidate import CANDIDATE
 from desktop.core.harness.loop import DECLINED, INTERRUPTED
 from desktop.core.harness.store import LOST, SavedSession, SavedTurn, diff_from_json
 from desktop.core.harness.tools import ToolRegistry
@@ -90,6 +91,10 @@ def build_turn(transcript: Transcript, registry: ToolRegistry, saved: SavedSessi
     for index, item in enumerate(items[1 if first is not None else 0 :]):
         kind = item.get("type")
         key = f"{prefix}-{index}"
+        if item.get(CANDIDATE):
+            # A draft the turn never published (superseded, or the run died first): the log keeps it for the model,
+            # the page never shows it as the answer.
+            continue
         if kind == "message" and item.get("role") == "assistant":
             transcript.end_text(turn, key, 0, _assistant_text(item))
         elif kind == "message" and item.get("role") == "user":

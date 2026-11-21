@@ -432,6 +432,7 @@ class AcpRun:
         self.loop = AgentLoop(None, tools, watcher, model=self.host.model, reasoning=None, instructions=instructions)
         self.steps, self.boundary, self.violation = steps_used, "", ""
         self.reported = False
+        watcher.begin_step()  # A new prompt: per-request answer staging resets (item ids are per run).
         self._usage.clear()
         self._seen.clear()
         self._pending.clear()

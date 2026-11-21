@@ -47,6 +47,7 @@ from desktop.core.engine_items import attachment_block
 from desktop.core.connections import ConnectionError as ExtensionError
 from desktop.core.context import ContextState, format_tokens
 from desktop.core.context_envelope import wrap as wrap_context
+from desktop.core.fusion.candidate import MERGE_CLAUSE, Staging, mark_candidates, unflag
 from desktop.core.handoff import Handoff
 from desktop.core.harness import asking, compact, skills
 from desktop.core.harness.history import prune_tool_images
@@ -1028,7 +1029,7 @@ class ChatGPTController:
             loop = AgentLoop(
                 self._stream_turn,
                 tools,
-                _Watch(self, tools, turn, instructions=instructions),
+                _Watch(self, tools, turn, instructions=instructions, candidate=self._fusion is not None),
                 model=model,
                 reasoning=reasoning or None,
                 instructions=instructions,
@@ -1061,7 +1062,9 @@ class ChatGPTController:
                     asks.append(map_request)
                 if asks and end.reason == "done" and end.steps < self.turn_step_limit():
                     # With a real model the turn's last words became a note about these steps instead of the result.
-                    continuation = "\n\n".join(asks) + " Then end with the answer to the user request, not with a report of these steps."
+                    held = loop.observer.hold_answer()
+                    continuation = "\n\n".join(asks) + (MERGE_CLAUSE if held else
+                        " Then end with the answer to the user request, not with a report of these steps.")
                     loop.observer.history_grew([{"type": "message", "role": "developer", "content": [{"type": "input_text", "text": continuation}]}])
                     self._save_now(required=True)
                     history = compact.view_of(self.saved.items, self.saved.compaction)
@@ -1071,13 +1074,19 @@ class ChatGPTController:
                     else:
                         end = await loop.run(history, steps_used=end.steps)
                     verdict = fusion.acceptance_verdict()
+                if verdict is None or not verdict.missing:
+                    loop.observer.release_answer()
+                else:
+                    # Still unverified: an unaccepted "done" is not the answer — bury it like a superseded draft.
+                    loop.observer.hold_answer()
                 if verdict is not None:
-                    if verdict.missing:
-                        self.transcript.add_notice("Fusion：本轮工作未验证；缺少检查：" + ", ".join(verdict.missing) + "。")
                     await fusion.retain_verdict(verdict)
                 if not plan:
                     await fusion.finish_map_turn(verdict)
                 await fusion.settle_main_ratings()
+            else:
+                # Nothing more owed: the turn settled on its own — the last words are the answer.
+                loop.observer.release_answer()
             if tools.connections is not None and end.reason != "observer":
                 try:
                     await tools.connections.hooks("Stop", self.project, {"session_id": self.session_id, "stop_hook_active": True})
@@ -1134,6 +1143,11 @@ class ChatGPTController:
             note = STOP_NOTES.get(end.detail, f"回答没有说完（{end.detail}）。")
         elif end.reason == "step_limit":
             note = f"这一轮用了 {end.steps} 步还没结束，先停在这里；可在设置 → 会话里调整「单轮步数上限」，或回复「继续」。"
+        if verdict is not None and verdict.missing:
+            # The unverified "done" hid every answer text; the verdict is the only conclusion this turn has —
+            # persist it like the stop notes so a reopened chat still shows it once.
+            unverified = "Fusion：本轮工作未验证；缺少检查：" + ", ".join(verdict.missing) + "。"
+            note = unverified + (" " + note if note else "")
         if note:
             self.transcript.add_notice(note)
         self._release_steers()
@@ -1849,7 +1863,8 @@ class _Watch(Observer):
     down; that loop goes on reporting, and none of it may reach the turn that follows (its text, its tool results, its
     token counts, the steers waiting for it) or the log: once ``owner`` is not the controller's turn, every report is dropped."""
 
-    def __init__(self, controller: ChatGPTController, tools: HarnessTools, owner: Turn, *, instructions: str = "") -> None:
+    def __init__(self, controller: ChatGPTController, tools: HarnessTools, owner: Turn, *, instructions: str = "",
+                 candidate: bool = False) -> None:
         self.ctl = controller
         self.tools = tools
         self.owner = owner
@@ -1857,6 +1872,10 @@ class _Watch(Observer):
         """The turn's instructions: with the tool declarations, what every request holds besides the conversation."""
         self._compacted_to = 0
         """The estimate right after the last compaction of this turn (or at the last one that could not help)."""
+        self._staging = Staging() if candidate else None
+        """A Fusion main turn's answer text stays buffered until the step's fate is known (fusion.candidate)."""
+        self._flagged: dict[str, dict[str, Any]] = {}
+        """Log items marked ``CANDIDATE`` while still buffered, by staged id — the mark comes off at publication."""
 
     @property
     def current(self) -> bool:
@@ -1869,25 +1888,66 @@ class _Watch(Observer):
     def working(self, state: str | None) -> None:
         if not self.current:
             return
+        if state == "thinking" and self._staging is not None:
+            # A new request begins: the previous request's unflushed text was mid-turn progress after all.
+            self._release_staged()
+            self._staging.begin()
         self.ctl.transcript.set_working_state({"running_tool": "executing_tool"}.get(state or "", state))
         self.ctl._changed()
 
+    def _release_staged(self) -> None:
+        """Buffered answer text that turned out mid-turn: publish it now, in the order it was written."""
+        if self._staging is None or not self._staging.staged():
+            return
+        turn = self._turn
+        published: list[str] = []
+        for item_id, text, done in self._staging.flush():
+            if turn is None:
+                continue  # Without the turn it never renders; keep the mark so the reopened view agrees.
+            published.append(item_id)
+            if done:
+                self.ctl.transcript.end_text(turn, item_id, 0, text)
+            else:
+                self.ctl.transcript.append_text(turn, item_id, 0, text)
+        if turn is not None:
+            self.ctl._changed()
+            if unflag(self._flagged, published):
+                self.ctl._save_soon()  # The CANDIDATE mark comes off with the same write the publication reaches.
+
+    def begin_step(self) -> None:
+        if self._staging is not None:
+            self._staging.begin()
+
+    def hold_answer(self) -> bool:
+        """Keep the staged answer internal: the continuation the caller runs next supersedes it (the log keeps it)."""
+        if self._staging is None:
+            return False
+        held = self._staging.drop()
+        self._flagged.clear()  # Forget the ids: a reused id in the next run must never unmark the superseded draft.
+        return held
+
+    def release_answer(self) -> None:
+        self._release_staged()
+
     def text_delta(self, item_id: str, text: str) -> None:
         if self._turn is not None:
-            self.ctl.transcript.append_text(self._turn, item_id, 0, text)
+            if self._staging is None or not self._staging.delta(item_id, text):
+                self.ctl.transcript.append_text(self._turn, item_id, 0, text)
+                self.ctl._changed()
             if text.strip():
                 self.ctl._model_progress()
-            self.ctl._changed()
 
     def text_done(self, item_id: str, text: str) -> None:
         if self._turn is not None:
-            self.ctl.transcript.end_text(self._turn, item_id, 0, text)
+            if self._staging is None or not self._staging.done(item_id, text):
+                self.ctl.transcript.end_text(self._turn, item_id, 0, text)
+                self.ctl._changed()
             if text.strip():
                 self.ctl._model_progress()
-            self.ctl._changed()
 
     def thinking_delta(self, item_id: str, text: str) -> None:
         if self._turn is not None:
+            self._release_staged()  # Thinking comes after the answer text it follows: that text was progress.
             self.ctl.transcript.append_thinking(self._turn, item_id, 0, text)
             if text.strip():
                 self.ctl._model_progress()
@@ -1895,6 +1955,7 @@ class _Watch(Observer):
 
     def thinking_done(self, item_id: str, text: str) -> None:
         if self._turn is not None:
+            self._release_staged()
             self.ctl.transcript.end_thinking(self._turn, item_id, 0, text=text or None)
             if text.strip():
                 self.ctl._model_progress()
@@ -1902,6 +1963,9 @@ class _Watch(Observer):
 
     def call_begun(self, item_id: str, call_id: str, name: str) -> None:
         if self._turn is not None:
+            if self._staging is not None:
+                self._staging.calls = True
+            self._release_staged()  # The text before a tool call is mid-turn progress, not the answer.
             ui_name, _ = self.tools.display(name, {})
             self.ctl.transcript.ensure_tool(self._turn, call_id, ui_name)
             self.ctl._model_progress()
@@ -1911,6 +1975,7 @@ class _Watch(Observer):
         turn = self._turn
         if turn is None:
             return
+        self._release_staged()
         ui_name, data = self.tools.display(call.name, call.args)
         tool = self.ctl.transcript.ensure_tool(turn, call.call_id, ui_name)
         self.ctl.transcript.set_tool_input(turn, tool, data, final=True)
@@ -1968,6 +2033,7 @@ class _Watch(Observer):
 
     def notice(self, text: str) -> None:
         if self.current:
+            self._release_staged()
             self.ctl.transcript.add_notice(text)
             self.ctl._changed()
 
@@ -1977,6 +2043,15 @@ class _Watch(Observer):
 
     def request_done(self, request: dict[str, Any], finished: Finished | None, seconds: float, failed: bool) -> None:
         if self.current:
+            if self._staging is not None:
+                if failed:
+                    # A failed request's buffered words are superseded by the retry or buried with the turn:
+                    # never the answer — their marks stay, the ids are forgotten.
+                    self._staging.drop()
+                    self._flagged.clear()
+                elif self._staging.calls:
+                    # A request that made calls ends a step that continues: its text is progress, show it.
+                    self._release_staged()
             fusion = self.ctl._fusion or getattr(self.ctl._fusion_parent, "_fusion", None)
             if fusion is not None:
                 usage = finished.usage if finished is not None else None
@@ -1988,6 +2063,9 @@ class _Watch(Observer):
 
     def history_grew(self, items: Sequence[dict[str, Any]]) -> None:
         if self.current:
+            if self._staging is not None and self._staging.staged():
+                # Still buffered as they are saved: marked now, unmarked the moment their text is published.
+                self._flagged.update(mark_candidates(items, self._staging))
             self.ctl.saved.items.extend(items)  # (the loop works on the view; the log is what the page and the file are made of)
             if any(item.get("wc_images") for item in items):
                 prune_tool_images(self.ctl.saved.items)  # Include the part of the log that is no longer in the view.
@@ -2121,6 +2199,8 @@ class _Watch(Observer):
         if not self.current:
             return []
         taken, self.ctl._steers = self.ctl._steers, []
+        if taken:
+            self._release_staged()  # The answer goes on: what was written so far is progress.
         return taken
 
     def steer_given(self, steer: Steer) -> None:

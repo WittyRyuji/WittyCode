@@ -205,6 +205,16 @@ class Observer:
     def steer_given(self, steer: Steer) -> None:
         """The model will see this at its next request."""
 
+    def begin_step(self) -> None:
+        """A new model request starts; any per-request answer staging resets (item ids repeat between responses)."""
+
+    def hold_answer(self) -> bool:
+        """Keep the staged final answer out of the transcript: a continuation supersedes it. Whether one was held."""
+        return False
+
+    def release_answer(self) -> None:
+        """Publish the staged final answer, if any: the turn settled without a continuation."""
+
     def notice(self, text: str) -> None: ...
 
 
