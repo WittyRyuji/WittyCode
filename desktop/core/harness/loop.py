@@ -633,6 +633,14 @@ class AgentLoop:
                     for position in range(index, len(calls)):
                         await commit(position, calls[position], Outcome(message, True, cancelled=True))
                     break
+                ending = getattr(self.tools, "finish_call", None)
+                if len(calls) > 1 and ending is not None and (reason := ending(calls[index])):
+                    # Accepting a bundled submission would drop the rest of the step; the other calls still ran.
+                    await commit(index, calls[index], Outcome(
+                        f"Not submitted: the {reason} must be the only call of its step, not bundled with other calls. "
+                        f"The other calls of this step will be processed normally; submit the {reason} alone once their results are in.", True))
+                    index += 1
+                    continue
                 if getattr(self.tools, "strict_context", False):
                     check = getattr(self.observer, "before_tools", None)
                     if check is None or not await check():

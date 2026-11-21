@@ -51,11 +51,11 @@ REPORT_PARAMETERS: dict[str, Any] = {
             "type": "object", "properties": {
                 "record": {"type": "string"},
                 "score": {"type": "integer", "enum": [-1, 0, 1]},
-                "reason": {"type": "string", "description": "One sentence for -1 or 1; may be empty for 0."},
-            }, "required": ["record", "score", "reason"],
+                "reason": {"type": "string", "description": "One sentence for -1 or 1; may be omitted or empty for 0."},
+            }, "required": ["record"],
         }},
     },
-    "required": ["status", "summary", "evidence", "notes", "ratings"],
+    "required": [],
 }
 ROUTE_PARAMETERS: dict[str, Any] = {
     "type": "object",
@@ -99,7 +99,13 @@ UPDATE_MAP_DECLARATION: dict[str, Any] = {
 }
 RATE_PARAMETERS: dict[str, Any] = {
     "type": "object",
-    "properties": {"ratings": REPORT_PARAMETERS["properties"]["ratings"]},
+    "properties": {"ratings": {"type": "array", "description": "Rate each supplied record once; use an empty array if none.", "items": {
+        "type": "object", "properties": {
+            "record": {"type": "string"},
+            "score": {"type": "integer", "enum": [-1, 0, 1]},
+            "reason": {"type": "string", "description": "One sentence for -1 or 1; may be empty for 0."},
+        }, "required": ["record", "score", "reason"],
+    }}},
     "required": ["ratings"],
 }
 RATE_DECLARATION: dict[str, Any] = {
@@ -142,8 +148,8 @@ def report_guidance(records: Sequence[str]) -> str:
             "status is one of " + ", ".join(_STATUSES) + "; summary is a string; evidence and notes are "
             "arrays of strings. ratings holds one object " + rating_item_text("<record ID>")
             + " per Fusion Drive record you used: score is the integer 1 (it helped), 0 (it made no "
-            "difference) or -1 (it was wrong or harmful); reason is always present: one sentence for 1 or -1, "
-            "may be empty for 0.")
+            "difference) or -1 (it was wrong or harmful); reason is one sentence for 1 or -1, and for 0 it "
+            "may be empty or left out. evidence, notes and ratings may also be left out and become [].")
     if records:
         text += " Every record supplied above is due for a rating, whether or not it helped."
     else:
@@ -151,6 +157,9 @@ def report_guidance(records: Sequence[str]) -> str:
     text += (" In addition, each ID that a read_record result marks for report ratings is due once; only "
              "marked IDs join ratings, and reads are not marked when the Drive is not writable. Keep ratings "
              "[] only while nothing is due.")
+    text += (" Call it only when you have a verdict; a call missing pieces is kept as a draft and you are told "
+             "which pieces are still due — send only those next, no redoing finished work, and the task stays "
+             "open meanwhile.")
     return text
 
 
@@ -247,7 +256,8 @@ def parse_brief(args: Mapping[str, Any]) -> tuple[Brief | None, str]:
                  tuple(path.strip() for path in paths), dict(budget), read_only, resume), ""
 
 
-def _ratings(ratings: Any, used: Sequence[str]) -> tuple[dict[str, tuple[int, str]], list[str]]:
+def _ratings(ratings: Any, used: Sequence[str], *, report: bool = False) -> tuple[dict[str, tuple[int, str]], list[str]]:
+    """Rating entries for the records in ``used``. ``report`` allows a report to omit the reason of a neutral score."""
     eligible = dict.fromkeys(used)
     valid: dict[str, tuple[int, str]] = {}
     seen: set[str] = set()
@@ -272,6 +282,8 @@ def _ratings(ratings: Any, used: Sequence[str]) -> tuple[dict[str, tuple[int, st
             problems.append(f"Rating for {record!r} must use a score of -1, 0 or 1.")
         elif score != 0 and not _nonempty(reason):
             problems.append(f"A score of -1 or 1 for {record!r} needs a reason.")
+        elif reason is None and report and "reason" not in item:
+            valid[record] = score, ""  # Only a report may omit the reason of a neutral score; an explicit null is invalid.
         elif not isinstance(reason, str):
             problems.append(f"Rating for {record!r} needs a reason string (empty is fine for score 0).")
         else:
@@ -280,23 +292,75 @@ def _ratings(ratings: Any, used: Sequence[str]) -> tuple[dict[str, tuple[int, st
     return valid, problems
 
 
-def parse_report(args: Mapping[str, Any], used: Sequence[str]) -> tuple[Report | None, tuple[str, ...]]:
-    """Keep a valid report body despite rating problems so a retry can settle them neutrally."""
+def parse_report(args: Mapping[str, Any], used: Sequence[str], *, draft: dict[str, Any] | None = None
+                 ) -> tuple[Report | None, tuple[str, ...]]:
+    """Keep a valid report body despite rating problems so a retry can settle them neutrally.
+
+    ``draft`` accumulates the pieces a run already supplied across calls: a key left out of a call falls
+    back to the kept value, and a re-submitted rating replaces a record's earlier entry as a whole, so a
+    stale reason is never reused. Only individually valid values are kept; a key set to null is invalid,
+    not omitted.
+    """
     if not isinstance(args, Mapping):
         return None, ("Provide the report as an object.",)
-    status, summary, evidence, notes = (args.get(key) for key in ("status", "summary", "evidence", "notes"))
+    merged = dict(args)
+    kept: dict[str, Any] | None = None
+    if draft is not None:
+        for key in ("status", "summary", "evidence", "notes"):
+            if key not in merged and draft.get(key) is not None:
+                merged[key] = draft[key]
+        if "ratings" in merged:
+            if isinstance(merged["ratings"], (list, tuple)):
+                kept = dict(draft.get("ratings") or {})
+                entries: dict[str, list[Any]] = {}
+                leftovers = []
+                for entry in merged["ratings"]:
+                    record = entry.get("record") if isinstance(entry, Mapping) else None
+                    if _nonempty(record):
+                        entries.setdefault(record.strip(), []).append(entry)
+                    else:
+                        leftovers.append(entry)
+                for record, patches in entries.items():
+                    if len(patches) > 1:
+                        # A record rated twice in one call is invalid and cannot hide behind the kept draft.
+                        kept.pop(record, None)
+                        leftovers.extend(patches)
+                        continue
+                    patch = dict(kept.get(record) or {"record": record})
+                    entry = patches[0]
+                    if "score" in entry and entry["score"] != patch.get("score"):
+                        patch.pop("reason", None)  # A changed score must bring its own reason.
+                    patch.update(entry)
+                    patch["record"] = record
+                    kept[record] = patch
+                merged["ratings"] = [*kept.values(), *leftovers]
+        elif draft.get("ratings"):
+            merged["ratings"] = list(draft["ratings"].values())
+    status, summary = merged.get("status"), merged.get("summary")
+    evidence = merged["evidence"] if "evidence" in merged else []
+    notes = merged["notes"] if "notes" in merged else []
     problems: list[str] = []
     if status not in _STATUSES:
         problems.append("Use a status of done, concerns, needs_context or blocked.")
+    elif draft is not None:
+        draft["status"] = status
     if not _nonempty(summary):
         problems.append("Provide a non-empty summary string.")
+    elif draft is not None:
+        draft["summary"] = summary.strip()
     for key, values in (("evidence", evidence), ("notes", notes)):
         if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
             problems.append(f"Provide {key} as an array of strings, even if it is empty.")
+        elif draft is not None:
+            draft[key] = list(values)
     if _nonempty(summary) and isinstance(notes, list) and all(isinstance(note, str) for note in notes):
         if estimate_text("\n".join((summary, *notes))) > REPORT_TOKENS:
             problems.append(f"Shorten the summary and notes to {REPORT_TOKENS:,} tokens or less and point to evidence instead.")
-    ratings, rating_problems = _ratings(args.get("ratings"), used)
+    ratings, rating_problems = _ratings(merged.get("ratings", []), used, report=True)
+    if draft is not None and kept is not None:
+        # Persist the merged entries as the draft state: pending pieces (a score still missing its reason, an
+        # invalid new value) stay due and an empty call cannot silently resurrect what a patch replaced.
+        draft["ratings"] = kept
     if problems:
         return None, tuple(problems + rating_problems)
     items = tuple({"record": record, "score": score, "reason": reason} for record, (score, reason) in ratings.items())

@@ -125,7 +125,7 @@ def test_existing_file_wins_then_updates_one_entry_and_imports_hand_edit(tmp_pat
             edited = project_map.ProjectMap((project_map.MapEntry("counts", ("stock",), "Counts packages.", "Totals batches."),))
             project_map.write(main.project, edited)
             first = len(fake.requests)
-            await _turn(main, fake, _delegate(paths=["stock/items.txt"]), say("Checked."), say("No structured report."), say("Reviewed."))
+            await _turn(main, fake, _delegate(paths=["stock/items.txt"]), say("Checked."), say("Reviewed."))
             prompt = _prompt(fake.requests[first + 1])
             assert "Counts packages." in prompt and "Counts boxes." not in prompt
             assert set(_records(main)) == {"map:counts"} and project_map.read(main.project) == edited

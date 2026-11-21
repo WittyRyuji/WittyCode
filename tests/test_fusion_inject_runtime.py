@@ -35,7 +35,7 @@ def test_coder_pack_precedes_delegation_envelope(tmp_path):
                         "### Acceptance criteria\nCounts match the inventory.", "### Write paths\ninventory.txt",
                         "### Budget\n20 steps (adaptive 20-40; requested 8)", "### Original request\nCheck the inventory.",
                         "Your responsibility / deliverable: Coder-Inventory.", "Declared write paths: inventory.txt.",
-                        "Finish with submit_report.")
+                        "ending with a plain message is also fine.")
             assert [prompt.index(section) for section in sections] == sorted(prompt.index(section) for section in sections)
             assert prompt.count("Check the inventory.") == 1
     asyncio.run(go())
@@ -80,7 +80,7 @@ def test_second_delegation_injects_the_report_and_requires_a_rating(tmp_path):
             assert record.summary in prompt
             assert "Every record supplied above is due for a rating, whether or not it helped." in prompt
             item = f'{{"record":"{record.id}","score":0,"reason":""}}'
-            guidance = prompt.split("Finish with submit_report. ", 1)[1]
+            guidance = prompt.split("a plain message is also fine. ", 1)[1]
             assert json.loads(guidance.splitlines()[1])["ratings"] == [json.loads(item)]
             assert all(record.id not in line for line in guidance.splitlines()[2:])  # listed once, inside the JSON
             child = next(iter(main.agents.values())).controller

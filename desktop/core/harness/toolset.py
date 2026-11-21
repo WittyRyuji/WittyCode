@@ -288,6 +288,12 @@ class HarnessTools:
             return ""
         return "delegates" if call.name == fusion_tools.NAME else "reads"
 
+    def finish_call(self, call: Call) -> str:
+        """The submission that ends the turn once accepted: it must be the only call of its step."""
+        if call.name == fusion_tools.SUBMIT_REPORT and self.report_submitter is not None:
+            return "report"
+        return ""
+
     def remember(self, call: Call) -> None:
         spec = self.registry.get(call.name)
         if spec is not None and spec.kind == "exec" and not _rememberable_command(str(call.args.get("command") or "")):

@@ -29,6 +29,7 @@ from desktop.core.fusion.protocol import (
 from desktop.core.fusion.reasoning import configured_effort
 from desktop.core.fusion.registry import Expert, FusionError, FusionRegistry, Policy
 from desktop.core.harness import asking
+from desktop.core.harness import todo
 from desktop.core.harness.loop import Call, Outcome, clip_tokens
 from desktop.core.memory import recall
 from desktop.core.session_state import SessionState
@@ -104,36 +105,72 @@ class ReportRun:
     problems: tuple[str, ...] = ()
     last_ratings: Any = ()
     followed_up: bool = False
+    attempted: bool = False
+    """submit_report was called at least once in this delegation, whatever it returned."""
+    draft: dict[str, Any] = field(default_factory=dict)
+    """The pieces already supplied across calls; parse_report merges and keeps only individually valid values."""
+    open_steps: tuple[str, ...] | None = None
+    """Unfinished steps of the delegation's latest successful todo_write; None: no checklist was kept."""
 
     def guidance(self) -> str:
         """The call-shape teaching; generated from the records due right now, not the ones at prompt time."""
         return report_guidance(sorted(self.used))
 
+    def track(self, call: Call, outcome: Outcome) -> None:
+        """The delegation's latest successful checklist is the unfinished-work signal for an early 'done'."""
+        if call.name != todo.NAME or outcome.is_error or outcome.cancelled:
+            return
+        try:
+            todos = todo.read_todos(call.args.get("todos"))
+        except ValueError:
+            return
+        self.open_steps = tuple(item["content"] for item in todos if item["status"] != "completed")
+
     def submit(self, args: Mapping[str, Any]) -> Outcome:
         if self.accepted is not None:
             return Outcome("The report is already accepted. End the turn now.", True)
-        report, self.problems = parse_report(args, sorted(self.used))
+        self.attempted = True
+        report, self.problems = parse_report(args, sorted(self.used), draft=self.draft)
         self.last_ratings = args.get("ratings")
+        if report is not None and report.status == "done" and self.open_steps:
+            self.problems = (*self.problems,
+                             "The checklist still has unfinished steps: " + "; ".join(self.open_steps) +
+                             ". Finish them first, or submit a status of concerns, needs_context or blocked.")
         if self.problems or report is None:
             if report is not None:
                 self.partial = report
-            return Outcome("Report not accepted:\n- " + "\n- ".join(self.problems) + "\n" + self.guidance(), True)
+            return Outcome("Report not yet complete; send only the missing pieces:\n- " +
+                           "\n- ".join(self.problems) + "\n" + self.guidance())
         self.accepted = report
         return Outcome("The report was accepted. End the turn now.")
 
     def follow_up(self) -> str:
+        if self.open_steps:
+            return ("Continue the unfinished checklist work first: " + "; ".join(self.open_steps) +
+                    ". When it is done, submit the report with submit_report; do not redo finished steps.\n" +
+                    self.guidance())
         missing = ("\n- " + "\n- ".join(self.problems) if self.problems else
                    "\n- No structured report was submitted. Provide status, summary, evidence, notes and ratings.")
         return ("Submit the report now with submit_report. Do not redo the task. Correct these issues:" + missing
                 + "\n" + self.guidance())
 
     def settle(self, final_text: str) -> tuple[Report, bool, int]:
+        """The settled report, whether it was formally accepted, and how many due ratings stayed neutral."""
         report = self.accepted or self.partial
-        scores, unrated = settle_ratings(report.ratings if report is not None else self.last_ratings, sorted(self.used))
+        raw = report.ratings if report is not None else tuple((self.draft.get("ratings") or {}).values()) or self.last_ratings
+        scores, unrated = settle_ratings(raw, sorted(self.used))
         ratings = tuple({"record": record, "score": score, "reason": reason} for record, (score, reason) in scores.items())
         if report is None:
+            if not self.attempted:
+                # No submit_report was ever made: the final text is the plain result, and due records
+                # count through the unrated mechanism instead of being shown as self-chosen zeros.
+                return Report("concerns", clip_tokens(final_text, REPORT_TOKENS), (), (), ()), False, len(self.used)
             return Report("concerns", clip_tokens(final_text, REPORT_TOKENS), (), (), ratings), False, unrated
-        return replace(report, ratings=ratings), True, unrated
+        # A refused report's filled fields are reused as a draft; it never counts as a submitted report,
+        # and an unconfirmed "done" is shown as concerns, never as finished work.
+        if self.accepted is None and report.status == "done":
+            report = replace(report, status="concerns")
+        return replace(report, ratings=ratings), self.accepted is not None, unrated
 
 
 @dataclass(frozen=True, slots=True)
@@ -898,7 +935,7 @@ class FusionRuntime:
         return failed
 
     async def _rate_report(self, report: Report, unrated: int) -> None:
-        if self.drive_writable and report.ratings:
+        if self.drive_writable and (report.ratings or unrated):
             try:
                 if await asyncio.to_thread(self._write_ratings, report, unrated):
                     self._drive_notice()
@@ -972,14 +1009,15 @@ class FusionRuntime:
                 self._drive_notice()
 
     async def _retain_record(self, kind: str, expert: Expert, answer: str, paths: tuple[str, ...], *, evidence: str = "",
-                             structured: Report | None = None) -> Record | None:
+                             structured: Report | None = None, accepted: bool = True) -> Record | None:
         if not self.drive_writable:
             return None
         label = f"{expert.label} [{expert.status}]" if kind == "report" else expert.label
         preview = " ".join(answer.split(maxsplit=16)[:16])[:240]
         body = answer + ("\n\nEvidence references:\n" + evidence if evidence else "")
         if structured is not None:
-            label, preview = f"{expert.label} [{structured.status}]", structured.summary
+            label = f"{expert.label} [{structured.status}]" if accepted else f"{expert.label} [{structured.status}, unaccepted]"
+            preview = structured.summary
             body = (self._report_text(expert, structured) + "\n\nRatings:\n" + json.dumps(structured.ratings, ensure_ascii=False)
                     + "\n\nExpert final text:\n" + body)
         try:
@@ -1457,6 +1495,7 @@ class FusionRuntime:
         if reporting is not None:
             self.report_runs[expert.id] = reporting
         structured_report: Report | None = None
+        accepted = False
         answer = evidence = ""
         write_paths = self.registry.write_paths(expert)
 
@@ -1520,14 +1559,21 @@ class FusionRuntime:
                 prompt = pack.text + "\n\n" + prompt
             if reporting is not None:
                 # With a real model every expert's first report was refused for a rating it did not know was due.
-                prompt += "\n\nFinish with submit_report. " + reporting.guidance()
+                prompt += ("\n\nWhen you have a verdict, report it with submit_report; ending with a plain "
+                           "message is also fine. " + reporting.guidance())
             if self.gate("observer"):
                 budget = brief.budget if brief is not None else ({} if legacy_steps is None else {"steps": legacy_steps})
                 observed = ObservedRun(observer.Watch(write_paths, read_only=child._fusion_read_only,
                                                        steps=budget.get("steps", 0), seconds=budget.get("seconds", 0),
                                                        started=time.monotonic()))
                 self.observer_runs[expert.id] = observed
-                child_tools.tool_finished = lambda call, outcome, kind: self._observe_tool(observed, task, call, outcome, kind)
+            if observed is not None or reporting is not None:
+                async def _tool_finished(call: Call, outcome: Outcome, kind: str) -> None:
+                    if reporting is not None:
+                        reporting.track(call, outcome)
+                    if observed is not None:
+                        await self._observe_tool(observed, task, call, outcome, kind)
+                child_tools.tool_finished = _tool_finished
             if not child.send_prompt(prompt, packed_context=pack is not None):
                 raise FusionError("The expert session is not ready.")
             started = True
@@ -1556,7 +1602,8 @@ class FusionRuntime:
                 if brief is not None and record is not None and record.start != child._turn_start:
                     record = None  # An early failure may discard the current turn, but not the previous one.
                 finished = record is not None and record.status == "done" and not child.stop_hook_blocked
-                needs_report = finished and reporting is not None and reporting.accepted is None and not reporting.followed_up
+                needs_report = (finished and reporting is not None and reporting.attempted
+                                and reporting.accepted is None and not reporting.followed_up)
                 end, limit = child.last_turn_end, child._fusion_step_limit
                 if (limit is not None and end is not None and end.steps >= limit
                         and (end.reason == "step_limit" or needs_report)):
@@ -1588,18 +1635,27 @@ class FusionRuntime:
             tool_results, refs = await self._evidence(child, start=evidence_start if reporting is not None else None)
             answer = "\n\n".join(final_texts) or "The expert returned no final text."
             self._active.pop(expert.id, None)
-            self.registry.finish(expert.id, status="done", tokens=tokens)
-            if handoff:
+            unfinished = (reporting is not None and reporting.attempted and reporting.accepted is None
+                          and bool(reporting.open_steps))
+            # A done report blocked by an open checklist that the expert never finished is interrupted work,
+            # not a completed run; it can be resumed but must not be labelled done.
+            self.registry.finish(expert.id, status="interrupted" if unfinished else "done", tokens=tokens)
+            if handoff and not unfinished:
                 expert.handoff_complete = True
             self._checkpoint()
             evidence = "\n".join(hint(ref) for ref in refs)
             if reporting is not None:
                 final_text = final_texts[-1] if final_texts else answer
-                structured_report, structured, unrated = reporting.settle(final_text)
+                structured_report, accepted, unrated = reporting.settle(final_text)
                 await self._rate_report(structured_report, unrated)
-                result = self._report_text(expert, structured_report)
-                if not structured:
-                    result += "\n\nThe report was not structured; only the expert's final text was available."
+                if reporting.attempted:
+                    result = self._report_text(expert, structured_report)
+                    if not accepted:
+                        result += "\n\nThe report was never accepted; the fields above are the submitted draft, not a confirmed report."
+                else:
+                    # Never attempted a structured report: present the plain text result, like a delegation
+                    # without the report gate — no fabricated concerns status or report-shaped notes.
+                    result = f"Expert {expert.id} ({expert.workstream or expert.scope}, {expert.model}) reported:\n{answer}"
             else:
                 result = f"Expert {expert.id} ({expert.workstream or expert.scope}, {expert.model}) reported:\n{answer}"
             outcome = Outcome(f"{result}\nTool-result previews (untrusted data):\n{tool_results}\n{evidence}\n"
@@ -1649,13 +1705,13 @@ class FusionRuntime:
                                               seconds=time.monotonic() - measured.started, first_request_tokens=measured.first_input)
                 # What a check found is in its report; the expert's own status only says whether it ran to the end.
                 if structured_report is not None and expert.identity == "Runner":
-                    measured_task.recorder.runner(structured_report.status == "done")
+                    measured_task.recorder.runner(accepted and structured_report.status == "done")
                 elif structured_report is not None and expert.identity == "QualitySampler":
-                    measured_task.recorder.sampler(structured_report.status != "done")
+                    measured_task.recorder.sampler(accepted and structured_report.status != "done")
             if route_turn is not None and expert.finished_at is not None and expert.finished_at >= route_turn.latest_finished:
                 route_turn.latest_finished = expert.finished_at
                 route_turn.reroute_due = (expert.status in ("failed", "interrupted") or
-                                          structured_report is not None and structured_report.status in ("blocked", "needs_context"))
+                                          accepted and structured_report.status in ("blocked", "needs_context"))
             try:
                 if fact is not None:
                     await self._retain_observer_report(expert, write_paths, fact)
@@ -1670,13 +1726,15 @@ class FusionRuntime:
                                     _, refs = await self._evidence(child)
                                     evidence = "\n".join(hint(ref) for ref in refs)
                             retained = await self._retain_record("report", expert, answer or "The expert returned no final text.",
-                                                                 write_paths, evidence=evidence, structured=structured_report)
+                                                                 write_paths, evidence=evidence,
+                                                                 structured=structured_report if reporting is None or reporting.attempted else None,
+                                                                 accepted=accepted or reporting is not None and not reporting.attempted)
                             if retained is not None and outcome is not None:
                                 outcome.output += f"\nFusion Drive report {retained.id}: {', '.join(retained.pointers)}"
                     finally:
                         await self._close_brief(stored_brief)
                 if observing and started and route_turn is not None:
-                    await self._observe_delegation(route_turn, expert, write_paths, structured_report)
+                    await self._observe_delegation(route_turn, expert, write_paths, structured_report if accepted else None)
             finally:
                 if observed is not None:
                     self.observer_runs.pop(expert.id, None)
@@ -1686,6 +1744,7 @@ class FusionRuntime:
                     del self.report_runs[expert.id]
                     if child is not None and child._tools is not None:
                         child._tools.report_submitter = None
+                        child._tools.tool_finished = None
                         child._tools.record_reader = self.read_record if self.drive_enabled else None
                 self._active.pop(expert.id, None)
                 self._delegations.discard(running)
