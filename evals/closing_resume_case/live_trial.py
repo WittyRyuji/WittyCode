@@ -50,16 +50,60 @@ def _redact(value: Any, paths: list[tuple[Path, str]]) -> Any:
     return value
 
 
+def _error_kind(message: str | None) -> str:
+    if not message:
+        return ""
+    message = message.casefold()
+    if "refresh_disabled" in message or "登录已失效" in message:
+        return "auth_needs_refresh"
+    for needle, kind in (("no verified get /models catalog", "meter_no_catalog_proof"),
+                         ("shared budget is spent", "budget_spent"),
+                         ("no settled usage", "meter_pending_usage"), ("meterblocked", "meter_blocked")):
+        if needle in message:
+            return kind
+    return "other"
+
+
 def _public_report(report: dict, paths: list[tuple[Path, str]]) -> dict:
-    result = _redact({key: value for key, value in report.items() if key != "_child_stderr"}, paths)
-    stderr = report.get("_child_stderr")
-    if stderr is not None and result["status"] not in {"scored", "smoke"}:
-        text = _redact(stderr.decode("utf-8", errors="replace"), paths)
-        # Scrub before slicing so the boundary cannot expose part of a credential.
-        text = re.sub(r"(\bBearer[ \t]+)[A-Za-z0-9._~+/-]+=*", r"\1<redacted>", text, flags=re.IGNORECASE)
-        text = re.sub(r"[A-Za-z0-9._+/=\-]{40,}", "<redacted>", text)
-        result["child_stderr_tail"] = text[-1500:]
+    private = {"turn_errors", "trace", "_child_stderr", "child_stderr_tail", "error"}
+    result = _redact({key: value for key, value in report.items() if key not in private}, paths)
+    result["turn_error_kinds"] = [kind for message in report.get("turn_errors", ()) if (kind := _error_kind(message))]
+    if "trace" in report:
+        result["trace"] = []
+        for event in report["trace"]:
+            public_event = _redact({key: value for key, value in event.items() if key != "turn_error"}, paths)
+            if kind := _error_kind(event.get("turn_error")):
+                public_event["turn_error_kind"] = kind
+            result["trace"].append(public_event)
+    if kind := _error_kind(report.get("error")):
+        result["error"] = kind
+    for post in result.get("provider_posts", ()):
+        if post.get("error"):
+            post["error"] = _error_kind(post["error"])
     return result
+
+
+def _diagnostic_text(text: str, paths: list[tuple[Path, str]]) -> str:
+    text = _redact(text, paths)
+    text = re.sub(r"(\bBearer[ \t]+)[A-Za-z0-9._~+/-]+=*", r"\1<redacted>", text, flags=re.IGNORECASE)
+    return re.sub(r"[A-Za-z0-9._+/=\-]{40,}", "<redacted>", text)
+
+
+def _write_report(dst: Path, report: dict, paths: list[tuple[Path, str]], *, keep_diagnostics: bool = False) -> dict:
+    public = _public_report(report, paths)
+    dst.write_text(json.dumps(public, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    if keep_diagnostics and (report["status"] not in {"scored", "smoke"} or report.get("cleanup") != "done"):
+        trial_error = _diagnostic_text(report.get("error") or "", paths)
+        errors = "\n".join(_diagnostic_text(message, paths) for message in report.get("turn_errors", ()) if message)
+        # Scrub before slicing so the boundary cannot expose part of a credential.
+        stderr = (report.get("_child_stderr") or b"").decode("utf-8", errors="replace")
+        tail = _diagnostic_text(stderr, paths)[-1500:]
+        dst.with_name("diagnostics.txt").write_text(
+            f"仅供本机排障，可能含本机信息，不得提交或外传\n\nTrial error:\n{trial_error}\n\n"
+            f"Turn errors:\n{errors}\n\nChild stderr tail:\n{tail}\n",
+            encoding="utf-8",
+        )
+    return public
 
 
 def _isolated_env(work: Path, evidence: Path) -> dict[str, str]:
@@ -181,6 +225,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ledger", type=Path)
     parser.add_argument("--request-cap", type=int, default=REQUEST_CAP)
     parser.add_argument("--offline-smoke", choices=SMOKES)
+    parser.add_argument("--keep-diagnostics", action="store_true", help="keep local-only error text and stderr for invalid runs")
     args = parser.parse_args(argv)
     if "WITTYCODE_TEST_WORK" in os.environ:
         parser.error("start this self-managed trial directly, never inside a managed run")
@@ -235,10 +280,7 @@ def main(argv: list[str] | None = None) -> int:
         report.update(status="cannot_run", passed=None, error=type(error).__name__)
     finally:
         _finalize_trial(report, temp, ledger, last_id if ledger is not None else 0)
-        report = _public_report(report, [*paths, (REPO, "<repo>")])
-        if "error" in report:
-            report["error"] = report["error"][:350]
-        dst.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        report = _write_report(dst, report, [*paths, (REPO, "<repo>")], keep_diagnostics=args.keep_diagnostics)
     print(dst.relative_to(REPO))
     print(json.dumps(_select(report, ("status", "passed", "tokens", "resume_to_oracle_s", "end", "error", "cleanup", "budget_after"))))
     if cancelled:

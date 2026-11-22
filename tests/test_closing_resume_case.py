@@ -123,14 +123,25 @@ def test_task_and_fixed_inputs(tmp_path):
 
 
 @pytest.mark.parametrize("bad_db", [None, b"not a SQLite database", b""])
-def test_check_handles_missing_and_bad_books(tmp_path, bad_db):
+@pytest.mark.parametrize("report_data, report_detail", [
+    (None, "missing"),
+    (b"wh,sku,qty\nW1,SKU-A,\xff\n", "not valid UTF-8"),
+    (b"wh,sku,qty\nW1,SKU-A,not-a-number\n", "malformed CSV"),
+])
+def test_check_handles_missing_and_bad_books(tmp_path, bad_db, report_data, report_detail):
     ws = tmp_path / "workspace"
     case.write_inputs(ws)
     if bad_db is not None:
         (ws / case.DB).write_bytes(bad_db)
-    (ws / "closing.csv").write_bytes(b"wh,sku,qty\nW1,SKU-A,\xff\n")
+    if report_data is not None:
+        (ws / "closing.csv").write_bytes(report_data)
     verdict = case.check(tmp_path)
     assert not verdict["ok"] and _failed(verdict) == CATEGORIES - {"inputs"}
+    details = [c["detail"] for c in verdict["checks"]]
+    assert all(str(ws) not in detail and ws.as_posix() not in detail for detail in details)
+    assert [c["detail"] for c in verdict["checks"] if c["category"] == "report"] == [report_detail]
+    book_details = [c["detail"] for c in verdict["checks"] if c["name"] == "books readable"]
+    assert book_details and all(detail.startswith("unreadable books: ") for detail in book_details)
     if bad_db is None:
         assert not (ws / case.DB).exists()
     else:

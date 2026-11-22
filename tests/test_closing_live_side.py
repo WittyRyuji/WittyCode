@@ -200,6 +200,84 @@ def test_resumed_turn_failure_stops_and_reports_saved_error(tmp_path, monkeypatc
     ]
 
 
+@pytest.mark.parametrize("limit", ["timeout", "request_cap"])
+@pytest.mark.parametrize("running", [False, True])
+def test_pump_only_interrupts_running_turns(tmp_path, trial_usage, limit, running):
+    from desktop.core.session_state import SessionState
+    from desktop.core.transcript import TurnStatus
+    from evals.closing_resume_case import live_trial
+
+    runner = live_side.Runner({"work": tmp_path, "mode": "pre_receipt", "request_cap": 0})
+    ctl = SimpleNamespace(state=SessionState.RUNNING if running else SessionState.READY,
+                          saved=SimpleNamespace(requests=[]),
+                          transcript=SimpleNamespace(turns=[SimpleNamespace(status=TurnStatus.FAILED)]))
+    interrupts = []
+
+    async def interrupt():
+        interrupts.append(True)
+        ctl.state = SessionState.READY
+
+    ctl.interrupt = interrupt
+    requests = live_side.RequestDelta(ctl)
+    if limit == "request_cap":
+        ctl.saved.requests.append({"kind": "fake"})
+    deadline = 0 if limit == "timeout" else float("inf")
+    asyncio.run(runner.pump(ctl, deadline=deadline, requests=requests))
+    assert interrupts == ([True] if running else [])
+    assert runner.stopped == (limit if running else "")
+    outcome = live_side._outcome(True, runner.stopped, live_side._turn_status(ctl))
+    assert outcome == ("stopped_books_right" if running else "turn_failed")
+    if not running:
+        ledger, last_id, _ = trial_usage
+        report = _trial_report(status=outcome, exit_code=2)
+        live_trial._finalize_trial(report, None, ledger, last_id)
+        assert report["status"] == "turn_failed" and report["passed"] is None and report["tokens"] is None
+
+
+@pytest.mark.parametrize("limit", ["timeout", "request_cap", ""])
+def test_resume_checks_shared_limits_before_followup(tmp_path, monkeypatch, limit):
+    from desktop.core.session_state import SessionState
+    from desktop.core.transcript import TurnStatus
+
+    clock = 0.0
+    monkeypatch.setattr(live_side, "time", SimpleNamespace(monotonic=lambda: clock, time=live_side.time.time))
+    runner = live_side.Runner({"work": tmp_path, "mode": "pre_receipt", "seconds": 10, "request_cap": 1})
+    runner.ws.mkdir(parents=True)
+    ctl = SimpleNamespace(state=SessionState.READY, autonomy="full", usage=None,
+                          saved=SimpleNamespace(items=[], turns=[], requests=[]),
+                          transcript=SimpleNamespace(turns=[SimpleNamespace(status=TurnStatus.INTERRUPTED)]))
+    sent = []
+
+    def send_prompt(text):
+        nonlocal clock
+        sent.append(text)
+        # Finish before the first poll; pump must not interrupt a finished turn.
+        ctl.transcript.turns.append(SimpleNamespace(status=TurnStatus.DONE))
+        ctl.saved.requests.append({})
+        if len(sent) == 1:
+            clock = 11.0 if limit == "timeout" else 1.0
+            if limit == "request_cap":
+                ctl.saved.requests.append({})
+        else:
+            (runner.ws / "closing.csv").touch()
+        return True
+
+    async def do_not_interrupt():
+        pytest.fail("a finished turn must not be interrupted")
+
+    async def open_saved(workspace, session_id):
+        return ctl
+
+    ctl.send_prompt, ctl.interrupt = send_prompt, do_not_interrupt
+    result = asyncio.run(runner._resume(SimpleNamespace(open_saved=open_saved), "checkpoint", {}))
+    wanted = [case.RESUME_INPUT] if limit else [case.RESUME_INPUT, live_side.FOLLOW_UP]
+    assert sent == wanted
+    assert [event["text"] for event in runner.trace if event["event"] == "user_message"] == wanted
+    assert runner.follow_ups == len(wanted) - 1 and runner.stopped == limit
+    assert result["end"] == (limit or "done")
+    assert (runner.ws / "closing.csv").exists() == (not limit)
+
+
 def test_request_cap_stops_without_followup(tmp_path):
     result = _run(tmp_path, "pre_receipt", "reference", request_cap=1)
     assert result["status"] == "smoke" and result["stopped"] == result["end"] == "request_cap"
@@ -231,8 +309,8 @@ def test_real_configuration_cannot_accept_a_script(tmp_path):
     assert not (tmp_path / "side.json").exists()
 
 
-@pytest.mark.parametrize("refresh_fails", [False, True])
-def test_real_resume_refreshes_metered_catalog_before_open_saved(tmp_path, monkeypatch, refresh_fails):
+@pytest.mark.parametrize("catalog", ["verified", "exception", "fallback"])
+def test_real_resume_refreshes_metered_catalog_before_open_saved(tmp_path, monkeypatch, catalog):
     from evals.inventory_resume_case import plan_meter
 
     calls = []
@@ -241,10 +319,15 @@ def test_real_resume_refreshes_metered_catalog_before_open_saved(tmp_path, monke
         pass
 
     class FakeEngine:
+        def __init__(self):
+            self.http = SimpleNamespace(_window=None)
+
         async def list_models(self, *, refresh=False):
             calls.append(("list_models", refresh))
-            if refresh_fails:
+            if catalog == "exception":
                 raise RuntimeError("catalog unavailable")
+            if catalog == "verified":
+                self.http._window = 128_000
             return [object(), object()]
 
         async def open_saved(self, workspace, session_id):
@@ -262,15 +345,16 @@ def test_real_resume_refreshes_metered_catalog_before_open_saved(tmp_path, monke
     monkeypatch.setattr(plan_meter, "make_engine", lambda *args, **kwargs: FakeEngine())
     monkeypatch.setattr(runner, "_setup", setup)
     monkeypatch.setattr(runner, "_books_at_crash", lambda: {})
-    if refresh_fails:
-        with pytest.raises(live_side.CannotRun, match="model catalog refresh failed"):
+    if catalog != "verified":
+        reason = "model catalog refresh failed" if catalog == "exception" else "no verified GET /models catalog"
+        with pytest.raises(live_side.CannotRun, match=reason):
             asyncio.run(runner.run())
         assert calls == [("list_models", True), ("close_all",)]
     else:
         with pytest.raises(ReachedOpenSaved):
             asyncio.run(runner.run())
         assert calls == [("list_models", True), ("open_saved", "checkpoint"), ("close_all",)]
-    assert [e["models"] for e in runner.trace if e["event"] == "catalog_refreshed"] == ([] if refresh_fails else [2])
+    assert [e["models"] for e in runner.trace if e["event"] == "catalog_refreshed"] == ([2] if catalog == "verified" else [])
 
 
 def test_trial_rejects_nested_run_before_touching_any_state(monkeypatch, capsys):
@@ -383,16 +467,19 @@ def test_missing_shared_ledger_is_refused_without_creating_one(tmp_path, monkeyp
     assert not missing.exists()
 
 
-def test_trial_preserves_and_redacts_turn_failed_without_scoring(tmp_path, monkeypatch, trial_usage):
+def test_trial_keeps_only_error_kinds_without_scoring(tmp_path, monkeypatch, trial_usage):
     from evals.closing_resume_case import live_trial
 
     work, evidence = tmp_path / "scratch", tmp_path / "evidence"
     work.mkdir()
     ledger, last_id, _ = trial_usage
     account = tmp_path / "account"
-    error = f"Fake error: {work}; {account}; {ledger.path}"
+    email = "demo@example.com"
+    extra_path = "C:/demo/private/state.txt"
+    short_token = "fake-" + "short"
+    error = f"refresh_disabled: {work}; {account}; {ledger.path}; {email}; {extra_path}; {short_token}"
     child_result = {"status": "turn_failed", "outcome": "turn_failed", "passed": None, "turn_errors": [error],
-                    "trace": [{"event": "turn_end", "turn_status": "failed", "turn_error": error}]}
+                    "note": error, "trace": [{"event": "turn_end", "turn_status": "failed", "turn_error": error}]}
 
     def run(argv, **kwargs):
         if argv[:2] == ["git", "archive"]:
@@ -412,13 +499,36 @@ def test_trial_preserves_and_redacts_turn_failed_without_scoring(tmp_path, monke
     live_trial._finalize_trial(report, None, ledger, last_id)
     assert report["status"] == report["outcome"] == "turn_failed" and report["exit_code"] == 2
     assert report["passed"] is None and report["tokens"] is None and report["tokens_spent"] == 17
-    redacted = live_trial._public_report(report, [(work, "<scratch>"), (account, "<account>"), (ledger.path, "<ledger>")])
-    assert redacted["turn_errors"] == ["Fake error: <scratch>; <account>; <ledger>"]
-    assert redacted["trace"][0]["turn_error"] == redacted["turn_errors"][0]
-    assert redacted["child_stderr_tail"] == redacted["turn_errors"][0] and "_child_stderr" not in redacted
+    evidence.mkdir()
+    dst = evidence / "trial.json"
+    public = live_trial._write_report(dst, report, [(work, "<scratch>"), (account, "<account>"), (ledger.path, "<ledger>")])
+    assert public["turn_error_kinds"] == ["auth_needs_refresh"]
+    assert public["trace"][0]["turn_error_kind"] == public["error"] == "auth_needs_refresh"
+    persisted = dst.read_text(encoding="utf-8")
+    for forbidden in (email, extra_path, short_token, '"turn_errors"', '"turn_error"', '"child_stderr_tail"', '"_child_stderr"'):
+        assert forbidden not in persisted
+    assert not (evidence / "diagnostics.txt").exists()
 
 
-def test_child_stderr_tail_redacts_paths_and_credentials(tmp_path):
+@pytest.mark.parametrize("message, kind", [
+    ("refresh_disabled", "auth_needs_refresh"),
+    ("登录已失效", "auth_needs_refresh"),
+    ("MeterBlocked: no verified GET /models catalog yet", "meter_no_catalog_proof"),
+    ("MeterBlocked: the shared budget is spent", "budget_spent"),
+    ("MeterBlocked: an earlier request has no settled usage", "meter_pending_usage"),
+    ("MeterBlocked: request refused", "meter_blocked"),
+    ("Unexpected failure", "other"),
+    ("", ""),
+])
+def test_trial_error_kind_allowlist(message, kind):
+    from evals.closing_resume_case import live_trial
+
+    report = live_trial._public_report({"turn_errors": [message], "trace": [{"turn_error": message}]}, [])
+    assert report["turn_error_kinds"] == ([kind] if kind else [])
+    assert report["trace"] == ([{"turn_error_kind": kind}] if kind else [{}])
+
+
+def test_opt_in_diagnostics_redact_and_only_write_for_invalid_runs(tmp_path):
     from evals.closing_resume_case import live_trial
 
     work, account, ledger = tmp_path / "scratch", tmp_path / "account", tmp_path / "budget.sqlite"
@@ -426,13 +536,32 @@ def test_child_stderr_tail_redacts_paths_and_credentials(tmp_path):
     jwt_like = ".".join(("a" * 14, "b" * 14, "c" * 14))
     base64_like = "a+/=" * 10
     prefix = "尾" * 1600
+    short_token = "fake-" + "short"
+    error = f"Fake turn error at {work}; Bearer {short_token}"
+    trial_error = f"no verified GET /models catalog at {account}; Bearer {short_token}"
     stderr = (f"Discard this earlier line\n{prefix}\n{work}; {account}; {ledger}\n"
-              f"bEaReR fake-short\n{jwt_like}\n{base64_like}\n").encode("utf-8") + b"\xff"
+              f"bEaReR {short_token}\n{jwt_like}\n{base64_like}\n").encode("utf-8") + b"\xff"
     expected = f"{prefix}\n<scratch>; <account>; <ledger>\nbEaReR <redacted>\n<redacted>\n<redacted>\n\ufffd"
-    report = live_trial._public_report({"status": "unmetered", "_child_stderr": stderr}, paths)
-    assert report == {"status": "unmetered", "child_stderr_tail": expected[-1500:]}
-    for status in ("scored", "smoke"):
-        assert live_trial._public_report({"status": status, "_child_stderr": stderr}, paths) == {"status": status}
+    for status in ("unmetered", "scored", "smoke"):
+        evidence = tmp_path / status
+        evidence.mkdir()
+        result = {"status": status, "cleanup": "done", "error": trial_error,
+                  "turn_errors": [error], "_child_stderr": stderr}
+        dst = evidence / "trial.json"
+        live_trial._write_report(dst, result, paths, keep_diagnostics=True)
+        assert json.loads(dst.read_text(encoding="utf-8")) == {
+            "status": status, "cleanup": "done", "error": "meter_no_catalog_proof", "turn_error_kinds": ["other"],
+        }
+        diagnostics = evidence / "diagnostics.txt"
+        if status != "unmetered":
+            assert not diagnostics.exists()
+            continue
+        text = diagnostics.read_text(encoding="utf-8")
+        assert text.splitlines()[0] == "仅供本机排障，可能含本机信息，不得提交或外传"
+        assert "Trial error:\nno verified GET /models catalog at <account>; Bearer <redacted>\n" in text
+        assert "Fake turn error at <scratch>; Bearer <redacted>" in text
+        assert text.split("\nChild stderr tail:\n")[1] == expected[-1500:] + "\n"
+        assert short_token not in text
 
 
 @pytest.mark.parametrize("oracle_ok, stopped, end, expected", [

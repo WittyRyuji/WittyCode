@@ -214,7 +214,7 @@ class Runner:
         """Run one user turn; the resumed turns share one deadline and request counter."""
         from desktop.core.session_state import SessionState
 
-        while True:
+        while controller.state is SessionState.RUNNING:
             if requests is not None and requests.update(controller) > self.request_cap:
                 self.stopped = "request_cap"
             elif time.monotonic() >= deadline:
@@ -226,8 +226,6 @@ class Runner:
                 ready_deadline = time.monotonic() + READY_WAIT
                 while controller.state is SessionState.RUNNING and time.monotonic() < ready_deadline:
                     await asyncio.sleep(0.02)
-                break
-            if controller.state is not SessionState.RUNNING:
                 break
             self._answer_prompts(controller)
             await asyncio.sleep(0.02)
@@ -394,6 +392,12 @@ class Runner:
             if (self.stopped or turn_status != "done" or (self.ws / "closing.csv").exists()
                     or self.follow_ups >= 2 or ctl.state is not SessionState.READY):
                 break
+            if requests.update(ctl) > self.request_cap:
+                self.stopped = "request_cap"
+                break
+            if time.monotonic() >= deadline:
+                self.stopped = "timeout"
+                break
             if fake is not None and self.follow_ups == 0 and self.smoke_branch == "blind_repeat_refused_then_reference":
                 fake.script(*script.reference_steps(self.mode))
             self.follow_ups += 1
@@ -434,6 +438,8 @@ class Runner:
                         models = await engine.list_models(refresh=True)
                     except Exception as error:
                         raise CannotRun(f"model catalog refresh failed ({type(error).__name__})") from error
+                    if getattr(engine.http, "_window", None) is None:
+                        raise CannotRun("no verified GET /models catalog after refresh")
                     self.event("catalog_refreshed", models=len(models), phase="resumed")
                     result = await self._resume(engine, session_id, precrash)
                 finally:

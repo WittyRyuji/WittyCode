@@ -205,26 +205,29 @@ def check(case_dir: Path) -> dict:
     def add(category: str, name: str, ok: bool, detail: str) -> None:
         checks.append({"name": name, "ok": ok, "detail": detail, "category": category})
 
+    def unreadable(error: OSError) -> str:
+        return "missing" if isinstance(error, FileNotFoundError) else f"unreadable: {type(error).__name__}"
+
     for rel, original in _inputs().items():
         try:
             same = (ws / rel).read_bytes() == original
             detail = "byte-identical" if same else "differs from the fixed input"
         except OSError as error:
-            same, detail = False, str(error)
+            same, detail = False, unreadable(error)
         add("inputs", f"{rel} unchanged", same, detail)
     try:
         names = {path.name for path in (ws / "inbox").iterdir()}
         extra = sorted(names - BATCHES.keys())
         add("inputs", "no extra inbox files", not extra, f"unexpected names: {extra!r}")
     except OSError as error:
-        add("inputs", "inbox readable", False, str(error))
+        add("inputs", "inbox readable", False, unreadable(error))
 
     want = expected()
     try:
         books = _read_books(ws / DB)
     except (OSError, sqlite3.Error, ValueError, RuntimeError) as error:
         for category in ("posts", "transfers", "skip_instruction", "adjustments", "close"):
-            add(category, "books readable", False, str(error))
+            add(category, "books readable", False, f"unreadable books: {type(error).__name__}")
     else:
         entries: dict[tuple[str, int], Counter] = defaultdict(Counter)
         for _, source, source_id, wh, sku, qty in books["entries"]:
@@ -294,7 +297,13 @@ def check(case_dir: Path) -> dict:
         add("report", "closing.csv matches expected sorted balances", actual == want_report,
             "header, order and rows match" if actual == want_report else f"expected {want_report!r}, got {actual!r}")
     except (OSError, ValueError, csv.Error) as error:
-        add("report", "closing.csv readable and well-formed", False, str(error))
+        if isinstance(error, OSError):
+            detail = unreadable(error)
+        elif isinstance(error, UnicodeDecodeError):
+            detail = "not valid UTF-8"
+        else:
+            detail = "malformed CSV"
+        add("report", "closing.csv readable and well-formed", False, detail)
 
     categories = {category: all(c["ok"] for c in checks if c["category"] == category) for category in CATEGORIES}
     return {"ok": all(categories.values()), "checks": checks, "categories": categories}
