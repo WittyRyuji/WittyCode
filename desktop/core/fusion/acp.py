@@ -55,6 +55,7 @@ def _ended(update: Any) -> bool:
 class AcpRun:
     acp_args: tuple[str, ...] = ()
     tool_free = False
+    persist_session = True
 
     def __init__(self, host: Any) -> None:
         self.host = host
@@ -411,13 +412,14 @@ class AcpRun:
         self.session = ident or result.get("sessionId", "")
         if not self.session:
             raise ChatGPTError("ACP 没有返回原生会话，未自动重试。", code="fusion_acp")
-        self.host.saved.origin["fusionAcp"] = {"session": self.session, "upto": saved.get("upto", 0) if ident else 0,
-                                               "promptAttempted": bool(ident) and not never_prompted}
-        if previous_empty:
-            self.host.saved.origin["fusionAcp"]["previousEmptySession"] = previous_empty
-        # The real native session id is known now; bind the archive before any retained-text write.
-        self.host._archive_before_handoff()
-        self.host._save_now(required=True)
+        if self.persist_session:
+            self.host.saved.origin["fusionAcp"] = {"session": self.session, "upto": saved.get("upto", 0) if ident else 0,
+                                                   "promptAttempted": bool(ident) and not never_prompted}
+            if previous_empty:
+                self.host.saved.origin["fusionAcp"]["previousEmptySession"] = previous_empty
+            # Bind the real native session id before any retained-text write.
+            self.host._archive_before_handoff()
+            self.host._save_now(required=True)
         try:
             await asyncio.wait_for(asyncio.gather(self.guard_seen.wait(), self.bridge_seen.wait()), GUARD_SECONDS)
         except asyncio.TimeoutError:

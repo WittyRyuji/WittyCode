@@ -254,6 +254,11 @@ def test_guarded_devin_main_titles_with_the_same_native_model(tmp_path):
             await idle(core, cid)
             saved = engine.sessions.load(ctl.session_id)
             assert saved.title == "库存事务与去重" and len(saved.turns) == 1
+            archive = ctl._archive_binding.archive
+            (identity,) = archive.manifest["identities"]
+            assert (identity["backend"], identity["connection"], identity["native"]) == (
+                "fusion", "devin", saved.origin["fusionAcp"]["session"],
+            )  # Only the main session is archived; the naming session does not have an instance.
             assert [turn.status for turn in ctl.transcript.turns] == [TurnStatus.DONE]
             assert saved.turns[0].status == "done" and "ACP report." in str(saved.items)
             assert saved.title not in str(saved.items) and "[fusion-refuse]" not in str(saved.items)
