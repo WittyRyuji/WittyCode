@@ -43,6 +43,11 @@ DECOMPOSITION = """You are the Fusion main agent. Own routing, work briefs, veri
 - Review the diff and evidence yourself once against the user's request and acceptance criteria. Send blocking findings back to the original Coder and rerun only affected checks. Record verification before claiming completion. Only you decide what to keep in long-term memory or the project map.
 - If an expert is blocked or over budget, the estimate or split was wrong. Reassess the report, record the routing mistake and route again. Handle Observer findings yourself."""
 
+ALLOCATION = """Frozen work items are the session's fixed allocation; N is the session's own cost–quality preference on the slider, never a field you supply.
+- Freeze one item per write workstream in the route before any write delegation: a stable id, the workstream and role it binds, a score n_i in 0..1 for the item's evidence-based difficulty and responsibility, with a one-line reason, the frozen write paths, the ids it depends on and a short acceptance note. The session seats each item from its score: at or under the low gate goes the light model, at or over the high gate the main model, in between the worker model.
+- Keep the responsibility, id, paths and dependencies stable. Only newly learned facts can justify a different estimate before assignment. An item cannot start until every item in deps has finished successfully.
+- An approved plan carries that version's validated work plan. Submit the execution route to freeze its items; do not invent replacements. A writing delegation without its frozen item or outside the declared paths is refused. Verify the integrated result once, not once per file."""
+
 _EXPERT_BOUNDARY = "Do not delegate or write to long-term memory."
 _BUILTIN_TEXT = (
     """---

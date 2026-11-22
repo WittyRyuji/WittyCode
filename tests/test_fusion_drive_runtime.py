@@ -7,6 +7,7 @@ import threading
 
 import pytest
 
+from desktop.core.fusion import step_budget
 from desktop.core.fusion.acp import AcpRun
 from desktop.core.fusion.drive.fingerprint import fingerprint
 from desktop.core.fusion.drive.retention import Retention
@@ -38,12 +39,24 @@ def _records(drive):
     return {entry.record.kind: entry.record for entry in drive.candidates(shared=False, retention=Retention())}
 
 
+def _stored_task() -> str:
+    """The brief text the runtime retains: a legacy delegation gets the band's ceiling appended."""
+    settings = AppSettings()
+    band = step_budget.resolve_band(
+        step_budget.Side(settings.fusion_steps_min_adaptive, settings.fusion_steps_min),
+        step_budget.Side(settings.fusion_steps_max_adaptive, settings.fusion_steps_max),
+        step_budget.task_size(paths=len(set(TASK["paths"])), acceptance="", text=TASK["task"]),
+        settings.max_steps)
+    return TASK["task"] + f"\n\nBudget: {step_budget.effective_steps(None, band)} steps ({step_budget.note(band, None)})"
+
+
 def test_delegation_retains_task_and_report_for_both_agents(tmp_path):
     async def go():
         project = tmp_path / "project"
         project.mkdir()
         stamp = fingerprint(project, TASK["paths"])
-        brief_pointer = "d-" + hashlib.sha256(TASK["task"].encode()).hexdigest()
+        task = _stored_task()
+        brief_pointer = "d-" + hashlib.sha256(task.encode()).hexdigest()
         with FakeResponses() as fake:
             engine = make_engine(tmp_path, fake)
             main = await engine.open_new(project, model="gpt-6.1-sol")
@@ -61,7 +74,7 @@ def test_delegation_retains_task_and_report_for_both_agents(tmp_path):
                 runtime = main._fusion
                 expert = next(iter(main.agents.values()))
                 assert expert.record.status == "done"
-                assert any(item.get("output") == HEADER + TASK["task"] for item in expert.controller.saved.items)
+                assert any(item.get("output") == HEADER + task for item in expert.controller.saved.items)
                 records = await asyncio.to_thread(lambda: _records(Drive(root, project, runtime.owner)))
                 brief, report = records["brief"], records["report"]
                 assert brief.pointers == (brief_pointer,)
@@ -70,7 +83,7 @@ def test_delegation_retains_task_and_report_for_both_agents(tmp_path):
                 assert brief.session == report.session == runtime.owner
                 assert brief.paths == report.paths == ("inventory.txt",)
                 assert brief.fingerprint == stamp != report.fingerprint == fingerprint(project, TASK["paths"])
-                assert brief.summary == "Inventory: " + TASK["task"]
+                assert brief.summary == "Inventory: " + " ".join(task.split(maxsplit=16)[:16])[:240]
                 assert report.summary == "Inventory [done]: Inventory verified."
                 assert any(f"Fusion Drive report {report.id}: {', '.join(report.pointers)}" in item.get("output", "")
                            for item in main.saved.items)
@@ -80,7 +93,7 @@ def test_delegation_retains_task_and_report_for_both_agents(tmp_path):
                     read = _call("read_record", pointer=brief_pointer)
                     tools.plan = True
                     assert tools.check(read).verdict == ALLOW
-                    assert (await tools.run(read)).output == HEADER + TASK["task"]
+                    assert (await tools.run(read)).output == HEADER + task
                     outcome = await tools.run(_call("read_record", pointer=report.pointers[0]))
                     assert not outcome.is_error and outcome.output.startswith(HEADER + "Inventory verified.")
                     assert "Evidence references:\n" in outcome.output and "retained as o-" in outcome.output

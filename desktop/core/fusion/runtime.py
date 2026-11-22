@@ -18,12 +18,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from weakref import WeakValueDictionary
 
-from desktop.core.fusion import gates, identity, inject, map as project_map, metrics, observer, step_budget
+from desktop.core.fusion import allocation, dispatch, gates, identity, inject, map as project_map, metrics, observer, review_policy, step_budget
 from desktop.core.fusion.drive.fingerprint import Manifest, _GitError, _head, changed_since, fingerprint, workspace_kind
 from desktop.core.fusion.drive.retention import Retention
 from desktop.core.fusion.drive.store import Drive, DriveError, Record, SessionUsage
 from desktop.core.fusion.protocol import (
-    REPORT_TOKENS, Brief, Report, Route, brief_writes, checks_after, parse_ratings, parse_report, parse_route, risk_signals, route_refusal,
+    REPORT_TOKENS, Brief, Report, Route, brief_writes, checks_after, parse_ratings, parse_report, parse_route, required_checks, risk_signals, route_refusal,
     rating_item_text, report_guidance, settle_ratings,
 )
 from desktop.core.fusion.reasoning import configured_effort
@@ -40,6 +40,32 @@ if TYPE_CHECKING:
     from desktop.core.chatgpt.controller import ChatGPTController
 
 _BUDGET_EXCEEDED = "The expert exceeded its {unit} budget. The estimate or the split was wrong; review the work before retrying."
+_RISK_PER_SIGNAL = 40
+"""Each acceptance-time risk signal adds this to a delivery's risk index."""
+
+
+def _risk_index(score: Any, preference: int, signals: int = 0) -> int:
+    """The delivery's 0..100 risk index: the frozen item's score percent shifted by the
+    preference's distance from neutral, plus a fixed weight per acceptance risk signal."""
+    return min(max(int(dispatch.check_score(score) * 100) + preference - 50 + _RISK_PER_SIGNAL * signals, 0), 100)
+
+
+def _current_evidence(delegations: list[DelegationResult], identity_name: str, last_write: float, *, seat: str = "") -> bool:
+    """One check kind is verified only by its latest finished run on its own seat: it must have
+    started after the last write, completed cleanly, reported ``done`` and kept its evidence.
+    A later blocked or failed run voids an earlier pass of the same kind; a run on another
+    seat never counts — equal models on different seats stay distinct."""
+    runs = [work for work in delegations if work.identity == identity_name and (not seat or work.seat == seat)]
+    if not runs:
+        return False
+    latest = max(runs, key=lambda work: work.finished)
+    return latest.started > last_write and latest.status == "done" and latest.report_status == "done" and latest.has_evidence
+
+
+_CHECK_KINDS = (("runner", "Runner", "L3"), ("sampler", "QualitySampler", "L2"), ("review", "QualitySampler", "L1"))
+"""Each acceptance check kind is one named run on a fixed seat: the Runner checks the whole
+delivery at L3, the QualitySampler samples independently at L2, and the same identity
+re-seated at L1 is the optional top review — a separate check, never the L2 sample again."""
 
 
 def native_model(page_id: str) -> str:
@@ -219,6 +245,8 @@ class DelegationResult:
     finished: float
     status: str
     report_status: str = ""
+    has_evidence: bool = False
+    seat: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,6 +278,9 @@ class RouteTurn:
     writing_route: Route | None = None
     writing_from_plan: bool = False
     workspace: asyncio.Task[WorkspaceStart | None] | None = None
+    plan_tokens_start: int | None = None
+    """Known session token spend when this turn's plan budget was first measured — the baseline
+    keeping ``known_tokens`` deltas inside this turn instead of the whole session."""
     changes: set[str] = field(default_factory=set)
     delegations: list[DelegationResult] = field(default_factory=list)
     observer_reported: bool = False
@@ -449,9 +480,19 @@ class FusionRuntime:
         turn = self.route_turn
         if turn is None or self.parent._turn is None or not self.gate("route"):
             return Outcome("There is no active Fusion route turn.", True)
-        route, problem = parse_route(args)
+        route, problem = parse_route(args, self.registry.policy.preference)
         if route is None:
             return Outcome(problem, True)
+        if self.gate("v3"):
+            frozen = dict(self.registry.allocations)
+            try:
+                self.registry.freeze(route.items, self.registry.policy.preference)
+                self._checkpoint()
+            except BaseException as error:
+                self.registry.allocations = frozen
+                if isinstance(error, FusionError):
+                    return Outcome(f"Route not submitted: {error}", True)
+                raise
         if turn.reroute_due:
             self.registry.misroutes += 1
             try:
@@ -477,9 +518,49 @@ class FusionRuntime:
         if expert.finished_at is None:
             return
         turn.delegations.append(DelegationResult(expert.label, expert.identity, paths, expert.started_at, expert.finished_at,
-                                                 expert.status, report.status if report is not None else ""))
+                                                 expert.status, report.status if report is not None else "",
+                                                 bool(report.evidence) if report is not None else False, expert.seat))
         if turn.workspace is not None and (start := await asyncio.shield(turn.workspace)) is not None:
             turn.changes.update(await asyncio.to_thread(start.changed, self.parent.project))
+
+    def _acceptance_signals(self, turn: RouteTurn, writes: list[DelegationResult]) -> tuple[str, ...]:
+        """The risk signals so far: a non-clean Coder report, an Observer report, workspace
+        changes outside the declared writes, or a repair after a failed acceptance check."""
+        paths = {os.path.normcase(path).replace("\\", "/") for work in writes for path in work.paths}
+        if self._map_file_written:
+            paths.add(".witty_map.md")  # An authorized program-managed write is not expert scope drift.
+        changed = (os.path.normcase(path).replace("\\", "/") for path in turn.changes)
+        out_of_scope = any(not any(name == path or name.startswith(path + "/") for path in paths) for name in changed)
+        status = next((work.report_status for work in writes if work.identity == "Coder" and work.report_status not in ("", "done")), "")
+        runners = [work for work in turn.delegations if work.identity == "Runner" and work.report_status]
+        repaired = any(runner.report_status != "done" and any(work.identity == "Coder" and work.started >= runner.finished for work in writes)
+                       for runner in runners)
+        return risk_signals(status=status, observer_reported=turn.observer_reported, out_of_scope=out_of_scope, repaired=repaired)
+
+    def _check_facts(self, turn: RouteTurn, writes: list[DelegationResult], last_write: float) -> tuple[tuple[str, ...], tuple[str, ...], int]:
+        """The facts a V3 verdict or a check-seat choice is built on: the current evidence by
+        check kind, the risk signals and the delivery's risk index."""
+        checks = tuple(name for name, identity_name, seat in _CHECK_KINDS
+                       if _current_evidence(turn.delegations, identity_name, last_write, seat=seat))
+        signals = self._acceptance_signals(turn, writes)
+        scores = [dispatch.check_score(item["score"]) for (workstream, _), item in self.registry.allocations.items()
+                  if workstream in turn.workstreams]
+        return checks, signals, _risk_index(max(scores, default=0), self.registry.policy.preference, len(set(signals)))
+
+    def _check_seat(self, name: str, turn: RouteTurn | None) -> str:
+        """The seat an unfrozen read-only check takes: the Runner always checks at L3; the
+        QualitySampler samples at L2 and may take the L1 review seat only once an L2 sample
+        with current evidence is on record and the delivery's risk calls for it."""
+        if name == "Runner":
+            return "L3"
+        writes = [work for work in turn.delegations if work.paths] if turn is not None else []
+        if not writes:
+            return "L2"
+        checks, _, risk = self._check_facts(turn, writes, max(work.finished for work in writes))
+        if "sampler" in checks and review_policy.plan_review(self.registry.policy.preference, risk,
+                                                            runnable=False, has_current_evidence=False).review:
+            return "L1"
+        return "L2"
 
     def acceptance_verdict(self) -> AcceptanceVerdict | None:
         turn = self.route_turn
@@ -497,16 +578,24 @@ class FusionRuntime:
             if turn.writing_route is None or turn.writing_route.destination == "self":
                 return None
             route, from_plan = turn.writing_route, turn.writing_from_plan
-        paths = {os.path.normcase(path).replace("\\", "/") for work in writes for path in work.paths}
-        if self._map_file_written:
-            paths.add(".witty_map.md")  # An authorized program-managed write is not expert scope drift.
-        changed = (os.path.normcase(path).replace("\\", "/") for path in turn.changes)
-        out_of_scope = any(not any(name == path or name.startswith(path + "/") for path in paths) for name in changed)
-        status = next((work.report_status for work in writes if work.identity == "Coder" and work.report_status not in ("", "done")), "")
-        runners = [work for work in turn.delegations if work.identity == "Runner" and work.report_status]
-        repaired = any(runner.report_status != "done" and any(work.identity == "Coder" and work.started >= runner.finished for work in writes)
-                       for runner in runners)
-        signals = risk_signals(status=status, observer_reported=turn.observer_reported, out_of_scope=out_of_scope, repaired=repaired)
+        elif self.gate("v3") and skip and turn.writing_route is not None and turn.writing_route.destination != "self":
+            # V3: a self_check re-route only explains the gap; it never erases what a delegated write owes.
+            route, from_plan = turn.writing_route, turn.writing_from_plan
+        if self.gate("v3"):
+            checks, signals, risk = self._check_facts(turn, writes, last_write)
+            declared = required_checks(route)
+            plan = review_policy.plan_review(self.registry.policy.preference, risk, runnable="runner" in declared,
+                                             has_current_evidence="runner" in checks)
+            required = tuple(name for name, needed in (("runner", plan.runner),
+                                                       ("sampler", "sampler" in declared or plan.sampler),
+                                                       ("review", plan.review)) if needed)
+            # A self_check only explains the gap; it never waives it, and a deliverable nothing
+            # verifies — no runnable check and no current evidence — cannot be marked verified.
+            missing = tuple(check for check in required if check not in checks)
+            if not missing and not plan.sufficient:
+                missing = ("runner",)
+            return AcceptanceVerdict(route, from_plan, checks, missing, signals, skip)
+        signals = self._acceptance_signals(turn, writes)
         checks = tuple(check for check, identity_name in (("runner", "Runner"), ("sampler", "QualitySampler"))
                        if any(work.identity == identity_name and work.report_status and work.finished > last_write for work in turn.delegations))
         missing = () if skip else tuple(check for check in checks_after(route, signals) if check not in checks)
@@ -1059,10 +1148,11 @@ class FusionRuntime:
 
     def instructions(self) -> str:
         policy = self.registry.policy
+        allocation = f"\n\n{identity.ALLOCATION}" if self.gate("v3") else ""
         if self.brief_enabled:
             return (self.identities.main + "\n\nUse the user's weights as a preference when deciding whether to delegate: "
                     f"cost x{1.5 - policy.preference / 100:.2f}, quality x{0.5 + policy.preference / 100:.2f} "
-                    "(result quality and verification depth, not speed).")
+                    "(result quality and verification depth, not speed)." + allocation)
         return (
             "Fusion mode: you are the fixed main agent. You own task analysis, planning, delegation and final verification. "
             "For implementation work, assess delegation before doing the whole task yourself: use experts for separable "
@@ -1083,6 +1173,7 @@ class FusionRuntime:
             "cost and result quality; the weights are not prices, guarantees or hard rules. Decide the number of calls "
             "and work needed yourself. "
             "Do not assume an expert's claim is proof; inspect the workspace and evidence before reporting success."
+            + allocation
         )
 
     def context_snapshot(self, *, expert_id: str = "") -> str:
@@ -1184,9 +1275,9 @@ class FusionRuntime:
         prepared = FusionRegistry.from_json(self.registry.project, self.registry.to_json())
         prepared.policy = policy
         for expert in list(prepared.agents.values()):
-            if expert.status != "retired" and not policy.allowed(expert.model, expert.role):
-                # Changing the role's configured model authorises a context-preserving handoff, never an execution.
-                model = policy.light if expert.role == "light" else policy.workers[0]
+            if expert.status != "retired" and not policy.allowed(expert.model, expert.role, expert.seat):
+                # Changing the seat's configured model authorises a context-preserving handoff, never an execution.
+                model = policy.seat_model(expert.seat) if expert.seat else (policy.light if expert.role == "light" else policy.workers[0])
                 incomplete = expert.status in ("interrupted", "failed")
                 replacement = prepared.transfer(expert.id, model, expert.role)
                 replacement.status = "interrupted" if incomplete else "idle"
@@ -1289,6 +1380,9 @@ class FusionRuntime:
         return True
 
     def _expert_effort(self, expert: Expert, profile: identity.Identity | None) -> str | None:
+        if expert.seat:
+            # The seat picks the reasoning level before the identity's own default.
+            return self.reasoning_for(expert.model, allocation.SEAT_ROLE.get(expert.seat, expert.role))
         if profile is not None and profile.reasoning:
             info = self.parent.manager.model_info(native_model(expert.model))
             if info is None or profile.reasoning not in info.efforts:
@@ -1392,21 +1486,103 @@ class FusionRuntime:
         return next((block.text for block in reversed(turn.blocks)
                      if isinstance(block, TextBlockView) and block.text.strip()), "") if turn else ""
 
-    def _step_band(self, *, paths: int, acceptance: str, text: str) -> step_budget.Band:
+    def _step_band(self, *, paths: int, acceptance: str, text: str, risk: int = 0) -> step_budget.Band:
         settings = self.parent.manager.settings
         return step_budget.resolve_band(
             step_budget.Side(settings.fusion_steps_min_adaptive, settings.fusion_steps_min),
             step_budget.Side(settings.fusion_steps_max_adaptive, settings.fusion_steps_max),
             step_budget.task_size(paths=paths, acceptance=acceptance, text=text),
-            settings.max_steps)
+            settings.max_steps, risk=risk)
+
+    def _plan_budget(self) -> Mapping[str, Any] | None:
+        """The validated work plan's ``budget`` for the current turn, when a V3 plan declared one."""
+        if not self.gate("v3"):
+            return None
+        declare = getattr(self.parent, "_declare_state", None)
+        receipt = declare() if declare is not None else None
+        workplan = receipt.get("workplan") if isinstance(receipt, Mapping) else None
+        budget = workplan.get("budget") if isinstance(workplan, Mapping) else None
+        return budget if isinstance(budget, Mapping) else None
+
+    def _planned(self, band: step_budget.Band) -> step_budget.PlannedBudget | None:
+        """The plan's budget resolved against this delegation's band and the session run-time cap."""
+        return step_budget.planned_budget(self._plan_budget(), band, self.registry.policy.max_seconds)
+
+    def _plan_tokens(self) -> int | None:
+        """The plan's session-wide token estimate for this turn; ``None`` for adaptive or no plan."""
+        budget = self._plan_budget()
+        tokens = budget.get("tokens") if isinstance(budget, Mapping) else None
+        return tokens if type(tokens) is int else None
+
+    def _plan_spent(self) -> int | None:
+        """Known token spend charged since this turn's plan budget was first measured.
+
+        ``None`` when usage is unknown (unmetered or an unreliable expert counter): an estimate
+        cannot honestly be checked against a number that is not there, so the gate must say the
+        budget needs review rather than read an unknown as zero."""
+        if self.registry.unmetered:
+            return None
+        turn = self.route_turn
+        if turn is None:
+            return 0
+        if turn.plan_tokens_start is None:
+            try:
+                turn.plan_tokens_start = self.known_tokens()
+            except FusionError:
+                return None
+        try:
+            return max(self.known_tokens() - turn.plan_tokens_start, 0)
+        except FusionError:
+            return None
+
+    def _plan_budget_gate(self, task: str) -> str:
+        """The plan's token estimate as a refusal message; empty while the estimate holds.
+
+        The plan's ``tokens`` is a review threshold, not a backend limit: delegation is refused
+        once the turn's known spend plus this delegation's own input estimate would exceed it,
+        so the main agent has to re-plan rather than overspend silently. Unknown usage can never
+        clear the estimate, so it needs an explicit review, never a pass."""
+        tokens = self._plan_tokens()
+        if tokens is None:
+            return ""
+        from desktop.core.harness import compact
+        estimate = compact.estimate_text(task)
+        spent = self._plan_spent()
+        if spent is None:
+            return "The plan's token budget needs review: this turn's expert usage is unknown, so its estimate cannot be checked."
+        if spent + estimate > tokens:
+            return (f"The plan's token estimate (~{tokens}) is reached or would be exceeded: about {spent} tokens are already "
+                    f"charged to this turn's delegations and this delegation alone estimates {estimate} input tokens; "
+                    "review the spend before delegating further.")
+        return ""
 
     def _bounded_brief(self, brief: Brief) -> Brief:
-        """Clamp the requested steps into the configured band and record where the number came from."""
+        """Clamp the requested steps into the configured band and record where the numbers came from."""
+        risk = 0
+        if self.gate("v3"):
+            profile = self.identities.get(brief.identity)
+            record = self.registry.allocation_for(brief.workstream, profile.role) if profile is not None else None
+            if record is not None:
+                # The frozen item's score and the session preference set the rework allowance.
+                risk = _risk_index(record["score"], self.registry.policy.preference)
         band = self._step_band(paths=len(set(brief.paths)), acceptance=brief.acceptance,
-                               text=brief.goal + brief.acceptance)
+                               text=brief.goal + brief.acceptance, risk=risk)
         requested = brief.budget.get("steps")
-        return replace(brief, budget={**brief.budget, "steps": step_budget.effective_steps(requested, band)},
-                       budget_note=step_budget.note(band, requested))
+        steps = step_budget.effective_steps(requested, band)
+        note = step_budget.note(band, requested)
+        seconds = brief.budget.get("seconds")
+        planned = self._planned(band)
+        if planned is not None:
+            # Plan numbers only ever tighten the resolved band and the session cap.
+            if planned.steps is not None:
+                steps = min(steps, planned.steps)
+            if planned.seconds is not None:
+                seconds = min(seconds, planned.seconds) if seconds is not None else planned.seconds
+            note = f"{note}; {planned.note}"
+        budget = {**brief.budget, "steps": steps}
+        if seconds is not None:
+            budget["seconds"] = seconds
+        return replace(brief, budget=budget, budget_note=note)
 
     async def delegate_brief(self, brief: Brief, *, tool_call: Call | None = None) -> Outcome:
         if not self.brief_enabled:
@@ -1436,24 +1612,58 @@ class FusionRuntime:
             await self.prepare_map_choice()
             if refusal := self.route_guard("delegate", (scope,)):
                 return Outcome(refusal, True)
+        seat, record = "", None
+        if self.gate("v3"):
+            policy = self.registry.policy
+            if profile is not None and profile.name in ("Runner", "QualitySampler") and not writes:
+                # A read-only check has no frozen work item: the harness seats it by kind — the
+                # Runner at L3, the QualitySampler at L2, L1 only once an L2 sample is on record.
+                seat = self._check_seat(profile.name, route_turn)
+                model = policy.seat_model(seat)
+            else:
+                record = self.registry.allocation_for(brief.workstream if brief is not None else scope, role)
+                if record is None:
+                    if writes:
+                        return Outcome("Submit the route with a frozen work item for this workstream and role before delegating writes.", True)
+                else:
+                    # The frozen item picks the seat and its policy model; a conflicting model argument is never used.
+                    seat, model = record["seat"], policy.seat_model(record["seat"])
+                    if writes:
+                        try:
+                            covered = self.registry.allocation_covers(record, scope, paths)
+                        except FusionError as error:
+                            return Outcome(str(error), True)
+                        if not covered:
+                            return Outcome("The delegation's write paths exceed the frozen work item's scope.", True)
         native = native_model(model)
         if self.parent.manager.model_info(native) is None:
             return Outcome("The requested expert model is unavailable; no fallback was selected.", True)
         legacy_steps: int | None = None
+        plan_seconds: int | None = None
         if brief is None:
-            # The legacy entry has no estimate of its own: it always gets the band's ceiling.
-            band = self._step_band(paths=len(set(paths or ())), acceptance="", text=task)
+            # The legacy entry has no estimate of its own: it always gets the band's ceiling,
+            # still tightened by this turn's plan budget when the plan declared numbers.
+            band = self._step_band(paths=len(set(paths or ())), acceptance="", text=task,
+                                   risk=_risk_index(record["score"], self.registry.policy.preference) if record is not None else 0)
+            planned = self._planned(band)
             legacy_steps = step_budget.effective_steps(None, band)
-            task += f"\n\nBudget: {legacy_steps} steps ({step_budget.note(band, None)})"
+            if planned is not None:
+                if planned.steps is not None:
+                    legacy_steps = min(legacy_steps, planned.steps)
+                plan_seconds = planned.seconds
+            note = step_budget.note(band, None) + (f"; {planned.note}" if planned is not None else "")
+            task += f"\n\nBudget: {legacy_steps} steps ({note})"
+        if refusal := self._plan_budget_gate(task):
+            return Outcome(refusal, True)
         known = set(self.registry.agents)
         snapshots = {key: replace(expert) for key, expert in self.registry.agents.items()}
         calls = self.registry.calls
         saved_fusion = self.parent.saved.fusion
         try:
             self.check_budget()
-            expert = (self.registry.assign(scope, model, role) if paths is None else
+            expert = (self.registry.assign(scope, model, role, seat=seat) if paths is None else
                       self.registry.assign_workstream(scope, paths, model, role, identity=profile.name if profile else "",
-                                                      reuse=profile.reuse if profile else True))
+                                                      reuse=profile.reuse if profile else True, seat=seat))
             transferred_new = bool(expert.transferred_from and expert.started_at == 0)
             self.registry.begin(expert.id, resume=resume)
             expert.task = task
@@ -1562,7 +1772,8 @@ class FusionRuntime:
                 prompt += ("\n\nWhen you have a verdict, report it with submit_report; ending with a plain "
                            "message is also fine. " + reporting.guidance())
             if self.gate("observer"):
-                budget = brief.budget if brief is not None else ({} if legacy_steps is None else {"steps": legacy_steps})
+                budget = brief.budget if brief is not None else {key: value for key, value in (
+                    ("steps", legacy_steps), ("seconds", plan_seconds)) if value is not None}
                 observed = ObservedRun(observer.Watch(write_paths, read_only=child._fusion_read_only,
                                                        steps=budget.get("steps", 0), seconds=budget.get("seconds", 0),
                                                        started=time.monotonic()))
@@ -1582,6 +1793,8 @@ class FusionRuntime:
             seconds = self.registry.policy.max_seconds
             if brief is not None:
                 seconds = min(seconds, brief.budget.get("seconds", seconds))
+            elif plan_seconds is not None:
+                seconds = min(seconds, plan_seconds)
             clock = asyncio.get_running_loop().time
             deadline = clock() + seconds
             evidence_start = child._turn_start

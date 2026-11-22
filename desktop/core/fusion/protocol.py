@@ -9,6 +9,7 @@ from typing import Any
 
 from desktop.core.harness.compact import estimate_text
 
+from . import allocation
 from .identity import load
 
 _IDENTITIES = load(None)
@@ -63,6 +64,24 @@ ROUTE_PARAMETERS: dict[str, Any] = {
         "destination": {"type": "string", "enum": list(_DESTINATIONS), "description": "Do the work yourself, give it to one Coder, or split it into independent deliverables."},
         "reason": {"type": "string", "minLength": 1, "description": "Why this destination fits the work."},
         "verification": {"type": "string", "enum": list(_CHECKS), "description": "How the result will be checked."},
+        "items": {"type": "array", "maxItems": 16, "items": {
+            "type": "object", "additionalProperties": False,
+            "properties": {
+                "id": {"type": "string", "minLength": 1, "maxLength": 64, "description": "Stable work-item id that dependencies and later routes refer to."},
+                "workstream": {"type": "string", "minLength": 1, "maxLength": _MAX_WORKSTREAM, "description": "The workstream this item binds; a delegation of the same workstream and role uses it."},
+                "role": {"type": "string", "enum": ["worker", "light"], "description": "The expert role the item binds (a Coder is worker)."},
+                "score": {"type": "number", "description": "Decimal score in 0..1: at or under the low gate the item seats the light model (L3), at or over the high gate the main model (L1), otherwise the worker model (L2)."},
+                "reason": {"type": "string", "minLength": 1, "description": "Why this item deserves its score."},
+                "paths": {"type": "array", "items": {"type": "string", "minLength": 1}, "maxItems": _MAX_PATHS, "description": "Frozen write scope: delegated write paths must stay inside these."},
+                "deps": {"type": "array", "items": {"type": "string"}, "description": "Ids of items that must finish first."},
+                "acceptance": {"type": "string", "description": "Frozen acceptance summary kept with the item."},
+                "new_facts": {"type": "string", "minLength": 1, "description": "Evidence of facts learned after the item froze; required before a frozen item's score may be re-estimated. Only score and reason may change, and only while the workstream has no owner."},
+            },
+            "required": ["id", "workstream", "role", "score", "reason"],
+        }, "description": "Frozen work items this route allocates: every write workstream needs one before it can be delegated. "
+                           "Once frozen they cannot be re-scored or renamed; an approved plan supplies none. An identical "
+                           "resubmission stays a no-op even after the preference moved; declared new_facts re-estimate only "
+                           "score and reason before the workstream has an owner."},
     },
     "required": ["destination", "reason", "verification"],
 }
@@ -205,6 +224,7 @@ class Route:
     destination: str
     reason: str
     verification: str
+    items: tuple[dict[str, Any], ...] = ()
 
 
 def _nonempty(value: Any) -> bool:
@@ -382,7 +402,8 @@ def parse_ratings(args: Mapping[str, Any], used: Sequence[str]) -> tuple[dict[st
     return valid, tuple(problems)
 
 
-def parse_route(args: Mapping[str, Any]) -> tuple[Route | None, str]:
+def parse_route(args: Mapping[str, Any], N: object = None) -> tuple[Route | None, str]:
+    """Validate a route; ``N`` is the session preference the runtime supplies, never the model's slider."""
     if not isinstance(args, Mapping):
         return None, "Provide the route as an object."
     destination, reason, verification = (args.get(key) for key in ("destination", "reason", "verification"))
@@ -392,7 +413,22 @@ def parse_route(args: Mapping[str, Any]) -> tuple[Route | None, str]:
         return None, "Give a non-empty reason for the route."
     if verification not in tuple(_CHECKS):
         return None, "Use a verification depth of self_check, runner or runner_and_sampler."
-    return Route(destination, reason.strip(), verification), ""
+    raw_items = args.get("items", [])
+    if not isinstance(raw_items, (list, tuple)) or len(raw_items) > 16:
+        return None, "Provide at most 16 work items."
+    items: list[dict[str, Any]] = []
+    for raw in raw_items:
+        try:
+            items.append(allocation.seal(raw, N))
+        except ValueError as error:
+            return None, str(error)
+    binds = [allocation.key(item["workstream"], item["role"]) for item in items]
+    if len(set(binds)) != len(binds):
+        return None, "Each work item needs a distinct workstream and role."
+    ids = [item["id"] for item in items]
+    if len(set(ids)) != len(ids):
+        return None, "Each work item needs a distinct id."
+    return Route(destination, reason.strip(), verification, tuple(items)), ""
 
 
 SELF_EDITS = 2

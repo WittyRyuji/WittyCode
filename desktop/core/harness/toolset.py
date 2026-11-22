@@ -23,6 +23,7 @@ import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any
 
+from desktop.core.fusion import debate_bridge
 from desktop.core.fusion import tools as fusion_tools
 from desktop.core.harness import asking, plan_approval
 from desktop.core.harness.loop import ALLOW, ASK, DENY, Call, Outcome, Verdict
@@ -84,6 +85,10 @@ class HarnessTools:
         self.route_submitter: Callable[[Mapping[str, Any]], Awaitable[Outcome]] | None = None
         self.map_chooser: Callable[[Call], Awaitable[Outcome]] | None = None
         self.map_updater: Callable[[Mapping[str, Any]], Awaitable[Outcome]] | None = None
+        self.topic_declarer: Callable[[str, str, str], Awaitable[Outcome]] | None = None
+        self.declare_state: Callable[[], Mapping[str, Any] | None] | None = None
+        """The main session's V3 turn declaration receipt (``intent``, ``failed``), or ``None`` while undeclared."""
+        self.work_plan_submitter: Callable[[Mapping[str, Any]], Awaitable[Outcome]] | None = None
         self.route_guard: Callable[[str, tuple[str, ...]], str] | None = None
         self.route_edit: Callable[[], None] | None = None
         self.rating_submitter: Callable[[Mapping[str, Any]], Awaitable[Outcome]] | None = None
@@ -133,6 +138,10 @@ class HarnessTools:
             declared.append(dict(fusion_tools.CHOOSE_MAP_DECLARATION))
         if self.map_updater is not None:
             declared.append(dict(fusion_tools.UPDATE_MAP_DECLARATION))
+        if self.topic_declarer is not None:
+            declared.append(dict(debate_bridge.DECLARE_TOPIC_DECLARATION))
+        if self.work_plan_submitter is not None:
+            declared.append(dict(debate_bridge.SUBMIT_WORK_PLAN_DECLARATION))
         for name, (_, tool) in self._mcp.items():
             declared.append({"name": name, "description": tool.description, "parameters": tool.input_schema})
         return [item for item in declared if not self.identity_refusal(item["name"])] if self.identity_tools is not None else declared
@@ -155,7 +164,8 @@ class HarnessTools:
             kind = spec.kind
         elif name == fusion_tools.READ_RECORD:
             kind = "read"
-        elif name in (asking.NAME, plan_approval.NAME, fusion_tools.NAME, fusion_tools.BATCH_NAME):
+        elif name in (asking.NAME, plan_approval.NAME, fusion_tools.NAME, fusion_tools.BATCH_NAME,
+                      debate_bridge.DECLARE_TOPIC, debate_bridge.SUBMIT_WORK_PLAN):
             return IDENTITY_REFUSAL
         else:
             return ""  # Unknown names still go through the usual unknown-tool handling.
@@ -173,7 +183,9 @@ class HarnessTools:
                 or (name == fusion_tools.SUBMIT_ROUTE and self.route_submitter is not None)
                 or (name == fusion_tools.RATE_RECORDS and self.rating_submitter is not None)
                 or (name == fusion_tools.CHOOSE_MAP and self.map_chooser is not None)
-                or (name == fusion_tools.UPDATE_MAP and self.map_updater is not None))
+                or (name == fusion_tools.UPDATE_MAP and self.map_updater is not None)
+                or (name == debate_bridge.DECLARE_TOPIC and self.topic_declarer is not None)
+                or (name == debate_bridge.SUBMIT_WORK_PLAN and self.work_plan_submitter is not None))
 
     def _identity_check(self, call: Call) -> Verdict | None:
         reason = self.identity_refusal(call.name)
@@ -187,7 +199,55 @@ class HarnessTools:
             return verdict
         return None
 
+    def _intent_check(self, call: Call) -> str:
+        """The V3 intent gate: a turn that may plan, route, delegate or change needs a declared intent — ``execute``
+        lets them through once a complex execution validated its work plan, ``plan`` only the work-plan and
+        submit_plan calls. Chat and reads never need a declaration; an untrusted server's ``read_only`` flag does
+        not exempt a tool, and the map callbacks act like the writes they are."""
+        if call.name == debate_bridge.DECLARE_TOPIC:
+            return ""
+        plan_only = call.name == plan_approval.NAME
+        work_plan = call.name == debate_bridge.SUBMIT_WORK_PLAN
+        if not (plan_only or work_plan):
+            gated = call.name in (fusion_tools.SUBMIT_ROUTE, fusion_tools.NAME, fusion_tools.BATCH_NAME,
+                                  fusion_tools.CHOOSE_MAP, fusion_tools.UPDATE_MAP)
+            spec = self.registry.get(call.name)
+            if not gated and spec is not None:
+                gated = spec.kind == "edit" or spec.kind == "exec" and self._planned(spec, call).verdict != ALLOW
+            if not gated and spec is None:
+                mcp = self._mcp.get(call.name)
+                gated = mcp is not None and not (mcp[1].read_only and getattr(mcp[0], "trusted_annotations", False))
+            if not gated:
+                return ""
+        receipt = self.declare_state()
+        if isinstance(receipt, Mapping) and receipt.get("failed"):
+            return "The turn's declaration failed, so it may not plan, route, delegate or change anything."
+        intent = receipt.get("intent") if isinstance(receipt, Mapping) else None
+        kind = receipt.get("kind") if isinstance(receipt, Mapping) else None
+        if work_plan:
+            if intent == "plan" or intent == "execute" and kind == "complex":
+                return ""
+            return "submit_work_plan follows a plan or complex-execute declaration."
+        if intent == "execute":
+            if plan_only:
+                return ""
+            if kind == "complex" and not receipt.get("approved") and not receipt.get("workplan"):
+                return "Validate this turn's work plan with submit_work_plan before routing, delegating or changing anything."
+            return ""
+        if intent == "plan" and plan_only:
+            if receipt.get("workplan"):
+                return ""
+            return "Validate the work plan with submit_work_plan before submitting the plan for approval."
+        if intent == "plan":
+            return "This turn was declared for planning: submit_work_plan and submit_plan are the only gated calls it allows."
+        if intent == "discussion":
+            return "This turn was declared a discussion: it may not plan, route, delegate or change anything."
+        return "Call declare_topic first: without a declared intent this turn may not plan, route, delegate or change anything."
+
     def _route_check(self, call: Call) -> str:
+        if self.declare_state is not None:
+            if refusal := self._intent_check(call):
+                return refusal
         guard = self.route_guard
         if guard is None or self.plan or self.permission_parent is not None and self.permission_parent.plan:
             return ""
@@ -234,6 +294,10 @@ class HarnessTools:
             if plan:
                 return Verdict(DENY, PLAN_REFUSAL)
             return Verdict(ALLOW) if self.route_submitter is not None else Verdict(DENY, "No active Fusion route.")
+        if call.name == debate_bridge.DECLARE_TOPIC:  # (read-only: the debate never changes the workspace)
+            return Verdict(ALLOW) if self.topic_declarer is not None else Verdict(DENY, "Fusion debate is unavailable.")
+        if call.name == debate_bridge.SUBMIT_WORK_PLAN:  # (read-only too: it only records the turn's validated plan)
+            return Verdict(ALLOW) if self.work_plan_submitter is not None else Verdict(DENY, "Fusion work plans are unavailable.")
         spec = self.registry.get(call.name)
         if spec is not None:
             if plan:
@@ -329,6 +393,22 @@ class HarnessTools:
         return outcome
 
     async def _run(self, call: Call) -> Outcome:
+        if call.name == debate_bridge.DECLARE_TOPIC:
+            verdict = self.check(call)
+            if verdict.verdict != ALLOW or self.topic_declarer is None:
+                return Outcome(verdict.reason, True)
+            values, problem = debate_bridge.parse_topic(call.args)
+            if problem or values is None:
+                return Outcome(problem, True)
+            return await self.topic_declarer(*values)
+        if call.name == debate_bridge.SUBMIT_WORK_PLAN:
+            verdict = self.check(call)
+            if verdict.verdict != ALLOW or self.work_plan_submitter is None:
+                return Outcome(verdict.reason, True)
+            data = call.args.get("data")
+            if not isinstance(data, Mapping):
+                return Outcome("Provide the work plan as a `data` JSON object.", True)
+            return await self.work_plan_submitter(data)
         if call.name == fusion_tools.CHOOSE_MAP:
             verdict = self.check(call)
             if verdict.verdict != ALLOW or self.map_chooser is None:

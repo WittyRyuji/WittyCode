@@ -239,24 +239,31 @@ def test_parse_reads_the_leaderboard_table():
     rows = {(entry.name, entry.effort): entry for entry in entries()}
     sol = rows[("gpt61sol", "max")]  # "GPT-6.1-Sol Max": the effort is a suffix of the name.
     assert sol.score == 51.5 and sol.task_cost == 1.75 and sol.minutes == 12.4
+    assert sol.label == "GPT-6.1-Sol Max" and sol.tier == "Max"  # The row's own evidence, kept raw.
+    assert sol.cells == {"score": "51.5", "taskCostUSD": "$1.75", "timeMinutes": "12.4"}
     assert rows[("gpt6luna", "high")].score == 54.2 and rows[("gpt6luna", "high")].task_cost == 2.3
     assert rows[("gpt6luna", "low")].score == 48.0
     claude = rows[("claudedemo52", "max")]  # "Claude Demo 5.2 Max, Default Fallback"
-    assert claude.score == 65.0 and claude.task_cost == 26.54
+    assert claude.score == 65.0 and claude.task_cost == 26.54 and claude.tier == "Max"
     assert rows[("minichat", None)].score == 20.1       # (Chat) is a variant name, not an effort.
+    assert rows[("minichat", None)].tier == ""          # No declared tier: nothing is invented.
     assert rows[("nemotron3ultra", "reasoning")].score == 33.0
     assert all(entry.name and entry.name != "model" for entry in entries())  # Neither headers nor "—" are rows.
 
 
 def test_parse_finds_the_model_column_by_header_not_position():
     assert aa_catalog.parse(LEADERBOARD_SHIFTED) == [
-        aa_catalog.Entry(name="soloranker", effort="high", score=33.0, task_cost=0.5, minutes=4.0)]
+        aa_catalog.Entry(name="soloranker", effort="high", score=33.0, task_cost=0.5, minutes=4.0,
+                         label="Solo Ranker High", tier="High",
+                         cells={"score": "33.0", "taskCostUSD": "$0.50", "timeMinutes": "4.0"})]
 
 
 def test_offer_is_exact_and_falls_back_on_ambiguity():
     rows = entries()
     single = aa_catalog.offer(rows, "chatgpt:gpt-6.1-sol", "max")
-    assert single == {"source": "artificialanalysis", "score": 51.5, "taskCostUSD": 1.75, "timeMinutes": 12.4}
+    assert single == {"source": "artificialanalysis", "score": 51.5, "taskCostUSD": 1.75, "timeMinutes": 12.4,
+                      "provenance": {"url": aa_catalog.URL, "label": "GPT-6.1-Sol Max", "tier": "Max",
+                                     "cells": {"score": "51.5", "taskCostUSD": "$1.75", "timeMinutes": "12.4"}}}
     assert aa_catalog.offer(rows, "chatgpt:gpt-6.1-sol", "high") is None  # Only its max row exists.
     assert aa_catalog.offer(rows, "devin:gpt-6-luna", "high")["score"] == 54.2
     assert aa_catalog.offer(rows, "api:demo:gpt-6-luna", "low")["score"] == 48.0
@@ -347,6 +354,23 @@ def test_source_downloads_once_and_stores_leaderboard_fields(tmp_path):
     assert one["confidence"] == profiles.CONFIDENCE_EXACT and one["source"] == profiles.SOURCE
     assert two["score"] == 48.0 and two["confidence"] == profiles.CONFIDENCE_EXACT
     assert profiles.load(tmp_path, "chatgpt:gpt-6.1-sol", "max") == one
+
+
+def test_the_record_keeps_the_leaderboard_row_it_came_from(tmp_path):
+    fetch = aa_catalog.source(loader=lambda: LEADERBOARD)
+    stored = profiles.ensure(tmp_path, "chatgpt:gpt-6.1-sol", "max", fetch)
+    record = profiles.load(tmp_path, "chatgpt:gpt-6.1-sol", "max")
+    assert record == stored  # The evidence survives the JSON round trip unchanged.
+    assert record["provenance"] == {"url": aa_catalog.URL, "label": "GPT-6.1-Sol Max", "tier": "Max",
+                                    "cells": {"score": "51.5", "taskCostUSD": "$1.75", "timeMinutes": "12.4"}}
+    assert record["fetchedAt"] > 0
+
+    fallback = profiles.ensure(tmp_path, "chatgpt:unlisted", "high", fetch)
+    assert fallback["confidence"] == profiles.CONFIDENCE_FALLBACK and "provenance" not in fallback
+
+    broken = profiles.ensure(tmp_path, "devin:odd", "high",
+                             lambda m, e: {"score": 5.0, "provenance": {"url": 7, "cells": "not-a-map"}})
+    assert broken["score"] == 5.0 and "provenance" not in broken  # Malformed evidence is dropped, not stored.
 
 
 # --------------------------------------------------------------------------- the app's call sites

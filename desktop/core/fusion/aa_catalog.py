@@ -21,7 +21,7 @@ import time
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from typing import Any
 
@@ -49,13 +49,18 @@ _NUMBER = re.compile(r"\d[\d,]*\.?\d*")
 
 @dataclass(frozen=True, slots=True)
 class Entry:
-    """One leaderboard row: the model name and optional ``(effort)`` annotation, with its three figures."""
+    """One leaderboard row: the model name and optional effort annotation, its three figures, and the row's raw
+    evidence — the displayed label and tier text plus the cells the figures were read from — so a stored profile
+    can be traced back to the public row it claims."""
 
     name: str
     effort: str | None
     score: float | None
     task_cost: float | None
     minutes: float | None
+    label: str = ""
+    tier: str = ""
+    cells: Mapping[str, str] = field(default_factory=dict)
 
 
 def native_id(page_id: str) -> str:
@@ -100,10 +105,10 @@ def _effort_key(text: str | None) -> str | None:
     return _EFFORT_ALIASES.get(key, key)
 
 
-def _split(name: str) -> tuple[str, str | None]:
-    """The model's base name and the effort the row declares, in the spellings the leaderboard uses:
-    ``GPT-6-Luna (high)``, ``Claude Fable 5.2 Max, Default Fallback``, ``Grok 4.7 Xhigh``. A trailing
-    parenthesis without a known effort word (``(Chat)``) stays part of the name."""
+def _split(name: str) -> tuple[str, str | None, str]:
+    """The model's base name, the effort the row declares, and that tier's text as displayed, in the spellings the
+    leaderboard uses: ``GPT-6-Luna (high)``, ``Claude Fable 5.2 Max, Default Fallback``, ``Grok 4.7 Xhigh``.
+    A trailing parenthesis without a known effort word (``(Chat)``) stays part of the name."""
     text, effort = name.strip(), None
     annotated = _ANNOTATION.match(text)
     if annotated is not None:
@@ -115,7 +120,7 @@ def _split(name: str) -> tuple[str, str | None]:
     tail = _EFFORT_TAIL.match(text)
     if tail is not None and _norm(tail["effort"]) in _EFFORT_WORDS:
         text, effort = tail["name"], tail["effort"]
-    return _norm(text), _effort_key(effort)
+    return _norm(text), _effort_key(effort), (effort or "")[:64]
 
 
 class _Tables(HTMLParser):
@@ -186,18 +191,24 @@ def parse(html: str) -> list[Entry]:
         for row in table[header_at + 1:]:
             if len(row) <= model_at or not row[model_at]:
                 continue
-            name, effort = _split(row[model_at])
+            name, effort, tier = _split(row[model_at])
             if not name:
                 continue
             def cell(index: int | None) -> float | None:
                 return _number(row[index]) if index is not None and index < len(row) else None
-            entries.append(Entry(name, effort, cell(score_at), cell(cost_at), cell(time_at)))
+            def raw(index: int | None) -> str | None:
+                return row[index][:80] if index is not None and index < len(row) else None
+            cells = {key: shown for key, shown in (("score", raw(score_at)), ("taskCostUSD", raw(cost_at)),
+                                                   ("timeMinutes", raw(time_at))) if shown is not None}
+            entries.append(Entry(name, effort, cell(score_at), cell(cost_at), cell(time_at),
+                                 label=row[model_at][:128], tier=tier, cells=cells))
     return entries
 
 
 def _offered(entry: Entry) -> dict[str, Any]:
     return {"source": "artificialanalysis", "score": entry.score, "taskCostUSD": entry.task_cost,
-            "timeMinutes": entry.minutes}
+            "timeMinutes": entry.minutes,
+            "provenance": {"url": URL, "label": entry.label, "tier": entry.tier, "cells": dict(entry.cells)}}
 
 
 def offer(entries: list[Entry], model: str, effort: str) -> Mapping[str, Any] | None:

@@ -28,6 +28,8 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+from desktop.core.fusion import planning
+
 FOLDER = "fusion-profiles"
 SOURCE = "artificialanalysis"
 """The single public source these profiles are allowed to come from."""
@@ -72,12 +74,32 @@ def _number(value: Any) -> float | None:
     return float(value)
 
 
+def _provenance(value: Any) -> dict[str, Any] | None:
+    """The matched leaderboard row's evidence, kept only as the bounded dict the source was asked for: the page
+    URL, the row's displayed label and tier text, and the raw cells the figures were read from. Anything else is
+    dropped, not stored — an unknown provenance is absent, never made up."""
+    if not isinstance(value, Mapping):
+        return None
+    url, label, tier, cells = value.get("url"), value.get("label"), value.get("tier"), value.get("cells")
+    if (not isinstance(url, str) or len(url) > 512 or not isinstance(label, str) or len(label) > 256
+            or not isinstance(tier, str) or len(tier) > 64 or not isinstance(cells, Mapping) or len(cells) > 8):
+        return None
+    if any(not isinstance(key, str) or len(key) > 64 or not isinstance(shown, str) or len(shown) > 256
+           for key, shown in cells.items()):
+        return None
+    return {"url": url, "label": label, "tier": tier, "cells": dict(cells)}
+
+
 def _record(model: str, effort: str, offered: Mapping[str, Any], at: float) -> dict[str, Any]:
-    return {"model": model, "effort": effort, "source": str(offered.get("source") or SOURCE),
-            "score": _number(offered.get("score")), "costIn": _number(offered.get("costIn")),
-            "costOut": _number(offered.get("costOut")), "taskCostUSD": _number(offered.get("taskCostUSD")),
-            "timeMinutes": _number(offered.get("timeMinutes")), "fetchedAt": float(at),
-            "confidence": CONFIDENCE_EXACT}
+    record = {"model": model, "effort": effort, "source": str(offered.get("source") or SOURCE),
+              "score": _number(offered.get("score")), "costIn": _number(offered.get("costIn")),
+              "costOut": _number(offered.get("costOut")), "taskCostUSD": _number(offered.get("taskCostUSD")),
+              "timeMinutes": _number(offered.get("timeMinutes")), "fetchedAt": float(at),
+              "confidence": CONFIDENCE_EXACT}
+    provenance = _provenance(offered.get("provenance"))
+    if provenance is not None:
+        record["provenance"] = provenance
+    return record
 
 
 def _fallback(model: str, effort: str, at: float) -> dict[str, Any]:
@@ -99,6 +121,12 @@ def load(root: Path, model: str, effort: str) -> dict[str, Any] | None:
     if _number(record.get("fetchedAt")) is None or any(
             record.get(field) is not None and _number(record.get(field)) is None for field in _NUMBERS):
         return None
+    if "provenance" in record:
+        provenance = _provenance(record["provenance"])
+        if provenance is None:
+            del record["provenance"]  # Corrupted evidence is dropped, never served as the row's.
+        else:
+            record["provenance"] = provenance
     return record
 
 
@@ -154,11 +182,17 @@ def _money(value: Any) -> str:
 
 
 def team_snapshot(root: Path, seats: dict[str, tuple[str, str]]) -> str:
-    """A read-only view of the team's local model profiles for planning.
+    """A read-only view of the team's local model profiles plus the V3 planning contract.
 
     ``seats`` maps a seat name (``main``, ``worker``, ``light``, …) to the (page model id, effort) sitting in it.
     Reads the stored records only: it never fetches, never writes and never touches anything outside ``root``, so a
-    seat with no profile yet is reported as such rather than blocking the planner on the network.
+    seat with no profile yet is reported as such rather than blocking the planner on the network. Each hit keeps
+    the public source's fetch date, the matched (model, effort) identifier, capability, task cost and speed;
+    values the record does not know stay unknown instead of being made up.
+
+    The seat lines are followed by ``planning.CONTRACT`` — the internal planning data structure and the rules a
+    planning turn submits to the harness — because this snapshot is only ever assembled for planning.
+    ``planning.parse`` is the standalone validator the calling side runs the planning JSON through.
     """
     lines = [f"Fusion team model profiles (local records; source: public {SOURCE} leaderboard):"]
     for seat, picked in seats.items():
@@ -183,4 +217,4 @@ def team_snapshot(root: Path, seats: dict[str, tuple[str, str]]) -> str:
         fetched = record.get("fetchedAt")
         day = time.strftime("%Y-%m-%d", time.gmtime(fetched)) if isinstance(fetched, (int, float)) else "unknown date"
         lines.append(f"- {seat}: {model}{effort_text} — {capability}, {cost}, confidence {record.get('confidence')}, fetched {day}")
-    return "\n".join(lines)
+    return "\n".join(lines) + "\n\n" + planning.CONTRACT

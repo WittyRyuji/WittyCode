@@ -14,11 +14,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
+from desktop.core.fusion import allocation
 from desktop.core.fusion.identity import display_name, load
 from desktop.core.fusion.metrics import RETAINED_TASKS, retained_tasks
 from desktop.core.fusion.reasoning import reasoning_map
 
 _IDENTITIES = load(None).names
+_MAX_ALLOCATIONS = 1024
+"""Total frozen work items a session may carry; it also bounds dependency checks."""
 
 
 class FusionError(ValueError):
@@ -57,7 +60,20 @@ class Policy:
                 or isinstance(self.preference, bool) or not isinstance(self.preference, int) or not 0 <= self.preference <= 100):
             raise FusionError("The Fusion policy is invalid.")
 
-    def allowed(self, model: str, role: str) -> bool:
+    def seat_model(self, seat: str) -> str:
+        """The policy model of one seat: L1 main, L2 worker, L3 light."""
+        if seat == "L1":
+            return self.main
+        if seat == "L2":
+            return self.workers[0]
+        if seat == "L3":
+            return self.light
+        raise FusionError("The Fusion seat is invalid.")
+
+    def allowed(self, model: str, role: str, seat: str = "") -> bool:
+        """A seated expert may only run its seat's policy model; tool permissions stay with the role."""
+        if seat:
+            return seat in allocation.SEATS and model == self.seat_model(seat)
         return model in self.workers if role == "worker" else role == "light" and model == self.light
 
     def to_json(self) -> dict[str, Any]:
@@ -89,6 +105,7 @@ class Expert:
     workstream: str = ""
     paths: tuple[str, ...] = ()
     identity: str = ""
+    seat: str = ""
 
     @property
     def label(self) -> str:
@@ -99,7 +116,7 @@ class Expert:
         return {"id": self.id, "scope": self.scope, "model": self.model, "role": self.role, "status": self.status,
                 "task": self.task, "startedAt": self.started_at, "finishedAt": self.finished_at,
                 "transferredFrom": self.transferred_from, "handoffComplete": self.handoff_complete, "aliases": list(self.aliases),
-                "workstream": self.workstream, "paths": list(self.paths), "identity": self.identity}
+                "workstream": self.workstream, "paths": list(self.paths), "identity": self.identity, "seat": self.seat}
 
 
 @dataclass(slots=True)
@@ -113,6 +130,8 @@ class FusionRegistry:
     had_unknown: bool = False
     misroutes: int = 0
     task_metrics: list[dict] = field(default_factory=list)
+    allocations: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
+    """Frozen route items by ``(workstream.casefold(), role)``; each holds id, N, score, seat and the frozen scope."""
 
     def __post_init__(self) -> None:
         self.project = Path(self.project).resolve(strict=False)
@@ -149,8 +168,9 @@ class FusionRegistry:
     def write_paths(expert: Expert) -> tuple[str, ...]:
         return expert.paths if expert.workstream else (expert.scope,)
 
-    def assign_workstream(self, workstream: str, paths: tuple[str, ...], model: str, role: str, *, identity: str = "", reuse: bool = True) -> Expert:
-        if not self.policy.allowed(model, role):
+    def assign_workstream(self, workstream: str, paths: tuple[str, ...], model: str, role: str, *, identity: str = "",
+                          reuse: bool = True, seat: str = "") -> Expert:
+        if not self.policy.allowed(model, role, seat):
             raise FusionError("The requested model is not in the authorised pool for this role.")
         if identity and identity not in _IDENTITIES:
             raise FusionError("The expert identity is invalid.")
@@ -164,18 +184,21 @@ class FusionRegistry:
             owner = owners[-1]
             if owner.model != model or owner.role != role:
                 raise FusionError(f"This workstream is already assigned to {owner.model} ({owner.role}); reuse it or ask before transferring it.")
+            if owner.seat and seat and owner.seat != seat:
+                raise FusionError("This workstream's seat is frozen; the route cannot reseat it.")
         if any(owner.status == "running" for owner in owners):
             raise FusionError("This expert is already running.")
         if owners and reuse:
             owner.workstream, owner.paths = owner.workstream or label, canonical
+            owner.seat = seat
             return owner
         expert = Expert(uuid.uuid4().hex, canonical[0] if canonical else "__project__", model, role,
-                        workstream=label, paths=canonical, identity=identity)
+                        workstream=label, paths=canonical, identity=identity, seat=seat)
         self.agents[expert.id] = expert
         return expert
 
-    def assign(self, scope: str, model: str, role: str) -> Expert:
-        if not self.policy.allowed(model, role):
+    def assign(self, scope: str, model: str, role: str, *, seat: str = "") -> Expert:
+        if not self.policy.allowed(model, role, seat):
             raise FusionError("The requested model is not in the authorised pool for this role.")
         logical, canonical = self._logical(scope), self._scope(scope)
         owners = [agent for agent in self.agents.values() if not agent.workstream and agent.status != "retired" and (
@@ -188,6 +211,8 @@ class FusionRegistry:
                 raise FusionError("The module path changed its resolved target; inspect it before assigning further work.")
             if owner.model != model or owner.role != role:
                 raise FusionError(f"This scope is already assigned to another expert: {owner.model} ({owner.role}). Reuse it or ask the user before transferring it.")
+            if owner.seat and seat and owner.seat != seat:
+                raise FusionError("This scope's seat is frozen; the route cannot reseat it.")
             aliases = owner.aliases
             if not any(alias == logical or logical.startswith(alias + "/") for alias in aliases):
                 aliases = (*[alias for alias in aliases if not alias.startswith(logical + "/")], logical)
@@ -196,8 +221,9 @@ class FusionRegistry:
             if owner.scope.startswith(canonical + "/"):
                 owner.scope = canonical
             owner.aliases = aliases
+            owner.seat = seat
             return owner
-        expert = Expert(uuid.uuid4().hex, canonical, model, role, aliases=(logical,))
+        expert = Expert(uuid.uuid4().hex, canonical, model, role, aliases=(logical,), seat=seat)
         self.agents[expert.id] = expert
         return expert
 
@@ -207,12 +233,12 @@ class FusionRegistry:
             raise FusionError("The original expert is unavailable or already transferred.")
         if any(agent.status == "running" for agent in self.agents.values()):
             raise FusionError("Wait until the running expert stops before transferring ownership.")
-        if not self.policy.allowed(model, role) or (old.model == model and old.role == role):
+        if not self.policy.allowed(model, role, old.seat) or (old.model == model and old.role == role):
             raise FusionError("Choose a different model or role from the authorised pool.")
         if old.identity and role != old.role:
             raise FusionError("An identified expert must keep its model role.")
         replacement = Expert(uuid.uuid4().hex, old.scope, model, role, transferred_from=old.id, aliases=old.aliases,
-                             workstream=old.workstream, paths=old.paths, identity=old.identity)
+                             workstream=old.workstream, paths=old.paths, identity=old.identity, seat=old.seat)
         old.status = "retired"
         self.agents[replacement.id] = replacement
         return replacement
@@ -229,6 +255,9 @@ class FusionRegistry:
             raise FusionError("This expert is already running.")
         if expert.status in ("interrupted", "failed") and not resume:
             raise FusionError("The previous result may be incomplete; inspect the workspace and explicitly resume.")
+        item = self.allocation_for(expert.workstream or expert.scope, expert.role)
+        if item is not None and (pending := self._unfinished_deps(item["deps"])):
+            raise FusionError(f"This work item waits on unfinished dependencies: {', '.join(pending)}.")
         paths = self.write_paths(expert)
         for other in self.agents.values():
             if other.status != "running":
@@ -244,6 +273,68 @@ class FusionRegistry:
         expert.status = "running"
         expert.started_at, expert.finished_at = time.time(), None
         return expert
+
+    def allocation_for(self, workstream: str, role: str) -> dict[str, Any] | None:
+        """The frozen route item binding this workstream and role, if the route declared one."""
+        return self.allocations.get(allocation.key(workstream, role))
+
+    def allocation_covers(self, record: Mapping[str, Any], scope: str, paths: tuple[str, ...] | None) -> bool:
+        """The delegation's write scope stays inside the frozen one; ``paths=None`` is the legacy module scope."""
+        given = tuple(self._scope(path) for path in (paths if paths is not None else (scope,)))
+        return allocation.covers(record, given)
+
+    def _unfinished_deps(self, deps: Sequence[str]) -> list[str]:
+        """Dependency ids whose bound expert is not done; a dep without an owner has not even started."""
+        owners = {allocation.key(agent.workstream or agent.scope, agent.role): agent
+                  for agent in self.agents.values() if agent.status != "retired"}
+        records = {record["id"]: record for record in self.allocations.values()}
+        pending = []
+        for dep in deps:
+            record = records.get(dep)
+            owner = None if record is None else owners.get(allocation.key(record["workstream"], record["role"]))
+            if owner is None or owner.status != "done":
+                pending.append(dep)
+        return pending
+
+    def freeze(self, items: Sequence[Mapping[str, Any]], N: int) -> int:
+        """Freeze route items durably under the current preference: an identical re-freeze keeps the
+        original record even after the preference moved; a changed item only passes as an explicit
+        ``new_facts`` re-estimate before its workstream has an owner, otherwise it is refused."""
+        sealed = []
+        for raw in items:
+            try:
+                record = allocation.seal(raw, N)
+                record["paths"] = tuple(self._scope(path) for path in record["paths"])
+            except ValueError as error:
+                raise FusionError(str(error)) from error
+            sealed.append(record)
+        binds = [allocation.key(record["workstream"], record["role"]) for record in sealed]
+        if len(set(binds)) != len(binds) or len({record["id"] for record in sealed}) != len(sealed):
+            raise FusionError("Each work item needs a distinct id, workstream and role.")
+        if len(self.allocations) + len({bind for bind in binds if bind not in self.allocations}) > _MAX_ALLOCATIONS:
+            raise FusionError(f"A session freezes at most {_MAX_ALLOCATIONS} work items.")
+        pending = []
+        for record, bind in zip(sealed, binds):
+            existing = self.allocations.get(bind)
+            if existing is not None:
+                if allocation.same(existing, record):
+                    continue  # An identical re-freeze keeps the original record, its N and its seat.
+                if "new_facts" not in record:
+                    raise FusionError("This workstream's item is already frozen; re-scoring, renaming or re-scoping it is not allowed.")
+                if any(agent.status != "retired" and allocation.key(agent.workstream or agent.scope, agent.role) == bind
+                       for agent in self.agents.values()):
+                    raise FusionError("This work item already has an owner; a changed estimate requires a new plan.")
+                if not allocation.reestimate(existing, record):
+                    raise FusionError("New facts may only re-estimate this item's score; changed ids, paths or dependencies require a new plan.")
+            if any(other_bind != bind and other["id"] == record["id"] for other_bind, other in self.allocations.items()):
+                raise FusionError("This work item id is already frozen under another workstream or role.")
+            pending.append((record, bind))
+        if problem := allocation.check_deps([*self.allocations.values(), *(record for record, bind in pending
+                                                                         if bind not in self.allocations)]):
+            raise FusionError(problem)
+        for record, bind in pending:
+            self.allocations[bind] = record
+        return len(sealed)
 
     def finish(self, agent_id: str, *, status: str, tokens: int | None) -> None:
         expert = self.agents.get(agent_id)
@@ -265,7 +356,8 @@ class FusionRegistry:
     def to_json(self) -> dict[str, Any]:
         return {"version": 2, "policy": self.policy.to_json(), "agents": [agent.to_json() for agent in self.agents.values()],
                 "calls": self.calls, "tokens": self.tokens, "unmetered": self.unmetered, "hadUnknown": self.had_unknown,
-                "misroutes": self.misroutes, "metrics": self.task_metrics[-RETAINED_TASKS:]}
+                "misroutes": self.misroutes, "metrics": self.task_metrics[-RETAINED_TASKS:],
+                "allocations": [dict(record) for record in self.allocations.values()]}
 
     @classmethod
     def from_json(cls, project: Path, raw: Any) -> FusionRegistry:
@@ -282,13 +374,30 @@ class FusionRegistry:
             raise FusionError("The Fusion misroute count is invalid.")
         result = cls(project, Policy.from_json(raw.get("policy")), calls=calls, tokens=tokens, unmetered=unmetered,
                      had_unknown=had_unknown, misroutes=misroutes, task_metrics=retained_tasks(raw.get("metrics")))
+        allocations = raw.get("allocations", [])
+        if not isinstance(allocations, list) or len(allocations) > _MAX_ALLOCATIONS:
+            raise FusionError("The Fusion allocation records are invalid.")
+        for entry in allocations:
+            try:
+                record = allocation.seal(entry, entry.get("N") if isinstance(entry, Mapping) else None)
+                record["paths"] = tuple(result._scope(path) for path in record["paths"])
+            except ValueError as error:
+                raise FusionError("The Fusion allocation records are invalid.") from error
+            bind = allocation.key(record["workstream"], record["role"])
+            if bind in result.allocations or any(other["id"] == record["id"] for other in result.allocations.values()):
+                raise FusionError("The Fusion allocation records overlap.")
+            result.allocations[bind] = record
+        if problem := allocation.check_deps(list(result.allocations.values())):
+            raise FusionError("The Fusion allocation records are invalid.")
         for item in raw["agents"]:
             if not isinstance(item, Mapping):
                 raise FusionError("The expert record is invalid.")
             ident, scope, model, role, status = (item.get(k) for k in ("id", "scope", "model", "role", "status"))
+            seat = item.get("seat", "")
             if (not isinstance(ident, str) or len(ident) != 32 or any(c not in "0123456789abcdef" for c in ident)
                     or role not in ("worker", "light") or not _model(model, external=True)
-                    or (status != "retired" and not result.policy.allowed(model, role))
+                    or seat not in ("", *allocation.SEATS)
+                    or (status != "retired" and not result.policy.allowed(model, role, seat))
                     or status not in ("idle", "running", "done", "failed", "interrupted", "retired")):
                 raise FusionError("The expert record is invalid.")
             workstream = item.get("workstream", "")
@@ -330,7 +439,7 @@ class FusionRegistry:
                 result.unmetered = result.had_unknown = True
             result.agents[ident] = Expert(ident, canonical, model, role, "interrupted" if status == "running" else status,
                                           task, float(started), float(finished) if finished is not None else None,
-                                          source, handoff, aliases, workstream, paths, identity)
+                                          source, handoff, aliases, workstream, paths, identity, seat)
         for expert in result.agents.values():
             seen = {expert.id}
             source = expert.transferred_from
