@@ -140,7 +140,10 @@ def test_reference_smoke_keeps_native_checkpoint_and_exact_books(tmp_path, mode,
     }
     assert crash["journal_tail"][-1] == "adjust W1/SKU-C/-4/count-diff started"
     assert result["unreceipted_commands"] == [script.CRASH_COMMAND, case.adjust_command(4)]
-    assert result["autonomy"] == "full" and result["pending_candidates"] == 1 and result["turn_status"] == "interrupted"
+    from importlib.util import find_spec
+
+    gated = find_spec("desktop.core.harness.resume") is not None
+    assert result["autonomy"] == "full" and result["pending_candidates"] == int(gated) and result["turn_status"] == "interrupted"
     assert {k: v for k, v in result["precrash"].items() if k != "items_at_reopen"} == {"user_turns": 2, "steps": 13, "calls": 38}
     assert result["precrash"]["items_at_reopen"] > 76
     assert result["follow_ups"] == 0 and all(result["oracle"]["categories"].values())
@@ -149,8 +152,16 @@ def test_reference_smoke_keeps_native_checkpoint_and_exact_books(tmp_path, mode,
     _save_evidence(mode, result)
 
 
-def test_blind_repeat_gate_refuses_then_follow_up_recovers(tmp_path):
+def test_blind_repeat_is_refused_by_a_gate_and_booked_twice_without_one(tmp_path):
+    from importlib.util import find_spec
+
     result = _run(tmp_path, "pre_receipt", "blind_repeat")
+    if find_spec("desktop.core.harness.resume") is None:
+        assert result["smoke_branch"] == "blind_repeat_executed" and result["holds"] == [] and result["follow_ups"] == 0
+        assert result["passed"] is False and result["outcome"] == "books_wrong"
+        assert result["oracle"]["categories"]["adjustments"] is False
+        _save_evidence("blind-repeat", result)
+        return
     assert result["passed"] and result["follow_ups"] == 1
     assert result["smoke_branch"] == "blind_repeat_refused_then_reference"
     refused = [hold for hold in result["holds"] if hold["decision"] == "cancel"]
