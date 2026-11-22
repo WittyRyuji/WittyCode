@@ -89,6 +89,7 @@ class Expert:
     workstream: str = ""
     paths: tuple[str, ...] = ()
     identity: str = ""
+    replaced_status: str = ""  # Retired by a role change; successor is allocated on actual delegation.
 
     @property
     def label(self) -> str:
@@ -99,7 +100,8 @@ class Expert:
         return {"id": self.id, "scope": self.scope, "model": self.model, "role": self.role, "status": self.status,
                 "task": self.task, "startedAt": self.started_at, "finishedAt": self.finished_at,
                 "transferredFrom": self.transferred_from, "handoffComplete": self.handoff_complete, "aliases": list(self.aliases),
-                "workstream": self.workstream, "paths": list(self.paths), "identity": self.identity}
+                "workstream": self.workstream, "paths": list(self.paths), "identity": self.identity,
+                **({"replacedStatus": self.replaced_status} if self.replaced_status else {})}
 
 
 @dataclass(slots=True)
@@ -113,6 +115,7 @@ class FusionRegistry:
     had_unknown: bool = False
     misroutes: int = 0
     task_metrics: list[dict] = field(default_factory=list)
+    preset_snapshot: dict[str, Any] | None = None  # Not persisted in the registry; committed with saved.origin.
 
     def __post_init__(self) -> None:
         self.project = Path(self.project).resolve(strict=False)
@@ -149,7 +152,8 @@ class FusionRegistry:
     def write_paths(expert: Expert) -> tuple[str, ...]:
         return expert.paths if expert.workstream else (expert.scope,)
 
-    def assign_workstream(self, workstream: str, paths: tuple[str, ...], model: str, role: str, *, identity: str = "", reuse: bool = True) -> Expert:
+    def assign_workstream(self, workstream: str, paths: tuple[str, ...], model: str, role: str, *, identity: str = "",
+                          reuse: bool = True, resume: bool = False) -> Expert:
         if not self.policy.allowed(model, role):
             raise FusionError("The requested model is not in the authorised pool for this role.")
         if identity and identity not in _IDENTITIES:
@@ -158,8 +162,12 @@ class FusionRegistry:
         if not isinstance(paths, (list, tuple)) or len(paths) > 128:
             raise FusionError("Provide up to 128 project-relative write paths; an empty list reserves the project.")
         canonical = tuple(dict.fromkeys(self._scope(path) for path in paths))
-        owners = [agent for agent in self.agents.values() if agent.status != "retired" and agent.identity == identity
-                  and (agent.workstream or agent.scope).casefold() == label.casefold()]
+        matches = [agent for agent in self.agents.values() if agent.identity == identity
+                   and (agent.workstream or agent.scope).casefold() == label.casefold()]
+        owners = [agent for agent in matches if agent.status != "retired"]
+        reuse = reuse or resume
+        if resume and len(owners) > 1:
+            raise FusionError("Several experts match this workstream; use a unique workstream before resuming.")
         if owners and reuse:
             owner = owners[-1]
             if owner.model != model or owner.role != role:
@@ -169,12 +177,31 @@ class FusionRegistry:
         if owners and reuse:
             owner.workstream, owner.paths = owner.workstream or label, canonical
             return owner
+        predecessors = [agent for agent in matches if agent.role == role and agent.replaced_status]
+        source = self._predecessor(predecessors) if reuse else None
+        if resume and source is None:
+            raise FusionError("No existing expert matches this workstream and model role.")
         expert = Expert(uuid.uuid4().hex, canonical[0] if canonical else "__project__", model, role,
                         workstream=label, paths=canonical, identity=identity)
+        self._link_replacement(expert, source)
         self.agents[expert.id] = expert
         return expert
 
-    def assign(self, scope: str, model: str, role: str) -> Expert:
+    def _predecessor(self, candidates: list[Expert]) -> Expert | None:
+        handed_off = {agent.transferred_from for agent in self.agents.values()}
+        available = [agent for agent in candidates if agent.id not in handed_off]
+        if len(available) > 1:
+            raise FusionError("Several archived experts match this workstream; no predecessor was selected.")
+        return available[0] if available else None
+
+    @staticmethod
+    def _link_replacement(expert: Expert, source: Expert | None) -> None:
+        if source is not None:
+            expert.transferred_from = source.id
+            if source.replaced_status in ("failed", "interrupted"):
+                expert.status = "interrupted"
+
+    def assign(self, scope: str, model: str, role: str, *, resume: bool = False) -> Expert:
         if not self.policy.allowed(model, role):
             raise FusionError("The requested model is not in the authorised pool for this role.")
         logical, canonical = self._logical(scope), self._scope(scope)
@@ -197,7 +224,12 @@ class FusionRegistry:
                 owner.scope = canonical
             owner.aliases = aliases
             return owner
+        source = self._predecessor([agent for agent in self.agents.values() if not agent.workstream
+                                    and agent.replaced_status and agent.role == role and self._overlaps(agent.scope, canonical)])
+        if resume and source is None:
+            raise FusionError("No existing expert matches this scope and model role.")
         expert = Expert(uuid.uuid4().hex, canonical, model, role, aliases=(logical,))
+        self._link_replacement(expert, source)
         self.agents[expert.id] = expert
         return expert
 
@@ -321,6 +353,9 @@ class FusionRegistry:
                 raise FusionError("The expert ownership records overlap.")
             task, started, finished, source = item.get("task", ""), item.get("startedAt", 0.0), item.get("finishedAt"), item.get("transferredFrom", "")
             handoff = item.get("handoffComplete", False)
+            replaced = item.get("replacedStatus", "")
+            if replaced not in ("", "idle", "done", "interrupted", "failed") or (replaced and status != "retired"):
+                raise FusionError("The retired expert checkpoint is invalid.")
             if (not isinstance(handoff, bool) or (handoff and not source) or not isinstance(task, str)
                     or len(task) > (60_000 if identity else 50_000) or isinstance(started, bool) or not isinstance(started, (int, float))
                     or not math.isfinite(started) or started < 0 or not isinstance(source, str) or (source and (len(source) != 32 or any(c not in "0123456789abcdef" for c in source)))
@@ -330,7 +365,7 @@ class FusionRegistry:
                 result.unmetered = result.had_unknown = True
             result.agents[ident] = Expert(ident, canonical, model, role, "interrupted" if status == "running" else status,
                                           task, float(started), float(finished) if finished is not None else None,
-                                          source, handoff, aliases, workstream, paths, identity)
+                                          source, handoff, aliases, workstream, paths, identity, replaced)
         for expert in result.agents.values():
             seen = {expert.id}
             source = expert.transferred_from

@@ -1864,6 +1864,8 @@ class AppCore:
         submitted = getattr(conv.controller, "prompt_submitted", None)
         if submitted is not None and submitted(turn):
             return  # an error stopping an accepted native turn is not a failed delivery
+        if getattr(conv.controller, "_unsent_prompt", None) == turn.id:
+            conv.unsent_turns.add(turn.id)
         if turn.id not in conv.unsent_turns and (not attachments or turn.status is not TurnStatus.FAILED):
             return
         if not attachments:
@@ -2672,7 +2674,7 @@ class AppCore:
             raise AppError("现在不能发送：会话没有就绪。")
         self._start_title(conv, text)
         conv.drafts = [a for a in conv.drafts if a.id not in wanted]
-        if attachments or not conv.in_history:
+        if attachments or not conv.in_history or conv.engine == "devin" or getattr(controller, "_fusion", None) is not None:
             conv.inflight = (controller.transcript.turns[-1], text, tuple(attachments))
 
     async def _m_session_approvePlan(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -2805,6 +2807,7 @@ class AppCore:
                     "fusionModel": getattr(record, "model", None),
                     "fusionRole": getattr(record, "role", None),
                     "fusionIdentity": getattr(record, "identity", None) or None,
+                    "unstartedTransfer": bool(record and record.transferred_from and not record.started_at),
                     "startedAt": int(agent.started_at_s * 1000),
                     "finishedAt": int(agent.finished_at_s * 1000) if agent.finished_at_s else None,
                 }
@@ -2948,7 +2951,7 @@ class AppCore:
             return
         self._start_title(conv, head.text)
         conv.queue.pop(0)
-        if head.attachments or not conv.in_history:
+        if head.attachments or not conv.in_history or conv.engine == "devin" or fusion is not None:
             conv.inflight = (controller.transcript.turns[-1], head.text, head.attachments)
         conv.dirty = True
         self._schedule_flush()
@@ -4733,8 +4736,20 @@ class AppCore:
 
     async def shutdown(self) -> None:
         """Close every session (consumers are cancelled first) and stop talking to the page."""
-        self._write_snapshots_now()
         self._shutting_down = True
+        stop_devin = getattr(self.devin, "stop_starting", None)
+        if stop_devin is not None:
+            stop_devin()
+        try:
+            await self._stop_consumers()
+        finally:
+            await self._close_engines()
+
+    async def _stop_consumers(self) -> None:
+        try:
+            self._write_snapshots_now()
+        except Exception:
+            log.exception("could not save session snapshots during shutdown")
         self._close_video_preview()
         for flow in list(self.connectors.flows.values()):
             flow.cancel()
@@ -4747,13 +4762,19 @@ class AppCore:
         for task in list(self._tasks):
             task.cancel()
         if self._tasks:
-            await asyncio.gather(*list(self._tasks), return_exceptions=True)
-        if self.factory is not None:
-            await self.factory.close_all()
-        if self.devin is not None:
-            await self.devin.close_all()
-        if self.chatgpt is not None:
-            await self.chatgpt.close_all()
+            _, pending = await asyncio.wait(list(self._tasks), timeout=10)
+            if pending:
+                log.warning("%d application tasks did not finish during shutdown", len(pending))
+
+    async def _close_engines(self) -> None:
+        async def close(engine: Any) -> None:
+            try:
+                async with asyncio.timeout(30):
+                    await engine.close_all()
+            except Exception:
+                log.exception("%s did not cleanly shut down", type(engine).__name__)
+
+        await asyncio.gather(*(close(engine) for engine in (self.factory, self.devin, self.chatgpt) if engine is not None))
 
 
 _MISSING = object()

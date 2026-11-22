@@ -1162,16 +1162,21 @@ class FusionRuntime:
     def settings_snapshot(policy: Policy) -> dict[str, Any]:
         return {key: value for key, value in policy.to_json().items() if key not in ("maxCalls", "maxTokens")}
 
+    def _global_preset(self) -> dict[str, Any]:
+        settings = self.parent.manager.settings
+        return {"main": settings.fusion_main, "workers": list(settings.fusion_workers), "light": settings.fusion_light,
+                "maxSeconds": settings.fusion_max_seconds, "preference": settings.fusion_preference,
+                "reasoning": dict(settings.fusion_reasoning)}
+
     def pending_settings(self) -> Policy | None:
-        settings, current = self.parent.manager.settings, self.registry.policy
+        current = self.registry.policy
+        desired = self._global_preset()
         # An unconfigured global preset must not invalidate a restored, self-contained session.
-        if not settings.fusion_main or not settings.fusion_workers or not settings.fusion_light:
+        if not all(desired[key] for key in ("main", "workers", "light")):
             return None
-        desired = Policy(settings.fusion_main, tuple(settings.fusion_workers), settings.fusion_light,
-                         current.max_calls, current.max_tokens, settings.fusion_max_seconds,
-                         settings.fusion_preference, settings.fusion_reasoning)
         previous = self.parent.saved.origin.get("fusionSettings", self.settings_snapshot(current))
-        return desired if self.settings_snapshot(desired) != previous else None
+        delta = {key: value for key, value in desired.items() if value != previous.get(key)}
+        return Policy.from_json({**current.to_json(), **delta}) if delta else None
 
     def prepare_settings(self, policy: Policy) -> FusionRegistry:
         if self.parent.state is not SessionState.READY or self._active or self._delegations:
@@ -1181,15 +1186,12 @@ class FusionRuntime:
             if info is None:
                 raise FusionError("A configured Fusion model is unavailable; no fallback was selected.")
             configured_effort(policy.reasoning, model, info.efforts, role=role)
-        prepared = FusionRegistry.from_json(self.registry.project, self.registry.to_json())
-        prepared.policy = policy
-        for expert in list(prepared.agents.values()):
+        prepared = replace(self.registry, policy=policy,
+                           agents={key: replace(record) for key, record in self.registry.agents.items()},
+                           task_metrics=list(self.registry.task_metrics), preset_snapshot=self._global_preset())
+        for expert in prepared.agents.values():
             if expert.status != "retired" and not policy.allowed(expert.model, expert.role):
-                # Changing the role's configured model authorises a context-preserving handoff, never an execution.
-                model = policy.light if expert.role == "light" else policy.workers[0]
-                incomplete = expert.status in ("interrupted", "failed")
-                replacement = prepared.transfer(expert.id, model, expert.role)
-                replacement.status = "interrupted" if incomplete else "idle"
+                expert.replaced_status, expert.status = expert.status, "retired"
         return prepared
 
     def apply_settings(self, prepared: FusionRegistry, reasoning: str) -> None:
@@ -1202,7 +1204,7 @@ class FusionRuntime:
         self.registry = prepared
         self.agents = {key: ExpertView(record, self.agents[key].controller if key in self.agents else None)
                        for key, record in prepared.agents.items()}
-        parent.saved.origin = {**parent.saved.origin, "fusionSettings": self.settings_snapshot(prepared.policy)}
+        parent.saved.origin = {**parent.saved.origin, "fusionSettings": prepared.preset_snapshot or self._global_preset()}
         try:
             parent._set_fusion_mode(self, None, native_model(prepared.policy.main), reasoning)
         except BaseException:
@@ -1451,9 +1453,9 @@ class FusionRuntime:
         saved_fusion = self.parent.saved.fusion
         try:
             self.check_budget()
-            expert = (self.registry.assign(scope, model, role) if paths is None else
+            expert = (self.registry.assign(scope, model, role, resume=resume) if paths is None else
                       self.registry.assign_workstream(scope, paths, model, role, identity=profile.name if profile else "",
-                                                      reuse=profile.reuse if profile else True))
+                                                      reuse=profile.reuse if profile else True, resume=resume))
             transferred_new = bool(expert.transferred_from and expert.started_at == 0)
             self.registry.begin(expert.id, resume=resume)
             expert.task = task
@@ -1748,6 +1750,8 @@ class FusionRuntime:
                         child._tools.record_reader = self.read_record if self.drive_enabled else None
                 self._active.pop(expert.id, None)
                 self._delegations.discard(running)
+                if child is not None and child._acp is not None:
+                    child._acp.arm_idle()
                 self.parent._changed()
 
     async def close(self) -> None:

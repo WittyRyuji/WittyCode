@@ -21,7 +21,7 @@ function AgentTeam({ session, onClose, inspector }: { session: Session; onClose?
   // Keep the graph inputs stable when the session changes only because a draft was edited.
   const { active, history, flowAgents } = useMemo(() => {
     const { active, history } = groupAgents(agents ?? []);
-    return { active, history, flowAgents: [...active, ...history] };
+    return { active, history, flowAgents: [...active, ...history.filter((agent) => !agent.unstartedTransfer)] };
   }, [agents]);
   const open = useStore((s) => s.agentPanel);
   const openAgent = useStore((s) => s.openAgent);
@@ -47,7 +47,7 @@ function AgentTeam({ session, onClose, inspector }: { session: Session; onClose?
                 <span className="agent-caption">{a.role || "Sub-Agent"}{a.model ? ` · ${a.model}` : ""}</span>
               </span>
               {inspector && a.tokens && <span className="agent-chip-tokens num">{formatTokens(usageTotal(a.tokens))} Token</span>}
-              <span className="agent-state">{AGENT_STATE[a.status].text}</span>
+              <span className="agent-state">{a.unstartedTransfer ? "未启动" : AGENT_STATE[a.status].text}</span>
             </button>
           </li>
         ))}
@@ -58,7 +58,7 @@ function AgentTeam({ session, onClose, inspector }: { session: Session; onClose?
       <header className="agentbar-head">
         <UsersRound size={16} aria-hidden />
         <h3 className="agentbar-title">Agents Team</h3>
-        <span className="agentbar-count num">{agents.length}</span>
+        <span className="agentbar-count num">{flowAgents.length}</span>
         {teamTokens !== null && <span className="agentbar-tokens num" title="已知专家的累计 Token 用量">{formatTokens(teamTokens)} Token</span>}
         {onClose && <button type="button" className="icon-btn sm" aria-label="关闭 Agents Team" onClick={onClose}><X size={15} aria-hidden /></button>}
       </header>

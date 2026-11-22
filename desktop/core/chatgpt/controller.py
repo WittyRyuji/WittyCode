@@ -203,6 +203,7 @@ class ChatGPTController:
     _fusion_read_only: bool = False
     _fusion_step_limit: int | None = None
     _acp: Any = None
+    _unsent_prompt: str = ""
     _archive_binding: ArchiveBinding | None = None
     """The session archive this log is mirrored to (``chatgpt/archive_binding``): ``None`` until a new session's
     first durable checkpoint, and forever for a saved session that never had one — no implicit migration."""
@@ -309,6 +310,12 @@ class ChatGPTController:
             await self._acp.close()
         if self._paused_fusion is not None:
             await self._paused_fusion.close()
+        if self._fusion is not None:
+            retired = [view.controller._acp for view in self._fusion.agents.values()
+                       if view.record.status == "retired" and view.controller is not None
+                       and view.controller._acp is not None and view.controller._acp.client is not None]
+            if retired:
+                await asyncio.gather(*(acp.close() for acp in retired), return_exceptions=True)
 
     def _set_fusion_mode(self, active: Any, paused: Any, model: str, reasoning: str | None, *, settings_snapshot: Any = None) -> None:
         before = (self._fusion, self._paused_fusion, self.requested_model, self.transcript.model, self.reasoning,
@@ -1289,11 +1296,13 @@ class ChatGPTController:
             return
         self._pending_fusion_title = None
         self._keep_first_prompt()  # stopped after dispatch, or finished without a separate response event
-        if (not self._checkpoint_written and self.saved.turns and self.saved.turns[-1].start == self._turn_start):
+        if ((not self._checkpoint_written or self._unsent_prompt == turn.id) and self.saved.turns
+                and self.saved.turns[-1].start == self._turn_start):
             # Stopped during local setup, before a request could reach the model.
             del self.saved.items[self._turn_start :]
             self.saved.turns.pop()
-            self.saved.prompt = {}
+            if not self._checkpoint_written:
+                self.saved.prompt = {}
         if self._fusion is not None:
             self._fusion.finish_metrics(turn)
         self._settle_expired()
@@ -1321,6 +1330,8 @@ class ChatGPTController:
             self.state = SessionState.READY
         self.refresh_context()  # (a model chosen during the turn now gives its window)
         self._save_now()
+        if self._acp is not None and self._fusion_parent is None:
+            self._acp.arm_idle()
         self._notify("state")
         self._changed()
 

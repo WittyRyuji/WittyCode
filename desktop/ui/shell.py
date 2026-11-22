@@ -561,11 +561,13 @@ class MainWindow(QMainWindow):
     async def shutdown(self) -> None:
         """Save state, hide the window, close every session (consumers are cancelled first), then signal ``closed``."""
         try:
-            self.save_state()
-            self.hide()
-            await self.backend.cancel_pending()
-            if self.core is not None:
-                await self.core.shutdown()
+            try:
+                self.save_state()
+                self.hide()
+                await asyncio.wait_for(self.backend.cancel_pending(), 10)
+            finally:
+                if self.core is not None:
+                    await self.core.shutdown()
         finally:
             self.platform.release_documents()
             self._detach_channel()

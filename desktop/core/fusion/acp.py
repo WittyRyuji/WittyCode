@@ -10,6 +10,7 @@ import contextlib
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import secrets
@@ -29,6 +30,8 @@ from desktop.core.fusion.tools import CHOOSE_MAP, RATE_RECORDS, READ_RECORD, SUB
 from desktop.core.harness.loop import AgentLoop, Call, TurnEnd
 from desktop.core.memory.launch import PACKAGE_ROOT, console_python
 
+log = logging.getLogger(__name__)
+ACP_WARM_SECONDS = 300.0
 GUARD_SECONDS = 15.0
 IMPORTS = ("agents_standard", "cursor", "windsurf", "claude", "copilot", "codex", "kiro", "opencode", "zed", "cloud")
 
@@ -81,6 +84,10 @@ class AcpRun:
         self._item = ""
         self._connections: set[asyncio.Task[Any]] = set()
         self._cancel: asyncio.Task[Any] | None = None
+        self._idle_timer: asyncio.TimerHandle | None = None
+        self._closing_task: asyncio.Task[None] | None = None
+        self._can_park = False
+        self._prompt_turn_id = ""
         self._usage: dict[str, Any] = {}
         self._replies: dict[str, tuple[str, Any]] = {}
         self._seen: dict[str, tuple[str, str]] = {}  # call id -> (wire name, verified private target), per turn
@@ -348,9 +355,32 @@ class AcpRun:
         }
         return bool(native) and all(turn.status == "failed" and turn.error in safe_errors for turn in native)
 
+    def arm_idle(self) -> None:
+        if (self.persist_session and self._can_park and self._idle_timer is None and self.client is not None
+                and self.client.running and not self.active and not self.host._close_requested):
+            self._idle_timer = asyncio.get_running_loop().call_later(ACP_WARM_SECONDS, self._idle_due)
+
+    def _cancel_idle(self) -> None:
+        if self._idle_timer is not None:
+            self._idle_timer.cancel()
+            self._idle_timer = None
+
+    def _idle_due(self) -> None:
+        self._idle_timer = None
+        if not self.active and not self.host.busy and not self.host._close_requested:
+            self._start_close()
+
+    def _exited(self, client: Any, error: BaseException) -> None:
+        if self.client is client and not self.active:
+            log.warning("Fusion ACP disconnected (pid %s); releasing its bridge", client.pid)
+            self._start_close()
+
     async def _open(self) -> None:
+        self._cancel_idle()
+        if self._closing_task is not None:
+            await asyncio.shield(self._closing_task)
         engine = getattr(self.host.manager, "devin", None)
-        if engine is None or not engine.settings.devin_enabled:
+        if engine is None or not engine.settings.devin_enabled or getattr(engine, "_closing", False):
             raise ChatGPTError("Devin ACP 当前不可用；未选择替代模型。", code="fusion_acp")
         if self.client is not None and self.client.running:
             return
@@ -380,11 +410,17 @@ class AcpRun:
         self.bridge_seen.clear()
         options = {"acp_args": self.acp_args} if self.acp_args else {}
         self.account = engine.cached_account().get("email")
-        self.client = engine._client_factory(binary, env=env, cwd=root, on_notification=self._notify,
-                                             on_request=self._request, on_exit=lambda error: None, **options)
-        await self.client.start()
-        await self.client.request("initialize", {"protocolVersion": 1, "clientCapabilities": {"fs": {"readTextFile": False, "writeTextFile": False}, "terminal": False},
-                                                  "clientInfo": {"name": "wittycode-fusion", "version": "1"}}, timeout=30)
+        if getattr(engine, "_closing", False):
+            raise ChatGPTError("应用正在退出，未启动 ACP。", code="fusion_acp")
+        client = self.client = engine._client_factory(binary, env=env, cwd=root, on_notification=self._notify,
+                                                      on_request=self._request,
+                                                      on_exit=lambda error: self._exited(client, error) if self.persist_session else None,
+                                                      **options)
+        await client.start()
+        initialized = await client.request("initialize", {"protocolVersion": 1, "clientCapabilities": {"fs": {"readTextFile": False, "writeTextFile": False}, "terminal": False},
+                                                          "clientInfo": {"name": "wittycode-fusion", "version": "1"}}, timeout=30)
+        caps = initialized.get("agentCapabilities", {}) if isinstance(initialized, dict) else {}
+        self._can_park = isinstance(caps, dict) and caps.get("loadSession") is True
         # The private address/credential are inherited from the ACP process, never sent in persistable MCP config.
         bridge_env = {key: env[key] for key in ("PYTHONPATH", "PYTHONUTF8", "PYTHONIOENCODING")}
         # A public generation defeats the CLI's cached MCP description: each process must prove live bridge access.
@@ -441,6 +477,11 @@ class AcpRun:
         self._seen.clear()
         self._pending.clear()
         requested = False
+        turn = self.host._turn
+        previous = self.host.saved.origin.get("fusionAcp", {})
+        resuming = (isinstance(previous, dict) and bool(previous.get("session"))
+                    and (self.client is None or not self.client.running
+                         or self._closing_task is not None and not self._closing_task.done()))
         fusion = self.host._fusion or getattr(self.host._fusion_parent, "_fusion", None)
         if fusion is not None and fusion.registry.policy.max_tokens:
             raise ChatGPTError("旧会话的 Token 上限无法约束 ACP；请新建无固定 Token 上限的 Fusion 会话。", code="fusion_acp")
@@ -499,6 +540,8 @@ class AcpRun:
             self.host._check_fusion_title_source(native_account=self.account)
             self.active = True
             requested = True
+            if turn is not None:
+                self._prompt_turn_id = turn.id
             result = await self.client.request("session/prompt", {"sessionId": self.session, "prompt": prompt_blocks(prompt, attachments)}, timeout=None)
             self._flush()
             if not self.violation and self._pending:
@@ -516,6 +559,8 @@ class AcpRun:
             self.host._save_now(required=True)
             return TurnEnd(self.boundary or "done", steps=self.steps)
         except BaseException:
+            if resuming and not requested and turn is not None and self._prompt_turn_id != turn.id:
+                self.host._unsent_prompt = turn.id
             await self.close()
             raise
         finally:
@@ -536,28 +581,45 @@ class AcpRun:
                 fusion._checkpoint()
             self.watcher = None
 
+    def _start_close(self) -> asyncio.Task[None]:
+        self._cancel_idle()
+        if self._closing_task is None or self._closing_task.done():
+            self._closing_task = asyncio.create_task(self._close_transport())
+            self._closing_task.add_done_callback(self._closed)
+        return self._closing_task
+
+    @staticmethod
+    def _closed(task: asyncio.Task[None]) -> None:
+        if not task.cancelled() and (error := task.exception()) is not None:
+            log.error("Fusion ACP transport cleanup failed", exc_info=error)
+
     async def close(self) -> None:
+        await asyncio.shield(self._start_close())
+
+    async def _close_transport(self) -> None:
         self.active = False
         for task in list(self._connections):
             task.cancel()
         if self._connections:
             await asyncio.gather(*list(self._connections), return_exceptions=True)
-        if self.client is not None:
-            if self.session and self.client.running:
-                with contextlib.suppress(Exception):
-                    await self.client.notify("session/cancel", {"sessionId": self.session})
-                with contextlib.suppress(Exception):
-                    await self.client.request("session/close", {"sessionId": self.session}, timeout=5)
-            await self.client.close()
-            self.client = None
-        if self._cancel is not None:
-            with contextlib.suppress(Exception):
-                await self._cancel
-        if self.server is not None:
-            self.server.close()
-            await self.server.wait_closed()
-            self.server = None
-        for task in list(self._connections):
-            task.cancel()
-        if self._connections:
-            await asyncio.gather(*list(self._connections), return_exceptions=True)
+        try:
+            if self.client is not None:
+                if self.session and self.client.running:
+                    with contextlib.suppress(Exception):
+                        await asyncio.wait_for(self.client.notify("session/cancel", {"sessionId": self.session}), 2)
+                    with contextlib.suppress(Exception):
+                        await self.client.request("session/close", {"sessionId": self.session}, timeout=5)
+                await self.client.close()
+                self.client = None
+        finally:
+            if self.server is not None:
+                self.server.close()
+                await self.server.wait_closed()
+                self.server = None
+            if self._cancel is not None:
+                await asyncio.gather(self._cancel, return_exceptions=True)
+                self._cancel = None
+            for task in list(self._connections):
+                task.cancel()
+            if self._connections:
+                await asyncio.gather(*list(self._connections), return_exceptions=True)

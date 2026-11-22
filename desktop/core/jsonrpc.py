@@ -439,7 +439,9 @@ class JsonRpcClient:
                 try:
                     await asyncio.wait_for(asyncio.shield(protocol.exited), grace)
                 except asyncio.TimeoutError:
-                    log.warning("%s did not exit %.1f s after its stdin was closed; terminating it", self.name, grace)
+                    # Only use the subprocess handle we created; a wrapper's descendants may be user jobs.
+                    log.warning("%s (pid %s) did not exit after %.1f s; terminating only the owned child",
+                                self.name, process.pid, grace)
                     with contextlib.suppress(ProcessLookupError, OSError):
                         process.terminate()
                     try:
