@@ -3,3 +3,24 @@
 .about-link { display: flex; align-items: center; gap: 4px; min-width: 0; }
 .about .kvs .about-link-text { width: auto; flex: 0 1 auto; min-width: 0; color: inherit; }
 .about-link .icon-btn { width: 24px; height: 24px; }
+
+.storage-inline { display: flex; align-items: center; gap: 8px; }
+.storage-shares { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.storage-share { display: flex; align-items: center; gap: 8px; }
+.storage-share > span:first-child { width: 84px; flex: 0 0 auto; }
+.storage-share-sum { display: flex; align-items: center; gap: 10px; }
+.storage-bad { color: var(--err); }
+.storage-autoclean { display: flex; flex-direction: column; gap: 8px; }
+.storage-autoclean-row { display: flex; align-items: center; gap: 10px; }
+.storage-usage { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
+.storage-donut { width: 140px; height: 140px; flex: 0 0 auto; }
+.storage-donut-track { stroke: var(--line); }
+.storage-donut-num { font-size: 15px; font-weight: 600; fill: currentColor; }
+.storage-donut-cap { font-size: 10px; fill: currentColor; opacity: 0.6; }
+.storage-legend { display: flex; flex-direction: column; gap: 6px; min-width: 0; flex: 1 1 220px; }
+.storage-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.storage-swatch { width: 10px; height: 10px; flex: 0 0 auto; }
+.storage-name { flex: 0 0 auto; }
+.storage-used { flex: 1 1 auto; text-align: right; font-variant-numeric: tabular-nums; }
+.storage-budget { opacity: 0.6; font-variant-numeric: tabular-nums; }
+.storage-total { border-top: 1px solid var(--line); padding-top: 6px; margin-top: 2px; }

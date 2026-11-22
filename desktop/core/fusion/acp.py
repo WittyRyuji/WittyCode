@@ -415,6 +415,8 @@ class AcpRun:
                                                "promptAttempted": bool(ident) and not never_prompted}
         if previous_empty:
             self.host.saved.origin["fusionAcp"]["previousEmptySession"] = previous_empty
+        # The real native session id is known now; bind the archive before any retained-text write.
+        self.host._archive_before_handoff()
         self.host._save_now(required=True)
         try:
             await asyncio.wait_for(asyncio.gather(self.guard_seen.wait(), self.bridge_seen.wait()), GUARD_SECONDS)

@@ -24,11 +24,11 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any
 
 from desktop.core.fusion import tools as fusion_tools
-from desktop.core.harness import asking, plan_approval
+from desktop.core.harness import asking, outputs, plan_approval, recall_tool
 from desktop.core.harness.loop import ALLOW, ASK, DENY, Call, Outcome, Verdict
 from desktop.core.harness.mcp import McpClient, McpTool
 from desktop.core.harness.permissions import _rememberable_command, action_view, decide, remember_key
-from desktop.core.harness.tools import ToolContext, ToolRegistry, ToolSpec
+from desktop.core.harness.tools import ToolContext, ToolError, ToolRegistry, ToolSpec
 from desktop.core.prompts import ActionView, QuestionView
 
 MCP_PREFIX = "mcp__"
@@ -133,9 +133,15 @@ class HarnessTools:
             declared.append(dict(fusion_tools.CHOOSE_MAP_DECLARATION))
         if self.map_updater is not None:
             declared.append(dict(fusion_tools.UPDATE_MAP_DECLARATION))
+        if self._history_bound():
+            declared.append(dict(recall_tool.DECLARATION))
         for name, (_, tool) in self._mcp.items():
             declared.append({"name": name, "description": tool.description, "parameters": tool.input_schema})
         return [item for item in declared if not self.identity_refusal(item["name"])] if self.identity_tools is not None else declared
+
+    def _history_bound(self) -> bool:
+        """A runtime archive binding authorizes ``recall_history``: without one it is not declared and not known."""
+        return bool(getattr(getattr(self.context, "history_recall", None), "enabled", False))
 
     def identity_refusal(self, name: str) -> str:
         kinds = self.identity_tools
@@ -155,7 +161,7 @@ class HarnessTools:
             kind = spec.kind
         elif name == fusion_tools.READ_RECORD:
             kind = "read"
-        elif name in (asking.NAME, plan_approval.NAME, fusion_tools.NAME, fusion_tools.BATCH_NAME):
+        elif name in (asking.NAME, plan_approval.NAME, fusion_tools.NAME, fusion_tools.BATCH_NAME, recall_tool.NAME):
             return IDENTITY_REFUSAL
         else:
             return ""  # Unknown names still go through the usual unknown-tool handling.
@@ -173,7 +179,8 @@ class HarnessTools:
                 or (name == fusion_tools.SUBMIT_ROUTE and self.route_submitter is not None)
                 or (name == fusion_tools.RATE_RECORDS and self.rating_submitter is not None)
                 or (name == fusion_tools.CHOOSE_MAP and self.map_chooser is not None)
-                or (name == fusion_tools.UPDATE_MAP and self.map_updater is not None))
+                or (name == fusion_tools.UPDATE_MAP and self.map_updater is not None)
+                or (name == recall_tool.NAME and self._history_bound()))
 
     def _identity_check(self, call: Call) -> Verdict | None:
         reason = self.identity_refusal(call.name)
@@ -219,6 +226,9 @@ class HarnessTools:
             return Verdict(ALLOW)  # (asking is not an action: the question is the user's say)
         if call.name == "read_output":
             return Verdict(ALLOW)  # Validated opaque references only, confined to this conversation.
+        if call.name == recall_tool.NAME:
+            # A read of this session's own archive under the turn ledger; it is never an action on the workspace.
+            return Verdict(ALLOW) if self._history_bound() else Verdict(DENY, recall_tool.UNAVAILABLE)
         if call.name == fusion_tools.READ_RECORD:
             return Verdict(ALLOW) if self.record_reader is not None else Verdict(DENY, "Fusion Drive is unavailable.")
         if call.name == fusion_tools.SUBMIT_REPORT:
@@ -392,6 +402,25 @@ class HarnessTools:
             if answers is None:
                 return Outcome(asking.SKIPPED, cancelled=True)
             return Outcome(asking.result(views, answers))
+        if call.name == recall_tool.NAME:
+            question, reason, problem = recall_tool.parse(call.args)
+            if problem:
+                return Outcome(problem, True)
+            bound = getattr(self.context, "history_recall", None)
+            if not getattr(bound, "enabled", False):
+                return Outcome("Refused: " + recall_tool.UNAVAILABLE, True)
+            # Disk IO on the session archive; a worker thread keeps the loop free like the registry's sync handlers.
+            text = await asyncio.to_thread(bound, question, reason)
+            outcome = Outcome(text, text.startswith("[recall] denied"))
+            store = getattr(self.context, "outputs", None)
+            if store is not None and len(text) > outputs.RETAIN_CHARS:
+                # The result would be retained wholesale; attach a real reference to the non-evidence note instead,
+                # so the archive text never enters the store and read_output cannot replay it past the ledger.
+                try:
+                    outcome.reference = await asyncio.to_thread(store.put, outputs.NOT_REPLAYABLE)
+                except (OSError, ToolError):
+                    pass
+            return outcome
         spec = self.registry.get(call.name)
         if spec is not None:
             result = await self.registry.run(call.name, call.args, self.context)

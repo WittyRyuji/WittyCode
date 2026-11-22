@@ -38,6 +38,7 @@ import "./skill-icons.test.mjs";
 import "./office.test.mjs";
 import "./media.test.mjs";
 import "./copy-chat.test.mjs";
+import "./storage-settings.test.mjs";
 
 test("a saved literal credential can be retained only at the same API kind and endpoint", () => {
   const saved = { baseUrl: "https://api.example.test/v1", kind: "anthropic" };

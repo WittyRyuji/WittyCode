@@ -159,6 +159,13 @@ class DevinController:
     _close_requested: bool = False
     _close_task: asyncio.Task[None] | None = None
     _opening: asyncio.Future[None] | None = None
+    _archive: Any = None
+    """The session archive this native session entered when an engine switch handed a logical-session sid over
+    (``session_archive``): ``None`` until then — a Devin session never invents a sid of its own, and a failed bind
+    leaves it unset so nothing unarchived is claimed."""
+    _archive_sid: str | None = None
+    """The logical-session sid this native session was bound under, kept even when the archive itself failed to
+    open — the next switch still carries the same identity."""
 
     # ------------------------------------------------------------------ plumbing
 

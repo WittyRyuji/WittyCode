@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { version } from "../../package.json";
-import { Brain, Brush, Cpu, ExternalLink, FolderOpen, Info, KeyRound, Layers, Minus, Plus, SlidersHorizontal, Sparkles, Trash2, X } from "lucide-react";
+import { Brain, Brush, Cpu, ExternalLink, FolderOpen, HardDrive, Info, KeyRound, Layers, Minus, Plus, SlidersHorizontal, Sparkles, Trash2, X } from "lucide-react";
 import { useStore } from "../store";
 import { aboutContact, PROJECT_GITHUB_URL } from "../lib/about";
 import { MODES, effortLabel, permissionsFor, reasoningChoices } from "../lib/vocab";
@@ -21,6 +21,7 @@ import { SoundSettings } from "./SoundSettings";
 import { ProviderEditor } from "./ProviderEditor";
 import { ProvidersPage } from "./ProvidersPage";
 import { FusionSettings } from "./FusionSettings";
+import { StorageSettings } from "./StorageSettings";
 import type { MenuItem } from "./ui";
 import "../styles/settings.css";
 
@@ -34,6 +35,7 @@ const PAGES = [
   { id: "programs", label: "外部程序", icon: <Cpu size={15} /> },
   { id: "projects", label: "项目", icon: <FolderOpen size={15} /> },
   { id: "connections", label: "插件", icon: <Layers size={15} /> },
+  { id: "storage", label: "存储", icon: <HardDrive size={15} /> },
   { id: "about", label: "关于", icon: <Info size={15} /> },
 ];
 
@@ -403,6 +405,7 @@ export function SettingsHost() {
             {current.id === "projects" && <ProjectsPage />}
             {current.id === "about" && <AboutPage />}
             {current.id === "connections" && <ConnectionsPage />}
+            {current.id === "storage" && <StorageSettings />}
           </div>
         </section>
       </div>

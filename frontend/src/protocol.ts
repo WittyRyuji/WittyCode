@@ -108,6 +108,34 @@ export type SoundKind = "question" | "complete" | "error";
 export type SoundKey = "soundQuestion" | "soundComplete" | "soundError";
 export type SettingValue = string | number | boolean | string[] | Record<string, string> | Record<string, number | boolean>;
 
+/** AppCore.storage_view(): the managed-data split, the global cap, and real occupancy where the
+ *  application measures it. `used`/`total.used` is `null` for what is not measured — an unknown is
+ *  never drawn as zero. `budget` is `maxBytes × share`, floored. */
+export interface StorageCategoryView {
+  id: string;
+  label: string;
+  /** percent of the cap */
+  share: number;
+  budget: number;
+  used: number | null;
+  known: boolean;
+  /** over its own share; a category never borrows another's headroom */
+  over: boolean;
+}
+export interface StorageView {
+  maxBytes: number;
+  /** percent of total occupancy at which the page warns */
+  alertAt: number;
+  /** "stop" refuses new writes at the cap; "autoclean" lets the writer drop the oldest eligible objects first */
+  fullPolicy: "stop" | "autoclean";
+  shares: Record<string, number>;
+  /** categories auto-clean may touch; history and dumps only appear when the user picked them */
+  autoclean: string[];
+  categories: StorageCategoryView[];
+  total: { used: number | null; known: boolean; alerted: boolean };
+}
+export type StorageSettingKey = "maxBytes" | "shares" | "alertAt" | "fullPolicy" | "autoclean";
+
 /** What `memory.list` can be narrowed by (all optional). `query`: words to look for; `status` "all" lists forgotten notes too. */
 export interface MemoryFilter {
   query?: string;
@@ -417,6 +445,8 @@ export interface Calls {
   /** the whole picture as a data: URI, for the big view; null when Python no longer has it */
   "attachments.full": { params: { id?: string; attachmentId: string }; result: { url: string | null } };
   "settings.set": { params: { key: SettingKey; value: SettingValue }; result: SettingsView };
+  "storage.get": { params: None; result: StorageView };
+  "storage.set": { params: { key: StorageSettingKey; value: SettingValue }; result: StorageView };
   "customization.read": { params: { projectId: string }; result: RulesDocument };
   "customization.save": { params: { projectId: string; text: string; revision: string }; result: RulesDocument };
   "sounds.pick": { params: { kind: SoundKind }; result: SettingsView };

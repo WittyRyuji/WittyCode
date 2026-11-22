@@ -40,6 +40,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from desktop.core.attachments import DEFAULT_PROMPT, IMAGE, PDF, TEXT, Attachment, sniff_image
 from desktop.core.chatgpt import history as saved_history
+from desktop.core.chatgpt.archive_binding import ArchiveBinding, PendingSnapshot
 from desktop.core.chatgpt.errors import AuthError, ChatGPTError, RequestNotSent, friendly_failure
 from desktop.core.chatgpt.responses import Event, Finished, Started, Usage, build_request
 from desktop.core.engine_errors import EngineRpcError
@@ -49,7 +50,7 @@ from desktop.core.context import ContextState, format_tokens
 from desktop.core.context_envelope import wrap as wrap_context
 from desktop.core.fusion.candidate import MERGE_CLAUSE, Staging, mark_candidates, unflag
 from desktop.core.handoff import Handoff
-from desktop.core.harness import asking, compact, skills
+from desktop.core.harness import asking, compact, recall_tool, skills
 from desktop.core.harness.history import prune_tool_images
 from desktop.core.harness.loop import INTERRUPTED, AgentLoop, Call, Observer, Outcome, Steer, TurnEnd, Verdict
 from desktop.core.harness.mcp import McpClient, McpError, McpTool, parse_tools
@@ -88,6 +89,9 @@ MANUAL_WINDOW = 128_000
 """The window a compaction the user asked for is measured against when the model's is not known."""
 MODES = ("auto", "spec")
 PLAN = "spec"
+ARCHIVE_ORIGIN = "sessionArchive"
+"""The ``saved.origin`` key holding the bound session archive's ``sid``; only its presence lets ``open_saved``
+rebind — a saved session without it keeps no archive, instead of being migrated silently."""
 """Droid's own word for what the page calls Plan."""
 
 
@@ -199,6 +203,14 @@ class ChatGPTController:
     _fusion_read_only: bool = False
     _fusion_step_limit: int | None = None
     _acp: Any = None
+    _archive_binding: ArchiveBinding | None = None
+    """The session archive this log is mirrored to (``chatgpt/archive_binding``): ``None`` until a new session's
+    first durable checkpoint, and forever for a saved session that never had one — no implicit migration."""
+    _archive_pending: bool = False
+    """``open_new`` marked a real (non-expert) conversation for archiving; its first checkpoint creates the
+    binding and records the ``sid`` under ``ARCHIVE_ORIGIN`` in the same write."""
+    _archive_broken: bool = False
+    """An archive write failed: the conversation goes on, but ``_compact`` refuses to run unarchived."""
 
     def __post_init__(self) -> None:
         self.saved = SavedSession(id=self.session_id, project=str(self.project))
@@ -433,6 +445,8 @@ class ChatGPTController:
         self._claim_session()
         memory = self.manager.memory
         self.preface = memory.brief_for("chatgpt", self.project) if memory is not None else ""
+        # An engine with a session root archives; one without (a bare fake manager) is never even asked to.
+        self._archive_pending = self._fusion_parent is None and isinstance(getattr(self.manager, "root", None), Path)
         self._ready()
 
     async def open_saved(self) -> None:
@@ -451,6 +465,15 @@ class ChatGPTController:
                           "warning": "上次批准后会话在启动阶段中断，可能已有副作用；请先检查，再明确选择是否执行。"}
             saved.mode = PLAN
         self.saved = saved
+        archive_sid = saved.origin.get(ARCHIVE_ORIGIN)
+        if isinstance(archive_sid, str):
+            try:
+                self._archive_adopt(ArchiveBinding.restore(self.manager, archive_sid, self.session_id))
+            except Exception:
+                # A damaged or unreadable archive must not take the conversation down with it — but a session
+                # that HAD one must not read as legacy either: broken, so compaction stays refused on the
+                # whole uncompacted view instead of running unarchived.
+                self._archive_fail()
         self._checkpoint_written = True
         self.requested_model = saved.model
         self.reasoning = saved.reasoning
@@ -594,6 +617,9 @@ class ChatGPTController:
             if isinstance(path, Path):
                 protected.append(path)
         self._context = self._context or ToolContext(self.project, threading.Event(), protected=tuple(protected), outputs=self._outputs)
+        if self._fusion_parent is None and self._fusion_identity is None:
+            # The recall tool is declared only while ``_archive_binding`` holds a live archive (harness/recall_tool).
+            recall_tool.bind_history(self._context, self)
         info = self.manager.model_info(self.running_model)
         self._context.supports_images = info is not None and info.supports_images
         names = getattr(providers, "secret_environment_names", None)
@@ -1598,6 +1624,33 @@ class ChatGPTController:
             async with contextlib.aclosing(stream(request)) as events:
                 async for event in events:
                     yield event
+        pending: PendingSnapshot | None = None
+        if self._archive_pending and not self._archive_broken:
+            # A compaction that precedes the first checkpoint opens the archive itself rather than run unarchived.
+            self._archive_begin()
+        binding = self._archive_binding
+        if self._archive_pending or self._archive_broken or binding is not None:
+            # A session that archives must not compact without it: stage first, and only a staged snapshot,
+            # a finished summary and a committed publish together may swap the view and ``saved.compaction``.
+            if binding is None or self._archive_broken:
+                raise ChatGPTError("会话归档不可用，未进行压缩；原始历史完整保留。请检查归档目录或存储设置后重试。", code="archive")
+            self._archive_sync()
+            if self._archive_broken:
+                raise ChatGPTError("会话归档同步失败，未进行压缩；原始历史完整保留。请检查归档目录或存储设置后重试。", code="archive")
+            try:
+                pending = binding.prepare(history, start, synthetic)
+            except Exception as error:
+                raise ChatGPTError("会话归档暂存失败，未进行摘要；原始历史完整保留。请检查存储空间或归档目录。", code="archive") from error
+
+        def drop() -> None:
+            nonlocal pending
+            if pending is not None and binding is not None:
+                try:
+                    binding.abort(pending)
+                except Exception:
+                    log.warning("could not drop the staged archive snapshot of %s", self.session_id, exc_info=True)
+                pending = None
+
         try:
             result = await compact.compact(
                 history,
@@ -1621,12 +1674,17 @@ class ChatGPTController:
                 on_request=requested,
             )
         except compact.CompactionFailed as error:
+            drop()
             raise ChatGPTError("摘要未完成，已暂停；原始历史和执行证据仍保留，没有用用户请求清单替代。可以重试压缩或换更大窗口的模型。", code="compaction") from error
+        except BaseException:
+            drop()
+            raise
         finally:
             if self._turn is owner:
                 self.transcript.set_working_state("thinking")
                 self._changed()
         if self._turn is not owner:
+            drop()
             return False
         entry: dict[str, Any] | None = None
         # A short conversation may have a slightly longer summary. Switching still needs a semantic handoff,
@@ -1646,19 +1704,30 @@ class ChatGPTController:
                 log.error("a compaction of the conversation %s does not match its log (upto %d); not kept", self.session_id, upto)
                 entry = None
         if entry is None:
+            drop()
             if must_fit:
                 raise self._too_big(model, window, result, estimate, fixed, overflow)
             return False
         previous_used = self.saved.context_used
         self.saved.compaction = entry
         self.saved.context_used = 0
-        if for_switch:
-            try:
+        try:
+            if pending is not None and binding is not None:
+                # The companion session save joins the archive's commit window as its checkpoint: the
+                # archive lock is held inside it, so it must save without syncing again. A failed save
+                # rolls the generation back — ``latest``, the staged file and this record all stay as before.
+                binding.publish(pending, entry,
+                                checkpoint=lambda _generation: self._save_now(required=True, already_synced=True))
+                pending = None
+            elif for_switch:
                 self._save_now(required=True)
-            except BaseException:
-                self.saved.compaction, self.saved.context_used = record, previous_used
-                raise
-        elif self.saved.prompt.get("current"):
+        except BaseException as error:
+            self.saved.compaction, self.saved.context_used = record, previous_used
+            drop()
+            if isinstance(error, Exception) and not isinstance(error, ChatGPTError):
+                raise ChatGPTError("摘要已生成，但归档提交失败；压缩未生效，原始历史完整保留。", code="archive") from error
+            raise
+        if not for_switch and self.saved.prompt.get("current"):
             self.saved.prompt["instructions"] = self.saved.prompt["current"]
         history[:] = result.view
         fusion = self._fusion or getattr(self._fusion_parent, "_fusion", None)
@@ -1739,7 +1808,7 @@ class ChatGPTController:
         if self._save_handle is not None:
             self._save_now()
 
-    def _save_now(self, *, required: bool = False, title_only: bool = False) -> bool:
+    def _save_now(self, *, required: bool = False, title_only: bool = False, already_synced: bool = False) -> bool:
         if title_only and not self._checkpoint_written:
             return False  # The side request must never create the conversation.
         if not title_only and self._save_handle is not None:
@@ -1752,6 +1821,8 @@ class ChatGPTController:
                 self.saved.origin[FIRST_PROMPT] = True
             elif not (any(t.finished is not None for t in self.saved.turns) or self.saved.goal and not self.transcript.turns):
                 return True  # settings, Fusion configuration and local turn setup are not archives
+        if not title_only and self._archive_pending and not self._archive_broken:
+            self._archive_begin()
         try:
             self.manager.sessions.save(self._snapshot())
         except OSError as error:
@@ -1771,7 +1842,94 @@ class ChatGPTController:
             return False
         self._checkpoint_written = True
         self._save_failed = False
+        if not title_only and not already_synced:
+            self._archive_sync()
         return True
+
+    def _archive_adopt(self, binding: ArchiveBinding) -> None:
+        """Bind the session archive and move this session's tool-output store into it — one store per logical
+        session (``<sid>/output``), for both a freshly created archive and a restored one."""
+        self._archive_binding = binding
+        self._outputs = binding.archive.outputs
+        if self._context is not None:
+            self._context.outputs = self._outputs
+
+    def _archive_fail(self) -> None:
+        """Mark the archive broken and say so once: the conversation keeps saving, but ``_compact`` refuses to
+        run unarchived rather than silently degrading its evidence."""
+        first = not self._archive_broken
+        self._archive_broken = True
+        log.warning("the session archive of %s failed", self.session_id, exc_info=True)
+        if first:
+            self.transcript.add_notice("会话归档写入失败：原文证据未继续归档，压缩已被阻止；请检查存储设置与磁盘空间。")
+            self._changed()
+
+    def _archive_begin(self) -> None:
+        """A conversation opened by ``open_new`` opens its session archive at its first durable checkpoint;
+        the sid joins ``saved.origin`` in the same write, so a reopen restores exactly this archive. A failed
+        create retries at the next checkpoint and blocks compaction meanwhile — never archives-disabled-then-compact."""
+        try:
+            self._archive_adopt(ArchiveBinding.create(self.manager, self.session_id))
+        except Exception:
+            self._archive_fail()
+            return
+        self._archive_pending = False
+        self._archive_broken = False
+        self.saved.origin[ARCHIVE_ORIGIN] = self._archive_binding.archive.sid
+
+    def _archive_segment(self) -> tuple[str, str, str] | None:
+        """``(backend, connection, native id)`` the current stretch of the log is archived under, by the actual
+        conversation backend — ``gpt`` on the ChatGPT plan, ``wittyharness`` on API providers (the harness is the
+        conversation), ``fusion`` on Fusion routing. The ACP stretch's native id comes only from the real
+        handshake (``_acp.session`` / the persisted ``saved.origin['fusionAcp']['session']``) — before one
+        exists nothing may be written, so ``None`` means "not yet archivable". A fusion session on a local
+        driver is still ``fusion`` (its ``_fusion`` state, not a model prefix) with the driver's own connection
+        and the local driver's native id — our session id. A backend switch starts a new archive instance; a
+        switch back resumes the old one."""
+        model = self.running_model or self.model or ""
+        if model.startswith("devin:"):
+            acp = getattr(self._acp, "session", "")
+            origin = self.saved.origin.get("fusionAcp")
+            saved_native = origin.get("session") if isinstance(origin, dict) else ""
+            native = acp or (saved_native if isinstance(saved_native, str) else "")
+            return ("fusion", "devin", native) if native else None
+        driver = "api" if model.startswith("api:") else "gpt"
+        if self._fusion is not None:
+            return "fusion", driver, self.session_id
+        return ("wittyharness" if driver == "api" else "gpt"), driver, self.session_id
+
+    def _archive_before_handoff(self) -> None:
+        """Fusion ACP knows its real native session id and is about to write retained handoff text: bind
+        the archive now so those writes land in the session-scoped store. An archive failure stops the
+        handoff; a session that never had an archive stays unarchived (no migration)."""
+        if self._archive_binding is None:
+            if self._archive_pending and not self._archive_broken:
+                self._archive_begin()
+            if self._archive_binding is None:
+                if self._archive_pending or self._archive_broken:
+                    raise ChatGPTError("会话归档不可用，未进行交接；原始历史完整保留。请检查归档目录或存储设置后重试。", code="archive")
+                return
+        self._archive_sync()
+        if self._archive_broken:
+            raise ChatGPTError("会话归档写入失败，未进行交接；原始历史完整保留。请检查归档目录或存储设置后重试。", code="archive")
+
+    def _archive_sync(self) -> None:
+        """Append to the archive what the durable log has and it does not; a failure marks the archive broken
+        so compaction cannot proceed on stale evidence, and a later success clears the mark."""
+        binding = self._archive_binding
+        if binding is None:
+            return
+        segment = self._archive_segment()
+        if segment is None:
+            return  # the ACP stretch has no real native id yet; nothing is written until the handshake
+        backend, connection, native = segment
+        try:
+            binding.ensure_instance(backend, native, connection)
+            binding.sync(self.saved.items, self.saved.turns)
+        except Exception:
+            self._archive_fail()
+        else:
+            self._archive_broken = False
 
     # ------------------------------------------------------------------ approvals
 
@@ -1998,8 +2156,8 @@ class _Watch(Observer):
             self.ctl._changed()
 
     async def retain_output(self, call: Call, outcome: Outcome) -> None:
-        from desktop.core.harness.outputs import RETAIN_CHARS
-        if not self.current or call.name == "read_output" or outcome.reference or len(outcome.output) <= RETAIN_CHARS:
+        from desktop.core.harness.outputs import RETAIN_CHARS, UNRETAINED
+        if not self.current or call.name in UNRETAINED or outcome.reference or len(outcome.output) <= RETAIN_CHARS:
             return
         work = asyncio.create_task(asyncio.to_thread(self.ctl._outputs.put, outcome.output))
         try:

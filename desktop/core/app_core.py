@@ -23,6 +23,7 @@ import dataclasses
 import itertools
 import logging
 import os
+import stat
 import subprocess
 import sys
 import time
@@ -51,6 +52,8 @@ from desktop.core.connector_auth import ConnectorStore
 from desktop.core.plugin_http import PluginError
 from desktop.core.skill_marketplace import SkillMarketplace
 from desktop.core.cache import Cache
+from desktop.core import storage_policy
+from desktop.core import storage_meter
 from desktop.core.conversation_history import ConversationHistory, prepend as prepend_history
 from desktop.core.catalog import API_PREFIX, Catalog, Target, build_catalog, settings_for_model
 from desktop.core.chatgpt.errors import ChatGPTError
@@ -392,6 +395,9 @@ class AppCore:
         self.chatgpt = chatgpt
         if chatgpt is not None:
             chatgpt.devin = devin
+            chatgpt.archive_meter = self.archive_meter
+            """The shared usage meter the session archives write through (``chatgpt/archive_binding``):
+            the engines ask their manager for it, here the manager is this engine."""
         self.connections = ConnectionStore()
         self.connectors = ConnectorStore(self.connections.file.parent)
         self.skill_marketplace = SkillMarketplace(self.connections)
@@ -455,6 +461,7 @@ class AppCore:
         self.persist = persist
         self.offline = offline
         self.cache = cache if cache is not None else Cache(None)
+        self._archive_meter: storage_meter.ArchiveMeter | None = None
         self._index: dict[str, Any] = {}
         self._index_handle: asyncio.TimerHandle | None = None
         self._hydrated = False
@@ -628,6 +635,85 @@ class AppCore:
             "soundComplete": sounds.sound_path("complete", self.settings.sound_complete),
             "soundError": sounds.sound_path("error", self.settings.sound_error),
         }
+
+    def _storage_policy(self) -> storage_policy.StoragePolicy:
+        return storage_policy.StoragePolicy(
+            self.settings.storage_max_bytes,
+            dict(self.settings.storage_shares),
+            self.settings.storage_alert_at,
+            self.settings.storage_full_policy,
+            tuple(self.settings.storage_autoclean),
+        )
+
+    @staticmethod
+    def _managed_file_bytes(path: Path) -> int:
+        try:
+            info = path.lstat()
+        except OSError:
+            return 0
+        return info.st_size if stat.S_ISREG(info.st_mode) else 0
+
+    def session_archive_root(self) -> Path:
+        """The session archive root: ``<application data>/session`` (final spec §1) — beside the own
+        engine's root, the same folder ``ArchiveBinding`` opens (``manager.root.parent / 'session'``),
+        so the meter measures exactly what the bindings write. Without the own engine it stays beside
+        the settings file. Read-only to call."""
+        root = getattr(self.chatgpt, "root", None)
+        if root is not None:
+            return Path(root).parent / "session"
+        return default_settings_path().parent / "session"
+
+    def archive_meter(self) -> storage_meter.ArchiveMeter:
+        """The shared usage meter for the session archive — the object ``SessionArchive`` takes as
+        ``meter`` so its writes are gated and counted. The gate reads live settings, so a changed
+        policy applies to the next write, not the next launch."""
+        if self._archive_meter is None:
+            self._archive_meter = storage_meter.ArchiveMeter(self.session_archive_root(), gate=self._archive_gate)
+        return self._archive_meter
+
+    def _archive_gate(self, category: str, incoming: int,
+                      archive_usage: dict[str, int | None]) -> dict[str, Any]:
+        """The verdict the meter consults inside its serialized transaction: archive-side usage merged
+        with the application's own cache and shared memory index, judged by the current policy."""
+        usage = self._storage_usage(archive_usage=archive_usage)
+        return storage_policy.check_write(self._storage_policy(), usage, category, incoming)
+
+    def _storage_usage(self, archive_usage: dict[str, int | None] | None = None) -> dict[str, int | None]:
+        """Occupancy the application itself can state, per managed-data category; anything it does not
+        measure stays unknown — the page must never draw it as zero (``storage_policy.report``).
+
+        ``cache`` is the application's own cache folder (index.json and sessions/*.json) — ``None``
+        means there is no managed cache at all, a known zero, not an unmeasured figure; ``index``
+        the shared memory's rebuildable SQLite index plus the session archive's ``index.sqlite``
+        and WAL sidecars; ``history`` and ``dump`` are the session archive's metered bytes, per the
+        usage ledger — real counts for archive-managed writes only. Legacy history outside the
+        archive root is an explicit boundary: never scanned, never silently counted as zero."""
+        usage: dict[str, int | None] = {name: None for name in storage_policy.CATEGORIES}
+        if self.cache.enabled and self.cache.folder is not None:
+            total = sum(self._managed_file_bytes(path) for path in (self.cache.folder / "sessions").glob("*.json"))
+            usage["cache"] = total + self._managed_file_bytes(self.cache.folder / "index.json")
+        elif self.cache.folder is None:
+            usage["cache"] = 0
+        archive = archive_usage if archive_usage is not None else self.archive_meter().usage()
+        usage["history"], usage["dump"] = archive["history"], archive["dump"]
+        index_bytes = archive["index"] or 0
+        if self.memory is not None:
+            index = self.memory.store.index_path
+            index_bytes += sum(self._managed_file_bytes(index.with_name(index.name + suffix))
+                               for suffix in ("", "-wal", "-shm", "-journal"))
+        usage["index"] = index_bytes
+        return usage
+
+    def storage_view(self) -> dict[str, Any]:
+        """The Storage page: the split and cap, real occupancy where the application measures it,
+        and the metered archive's scope — root, boundary, unmetered entries, cleanup support."""
+        view = storage_policy.report(self._storage_policy(), self._storage_usage())
+        view["managed"] = {"archive": self.archive_meter().describe()}
+        return view
+
+    def check_capacity(self, category: str, incoming: int) -> dict[str, Any]:
+        """Pre-write gate for the archive layer — see ``storage_policy.check_write`` for the verdict shape."""
+        return storage_policy.check_write(self._storage_policy(), self._storage_usage(), category, incoming)
 
     def project_rows(self) -> list[dict[str, Any]]:
         return [
@@ -3761,6 +3847,44 @@ class AppCore:
             raise AppError(f"{held.describe()}：要这样带过去，请在清单里确认。")
         return chosen
 
+    def _archive_sid_of(self, controller: Any) -> str | None:
+        """The logical-session sid this runtime was bound to, if any — only its own bound state counts; an id the
+        page or another party passes in is never taken as an identity."""
+        binding = getattr(controller, "_archive_binding", None)
+        if binding is not None:
+            return binding.archive.sid
+        sid = getattr(controller, "_archive_sid", None)
+        if isinstance(sid, str) and sid:
+            return sid
+        origin = getattr(getattr(controller, "saved", None), "origin", None)
+        return origin.get("sessionArchive") if isinstance(origin, dict) else None
+
+    def _adopt_archive(self, old: Any, new: Any) -> None:
+        """Hand the trusted logical-session sid to the freshly opened controller, so an engine switch stays one
+        archive: a GPT/harness segment rebinds through ``ArchiveBinding.restore``; a native Devin session enters
+        with the session id its endpoint actually returned (re-entering the same native id resumes its ``iid``).
+        Let this run only inside the switch's guard: a failure rolls the switch back — it must never graft a
+        wrong identity or invent a second sid beside the trusted one."""
+        sid = self._archive_sid_of(old)
+        if sid is None:
+            return
+        if new.engine == "devin":
+            from desktop.core.session_archive import SessionArchive
+
+            archive = SessionArchive.open(self.session_archive_root(), sid, meter=self.archive_meter())
+            archive.enter("devin", "devin", new.session_id)
+            new._archive, new._archive_sid = archive, sid
+            return
+        if new.engine != "chatgpt":
+            return
+        from desktop.core.chatgpt.archive_binding import ArchiveBinding
+        from desktop.core.chatgpt.controller import ARCHIVE_ORIGIN
+
+        binding = ArchiveBinding.restore(new.manager, sid, new.session_id)
+        new._archive_adopt(binding)
+        new.saved.origin[ARCHIVE_ORIGIN] = sid
+        new._archive_pending = False
+
     async def _switch_engine(
         self, conv: Conversation, page_model: str, carry_ids: Sequence[str] | None = None, over_ok: bool = False,
         *, fusion_policy: Any = None, fusion_retained: Any = None,
@@ -3849,6 +3973,9 @@ class AppCore:
                 )
             if controller.state is not SessionState.READY:
                 raise AppError(controller.last_error or "没有切换成功：新的会话没有启动。")
+            if controller.engine != "devin":
+                # A GPT/harness segment's sid must join ``saved.origin`` before the compatibility snapshot below.
+                self._adopt_archive(old, controller)
             if handoff is not None and not window and not summary:
                 window = await self._window_of(controller, page_model)
                 if window and getattr(controller, "handoff", None) is handoff and controller.state is SessionState.READY:
@@ -3871,6 +3998,10 @@ class AppCore:
                     # Preserve even an empty native segment: its previous turns are in the engine-neutral archive.
                     await asyncio.to_thread(self.chatgpt.sessions.save, controller._snapshot())
                     controller._checkpoint_written = True
+            if controller.engine == "devin":
+                # A Devin ``enter`` writes the archive's timeline and current at once: last, after every other
+                # fallible write, so a failed checkpoint never leaves the archive switched to a lost segment.
+                self._adopt_archive(old, controller)
         except BaseException as error:
             self._rollback_switch(conv, old, controller)
             transcript.restore(before)  # a failed open writes its error into the shared transcript
@@ -4240,6 +4371,33 @@ class AppCore:
         view = self.settings_view()
         self.emit("settings", {"settings": view})
         return view
+
+    async def _m_storage_get(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self.storage_view()
+
+    async def _m_storage_set(self, params: dict[str, Any]) -> dict[str, Any]:
+        key, value = params.get("key"), params.get("value")
+        s = self.settings
+        if key == "maxBytes" and _is_int(value) and storage_policy.MAX_BYTES_RANGE[0] <= value <= storage_policy.MAX_BYTES_RANGE[1]:
+            s.storage_max_bytes = value
+        elif key == "shares":
+            shares = storage_policy.shares_from(value)
+            if shares is None:
+                raise AppError("各类占比必须合计 100%。")
+            s.storage_shares = shares
+        elif key == "alertAt" and _is_int(value) and storage_policy.ALERT_RANGE[0] <= value <= storage_policy.ALERT_RANGE[1]:
+            s.storage_alert_at = value
+        elif key == "fullPolicy" and value in storage_policy.FULL_POLICIES:
+            s.storage_full_policy = value
+        elif key == "autoclean":
+            picks = storage_policy.autoclean_from(value)
+            if picks is None:
+                raise AppError("这个设置的值不合法。")
+            s.storage_autoclean = picks
+        else:
+            raise AppError("这个设置的值不合法。")
+        self._save()
+        return self.storage_view()
 
     async def _m_sounds_pick(self, params: dict[str, Any]) -> dict[str, Any]:
         kind = params.get("kind")
