@@ -116,6 +116,9 @@ QUEUE_SECONDS = 180.0
 """How long a message typed while a session connects waits for it."""
 ACTIVITY_STEP = 10.0
 """A running turn updates its displayed activity age at most this often, in seconds. Activity never changes row order."""
+PREFETCH_DEDUPE_SECONDS = 60.0
+"""Repeat model selections and session READY events ask for the same profile at most this often per app run; the
+records on disk dedupe the actual fetches."""
 EVICTION_NOTICE = "已自动关闭最久未使用的会话"
 RETRY_NOTICE = "这条消息没有发送成功：附件已放回输入框，可以直接重试。"
 RETRY_OVER_NOTICE = "这条消息没有发送成功：附件已放回输入框。"
@@ -491,6 +494,9 @@ class AppCore:
         # while it was open.
         self._spoken: dict[str, float] = {}
         self._tasks: set[asyncio.Future[Any]] = set()
+        self._profiles_source: Any = None
+        """The model-profile fetch (tests substitute a fake; the real one only ever asks Artificial Analysis)."""
+        self._prefetched_profiles: dict[tuple[str, str], float] = {}  # (model, effort) -> monotonic of last spawn
         self._flush_handle: asyncio.TimerHandle | None = None
         self._sidebar_handle: asyncio.TimerHandle | None = None
         self._sidebar_reload: set[str] = set()
@@ -1343,6 +1349,8 @@ class AppCore:
             self._remember_auto_title(conv, self._row_of(conv), controller.title)
         elif kind == "state":
             self._schedule_sidebar(conv.project, reload=controller.state is SessionState.READY)
+            if controller.state is SessionState.READY:
+                self._prefetch_conv(conv)
             if conv.preview and controller.state is SessionState.DEAD:
                 self.say(f"{controller.last_error}；仍显示本地缓存，可以重新连接。")
         elif controller.state is SessionState.RUNNING and time.time() - controller.active_at >= ACTIVITY_STEP:
@@ -3341,11 +3349,14 @@ class AppCore:
                 raise AppError("所选模型不支持这个推理档位。")
             pending = {**conv.pending_model, "settings": {**conv.pending_model["settings"], "reasoning": value}}
             self._set_pending_model(conv, pending)
+            self._prefetch_profile(conv.pending_model["model"], value)
             return {"ok": True}
         ok = await self._update_live(conv, **{field_name: value})
         if ok and conv.pending_model is not None:
             pending = {**conv.pending_model, "settings": {**conv.pending_model["settings"], field_name: self._page_settings(conv).get(field_name, value)}}
             self._set_pending_model(conv, pending)
+        if ok and field_name == "reasoning":
+            self._prefetch_profile(self._page_settings(conv).get("model"), value)
         return {"ok": ok}
 
     def _set_default(self, field_name: str, value: str, *, engine: str | None = None) -> None:
@@ -3355,8 +3366,10 @@ class AppCore:
             # The level and permission that go with the new model's engine.
             fixed, _ = settings_for_model(self.catalog, self._engine_defaults(value), value)
             settings.reasoning_effort = fixed.get("reasoning", "")
+            self._prefetch_profile(value, settings.reasoning_effort)
         elif field_name == "reasoning":
             settings.reasoning_effort = value
+            self._prefetch_profile(settings.default_model, value)
         elif field_name == "autonomy":
             current = engine or self.catalog.engine_of(settings.default_model)
             if current == "factory" and value in ("off", "low", "medium", "high"):
@@ -3425,6 +3438,11 @@ class AppCore:
                 raise AppError("Fusion 主模型的推理档位不可用。") from error
             if effort is not None:
                 settings["reasoning"] = effort
+        if policy is not None:
+            self._prefetch_seats(policy.reasoning, [("main", policy.main), ("light", policy.light),
+                                                    *[("worker", seat) for seat in policy.workers]])
+        else:
+            self._prefetch_profile(destination, settings.get("reasoning", ""))
         self._set_pending_model(conv, {"model": page_model, "settings": settings, "attachments": list(carry_ids or ()),
                                       "overLimit": over_ok, "policy": policy.to_json() if policy is not None else None})
         return {"ok": True}
@@ -3555,6 +3573,7 @@ class AppCore:
                     if not settings.get("reasoning")
                     else f"{model.get('label', page_model)} 不支持「{current.get('reasoning', '')}」推理，已改为「{settings['reasoning']}」。"
                 )
+        self._prefetch_profile(page_model, settings.get("reasoning", ""))
         return {"ok": ok}
 
     def _check_fusion_switch(self, conv: Conversation) -> None:
@@ -3615,6 +3634,59 @@ class AppCore:
         except FusionError as error:
             raise AppError("Fusion 配置不可用；请检查设置或保留的专家配置，原会话未改变。") from error
         return policy, retained, restored
+
+    # ------------------------------------------------------------------ model profiles (public leaderboard prefetch)
+
+    def _profiles_fetch(self) -> Any:
+        if self._profiles_source is None:
+            from desktop.core.fusion import aa_catalog
+            self._profiles_source = aa_catalog.source()
+        return self._profiles_source
+
+    def _prefetch_profile(self, model: Any, effort: Any = "") -> None:
+        """Fetch the model's public profile in the background: a selection never waits for it or fails on it."""
+        if not isinstance(model, str) or not model.startswith(("chatgpt:", "api:", "devin:")):
+            return
+        key = (model, effort if isinstance(effort, str) else "")
+        now = time.monotonic()
+        if now - self._prefetched_profiles.get(key, -PREFETCH_DEDUPE_SECONDS) < PREFETCH_DEDUPE_SECONDS:
+            return
+        self._prefetched_profiles[key] = now
+        self._spawn(self._profile_task(model, key[1]), quiet=True)
+
+    async def _profile_task(self, model: str, effort: str) -> None:
+        from desktop.core.fusion import profiles
+        try:
+            await asyncio.to_thread(profiles.ensure, default_settings_path().parent, model, effort, self._profiles_fetch())
+        except Exception:
+            # A provider or custom id (api:vendor:custom:name) can be private; the engine prefix is enough.
+            log.exception("prefetching a model profile for %s failed", model.partition(":")[0])
+
+    def _seat_effort(self, reasoning: Mapping[str, str], role: str, model: str) -> str:
+        """The effort a seat will actually run at: its configured level, else the model's own default."""
+        effort = reasoning.get(f"{role}:{model}", reasoning.get(model))
+        if effort is not None:
+            return effort
+        return (self.catalog.find(model) or {}).get("defaultEffort") or ""
+
+    def _prefetch_seats(self, reasoning: Mapping[str, str], seats: Sequence[tuple[str, str]]) -> None:
+        for role, model in seats:
+            self._prefetch_profile(model, self._seat_effort(reasoning, role, model))
+
+    def _prefetch_fusion_settings(self) -> None:
+        settings = self.settings
+        self._prefetch_seats(settings.fusion_reasoning, [("main", settings.fusion_main), ("light", settings.fusion_light),
+                                                         *[("worker", model) for model in settings.fusion_workers]])
+
+    def _prefetch_conv(self, conv: Conversation) -> None:
+        fusion = getattr(conv.controller, "_fusion", None)
+        if fusion is not None:
+            policy = fusion.registry.policy
+            self._prefetch_seats(policy.reasoning, [("main", policy.main), ("light", policy.light),
+                                                    *[("worker", model) for model in policy.workers]])
+            return
+        settings = self._page_settings(conv)
+        self._prefetch_profile(settings.get("model"), settings.get("reasoning", ""))
 
     async def _refresh_fusion_settings(self, conv: Conversation) -> None:
         """Adopt the global preset at a new-turn boundary, never in a running model/tool step."""
@@ -3686,6 +3758,8 @@ class AppCore:
             self._schedule_flush()
         conv.ledger.seen.update(restored[0])
         conv.ledger.model_seen.update(restored[1])
+        self._prefetch_seats(policy.reasoning, [("main", policy.main), ("light", policy.light),
+                                                *[("worker", seat) for seat in policy.workers]])
         self.say("已在本会话启用 Fusion；历史和专家上下文保留，不会自动启动任务。")
         return {"ok": True}
 
@@ -4136,6 +4210,7 @@ class AppCore:
     async def _m_settings_set(self, params: dict[str, Any]) -> dict[str, Any]:
         key, value = params["key"], params["value"]
         s = self.settings
+        seats = False
         if key == "theme" and value in THEMES:
             s.theme = value
         elif key == "fontScale" and value in FONT_SCALES:
@@ -4160,8 +4235,10 @@ class AppCore:
             s.max_steps = value
         elif key in ("fusionMain", "fusionLight") and isinstance(value, str) and len(value) <= 512 and (not value or value.startswith(("chatgpt:", "api:", "devin:"))):
             setattr(s, "fusion_main" if key == "fusionMain" else "fusion_light", value)
+            seats = True
         elif key == "fusionWorkers" and isinstance(value, list) and len(value) <= 1 and all(isinstance(item, str) and len(item) <= 512 and item.startswith(("chatgpt:", "api:", "devin:")) for item in value):
             s.fusion_workers = list(dict.fromkeys(value))
+            seats = True
         elif key == "fusionReasoning":
             from desktop.core.fusion.reasoning import reasoning_map, reasoning_model
             try:
@@ -4176,6 +4253,7 @@ class AppCore:
                 if chosen is None or effort not in chosen.get("efforts", ()):
                     raise AppError("所选模型不支持这个思考等级。")
             s.fusion_reasoning = levels
+            seats = True
         elif key == "fusionPreference" and _is_int(value) and 0 <= value <= 100:
             s.fusion_preference = value
         elif key == "fusionMaxCalls" and _is_int(value) and 1 <= value <= 1000:
@@ -4236,6 +4314,8 @@ class AppCore:
                 self._spawn(self._devin_path_changed(), quiet=True)
         else:
             raise AppError("这个设置的值不合法。")
+        if seats:
+            self._prefetch_fusion_settings()
         self._save()
         view = self.settings_view()
         self.emit("settings", {"settings": view})
