@@ -298,11 +298,23 @@ def test_frozen_items_seat_all_three_tiers_with_their_reasoning(tmp_path):
             assert [(agents[name].record.seat, agents[name].record.model, agents[name].agent_effort)
                     for name in ("Alpha", "Beta", "Gamma")] == [
                 ("L3", LIGHT, "low"), ("L2", WORKER, "high"), ("L1", MAIN, "low")]
+            receipt = _output(main, "route")
+            assert receipt.startswith("Route accepted: split (runner).")
+            for name, item_id, score, seat, model, effort in (
+                    ("Alpha", "a", "0.3", "L3", "gpt-6-luna", "low"),
+                    ("Beta", "b", "0.5", "L2", "gpt-6.1-sol", "high"),
+                    ("Gamma", "c", "0.85", "L1", "gpt-6.1-sol", "low")):
+                assert (f"{name} [{item_id}]: score {score} at N=50 seats {seat} on {model}, {effort} reasoning; "
+                        f"scored as \"Sits between the gates.\"") in receipt
             # A second turn re-freezes the identical items and re-dispatches onto the same owners.
             await _declared_turn(main, fake, call("submit_route", route, call_id="route-2"),
                                  call("delegate_task", brief("Alpha", "a.txt"), call_id="d-a2"), say("Alpha again."),
                                  say("Reused."))
             assert {agent.record.workstream: agent for agent in main.agents.values()}["Alpha"] is agents["Alpha"]
+            assert "Alpha [a]: score 0.3 at N=50 seats L3" in _output(main, "route-2"), \
+                "a re-frozen item echoes its stored record, not a new score"
+            await _declared_turn(main, fake, call("submit_route", _route(), call_id="route-3"), say("Plain."))
+            assert _output(main, "route-3") == "Route accepted: coder (runner).", "no items means no scoring lines"
     asyncio.run(go())
 
 

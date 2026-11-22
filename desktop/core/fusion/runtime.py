@@ -476,6 +476,28 @@ class FusionRuntime:
         if turn is not None and turn.from_plan and turn.route is not None:
             await self._retain_route(turn, turn.route)
 
+    def _allocation_lines(self, items: tuple[dict[str, Any], ...]) -> str:
+        """One compact line per submitted item, read back from the records the freeze actually kept."""
+        policy = self.registry.policy
+        lines = []
+        for item in items:
+            record = self.registry.allocation_for(item["workstream"], item["role"])
+            if record is None:
+                continue
+            seat = record["seat"]
+            try:
+                model = policy.seat_model(seat)
+                effort = self.reasoning_for(model, allocation.SEAT_ROLE[seat]) or "default"
+                shown = f" on {native_model(model)}, {effort} reasoning"
+            except FusionError:
+                shown = ", model or effort unavailable"
+            reason = " ".join(record["reason"].split())
+            if len(reason) > 72:
+                reason = reason[:69] + "..."
+            lines.append(f"\n- {record['workstream']} [{record['id']}]: score {record['score']} at N={record['N']} "
+                         f"seats {seat}{shown}; scored as \"{reason}\"")
+        return "".join(lines)
+
     async def submit_route(self, args: Mapping[str, Any]) -> Outcome:
         turn = self.route_turn
         if turn is None or self.parent._turn is None or not self.gate("route"):
@@ -509,7 +531,8 @@ class FusionRuntime:
         turn.submitted_at = time.time()
         turn.workstreams.clear()
         await self._retain_route(turn, route)
-        return Outcome(f"Route accepted: {route.destination} ({route.verification}).")
+        lines = self._allocation_lines(route.items) if self.gate("v3") and route.items else ""
+        return Outcome(f"Route accepted: {route.destination} ({route.verification}).{lines}")
 
     def acceptance_enabled(self) -> bool:
         return all(self.gate(name) for name in ("acceptance", "route", "brief", "report"))
