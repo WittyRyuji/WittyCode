@@ -14,7 +14,7 @@ from desktop.core.app_core import AppError
 from desktop.core.cache import Cache
 from desktop.core.session_state import SessionState, SteerOutcome
 from desktop.core.settings import FOLLOW_UPS, AppSettings, settings_from_dict
-from tests.app_support import ready_core
+from tests.app_support import ready_core, without_numbered_reply
 from tests.devin_support import make_engine as make_devin
 from tests.fake_responses import fail, say, usage
 from tests.fakes import until
@@ -52,7 +52,7 @@ def user_parts(request):
 
 
 def user_text(request):
-    return user_parts(request)[0]["text"]
+    return without_numbered_reply(user_parts(request)[0]["text"])
 
 
 class Turns:
@@ -483,7 +483,7 @@ def test_a_message_sent_now_while_the_session_is_still_connecting_waits_and_the_
         await opening
         await until(lambda: len(harness.requests("session/prompt")) == 2, timeout=10)
         naming, main = [r["prompt"][0]["text"] for r in harness.requests("session/prompt")]
-        assert "at most 10 characters" in naming and '"early"' in naming and main == "early"
+        assert "at most 10 characters" in naming and '"early"' in naming and without_numbered_reply(main) == "early"
         await core.shutdown()
 
     run(scenario())

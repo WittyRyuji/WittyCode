@@ -13,7 +13,7 @@ from desktop.core.memory.store import MemoryStore, agent
 from desktop.core.toolinfo import Category, describe_input, memory_tool, tool_category
 from tests import chatgpt_support, devin_support
 from tests.fake_responses import fail, say
-from tests.app_support import make_core, ready_core
+from tests.app_support import make_core, ready_core, without_numbered_reply
 from tests.fakes import until
 
 
@@ -63,7 +63,7 @@ def test_a_new_own_loop_session_is_given_the_memory_server_and_the_note_after_it
         assert controller.preface == ""
         await core.call("session.send", {"id": cid, "text": "second question"})
         await until(lambda: controller.state.value == "ready" and len(plan.requests) == 2, timeout=15)
-        assert user_text(plan) == "second question", "the note goes with the first message only"
+        assert without_numbered_reply(user_text(plan)) == "second question", "the note goes with the first message only"
         await core.shutdown()
 
     run(scenario())
@@ -196,7 +196,7 @@ def test_an_own_loop_message_goes_with_the_notes_that_bear_on_it_once_and_the_pa
 
         await core.call("session.send", {"id": cid, "text": "and the deploy command once more, please"})
         await until(lambda: controller.state.value == "ready" and len(plan.requests) == 2, timeout=15)
-        assert user_text(plan) == "and the deploy command once more, please", "the same note is not given twice"
+        assert without_numbered_reply(user_text(plan)) == "and the deploy command once more, please", "the same note is not given twice"
         await core.shutdown()
 
     run(scenario())
@@ -221,7 +221,7 @@ def test_a_later_message_brings_no_notes_even_when_another_note_fits_it_better(t
         second = "what is the lint command for this project"
         await core.call("session.send", {"id": cid, "text": second})
         await until(lambda: controller.state.value == "ready" and len(plan.requests) == 2, timeout=15)
-        assert user_text(plan) == second, "a note that fits is not brought along: the model has memory_search"
+        assert without_numbered_reply(user_text(plan)) == second, "a note that fits is not brought along: the model has memory_search"
         assert notices_of(controller.transcript.turns[-1]) == []
         await core.shutdown()
 

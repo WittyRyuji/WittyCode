@@ -17,7 +17,7 @@ from desktop.core.app_core import AppError
 from desktop.core.chatgpt.http import HttpClient
 from desktop.core.llm.backend import ApiBackend
 from desktop.core.providers import ProviderStore
-from tests.app_support import make_core, ready_core
+from tests.app_support import make_core, ready_core, without_numbered_reply
 from tests.chatgpt_support import make_engine
 from tests.fakes import until
 from tests.llm_support import FakeApi, http_error
@@ -111,18 +111,23 @@ def test_the_providers_models_are_in_the_list_for_the_own_loop_without_any_sign_
 # ------------------------------------------------------------------------------------------------ a conversation
 
 
-def test_a_conversation_with_an_api_model_is_asked_at_the_provider(tmp_path):
+@pytest.mark.parametrize("numbered_reply", [True, False], ids=["numbered", "plain"])
+def test_a_conversation_with_an_api_model_is_asked_at_the_provider(tmp_path, numbered_reply):
     async def scenario():
         with FakeApi() as api:
             api.script(says("Four."))
-            core, factory, events, _, _ = await api_core(tmp_path, api)
+            core, _, events, _, _ = await api_core(tmp_path, api)
+            await core.call("settings.set", {"key": "numberedReply", "value": numbered_reply})
             cid = await new_session(core, events, tmp_path, api_model_id(events))
             assert meta(events, cid)["engine"] == "chatgpt"
             await core.call("session.send", {"id": cid, "text": "what is 2+2"})
             await until(lambda: meta(events, cid).get("mark") == "ready" and answer_of(events, cid) == "Four.")
             ((path, headers, body),) = api.posts
             assert path == "/v1/chat/completions" and headers["authorization"] == "Bearer sk-test-1" and body["model"] == "deep-chat"
-            assert body["messages"][0]["role"] == "system" and body["messages"][-1] == {"role": "user", "content": "what is 2+2"}
+            assert body["messages"][0]["role"] == "system"
+            message = body["messages"][-1]
+            assert message["role"] == "user" and without_numbered_reply(message["content"]) == "what is 2+2"
+            assert ('<skill name="numbered-reply" official="wittycode">' in message["content"]) is numbered_reply
             context = meta(events, cid)["context"]
             assert (context["window"], context["used"]) == (64_000, 220), "the window is the user's and the usage is what the provider counted"
             await core.shutdown()
@@ -202,7 +207,8 @@ def test_a_second_message_carries_the_conversation_so_far(tmp_path):
             await until(lambda: meta(events, cid).get("mark") == "ready")
             await core.call("session.send", {"id": cid, "text": "second"})
             await until(lambda: answer_of(events, cid) == "Two.")
-            roles = [(m["role"], m.get("content")) for m in api.posts[1][2]["messages"][1:]]
+            roles = [(m["role"], without_numbered_reply(m["content"]) if m["role"] == "user" else m.get("content"))
+                     for m in api.posts[1][2]["messages"][1:]]
             assert roles == [("user", "first"), ("assistant", "One."), ("user", "second")]
             await core.shutdown()
 

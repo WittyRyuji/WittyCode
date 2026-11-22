@@ -11,6 +11,8 @@ from types import SimpleNamespace
 from typing import Any
 
 from desktop.core.app_core import AppCore
+from desktop.core.context_envelope import wrap
+from desktop.core.harness import official_skill
 from desktop.core.attachments import Attachment, Rejection, Thumbnail, image_attachment, pdf_attachment, sniff_image, text_attachment
 from desktop.core.files import FileProblem
 from desktop.core.settings import AppSettings
@@ -21,6 +23,12 @@ from tests.fakes import until
 MODEL = "chatgpt:gpt-6.1-sol"
 """The page id of the model a new test session starts with (the first of ``fake_responses.DEFAULT_MODELS``)."""
 OTHER_MODEL = "chatgpt:gpt-6-luna"
+
+
+def without_numbered_reply(text: str) -> str:
+    """Ignore only the optional bundled reply suffix, not other hook context or user text."""
+    skill = official_skill.context()
+    return text.removesuffix(wrap(skill.text)) if skill is not None else text
 
 
 class FakePlatform:

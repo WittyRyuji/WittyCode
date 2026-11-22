@@ -13,7 +13,7 @@ import pytest
 from desktop.core.cache import Cache
 from desktop.core.fusion.registry import FusionRegistry, Policy
 from desktop.core.session_state import SessionState
-from tests.app_support import MODEL, OTHER_MODEL, make_core, ready_core, save_conversation
+from tests.app_support import MODEL, OTHER_MODEL, make_core, ready_core, save_conversation, without_numbered_reply
 from tests.devin_support import make_engine as make_devin
 from tests.fake_responses import say
 from tests.fakes import until
@@ -219,9 +219,9 @@ def test_a_message_typed_while_the_session_connects_is_shown_and_sent_by_itself(
 
         await opening
         await until(lambda: len(harness.requests("session/prompt")) == 3, timeout=10)
-        prompts = [request["prompt"][0]["text"] for request in harness.requests("session/prompt")]
-        assert prompts[0].startswith("Write a concise conversation title ") and '"hello while connecting"' in prompts[0]
-        assert prompts[1:] == ["hello while connecting", "and another"], "naming preflight, then one at a time, in order"
+        naming, *prompts = [request["prompt"][0]["text"] for request in harness.requests("session/prompt")]
+        assert naming.startswith("Write a concise conversation title ") and '"hello while connecting"' in naming
+        assert [without_numbered_reply(text) for text in prompts] == ["hello while connecting", "and another"]
         await until(lambda: sessions_of(events)[conv.cid]["queued"] == [] and conv.controller.state is SessionState.READY)
         await core.shutdown()
 
