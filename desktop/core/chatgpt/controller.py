@@ -32,7 +32,7 @@ import logging
 import threading
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
@@ -662,14 +662,112 @@ class ChatGPTController:
         self._tools.rating_submitter = rating.rate_records if rating is not None else None
         self._tools.fusion_brief_runner = self._fusion.delegate_brief if self._fusion is not None and self._fusion.brief_enabled else None
         routing = self._fusion if self._fusion is not None and self._fusion.gate("route") else None
-        self._tools.route_submitter = routing.submit_route if routing is not None else None
+        self._tools.route_submitter = partial(self._submit_route, routing.submit_route) if routing is not None else None
         self._tools.route_guard = routing.route_guard if routing is not None else None
         self._tools.route_edit = routing.note_edit if routing is not None else None
         mapping = self._fusion if self._fusion is not None and self._fusion.map_enabled else None
         self._tools.map_chooser = mapping.choose_map_location if mapping is not None else None
         self._tools.map_updater = mapping.update_map_entry if mapping is not None else None
         self._tools.read_only_brief = self._fusion_read_only
+        debating = self._fusion if self._fusion is not None and self._fusion_identity is None and self._fusion.gate("v3") else None
+        self._tools.topic_declarer = self._declare_topic if debating is not None else None
+        self._tools.declare_state = self._declare_state if debating is not None else None
+        self._tools.work_plan_submitter = self._submit_work_plan if debating is not None else None
         return self._tools
+
+    def _declare_state(self) -> dict[str, Any] | None:
+        """The running turn's declaration receipt; a pending one has no ``intent`` yet and unlocks nothing."""
+        receipt = getattr(self, "_declare_receipt", None)
+        return receipt if isinstance(receipt, dict) and receipt.get("turn") is self._turn else None
+
+    async def _declare_topic(self, kind: str, intent: str, topic: str) -> Outcome:
+        """The main agent's one routing declaration per turn; a rename cannot reopen it this turn."""
+        receipt = self._declare_state()
+        if receipt is not None:
+            task = receipt.get("task")
+            if task is None:
+                return receipt["outcome"]
+            try:
+                return await task  # A parallel declare shares the spend instead of re-running it.
+            except Exception as error:
+                return Outcome(f"Declare failed: {type(error).__name__}.", True)
+        task = asyncio.ensure_future(self._route_topic(kind, intent, topic))
+        self._declare_receipt = {"turn": self._turn, "task": task}
+        try:
+            outcome = await task
+        except Exception as error:
+            outcome = Outcome(f"Declare failed: {type(error).__name__}.", True)
+        self._declare_receipt = {"turn": self._turn, "kind": kind, "intent": intent,
+                                 "failed": outcome.is_error, "outcome": outcome}
+        return outcome
+
+    async def _route_topic(self, kind: str, intent: str, topic: str) -> Outcome:
+        from desktop.core.fusion import debate_bridge
+        from desktop.core.fusion.debate import DebateError
+        from desktop.core.fusion.registry import FusionError
+        if self._fusion is None:
+            return Outcome("Fusion mode is not active; answer directly.", True)
+        if kind == "simple":
+            text = "Declared simple: answer directly. No debate and no expert is needed."
+        else:
+            try:
+                result = await debate_bridge.discuss(self, topic)
+            except (DebateError, FusionError) as error:
+                # A failed declare stays failed: this turn cannot plan or delegate off it.
+                return Outcome(f"Declare failed: {error} Do not plan or delegate on this declaration.", True)
+            text = debate_bridge.result_text(result)
+        if intent == "plan" or kind == "complex" and intent == "execute":
+            text += "\n\n" + await self._team_snapshot()
+        return Outcome(text)
+
+    async def _team_snapshot(self) -> str:
+        """Local model profiles of the Fusion seats, read-only, for planning and work split."""
+        from desktop.core.fusion import profiles
+        from desktop.core.fusion.registry import FusionError
+        from desktop.core.settings import default_settings_path
+        policy = self._fusion.registry.policy
+
+        def effort(model: str, role: str) -> str:
+            try:
+                return self._fusion.reasoning_for(model, role) or ""
+            except FusionError:
+                return ""
+
+        seats = {"main": (policy.main, effort(policy.main, "main")),
+                 "worker": (policy.workers[0], effort(policy.workers[0], "worker")),
+                 "light": (policy.light, effort(policy.light, "light"))}
+        return await asyncio.to_thread(profiles.team_snapshot, default_settings_path().parent, seats)
+
+    async def _submit_work_plan(self, data: Mapping[str, Any]) -> Outcome:
+        """Validate the turn's V3 work plan into the receipt that gates routing, delegation and writes."""
+        from desktop.core.fusion import planning
+        receipt = self._declare_state()
+        if not isinstance(receipt, dict) or receipt.get("failed"):
+            return Outcome("The turn's declaration failed, so it may not plan, route, delegate or change anything.", True)
+        if receipt.get("intent") != "plan" and not (receipt.get("intent") == "execute" and receipt.get("kind") == "complex"):
+            return Outcome("submit_work_plan follows a plan or complex-execute declaration.", True)
+        if isinstance(receipt.get("workplan"), Mapping):
+            return Outcome("This turn already has a fixed work plan; it cannot be replaced.", True)
+        try:
+            workplan = planning.check(data)
+        except ValueError as error:
+            return Outcome(f"Work plan refused: {error}", True)
+        receipt["workplan"] = workplan
+        return Outcome("Work plan validated and recorded for this turn; a route's items now come from it, not from "
+                       "the model a second time. The JSON is internal planning data — answer the user in prose.")
+
+    async def _submit_route(self, submit: Callable[[Mapping[str, Any]], Awaitable[Outcome]],
+                            args: Mapping[str, Any]) -> Outcome:
+        """A frozen route's items come from the turn's validated work plan, never re-scored by the model."""
+        receipt = self._declare_state()
+        workplan = receipt.get("workplan") if isinstance(receipt, dict) else None
+        if isinstance(workplan, dict):
+            items = [{"id": item["id"], "workstream": item["workstream"], "role": "worker",
+                      "score": item["n"], "reason": item["evidence"], "paths": list(item["paths"]),
+                      "deps": list(item["deps"]), "acceptance": item["acceptance"]}
+                     for item in workplan["items"]]
+            args = {**args, "items": items}
+        return await submit(args)
 
     def _claim_session(self) -> None:
         try:
@@ -815,6 +913,8 @@ class ChatGPTController:
                 or plan.get("id") != plan_id or not isinstance(plan.get("text"), str)):
             return False
         previous = plan
+        bound = self.saved.origin.get("fusionWorkPlan")
+        workplan = bound.get("workplan") if isinstance(bound, Mapping) and bound.get("plan") == plan["id"] else None
         self.saved.plan = {"id": plan["id"], "text": plan["text"], "status": "approved", "execution": "starting"}
         self.mode = "auto"
         try:
@@ -825,7 +925,7 @@ class ChatGPTController:
             raise
         old_task = self._turn_task
         try:
-            if self.send_prompt("请执行我刚批准的方案。", approved_plan=plan["text"]):
+            if self.send_prompt("请执行我刚批准的方案。", approved_plan=plan["text"], approved_workplan=workplan):
                 return True
         except BaseException:
             self._restore_unstarted_plan(previous, old_task)
@@ -861,7 +961,7 @@ class ChatGPTController:
         return None
 
     def send_prompt(self, text: str, attachments: Sequence[Attachment] = (), *, approved_plan: str = "",
-                    packed_context: bool = False) -> bool:
+                    approved_workplan: Mapping[str, Any] | None = None, packed_context: bool = False) -> bool:
         text = text.strip()
         attachments = tuple(attachments)
         if attachments and not text:
@@ -909,6 +1009,18 @@ class ChatGPTController:
         self._preface_turn = turn if self.preface else None
         self._recall_turn, self._recall_ids = turn, context.ids
         self._turn = turn
+        if approved_plan:
+            # The user's approval is this turn's execute declaration; the model cannot mint one itself. It carries
+            # the work plan bound to the approved version — an older file or a reopened plan has none, so that
+            # approval may answer in this turn but never executes.
+            if isinstance(approved_workplan, Mapping):
+                self._declare_receipt = {"turn": turn, "kind": "complex", "intent": "execute", "approved": True,
+                                         "workplan": dict(approved_workplan),
+                                         "outcome": Outcome("The approved plan is this turn's declared intent: execute it.")}
+            else:
+                self._declare_receipt = {"turn": turn, "kind": "complex", "intent": "discussion", "approved": True,
+                                         "outcome": Outcome("No validated work plan is bound to this approval; "
+                                                            "answer the user — this turn cannot execute.")}
         if self._fusion is not None:
             self._fusion.start_metrics(turn)
             self._fusion.start_ratings()
@@ -1030,6 +1142,10 @@ class ChatGPTController:
                 fusion_instructions = self._fusion.instructions()
                 sections["fusion"] = fusion_instructions
                 instructions += "\n\n" + fusion_instructions
+                if tools.topic_declarer is not None:
+                    from desktop.core.fusion import debate_bridge
+                    sections["debate"] = debate_bridge.DECLARE_TOPIC_GUIDANCE
+                    instructions += "\n\n" + debate_bridge.DECLARE_TOPIC_GUIDANCE
             snapshot = self.saved.prompt
             if not snapshot.get("instructions"):
                 snapshot.update(instructions=instructions, current=instructions, sections=sections)
@@ -1160,6 +1276,16 @@ class ChatGPTController:
             previous = self.saved.plan
             self.mode = PLAN  # A mode change made during planning cannot approve or hide the submitted plan.
             self.saved.plan = {"id": uuid.uuid4().hex, "text": self._proposed_plan, "status": "pending"}
+            # Bind the turn's validated work plan to this version id; approving it carries the same work plan.
+            receipt, workplan = self._declare_state(), None
+            if isinstance(receipt, dict):
+                workplan = receipt.get("workplan")
+            before_origin = self.saved.origin
+            if isinstance(workplan, Mapping):
+                self.saved.origin = {**self.saved.origin, "fusionWorkPlan": {"plan": self.saved.plan["id"],
+                                                                             "workplan": dict(workplan)}}
+            elif "fusionWorkPlan" in self.saved.origin:
+                self.saved.origin = {key: value for key, value in self.saved.origin.items() if key != "fusionWorkPlan"}
             record = self.saved.turns[-1] if self.saved.turns else None
             before = (record.finished, record.status, record.error, record.note) if record is not None else None
             self._record_turn("done")
@@ -1167,6 +1293,7 @@ class ChatGPTController:
                 self._save_now(required=True)
             except ChatGPTError as error:
                 self.saved.plan = previous
+                self.saved.origin = before_origin
                 if record is not None and before is not None:
                     record.finished, record.status, record.error, record.note = before
                 self._turn_failed(turn, error)

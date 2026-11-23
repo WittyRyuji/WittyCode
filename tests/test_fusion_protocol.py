@@ -56,10 +56,22 @@ def test_brief_allows_exact_limits():
     assert brief.text().endswith("Budget: 1 step")
 
 
-@pytest.mark.parametrize("key", BRIEF)
+@pytest.mark.parametrize("key", [key for key in BRIEF if key != "budget"])
 def test_brief_requires_each_field(key):
     brief, problem = parse_brief({name: value for name, value in BRIEF.items() if name != key})
     assert brief is None and problem
+
+
+@pytest.mark.parametrize("empty", [False, True], ids=["omitted", "empty-object"])
+def test_brief_accepts_a_default_budget(empty):
+    args = dict(BRIEF)
+    if empty:
+        args["budget"] = {}
+    else:
+        del args["budget"]
+    brief, problem = parse_brief(args)
+    assert not problem and brief is not None and brief.budget == {}
+    assert validate_arguments(BRIEF_PARAMETERS, args) == args
 
 
 @pytest.mark.parametrize("changes, message", [
@@ -86,19 +98,35 @@ def test_brief_requires_each_field(key):
     ({"paths": ["src/*.py"]}, "project-relative"),
     ({"paths": ["."]}, "project-relative"),
     ({"paths": ["src/\0file.py"]}, "project-relative"),
-    ({"read_only": True}, "no write paths"),
     ({"paths": []}, "Declare write paths"),
-    ({"budget": "12 steps"}, "positive integer"),
-    ({"budget": {}}, "positive integer"),
-    ({"budget": {"steps": 2, "minutes": 3}}, "positive integer"),
-    ({"budget": {"seconds": 0}}, "positive integer"),
-    ({"budget": {"steps": -1}}, "positive integer"),
-    ({"budget": {"steps": True}}, "positive integer"),
-    ({"budget": {"steps": 1.0}}, "positive integer"),
 ])
 def test_invalid_brief(changes, message):
     brief, problem = parse_brief({**BRIEF, **changes})
     assert brief is None and message in problem
+
+
+@pytest.mark.parametrize(("raw", "budget", "ignored"), [
+    ("12 steps", {}, "budget (expected an object, got str)"),
+    (None, {}, "budget (expected an object, got null)"),
+    ({"steps": 2, "minutes": 3}, {"steps": 2}, "budget fields 'minutes'"),
+    ({"seconds": 0}, {}, "budget fields 'seconds'"),
+    ({"steps": -1}, {}, "budget fields 'steps'"),
+    ({"steps": True}, {}, "budget fields 'steps'"),
+    ({"steps": 1.0}, {}, "budget fields 'steps'"),
+    ({"steps": "12", "seconds": 3, "turns": 5}, {"seconds": 3}, "budget fields 'steps', 'turns'"),
+    ({"steps": 1_000_001, "seconds": 1_000_000}, {"seconds": 1_000_000}, "budget fields 'steps'"),
+    ({"steps": 1_000_000, "seconds": 1_000_001}, {"steps": 1_000_000}, "budget fields 'seconds'"),
+])
+def test_brief_ignores_malformed_budget_entries(raw, budget, ignored):
+    brief, problem = parse_brief({**BRIEF, "budget": raw})
+    assert not problem and brief is not None and brief.budget == budget and brief.ignored_budget == ignored
+
+
+@pytest.mark.parametrize("paths", [BRIEF["paths"], ["../outside.txt", "src/*.py"]])
+def test_brief_discards_paths_for_read_only_delegations(paths):
+    brief, problem = parse_brief({**BRIEF, "read_only": True, "paths": paths})
+    assert not problem and brief is not None and brief.read_only
+    assert brief.paths == () and brief.ignored_write_paths == len(paths) and not brief_writes(brief)
 
 
 def test_parsers_refuse_non_objects():

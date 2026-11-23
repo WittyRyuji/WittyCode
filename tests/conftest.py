@@ -34,6 +34,19 @@ def _no_files_of_the_real_user(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_real_network(monkeypatch):
+    """The model-profile leaderboard is the only door to the network: ``aa_catalog._urlopen`` is shut in tests,
+    while urllib's real ``urlopen`` is left alone for code that may rely on it. A test that exercises the
+    download path injects its own opener or loader."""
+    from desktop.core.fusion import aa_catalog
+
+    def blocked(*args, **kwargs):
+        raise AssertionError("a test tried to fetch the leaderboard")
+
+    monkeypatch.setattr(aa_catalog, "_urlopen", blocked)
+
+
+@pytest.fixture(autouse=True)
 def _fusion_gates_off(request, monkeypatch):
     """Fusion gates are off in tests; ``@pytest.mark.fusion_gates`` turns all on, with names only those."""
     from desktop.core.fusion import gates

@@ -121,6 +121,7 @@ def test_bad_and_legacy_calls_return_parser_refusals(tmp_path):
     async def go():
         async with _fusion(tmp_path) as (main, fake):
             bad = _brief(budget={"steps": 0})
+            del bad["goal"]  # A tolerated budget error must not hide a missing required field.
             await _turn(main, fake, call("delegate_task", bad, call_id="bad"),
                         call("delegate_task", LEGACY, call_id="old"), say("Need a brief."))
             assert _output(main, "bad") == parse_brief(bad)[1]
@@ -268,6 +269,31 @@ def test_user_identity_override_is_loaded_once_and_bad_file_noticed(tmp_path):
             assert next(iter(main.agents.values())).agent_effort == "low"
             notices = [block.text for turn in main.transcript.turns for block in turn.blocks if isinstance(block, NoticeBlock)]
             assert sum("Coder.md" in text for text in notices) == 1
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("tool_name", ["delegate_task", "delegate_tasks"])
+def test_read_only_brief_with_paths_is_refused_for_coder_override_without_edit(tmp_path, tool_name):
+    (_identity_folder() / "Coder.md").write_text(
+        "---\nname: Coder\ntools: read,exec\n---\nCheck the inventory.", encoding="utf-8")
+
+    async def go():
+        async with _fusion(tmp_path, active=("brief", "route", "v3")) as (main, fake):
+            assert main._fusion.identities.get("Coder").tools == {"read", "exec"}
+            declare = call("declare_topic", {"kind": "simple", "intent": "execute", "topic": "Check stock."})
+            brief = _brief(read_only=True)
+            args = brief if tool_name == "delegate_task" else {"tasks": [brief]}
+            await _turn(main, fake, declare, call(tool_name, args, call_id="delegate"), say("Reviewed."))
+            assert "A read-only brief must have no write paths." in _output(main, "delegate")
+            assert not main.agents and main._fusion.registry.calls == 0
+            assert not list(main.project.iterdir())
+
+            # An already-pathless brief still follows the override's existing permissions.
+            await _turn(main, fake, declare, call("delegate_task", _brief(read_only=True, paths=[]), call_id="pathless"),
+                        say("Inspected."), say("Reviewed."))
+            agent, = main.agents.values()
+            assert agent.record.status == "done" and not agent.controller._fusion_read_only
+            assert "Inspected." in _output(main, "pathless")
     asyncio.run(go())
 
 

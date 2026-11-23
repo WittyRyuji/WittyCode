@@ -9,12 +9,14 @@ from typing import Any
 
 from desktop.core.harness.compact import estimate_text
 
-from .identity import load
+from . import allocation
+from .identity import WORK_ITEM_ROLES, load
 
 _IDENTITIES = load(None)
 _MAX_WORKSTREAM = 160
 _MAX_PATHS = 128
 _MAX_BRIEF_TEXT = 50_000
+_MAX_BRIEF_BUDGET = 1_000_000
 REPORT_TOKENS = 2000
 _STATUSES = ("done", "concerns", "needs_context", "blocked")
 _DESTINATIONS = ("self", "coder", "split")
@@ -29,16 +31,15 @@ BRIEF_PARAMETERS: dict[str, Any] = {
         "constraints": {"type": "string", "minLength": 1, "description": "Limits, dependencies and relevant context."},
         "acceptance": {"type": "string", "minLength": 1, "description": "Acceptance criteria and the commands that check them, when available."},
         "paths": {"type": "array", "items": {"type": "string", "minLength": 1}, "maxItems": _MAX_PATHS, "description": "Concrete project-relative files or directories this expert may change."},
-        "read_only": {"type": "boolean", "default": False, "description": "Research by a Coder that must change nothing: leave paths empty; it gets no editing tools, may run only read-only commands and needs no route. Leave false for Runner and QualitySampler: they never edit and must be able to run the checks."},
+        "read_only": {"type": "boolean", "default": False, "description": "Research by a Coder that must change nothing: paths are ignored, only read-only commands are allowed and no route is needed. Leave false for Runner and QualitySampler so they can run checks."},
         "budget": {"type": "object", "properties": {
-            "steps": {"type": "integer", "minimum": 1},
-            "seconds": {"type": "integer", "minimum": 1},
-        }, "anyOf": [{"required": ["steps"]}, {"required": ["seconds"]}], "additionalProperties": False,
-            "description": "Requested limit on steps, seconds, or both; steps are clamped into the configured "
-                           "min/max or the adaptive suggestion for the task's size, under the global per-turn cap."},
+            "steps": {"type": "integer", "minimum": 1, "maximum": _MAX_BRIEF_BUDGET},
+            "seconds": {"type": "integer", "minimum": 1, "maximum": _MAX_BRIEF_BUDGET},
+        }, "additionalProperties": False,
+            "description": "Optional: positive integer steps and/or seconds. Invalid entries are ignored; omitted values use the session defaults."},
         "resume": {"type": "boolean", "default": False, "description": "Continue an interrupted workstream only after inspecting the evidence; give a new brief."},
     },
-    "required": ["workstream", "identity", "goal", "constraints", "acceptance", "paths", "budget"],
+    "required": ["workstream", "identity", "goal", "constraints", "acceptance", "paths"],
 }
 REPORT_PARAMETERS: dict[str, Any] = {
     "type": "object",
@@ -63,6 +64,24 @@ ROUTE_PARAMETERS: dict[str, Any] = {
         "destination": {"type": "string", "enum": list(_DESTINATIONS), "description": "Do the work yourself, give it to one Coder, or split it into independent deliverables."},
         "reason": {"type": "string", "minLength": 1, "description": "Why this destination fits the work."},
         "verification": {"type": "string", "enum": list(_CHECKS), "description": "How the result will be checked."},
+        "items": {"type": "array", "maxItems": 16, "items": {
+            "type": "object", "additionalProperties": False,
+            "properties": {
+                "id": {"type": "string", "minLength": 1, "maxLength": 64, "description": "Stable work-item id that dependencies and later routes refer to."},
+                "workstream": {"type": "string", "minLength": 1, "maxLength": _MAX_WORKSTREAM, "description": "The workstream this item binds; a delegation of the same workstream and role uses it."},
+                "role": {"type": "string", "enum": ["worker", "light"]},
+                "score": {"type": "number", "description": "Decimal score in 0..1: at or under the low gate the item seats the light model (L3), at or over the high gate the main model (L1), otherwise the worker model (L2)."},
+                "reason": {"type": "string", "minLength": 1, "description": "Why this item deserves its score."},
+                "paths": {"type": "array", "items": {"type": "string", "minLength": 1}, "maxItems": _MAX_PATHS, "description": "Frozen write scope: delegated write paths must stay inside these."},
+                "deps": {"type": "array", "items": {"type": "string"}, "description": "Ids of items that must finish first."},
+                "acceptance": {"type": "string", "description": "Frozen acceptance summary kept with the item."},
+                "new_facts": {"type": "string", "minLength": 1, "description": "Evidence of facts learned after the item froze; required before a frozen item's score may be re-estimated. Only score and reason may change, and only while the workstream has no owner."},
+            },
+            "required": ["id", "workstream", "role", "score", "reason"],
+        }, "description": f"One frozen item per write workstream. Set role to {WORK_ITEM_ROLES}. "
+                           "Use score, not the plan's n; omit N and seat. Omit items if the validated plan supplies them. "
+                           "Repeat unchanged even if preference moves; new_facts may update only score and reason before assignment. "
+                           'Example: {"id":"w1","workstream":"Rename","role":"worker","score":0.5,"reason":"Local change","paths":["src"]}'},
     },
     "required": ["destination", "reason", "verification"],
 }
@@ -83,7 +102,7 @@ ROUTE_DECLARATION: dict[str, Any] = {
 }
 CHOOSE_MAP_DECLARATION: dict[str, Any] = {
     "name": "choose_map_location",
-    "description": "Before the first writing delegation, ask the user where this project's map should live. Does not ask again once chosen.",
+    "description": "Optionally choose the project map location early. Otherwise the first writing delegation asks. Does not ask again once chosen.",
     "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
 }
 UPDATE_MAP_DECLARATION: dict[str, Any] = {
@@ -175,6 +194,8 @@ class Brief:
     read_only: bool = False
     resume: bool = False
     budget_note: str = ""
+    ignored_budget: str = ""
+    ignored_write_paths: int = 0
 
     def budget_label(self) -> str:
         parts = []
@@ -205,6 +226,7 @@ class Route:
     destination: str
     reason: str
     verification: str
+    items: tuple[dict[str, Any], ...] = ()
 
 
 def _nonempty(value: Any) -> bool:
@@ -217,6 +239,25 @@ def _write_path(value: Any) -> bool:
         return False
     path = value.strip().replace("\\", "/")
     return not ntpath.splitdrive(path)[0] and all(part not in ("", ".", "..") for part in path.split("/"))
+
+
+def _parse_brief_budget(raw: Any) -> tuple[dict[str, int], str]:
+    if not isinstance(raw, Mapping):
+        kind = "null" if raw is None else type(raw).__name__
+        return {}, f"budget (expected an object, got {kind})"
+    budget: dict[str, int] = {}
+    ignored = []
+    for key, value in raw.items():
+        if key in ("steps", "seconds") and type(value) is int and 1 <= value <= _MAX_BRIEF_BUDGET:
+            budget[key] = value
+        elif len(ignored) < 8:
+            # Echo field names, not values, and keep the receipt to one bounded line.
+            name = str(key)
+            ignored.append(repr(name if len(name) <= 40 else name[:37] + "..."))
+    extra = len(raw) - len(budget) - len(ignored)
+    if extra:
+        ignored.append(f"{extra} more")
+    return budget, "budget fields " + ", ".join(ignored) if ignored else ""
 
 
 def parse_brief(args: Mapping[str, Any]) -> tuple[Brief | None, str]:
@@ -239,21 +280,17 @@ def parse_brief(args: Mapping[str, Any]) -> tuple[Brief | None, str]:
     if not isinstance(read_only, bool) or not isinstance(resume, bool):
         return None, "read_only and resume must be booleans."
     paths = args.get("paths")
-    if not isinstance(paths, list) or len(paths) > _MAX_PATHS or not all(map(_write_path, paths)):
+    if not isinstance(paths, list) or len(paths) > _MAX_PATHS or (not read_only and not all(map(_write_path, paths))):
         return None, f"Provide an array of at most {_MAX_PATHS} concrete project-relative write paths."
-    if read_only and paths:
-        return None, "A read-only brief must have no write paths."
+    ignored_paths = len(paths) if read_only else 0
     # Overrides can remove edit, but cannot make any other identity an editor.
     identity = _IDENTITIES.get(name)
     if identity is not None and "edit" in identity.tools and not read_only and not paths:
         return None, "Declare write paths for this identity, or set read_only to true for research."
-    budget = args.get("budget")
-    if not isinstance(budget, Mapping) or not budget or any(
-        key not in ("steps", "seconds") or type(value) is not int or value < 1 for key, value in budget.items()
-    ):
-        return None, "Provide a budget with steps, seconds, or both, each a positive integer."
+    budget, ignored_budget = _parse_brief_budget(args.get("budget", {}))
     return Brief(workstream.strip(), name, goal.strip(), constraints.strip(), acceptance.strip(),
-                 tuple(path.strip() for path in paths), dict(budget), read_only, resume), ""
+                 () if read_only else tuple(path.strip() for path in paths), budget, read_only, resume,
+                 ignored_budget=ignored_budget, ignored_write_paths=ignored_paths), ""
 
 
 def _ratings(ratings: Any, used: Sequence[str], *, report: bool = False) -> tuple[dict[str, tuple[int, str]], list[str]]:
@@ -382,17 +419,39 @@ def parse_ratings(args: Mapping[str, Any], used: Sequence[str]) -> tuple[dict[st
     return valid, tuple(problems)
 
 
-def parse_route(args: Mapping[str, Any]) -> tuple[Route | None, str]:
+def parse_route(args: Mapping[str, Any], N: object = None) -> tuple[Route | None, str]:
+    """Validate a route; ``N`` is the session preference the runtime supplies, never the model's slider."""
     if not isinstance(args, Mapping):
         return None, "Provide the route as an object."
     destination, reason, verification = (args.get(key) for key in ("destination", "reason", "verification"))
+    if verification in ("self-check", "runner-and-sampler"):
+        verification = verification.replace("-", "_")
+    problems: list[str] = []
     if destination not in _DESTINATIONS:
-        return None, "Use a destination of self, coder or split."
+        problems.append("Use a destination of self, coder or split.")
     if not _nonempty(reason):
-        return None, "Give a non-empty reason for the route."
+        problems.append("Give a non-empty reason for the route.")
     if verification not in tuple(_CHECKS):
-        return None, "Use a verification depth of self_check, runner or runner_and_sampler."
-    return Route(destination, reason.strip(), verification), ""
+        problems.append("Use a verification depth of self_check, runner or runner_and_sampler.")
+    raw_items = args.get("items", [])
+    if not isinstance(raw_items, (list, tuple)) or len(raw_items) > 16:
+        problems.append("Provide at most 16 work items.")
+        return None, "\n".join(problems)
+    items: list[dict[str, Any]] = []
+    for index, raw in enumerate(raw_items, 1):
+        try:
+            items.append(allocation.seal(raw, N, from_route=True))
+        except ValueError as error:
+            problems.append(f"Work item {index}: {error}" if len(raw_items) > 1 else str(error))
+    binds = [allocation.key(item["workstream"], item["role"]) for item in items]
+    if len(set(binds)) != len(binds):
+        problems.append("Each work item needs a distinct workstream and role.")
+    ids = [item["id"] for item in items]
+    if len(set(ids)) != len(ids):
+        problems.append("Each work item needs a distinct id.")
+    if problems:
+        return None, "\n".join(problems)
+    return Route(destination, reason.strip(), verification, tuple(items)), ""
 
 
 SELF_EDITS = 2
