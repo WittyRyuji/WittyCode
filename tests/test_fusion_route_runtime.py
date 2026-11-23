@@ -42,8 +42,9 @@ def test_route_blocks_writes_before_routing_but_not_reads_or_research(tmp_path):
             await _turn(main, fake, _edit(), call("shell", {"command": "New-Item shell-marker.txt"}, call_id="shell"),
                         call("shell", {"command": "Get-Location"}, call_id="location"),
                         call("read_file", {"file_path": "stock.txt"}, call_id="read"), _delegate(),
+                        _delegate("malformed-budget", budget=None),
                         _delegate("research", read_only=True, paths=[]), _report(), say("Reviewed."))
-            for ident in ("edit", "shell", "delegate"):
+            for ident in ("edit", "shell", "delegate", "malformed-budget"):
                 assert route_refusal(None, "edit") in _output(main, ident)
             assert "Refused" not in _output(main, "location") and "4 parts" in _output(main, "read")
             assert "Coder-Inventory [done]" in _output(main, "research")

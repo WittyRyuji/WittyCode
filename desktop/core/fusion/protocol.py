@@ -16,6 +16,7 @@ _IDENTITIES = load(None)
 _MAX_WORKSTREAM = 160
 _MAX_PATHS = 128
 _MAX_BRIEF_TEXT = 50_000
+_MAX_BRIEF_BUDGET = 1_000_000
 REPORT_TOKENS = 2000
 _STATUSES = ("done", "concerns", "needs_context", "blocked")
 _DESTINATIONS = ("self", "coder", "split")
@@ -30,13 +31,12 @@ BRIEF_PARAMETERS: dict[str, Any] = {
         "constraints": {"type": "string", "minLength": 1, "description": "Limits, dependencies and relevant context."},
         "acceptance": {"type": "string", "minLength": 1, "description": "Acceptance criteria and the commands that check them, when available."},
         "paths": {"type": "array", "items": {"type": "string", "minLength": 1}, "maxItems": _MAX_PATHS, "description": "Concrete project-relative files or directories this expert may change."},
-        "read_only": {"type": "boolean", "default": False, "description": "Research by a Coder that must change nothing: leave paths empty; it gets no editing tools, may run only read-only commands and needs no route. Leave false for Runner and QualitySampler: they never edit and must be able to run the checks."},
+        "read_only": {"type": "boolean", "default": False, "description": "Research by a Coder that must change nothing: paths are ignored, only read-only commands are allowed and no route is needed. Leave false for Runner and QualitySampler so they can run checks."},
         "budget": {"type": "object", "properties": {
-            "steps": {"type": "integer", "minimum": 1},
-            "seconds": {"type": "integer", "minimum": 1},
+            "steps": {"type": "integer", "minimum": 1, "maximum": _MAX_BRIEF_BUDGET},
+            "seconds": {"type": "integer", "minimum": 1, "maximum": _MAX_BRIEF_BUDGET},
         }, "additionalProperties": False,
-            "description": "Optional: positive integer steps, seconds, or both. Omit or use {} for the session's defaults. "
-                           "Configured step bounds and time cap still apply."},
+            "description": "Optional: positive integer steps and/or seconds. Invalid entries are ignored; omitted values use the session defaults."},
         "resume": {"type": "boolean", "default": False, "description": "Continue an interrupted workstream only after inspecting the evidence; give a new brief."},
     },
     "required": ["workstream", "identity", "goal", "constraints", "acceptance", "paths"],
@@ -194,6 +194,8 @@ class Brief:
     read_only: bool = False
     resume: bool = False
     budget_note: str = ""
+    ignored_budget: str = ""
+    ignored_write_paths: int = 0
 
     def budget_label(self) -> str:
         parts = []
@@ -239,6 +241,25 @@ def _write_path(value: Any) -> bool:
     return not ntpath.splitdrive(path)[0] and all(part not in ("", ".", "..") for part in path.split("/"))
 
 
+def _parse_brief_budget(raw: Any) -> tuple[dict[str, int], str]:
+    if not isinstance(raw, Mapping):
+        kind = "null" if raw is None else type(raw).__name__
+        return {}, f"budget (expected an object, got {kind})"
+    budget: dict[str, int] = {}
+    ignored = []
+    for key, value in raw.items():
+        if key in ("steps", "seconds") and type(value) is int and 1 <= value <= _MAX_BRIEF_BUDGET:
+            budget[key] = value
+        elif len(ignored) < 8:
+            # Echo field names, not values, and keep the receipt to one bounded line.
+            name = str(key)
+            ignored.append(repr(name if len(name) <= 40 else name[:37] + "..."))
+    extra = len(raw) - len(budget) - len(ignored)
+    if extra:
+        ignored.append(f"{extra} more")
+    return budget, "budget fields " + ", ".join(ignored) if ignored else ""
+
+
 def parse_brief(args: Mapping[str, Any]) -> tuple[Brief | None, str]:
     """Validate a new delegation brief; paths coordinate writes, not filesystem permissions."""
     if not isinstance(args, Mapping):
@@ -259,22 +280,17 @@ def parse_brief(args: Mapping[str, Any]) -> tuple[Brief | None, str]:
     if not isinstance(read_only, bool) or not isinstance(resume, bool):
         return None, "read_only and resume must be booleans."
     paths = args.get("paths")
-    if not isinstance(paths, list) or len(paths) > _MAX_PATHS or not all(map(_write_path, paths)):
+    if not isinstance(paths, list) or len(paths) > _MAX_PATHS or (not read_only and not all(map(_write_path, paths))):
         return None, f"Provide an array of at most {_MAX_PATHS} concrete project-relative write paths."
-    if read_only and paths:
-        return None, "A read-only brief must have no write paths."
+    ignored_paths = len(paths) if read_only else 0
     # Overrides can remove edit, but cannot make any other identity an editor.
     identity = _IDENTITIES.get(name)
     if identity is not None and "edit" in identity.tools and not read_only and not paths:
         return None, "Declare write paths for this identity, or set read_only to true for research."
-    budget = args.get("budget", {})
-    if not isinstance(budget, Mapping) or any(
-        key not in ("steps", "seconds") or type(value) is not int or value < 1 for key, value in budget.items()
-    ):
-        return None, ("Budget must be an object with steps, seconds, or both, each a positive integer. "
-                      "Omit budget or use {} for the session defaults.")
+    budget, ignored_budget = _parse_brief_budget(args.get("budget", {}))
     return Brief(workstream.strip(), name, goal.strip(), constraints.strip(), acceptance.strip(),
-                 tuple(path.strip() for path in paths), dict(budget), read_only, resume), ""
+                 () if read_only else tuple(path.strip() for path in paths), budget, read_only, resume,
+                 ignored_budget=ignored_budget, ignored_write_paths=ignored_paths), ""
 
 
 def _ratings(ratings: Any, used: Sequence[str], *, report: bool = False) -> tuple[dict[str, tuple[int, str]], list[str]]:

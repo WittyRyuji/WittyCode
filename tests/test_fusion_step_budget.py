@@ -9,6 +9,7 @@ from desktop.core.app_core import AppError
 from desktop.core.fusion import step_budget
 from desktop.core.fusion.step_budget import Band, Side
 from tests.app_support import ready_core
+from tests.chatgpt_support import finish_turn, until
 from tests.fake_responses import call, say
 from tests.test_fusion_identity_runtime import WORKER, _brief, _fusion, _output, _turn
 
@@ -132,6 +133,53 @@ def test_default_budget_is_applied_and_reported(tmp_path, empty, manual, global_
     asyncio.run(go())
 
 
+@pytest.mark.parametrize(("budget", "ignored", "steps"), [
+    ("12 steps", "budget (expected an object, got str)", 15),
+    (12, "budget (expected an object, got int)", 15),
+    ([12], "budget (expected an object, got list)", 15),
+    (None, "budget (expected an object, got null)", 15),
+    ({"steps": 0}, "budget fields 'steps'", 15),
+    ({"steps": "many"}, "budget fields 'steps'", 15),
+    ({"tokens": 5}, "budget fields 'tokens'", 15),
+    ({"steps": True}, "budget fields 'steps'", 15),
+    ({"steps": 12, "tokens": 5}, "budget fields 'tokens'", 12),
+])
+def test_malformed_budget_allows_first_write_delegation(tmp_path, budget, ignored, steps):
+    from tests.test_fusion_route_runtime import ROUTE_GATES, _route
+
+    async def go():
+        async with _fusion(tmp_path, active=ROUTE_GATES, max_seconds=12) as (main, fake):
+            _band(main, 5, 15)
+            write = call("create_file", {"file_path": "inventory.txt", "content": "Counted."})
+            await _turn(main, fake, _route(), call("delegate_task", _brief(budget=budget), call_id="delegate"),
+                        write, say("Done."), say("Reviewed."))
+            agent, = main.agents.values()
+            assert main._fusion.registry.calls == 1 and agent.record.status == "done"
+            assert (main.project / "inventory.txt").read_text(encoding="utf-8") == "Counted."
+            assert agent.controller.turn_step_limit() == steps
+            assert _output(main, "delegate").startswith(f"Ignored {ignored}; using {steps} steps, 12 seconds")
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("budget_field", ["steps", "seconds"])
+def test_oversized_budget_is_ignored_without_echoing_its_value(tmp_path, budget_field):
+    async def go():
+        async with _fusion(tmp_path, max_seconds=12) as (main, fake):
+            _band(main, 5, 10)
+            huge = 10 ** 1199
+            await _turn(main, fake, call("delegate_task", _brief(budget={budget_field: huge, "tokens": 5}), call_id="delegate"),
+                        say("Done."), say("Reviewed."))
+            agent, = main.agents.values()
+            assert agent.record.status == "done" and agent.controller.turn_step_limit() == 10
+            receipt = _output(main, "delegate")
+            line = receipt.splitlines()[0]
+            assert str(huge) not in receipt and str(huge) not in agent.record.task
+            assert line.startswith(f"Ignored budget fields '{budget_field}', 'tokens'; using 10 steps, 12 seconds")
+            assert len(line) <= 160
+            assert "Budget: 10 steps, 12 seconds" in agent.record.task
+    asyncio.run(go())
+
+
 @pytest.mark.parametrize(("unit", "steps", "seconds", "expected"), [
     ("step", 1, 12, "1 step, 12 seconds"),
     ("time", 5, 1, "5 steps, 1 second"),
@@ -153,6 +201,36 @@ def test_default_budget_is_reported_when_expert_hits_its_limit(tmp_path, unit, s
             receipt = _output(main, "delegate")
             assert f"exceeded its {unit} budget" in receipt
             assert f"Default budget: {expected}" in receipt
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize(("unit", "seconds"), [("step", 12), ("time", 2)])
+def test_budget_interruption_receipt_uses_the_live_global_step_cap(tmp_path, unit, seconds):
+    async def go():
+        async with _fusion(tmp_path, max_seconds=seconds) as (main, fake):
+            _band(main, 5, 10)
+            main.manager.settings.max_steps = 100
+            worker = call("list_dir", {"directory_path": "."}) if unit == "step" else say("Too late.")
+            fake.script(call("delegate_task", _brief(budget={"tokens": 5}), call_id="delegate"),
+                        [("hold", "expert"), *worker], say("Reviewed the interruption."))
+            assert main.send_prompt("Check the inventory.")
+            try:
+                await until(lambda: len(fake.requests) >= 2)
+                agent, = main.agents.values()
+                assert agent.controller.turn_step_limit() == 10
+                main.manager.settings.max_steps = 1
+                if unit == "step":
+                    fake.release("expert")
+                await finish_turn(main)
+                assert agent.record.status == "interrupted"
+                if unit == "step":
+                    assert agent.controller.last_turn_end.steps == 1
+                receipt = _output(main, "delegate")
+                assert f"exceeded its {unit} budget" in receipt
+                assert f"Ignored budget fields 'tokens'; using 1 step, {seconds} seconds" in receipt
+                assert "using 10 steps" not in receipt
+            finally:
+                fake.release("expert")
     asyncio.run(go())
 
 

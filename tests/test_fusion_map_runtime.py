@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 
 import pytest
 
@@ -140,6 +141,44 @@ def test_read_only_delegation_does_not_choose_location(tmp_path, route):
             agent, = main.agents.values()
             assert agent.name == "Runner-Inventory" and agent.record.status == "done"
             assert main._fusion.drive.meta("map_location") is None and not main.transcript.turns[-1].prompts
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("has_paths", [True, False], ids=["paths-ignored", "no-paths"])
+@pytest.mark.parametrize("identity", ["Coder", "Runner", "QualitySampler"])
+def test_read_only_brief_with_paths_needs_no_route_or_map_choice(tmp_path, identity, has_paths):
+    async def go():
+        async with _fusion(tmp_path, active=(*_ACTIVE, "route", "acceptance", "v3")) as (main, fake):
+            declare = call("declare_topic", {"kind": "simple", "intent": "execute", "topic": "Check stock."})
+            paths = ["inventory.txt", "packing.txt"] if has_paths else []
+            if identity == "Coder":
+                command = "New-Item packing.txt"
+            else:
+                (main.project / "test_inventory_check.py").write_text(
+                    "from pathlib import Path\nfrom unittest import TestCase\n\n"
+                    "class InventoryCheck(TestCase):\n"
+                    "    def test_no_edit(self):\n"
+                    "        self.assertFalse(Path('inventory.txt').exists())\n", encoding="utf-8")
+                python = sys.executable.replace("'", "''")
+                command = f"& '{python}' -B -m unittest test_inventory_check"
+            await _turn(main, fake, declare, _delegate(identity, read_only=True, paths=paths),
+                        call("create_file", {"file_path": "inventory.txt", "content": "Not written."}, call_id="edit"),
+                        call("shell", {"command": command}, call_id="command"), _report(), say("Reviewed."))
+            runtime = main._fusion
+            agent, = main.agents.values()
+            assert agent.record.status == "done" and runtime.registry.calls == 1
+            assert ("Ignored 2 write paths for this read-only brief." in _output(main, "delegate")) is has_paths
+            edit, shell = (_output(agent.controller, call_id) for call_id in ("edit", "command"))
+            if identity == "Coder":
+                assert "read-only" in edit and "read-only" in shell
+            else:
+                assert "Refused" in edit and "Ran 1 test" in shell and "OK" in shell and "Refused" not in shell
+            assert not (main.project / "inventory.txt").exists() and not (main.project / "packing.txt").exists()
+            assert runtime.registry.write_paths(agent.record) == () and not runtime.registry.allocations
+            assert runtime.drive.meta("map_location") is None and not main.transcript.turns[-1].prompts
+            turn = runtime.route_turn
+            assert turn.route is None and not turn.workstreams and not turn.unfrozen_write and not turn.frozen_l3_paths
+            assert all(not result.paths for result in turn.delegations) and runtime.acceptance_verdict() is None
     asyncio.run(go())
 
 

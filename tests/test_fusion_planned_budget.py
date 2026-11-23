@@ -128,6 +128,33 @@ def test_dispatch_default_budget_respects_plan_turns_below_configured_floor(tmp_
     asyncio.run(go())
 
 
+@pytest.mark.parametrize(("budget", "plan", "steps", "seconds"), [
+    (None, None, 9, 12),
+    ({"steps": 120, "seconds": "many"}, None, 9, 12),
+    ({"steps": 120, "seconds": "many"}, {"turns": 2, "seconds": 6}, 2, 6),
+    ({"steps": False, "seconds": 60}, {"turns": 2, "seconds": 6}, 2, 6),
+    ({"steps": False, "seconds": 60}, None, 9, 12),
+])
+def test_malformed_budget_keeps_global_session_and_plan_caps(tmp_path, monkeypatch, budget, plan, steps, seconds):
+    import asyncio
+
+    from tests.fake_responses import call, say
+    from tests.test_fusion_identity_runtime import _brief as task_brief, _fusion, _manual_steps, _output, _turn
+
+    async def go():
+        async with _fusion(tmp_path, max_seconds=12) as (main, fake):
+            main.manager.settings.max_steps = 9
+            _manual_steps(main, 5, 15)
+            monkeypatch.setattr(main._fusion, "_plan_budget", lambda: plan)
+            await _turn(main, fake, call("delegate_task", task_brief(budget=budget), call_id="delegate"),
+                        say("Done."), say("Reviewed."))
+            agent, = main.agents.values()
+            assert main._fusion.registry.calls == 1 and agent.record.status == "done"
+            assert agent.controller.turn_step_limit() == steps
+            assert f"; using {steps} steps, {seconds} seconds" in _output(main, "delegate")
+    asyncio.run(go())
+
+
 def test_bounded_brief_without_a_plan_keeps_existing_behavior(tmp_path):
     rt = _runtime(tmp_path, plan_budget=None)
     bounded = rt._bounded_brief(_brief(steps=60, seconds=600))

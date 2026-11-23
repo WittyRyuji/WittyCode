@@ -117,6 +117,39 @@ def _passed_runner_report():
                                   "evidence": ["All inventory checks passed."], "notes": [], "ratings": []})
 
 
+def test_batch_normalizes_each_brief_without_changing_l3_acceptance(tmp_path):
+    async def go():
+        async with _fusion(tmp_path, active=(*GATES, "v3"), max_seconds=12) as (main, fake):
+            runtime = main._fusion
+            runtime.registry.policy = replace(runtime.registry.policy, preference=70)
+            main.manager.settings.max_steps = 100
+            _git(main.project, "init", "-q")
+            _git(main.project, "commit", "--allow-empty", "-qm", "Fixture baseline")
+            batch = call("delegate_tasks", {"tasks": [
+                _brief(budget={"steps": 0}),
+                _brief(workstream="Research", read_only=True, budget=None),
+            ]}, call_id="batch")
+            await _turn(main, fake, _declare_rename(), _l3_rename_route("runner", "route"), batch,
+                        say("Done."), say("Done."), _delegate("Runner", call_id="verify"), _passed_runner_report(),
+                        say("Reviewed."), say("No further checks."))
+            inventory, research = (_output(main, "batch").split("Workstream Research:\n"))
+            agents = {agent.record.workstream: agent for agent in main.agents.values() if agent.record.identity == "Coder"}
+            assert set(agents) == {"Inventory", "Research"} and runtime.registry.calls == 3
+            assert all(agent.record.status == "done" for agent in agents.values())
+            steps = agents["Inventory"].controller.turn_step_limit()
+            assert f"Ignored budget fields 'steps'; using {steps} steps, 12 seconds" in inventory
+            steps = agents["Research"].controller.turn_step_limit()
+            assert f"Ignored budget (expected an object, got null); using {steps} steps, 12 seconds" in research
+            assert "Ignored 1 write path for this read-only brief." in research
+            writes = [result for result in runtime.route_turn.delegations if result.paths]
+            assert len(writes) == 1 and writes[0].seat == "L3" and not runtime.route_turn.unfrozen_write
+            assert runtime.registry.write_paths(agents["Research"].record) == ()
+            verdict = _verdict(main)
+            assert verdict["checks"] == ["runner"] and verdict["status"] == "verified" and not verdict["signals"]
+            assert not _continuations(main)
+    asyncio.run(go())
+
+
 @pytest.mark.parametrize("preference", [50, 70])
 def test_reroute_cannot_drop_an_accepted_sampler_requirement(tmp_path, preference):
     async def go():

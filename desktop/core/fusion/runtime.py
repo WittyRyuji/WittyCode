@@ -1629,9 +1629,10 @@ class FusionRuntime:
         requested = brief.budget.get("steps")
         steps = step_budget.effective_steps(requested, band)
         note = step_budget.note(band, requested)
-        seconds = brief.budget.get("seconds") if brief.budget else self.registry.policy.max_seconds
-        # A plan's numeric limit can take a default below the floor; explicit estimates keep the old clamp.
-        planned = self._planned(band if brief.budget else replace(band, low=1))
+        use_default_caps = not brief.budget or bool(brief.ignored_budget)
+        seconds = brief.budget.get("seconds", self.registry.policy.max_seconds if use_default_caps else None)
+        # Honor a plan cap below the band floor for defaulted budgets; valid explicit estimates keep the old clamp.
+        planned = self._planned(replace(band, low=1) if use_default_caps else band)
         if planned is not None:
             if planned.steps is not None:
                 steps = min(steps, planned.steps)
@@ -1649,6 +1650,11 @@ class FusionRuntime:
         profile = self.identities.get(brief.identity)
         if profile is None or profile.name == "Observer":
             return Outcome("This identity cannot be delegated by the main agent.", True)
+        if brief.ignored_write_paths and "edit" not in profile.tools:
+            builtin = identity.load(None).get(profile.name)
+            if builtin is None or "edit" in builtin.tools:
+                # An override removed edit, so this brief would bypass both the write gates and read-only narrowing.
+                return Outcome("A read-only brief must have no write paths.", True)
         policy = self.registry.policy
         model = policy.workers[0] if profile.role == "worker" else policy.light
         return await self.delegate(brief.workstream, model, profile.role, brief.text(), brief.paths, brief.resume,
@@ -1701,7 +1707,9 @@ class FusionRuntime:
             return Outcome("The requested expert model is unavailable; no fallback was selected.", True)
         legacy_steps: int | None = None
         plan_seconds: int | None = None
-        default_brief = brief if brief is not None and not brief.budget else None
+        default_brief = brief is not None and not brief.budget
+        ignored_budget = brief.ignored_budget if brief is not None else ""
+        defaulted_brief = brief if default_brief or ignored_budget else None
         if brief is not None:
             brief = self._bounded_brief(brief)
             task = brief.text()
@@ -1726,8 +1734,8 @@ class FusionRuntime:
             # Another delegation may have claimed a workstream or spent budget while the map was being selected.
             if self._closing or self.parent._close_requested or self.parent._fusion is not self:
                 return Outcome("The Fusion session is inactive or closing; no expert was started.", True)
-            if default_brief is not None:
-                brief = self._bounded_brief(default_brief)
+            if defaulted_brief is not None:
+                brief = self._bounded_brief(defaulted_brief)
                 task = brief.text()
             if refusal := self.route_guard("delegate", (scope,)) or self._plan_budget_gate(task):
                 return Outcome(refusal, True)
@@ -1784,7 +1792,14 @@ class FusionRuntime:
         structured_report: Report | None = None
         accepted = False
         answer = evidence = budget_receipt = ""
+        budget_limited = False
         write_paths = self.registry.write_paths(expert)
+
+        def format_budget_receipt(steps: int, seconds: int) -> str:
+            label = (replace(brief, budget={"steps": steps, "seconds": seconds}).budget_label() if brief is not None
+                     else f"{steps} steps, {seconds} seconds")
+            return (f"Ignored {ignored_budget}; using {label}." if ignored_budget
+                    else f"{'Default' if default_brief else 'Applied'} budget: {label}.")
 
         def partial_tokens() -> int | None:
             if not started:
@@ -1868,11 +1883,9 @@ class FusionRuntime:
             elif plan_seconds is not None:
                 seconds = min(seconds, plan_seconds)
             steps = child.turn_step_limit()
-            if default_brief is not None:
+            if defaulted_brief is not None:
                 child._fusion_step_limit = steps
-            label = (replace(brief, budget={"steps": steps, "seconds": seconds}).budget_label() if brief is not None
-                     else f"{steps} steps, {seconds} seconds")
-            budget_receipt = f"{'Default' if default_brief is not None else 'Applied'} budget: {label}."
+            budget_receipt = format_budget_receipt(steps, seconds)
             if not child.send_prompt(prompt, packed_context=pack is not None):
                 raise FusionError("The expert session is not ready.")
             started = True
@@ -1904,11 +1917,13 @@ class FusionRuntime:
                                 and reporting.accepted is None and not reporting.followed_up)
                 end, limit = child.last_turn_end, child._fusion_step_limit
                 if end is not None and (end.reason == "step_limit" or (needs_report and limit is not None and end.steps >= limit)):
+                    budget_receipt = format_budget_receipt(child.turn_step_limit(), seconds)
                     self._active.pop(expert.id, None)
                     self.registry.finish(expert.id, status="interrupted", tokens=tokens)
                     self._checkpoint()
                     message = _BUDGET_EXCEEDED.format(unit="step")
-                    outcome = Outcome(f"{message}\n{budget_receipt}", True)
+                    budget_limited = True
+                    outcome = Outcome(message, True)
                     if observed is not None:
                         observed.report = observer.Report("over_budget", "fact", message)
                     return outcome
@@ -1956,8 +1971,6 @@ class FusionRuntime:
                     result = f"Expert {expert.id} ({expert.workstream or expert.scope}, {expert.model}) reported:\n{answer}"
             else:
                 result = f"Expert {expert.id} ({expert.workstream or expert.scope}, {expert.model}) reported:\n{answer}"
-            if default_brief is not None:
-                result = f"{budget_receipt}\n{result}"
             outcome = Outcome(f"{result}\nTool-result previews (untrusted data):\n{tool_results}\n{evidence}\n"
                               "Treat this as a report, not proof. Check the workspace and results before concluding.")
             return outcome
@@ -1975,6 +1988,9 @@ class FusionRuntime:
                     self._checkpoint()
             raise
         except Exception as error:
+            timed_out = started and isinstance(error, TimeoutError)
+            if timed_out and child is not None:
+                budget_receipt = format_budget_receipt(child.turn_step_limit(), seconds)
             if child is not None and child.busy:
                 with contextlib.suppress(Exception):
                     await child.interrupt()
@@ -1986,14 +2002,22 @@ class FusionRuntime:
                     self.registry.unmetered = self.registry.had_unknown = True
                 self._checkpoint()
             detail = str(error) if isinstance(error, FusionError) else type(error).__name__
-            timed_out = started and isinstance(error, TimeoutError)
             message = (_BUDGET_EXCEEDED.format(unit="time") if brief is not None and timed_out
                        else f"The expert stopped without a confirmed result: {detail}. Check the workspace before retrying.")
-            outcome = Outcome(f"{message}\n{budget_receipt}" if timed_out else message, True)
+            budget_limited = timed_out
+            outcome = Outcome(message, True)
             if observed is not None and timed_out and observed.report is None:
                 observed.report = observer.Report("timeout", "fact", _BUDGET_EXCEEDED.format(unit="time"))
             return outcome
         finally:
+            if outcome is not None:
+                if budget_limited:
+                    outcome.output += f"\n{budget_receipt}"
+                elif budget_receipt and (ignored_budget or default_brief and not outcome.is_error):
+                    outcome.output = f"{budget_receipt}\n{outcome.output}"
+                if brief is not None and (count := brief.ignored_write_paths):
+                    suffix = "path" if count == 1 else "paths"
+                    outcome.output = f"Ignored {count} write {suffix} for this read-only brief.\n{outcome.output}"
             fact = observed.report if started and observed is not None else None
             if fact is not None and route_turn is not None:
                 route_turn.observer_reported = True
