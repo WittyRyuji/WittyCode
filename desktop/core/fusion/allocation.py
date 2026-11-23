@@ -8,12 +8,13 @@ time. Pure helpers: no I/O and no knowledge of the registry or the models themse
 """
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from decimal import Decimal
 from fractions import Fraction
 from typing import Any
 
 from desktop.core.fusion.dispatch import check_index, check_score, tier
+from desktop.core.fusion.identity import WORK_ITEM_ROLES
 
 SEATS = ("L1", "L2", "L3")
 SEAT_ROLE = {"L1": "main", "L2": "worker", "L3": "light"}
@@ -63,41 +64,56 @@ def _decimal(value: Any) -> Decimal:
     return Decimal(text)
 
 
-def seal(raw: Mapping[str, Any], N: object) -> dict[str, Any]:
-    """Validate one allocation into its stored record under the session's current preference ``N``.
+def seal(raw: Mapping[str, Any], N: object, *, from_route: bool = False) -> dict[str, Any]:
+    """Validate an allocation under the session's preference, reporting all invalid fields together.
 
-    ``N`` is always supplied by the runtime (the policy preference slider), never chosen by the
-    model: a stored or repeated ``N``/``seat`` only passes when it agrees with the recomputed value.
+    ``N`` comes from the runtime, not the route. Stored ``N`` and ``seat`` must match the recomputed values.
     """
     if not isinstance(raw, Mapping):
         raise ValueError("A work item must be an object.")
+    problems: list[str] = []
+
+    def checked(validate: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        try:
+            return validate(*args, **kwargs)
+        except ValueError as error:
+            problems.append(str(error))
+            return None
+
     unknown = set(raw) - (_ITEM_KEYS | {"N", "seat", "new_facts"})
+    score_alias = bool(unknown & {"n", "n_i", "difficulty"})
     if unknown:
-        raise ValueError(f"Unknown work item fields: {', '.join(sorted(map(str, unknown)))}.")
-    score = raw.get("score")
-    if score is None:
-        raise ValueError("A work item needs a decimal score in 0..1.")
-    index = check_index(N)
-    if "N" in raw and raw["N"] != index:
-        raise ValueError("A work item's N is fixed by the session preference, not by the brief.")
+        problems.append(f"Unknown work item fields: {', '.join(sorted(map(str, unknown)))}.")
+    if score_alias:
+        problems.append("Use score (decimal in 0..1) for difficulty; omit the aliases.")
+    if raw.get("score") is None and not score_alias:
+        problems.append("A work item needs a decimal score in 0..1.")
+    score = checked(_decimal, raw["score"]) if raw.get("score") is not None else None
+    role = raw.get("role")
+    if role not in _ROLES:
+        problems.append(f"Set role to {WORK_ITEM_ROLES}.")
+    index = checked(check_index, N)
+    if "N" in raw and (from_route or (index is not None and raw["N"] != index)):
+        problems.append("Omit N: it is fixed by the session preference, not by the brief.")
     record = {
-        "id": _text(raw.get("id"), "id", _MAX_ID),
-        "workstream": _text(raw.get("workstream"), "workstream", 160),
-        "role": raw.get("role"),
+        "id": checked(_text, raw.get("id"), "id", _MAX_ID),
+        "workstream": checked(_text, raw.get("workstream"), "workstream", 160),
+        "role": role,
         "N": index,
-        "score": format(_decimal(score), "f"),
-        "reason": _text(raw.get("reason"), "reason", 4000),
-        "paths": _paths(raw.get("paths")),
-        "deps": _deps(raw.get("deps")),
-        "acceptance": _text(raw.get("acceptance", ""), "acceptance", 50_000, required=False),
+        "score": format(score, "f") if score is not None else None,
+        "reason": checked(_text, raw.get("reason"), "reason", 4000),
+        "paths": checked(_paths, raw.get("paths")),
+        "deps": checked(_deps, raw.get("deps")),
+        "acceptance": checked(_text, raw.get("acceptance", ""), "acceptance", 50_000, required=False),
     }
-    if record["role"] not in _ROLES:
-        raise ValueError("A work item's role must be worker or light.")
-    record["seat"] = tier(record["N"], check_score(record["score"]))
-    if "seat" in raw and raw["seat"] != record["seat"]:
-        raise ValueError("A stored work item seat does not match its N and score.")
+    if index is not None and score is not None:
+        record["seat"] = tier(index, check_score(record["score"]))
+        if "seat" in raw and raw["seat"] != record["seat"]:
+            problems.append("A stored work item seat does not match its N and score.")
     if raw.get("new_facts") is not None:
-        record["new_facts"] = _text(raw["new_facts"], "new_facts", 4000)
+        record["new_facts"] = checked(_text, raw["new_facts"], "new_facts", 4000)
+    if problems:
+        raise ValueError(" ".join(problems))
     return record
 
 

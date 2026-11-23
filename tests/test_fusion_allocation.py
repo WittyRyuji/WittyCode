@@ -14,9 +14,10 @@ from dataclasses import replace
 
 import pytest
 
-from desktop.core.fusion import allocation
-from desktop.core.fusion.protocol import parse_route
+from desktop.core.fusion import allocation, identity
+from desktop.core.fusion.protocol import ROUTE_DECLARATION, parse_route
 from desktop.core.fusion.registry import FusionError, FusionRegistry, Policy
+from desktop.core.harness.tools import validate_arguments
 from desktop.core.settings import AppSettings
 from tests.chatgpt_support import make_engine
 from tests.fake_responses import FakeResponses, call, say
@@ -112,6 +113,56 @@ def test_parse_route_seals_items_under_the_runtime_N():
     assert route is not None and route.items == (), "item-less routes keep the old signature"
 
 
+def test_route_guidance_uses_tool_fields_and_a_valid_item_example():
+    parameters = ROUTE_DECLARATION["parameters"]
+    items = parameters["properties"]["items"]
+    description, example = items["description"].split("Example: ")
+    identities = identity.load(None)
+    roles = items["items"]["properties"]["role"]["enum"]
+    assert roles == ["worker", "light"]
+    for guidance in (identity.ALLOCATION, description):
+        assert "score" in guidance and "n_i" not in guidance
+        for role, names in ((roles[0], ("Coder", "QualitySampler")), (roles[1], ("Runner",))):
+            assert all(identities.get(name).role == role for name in names)
+            assert f"{role} ({', '.join(names)})" in guidance
+    args = _route(items=[json.loads(example)])
+    assert validate_arguments(parameters, args) == args
+    route, problem = parse_route(args, 50)
+    assert not problem and route.items[0]["score"] == "0.5"
+
+
+@pytest.mark.parametrize("alias", ["n", "n_i", "difficulty"])
+def test_route_rejects_score_alias_with_actionable_hint(alias):
+    item = _item()
+    item[alias] = item.pop("score")
+    route, problem = parse_route(_route(items=[item]), 50)
+    assert route is None and f"Unknown work item fields: {alias}." in problem
+    assert "Use score" in problem
+
+
+def test_route_reports_invalid_fields_and_items_together():
+    first = _item(n_i=0.5, role="Coder")
+    second = _item(id="second", workstream="Shipping", paths="src", reason="")
+    route, problem = parse_route(_route(verification="full", items=[first, second]), 50)
+    assert route is None
+    route_problem, first_problem, second_problem = problem.splitlines()
+    assert "verification depth" in route_problem
+    assert first_problem.startswith("Work item 1:") and "Unknown work item fields: n_i." in first_problem
+    assert "Use score" in first_problem and "worker (Coder, QualitySampler) or light (Runner)" in first_problem
+    assert second_problem.startswith("Work item 2:") and "reason" in second_problem and "paths" in second_problem
+
+
+def test_route_refuses_explicit_preference_even_when_it_matches():
+    route, problem = parse_route(_route(items=[_item(N=50)]), 50)
+    assert route is None and "Omit N" in problem and "session preference" in problem
+
+
+@pytest.mark.parametrize("verification", ["self-check", "runner-and-sampler"])
+def test_route_accepts_hyphenated_verification(verification):
+    route, problem = parse_route(_route(verification=verification), 50)
+    assert not problem and route.verification == verification.replace("-", "_")
+
+
 def test_freeze_keeps_a_workstream_binding_stable(tmp_path):
     registry = _registry(tmp_path)
     assert registry.freeze([_item()], 50) == 1
@@ -122,8 +173,12 @@ def test_freeze_keeps_a_workstream_binding_stable(tmp_path):
         registry.freeze([_item(score=0.9)], 50)
     with pytest.raises(FusionError, match="already frozen"):
         registry.freeze([_item(id="w2")], 50)
-    with pytest.raises(FusionError, match="another workstream"):
+    with pytest.raises(FusionError, match="another workstream") as refusal:
         registry.freeze([_item(workstream="Second")], 50)
+    assert "id 'w1'" in str(refusal.value)
+    assert "workstream 'Inventory', role 'worker'" in str(refusal.value)
+    assert "Reuse that frozen item unchanged" in str(refusal.value)
+    assert list(registry.allocations.values()) == [record]
 
 
 def test_freeze_keeps_the_record_when_the_preference_moves(tmp_path):
@@ -323,6 +378,24 @@ async def _seats(tmp_path, *, active=("route", "brief", "v3"), preference=50, re
             yield main, fake
         finally:
             await engine.close_all()
+
+
+def test_submit_route_repairs_both_fields_from_one_refusal(tmp_path):
+    async def go():
+        async with _seats(tmp_path) as (main, fake):
+            bad = _item(role="Coder")
+            bad["n"] = bad.pop("score")
+            await _declared_turn(main, fake,
+                                 call("submit_route", _route(items=[bad]), call_id="bad"),
+                                 call("submit_route", _route(verification="runner-and-sampler", items=[_item()]), call_id="fixed"),
+                                 call("submit_route", _route(items=[_item(workstream="Second")]), call_id="duplicate"),
+                                 say("Routed."))
+            refusal = _output(main, "bad")
+            assert "Use score" in refusal and "worker (Coder, QualitySampler) or light (Runner)" in refusal
+            assert "Route accepted: coder (runner_and_sampler)" in _output(main, "fixed")
+            assert "workstream 'Inventory', role 'worker'" in _output(main, "duplicate")
+            assert list(main._fusion.registry.allocations) == [("inventory", "worker")]
+    asyncio.run(go())
 
 
 def test_writes_without_a_frozen_item_are_refused_before_any_side_effect(tmp_path):

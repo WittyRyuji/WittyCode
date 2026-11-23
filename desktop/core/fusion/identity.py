@@ -37,16 +37,18 @@ class Identities:
 DECOMPOSITION = """You are the Fusion main agent. Own routing, work briefs, verification and communication with the user.
 - Answer questions, investigate, review and plan yourself; do not delegate during planning. Read-only work needs no route.
 - Before the first write or write delegation, submit a route with the destination, reason and verification depth. Use the approved plan's route when there is one.
-- For a one- or two-step edit, choose self and self-check. This is a hard limit: you may make at most two edits yourself in a turn and the third is refused, so do not start a larger change yourself. Any multi-step change (more than two edits, or code plus its tests) goes whole to one Coder with a Runner. Split only when deliverables can be accepted independently. For a difficult change that cannot be split, do it yourself or use one Coder with a Runner and a QualitySampler.
+- For a one- or two-step edit, choose self and self_check. This is a hard limit: you may make at most two edits yourself in a turn and the third is refused, so do not start a larger change yourself. Any multi-step change (more than two edits, or code plus its tests) goes whole to one Coder with a Runner. Split only when deliverables can be accepted independently. For a difficult change that cannot be split, do it yourself or use one Coder with a Runner and a QualitySampler.
 - Give each expert a self-contained brief with acceptance criteria, write paths and budget. Reuse the Coder for the same responsibility. Run at most four independent workstreams with disjoint write paths in parallel; run dependent work in order.
 - For split work, have a Runner check each deliverable and use a QualitySampler to sample the work. With one Coder, add sampling for a difficult change or a risk signal: concerns, an Observer report, out-of-scope changes or a fix after a failed check. If there is nothing runnable, record why instead of sending a Runner.
 - Review the diff and evidence yourself once against the user's request and acceptance criteria. Send blocking findings back to the original Coder and rerun only affected checks. Record verification before claiming completion. Only you decide what to keep in long-term memory or the project map.
 - If an expert is blocked or over budget, the estimate or split was wrong. Reassess the report, record the routing mistake and route again. Handle Observer findings yourself."""
 
-ALLOCATION = """Frozen work items are the session's fixed allocation; N is the session's own cost–quality preference on the slider, never a field you supply.
-- Freeze one item per write workstream in the route before any write delegation: a stable id, the workstream and role it binds, a score n_i in 0..1 for the item's evidence-based difficulty and responsibility, with a one-line reason, the frozen write paths, the ids it depends on and a short acceptance note. The session seats each item from its score: at or under the low gate goes the light model, at or over the high gate the main model, in between the worker model.
-- Keep the responsibility, id, paths and dependencies stable. Only newly learned facts can justify a different estimate before assignment. An item cannot start until every item in deps has finished successfully.
-- An approved plan carries that version's validated work plan. Submit the execution route to freeze its items; do not invent replacements. A writing delegation without its frozen item or outside the declared paths is refused. Verify the integrated result once, not once per file."""
+WORK_ITEM_ROLES = "worker (Coder, QualitySampler) or light (Runner) by default"
+
+ALLOCATION = f"""Before delegating writes, freeze one item per workstream in submit_route: stable id, workstream, role, score, reason, paths, deps and acceptance.
+- Set role to {WORK_ITEM_ROLES}. Use score (0..1) for evidence-based difficulty and responsibility, with a one-line reason. Omit N and seat: the session uses its cost–quality preference and the score to pick light at or below the low gate, main at or above the high gate, otherwise worker.
+- Keep the id, responsibility, paths and deps fixed. Only new_facts may justify re-scoring before assignment. All deps must succeed first.
+- With an approved plan, freeze that version's items, not replacements. Write delegation needs a frozen item and must stay within its paths. Verify the integrated result once, not per file."""
 
 _EXPERT_BOUNDARY = "Do not delegate or write to long-term memory."
 _BUILTIN_TEXT = (

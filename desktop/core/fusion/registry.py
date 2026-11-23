@@ -429,8 +429,11 @@ class FusionRegistry:
                     raise FusionError("This work item already has an owner; a changed estimate requires a new plan.")
                 if not allocation.reestimate(existing, record):
                     raise FusionError("New facts may only re-estimate this item's score; changed ids, paths or dependencies require a new plan.")
-            if any(other_bind != bind and other["id"] == record["id"] for other_bind, other in self.allocations.items()):
-                raise FusionError("This work item id is already frozen under another workstream or role.")
+            other = next((other for other_bind, other in self.allocations.items()
+                          if other_bind != bind and other["id"] == record["id"]), None)
+            if other is not None:
+                raise FusionError(f"Work item id {record['id']!r} is already frozen under another workstream or role: "
+                                  f"workstream {other['workstream']!r}, role {other['role']!r}. Reuse that frozen item unchanged.")
             pending.append((record, bind))
         if problem := allocation.check_deps([*self.allocations.values(), *(record for record, bind in pending
                                                                          if bind not in self.allocations)]):
