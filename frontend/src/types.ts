@@ -251,6 +251,7 @@ export interface AgentInfo {
   fusionRole?: "worker" | "light" | null;
   /** The actual Fusion assignment (e.g. Coder), independent of the model pool above. */
   fusionIdentity?: string | null;
+  unstartedTransfer?: boolean;
   startedAt: number;
   finishedAt: number | null;
 }

@@ -19,12 +19,12 @@ class AcpSummary(AcpRun):
 
     acp_args = ("--agent-type", "summarizer")
     tool_free = True
+    persist_session = False
 
     def __init__(self, manager, *, before_prompt=None):
         self.before_prompt = before_prompt
         host = SimpleNamespace(manager=manager, session_id="summary-" + uuid.uuid4().hex,
-                               saved=SimpleNamespace(origin={}, items=[], turns=[]), _turn=None,
-                               _save_now=lambda **_: None)
+                               saved=SimpleNamespace(origin={}))
         super().__init__(host)
         self.tools = SimpleNamespace(declarations=lambda: [])
         self.answer = ""

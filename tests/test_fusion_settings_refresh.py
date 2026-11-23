@@ -68,6 +68,39 @@ def test_changed_roles_apply_on_send_and_preserve_expert_handoff_and_history(tmp
     asyncio.run(go())
 
 
+def test_main_only_change_keeps_all_34_experts_and_session_authorisations(tmp_path):
+    from desktop.core.fusion.runtime import ExpertView
+
+    async def go():
+        core, fake, _, _, _ = await ready_core(tmp_path)
+        try:
+            cid, main = await open_fusion(core, tmp_path)
+            fake.script(say("Before."))
+            await core.call("session.send", {"id": cid, "text": "Start"})
+            await finish_turn(main)
+            assert (await core.call("fusion.authorizeModel", {"id": cid, "model": SOL}))["ok"]
+            runtime = main._fusion
+            for i in range(34):
+                record = runtime.registry.assign_workstream(f"Sample {i}", (), SOL if i < 14 else LUNA,
+                                                            "worker", identity="Coder")
+                record.status, record.started_at, record.finished_at = "done", 1.0, 2.0
+                runtime.agents[record.id] = ExpertView(record)
+            runtime._checkpoint()
+            before = [record.to_json() for record in runtime.registry.agents.values()]
+            count = len(fake.requests)
+            await core.call("settings.set", {"key": "fusionMain", "value": LUNA})
+            fake.script(say("Handoff."), say("No delegation."))
+            await core.call("session.send", {"id": cid, "text": "Continue"})
+            await finish_turn(main)
+            assert [record.to_json() for record in runtime.registry.agents.values()] == before
+            assert runtime.registry.policy.workers == (LUNA, SOL)
+            assert len(main.agents) == 34 and runtime.registry.calls == 0 and len(fake.requests) == count + 2
+        finally:
+            await core.shutdown()
+
+    asyncio.run(go())
+
+
 def test_running_turn_keeps_policy_and_queued_turn_applies_latest(tmp_path):
     async def go():
         core, fake, _, _, _ = await ready_core(tmp_path)
@@ -295,7 +328,7 @@ def test_summary_unknown_usage_survives_policy_replacement_and_blocks_legacy_bud
     asyncio.run(go())
 
 
-def test_unstarted_replacement_of_interrupted_owner_can_be_watched_and_acknowledged(tmp_path):
+def test_role_change_leaves_interrupted_owner_in_history_until_explicit_resume(tmp_path):
     async def go():
         core, fake, _, _, _ = await ready_core(tmp_path)
         try:
@@ -310,15 +343,15 @@ def test_unstarted_replacement_of_interrupted_owner_can_be_watched_and_acknowled
             fake.script(say("Assess the changed team first."))
             await core.call("session.send", {"id": cid, "text": "Assess"})
             await finish_turn(main)
-            new = next(view for view in main.agents.values() if view.record.status != "retired")
-            assert new.record.status == "interrupted" and not new.record.started_at
-            assert main.manager.sessions.load(new.record.id) is None
-            assert (await core.call("agents.watch", {"id": cid, "agentId": new.record.id}))["ok"]
-            assert (await core.call("fusion.resumeExpert", {"id": cid, "agentId": new.record.id}))["ok"]
-            assert len(fake.requests) == 4 and new.record.status == "idle"
-            fake.script(call("delegate_task", assignment(SOL)), say("Continued safely."), say("Verified."))
+            assert list(main.agents) == [old.record.id]
+            assert main.agents[old.record.id].record.replaced_status == "interrupted"
+            assert (await core.call("agents.watch", {"id": cid, "agentId": old.record.id}))["ok"]
+            rejected = await main._fusion.delegate("Login flow", SOL, "worker", "Check first", ("src/auth",))
+            assert rejected.is_error and len(main.agents) == 1 and len(fake.requests) == 4
+            fake.script(call("delegate_task", assignment(SOL, resume=True)), say("Continued safely."), say("Verified."))
             await core.call("session.send", {"id": cid, "text": "Continue after checking"})
             await finish_turn(main)
+            new = next(view for view in main.agents.values() if view.record.transferred_from == old.record.id)
             assert new.record.status == "done" and new.record.handoff_complete
             assert len(fake.requests) == 7
         finally:

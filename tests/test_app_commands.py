@@ -11,7 +11,7 @@ import pytest
 
 from desktop.core.harness import compact, goal as goals, skills
 from desktop.core.transcript import TurnStatus
-from tests.app_support import ready_core
+from tests.app_support import ready_core, without_numbered_reply
 from tests.fake_responses import say
 from tests.fakes import until
 from tests.llm_support import FakeApi, http_error
@@ -82,7 +82,7 @@ def test_compact_turns_the_conversation_into_a_summary_the_next_message_starts_f
             await say_and_wait(core, events, cid, "and 3+3?", "Six.")
             sent = api.posts[2][2]["messages"]
             assert [m["role"] for m in sent] == ["system", "user", "user"], "the summary, then the new question: nothing older"
-            assert "SUMMARY: the user asked 2+2" in sent[1]["content"] and sent[2]["content"] == "and 3+3?"
+            assert "SUMMARY: the user asked 2+2" in sent[1]["content"] and without_numbered_reply(sent[2]["content"]) == "and 3+3?"
             await core.shutdown()
 
     run(scenario())
@@ -135,8 +135,8 @@ def test_a_goal_goes_on_by_itself_until_the_model_says_it_is_done_and_each_round
             await until(lambda: len(api.posts) == 2 and meta(events, cid).get("mark") == "ready")
             await asyncio.sleep(0.2)
             assert len(api.posts) == 2, "it stops when the model says it is done"
-            assert last_words(api.posts[0]) == goals.opening("make the tests pass")
-            assert last_words(api.posts[1]) == goals.Goal("make the tests pass", rounds=1).next_message()
+            assert without_numbered_reply(last_words(api.posts[0])) == goals.opening("make the tests pass")
+            assert without_numbered_reply(last_words(api.posts[1])) == goals.Goal("make the tests pass", rounds=1).next_message()
             shown = blocks(events, cid)
             assert any(b["kind"] == "notice" and "目标完成了（用了 2 轮）" in b["text"] for b in shown)
             assert any(b["kind"] == "notice" and b["text"].startswith("目标已设定：make the tests pass") for b in all_blocks(events, cid))
@@ -276,7 +276,7 @@ def test_a_message_the_user_queued_goes_before_the_next_turn_of_the_goal(tmp_pat
             await core.call("session.send", {"id": cid, "text": "a question of mine"})
             await until(lambda: len(api.posts) == 3 and meta(events, cid).get("mark") == "ready")
             await asyncio.sleep(0.2)
-            assert [last_words(post) for post in api.posts] == [
+            assert [without_numbered_reply(last_words(post)) for post in api.posts] == [
                 goals.opening("ship it"), "a question of mine", goals.Goal("ship it", rounds=1).next_message(),
             ]
             await core.shutdown()

@@ -449,9 +449,10 @@ class FusionRuntime:
         route = turn.route if turn is not None else None
         if action == "exec":
             return route_refusal(None, "edit") if route is None else ""
-        names = set(name.casefold() for name in workstreams)
-        return route_refusal(route, action, workstreams=len(names | (turn.workstreams if turn is not None else set())),
-                             edits=turn.edits if turn is not None else 0)
+        names = {name.casefold() for name in workstreams} | (turn.workstreams if turn is not None else set())
+        if self.gate("v3"):
+            names = {name.replace("\\", "/") for name in names}
+        return route_refusal(route, action, workstreams=len(names), edits=turn.edits if turn is not None else 0)
 
     def note_edit(self) -> None:
         """One successful edit by the main agent itself. An approved plan is its own route and is not counted."""
@@ -1276,16 +1277,21 @@ class FusionRuntime:
     def settings_snapshot(policy: Policy) -> dict[str, Any]:
         return {key: value for key, value in policy.to_json().items() if key not in ("maxCalls", "maxTokens")}
 
+    def _global_preset(self) -> dict[str, Any]:
+        settings = self.parent.manager.settings
+        return {"main": settings.fusion_main, "workers": list(settings.fusion_workers), "light": settings.fusion_light,
+                "maxSeconds": settings.fusion_max_seconds, "preference": settings.fusion_preference,
+                "reasoning": dict(settings.fusion_reasoning)}
+
     def pending_settings(self) -> Policy | None:
-        settings, current = self.parent.manager.settings, self.registry.policy
+        current = self.registry.policy
+        desired = self._global_preset()
         # An unconfigured global preset must not invalidate a restored, self-contained session.
-        if not settings.fusion_main or not settings.fusion_workers or not settings.fusion_light:
+        if not all(desired[key] for key in ("main", "workers", "light")):
             return None
-        desired = Policy(settings.fusion_main, tuple(settings.fusion_workers), settings.fusion_light,
-                         current.max_calls, current.max_tokens, settings.fusion_max_seconds,
-                         settings.fusion_preference, settings.fusion_reasoning)
         previous = self.parent.saved.origin.get("fusionSettings", self.settings_snapshot(current))
-        return desired if self.settings_snapshot(desired) != previous else None
+        delta = {key: value for key, value in desired.items() if value != previous.get(key)}
+        return Policy.from_json({**current.to_json(), **delta}) if delta else None
 
     def prepare_settings(self, policy: Policy) -> FusionRegistry:
         if self.parent.state is not SessionState.READY or self._active or self._delegations:
@@ -1295,20 +1301,23 @@ class FusionRuntime:
             if info is None:
                 raise FusionError("A configured Fusion model is unavailable; no fallback was selected.")
             configured_effort(policy.reasoning, model, info.efforts, role=role)
-        prepared = FusionRegistry.from_json(self.registry.project, self.registry.to_json())
-        prepared.policy = policy
-        for expert in list(prepared.agents.values()):
+        return self._prepare_policy(policy, preset_snapshot=self._global_preset())
+
+    def _prepare_policy(self, policy: Policy, *, preset_snapshot: dict[str, Any] | None = None) -> FusionRegistry:
+        # A live policy change is not a restore: keep the frozen allocations and capture any preset separately.
+        prepared = replace(self.registry, policy=policy,
+                           agents={key: replace(record) for key, record in self.registry.agents.items()},
+                           allocations={key: dict(record) for key, record in self.registry.allocations.items()},
+                           task_metrics=list(self.registry.task_metrics), preset_snapshot=preset_snapshot)
+        for expert in prepared.agents.values():
             if expert.status != "retired" and not policy.allowed(expert.model, expert.role, expert.seat):
-                # Changing the seat's configured model authorises a context-preserving handoff, never an execution.
-                model = policy.seat_model(expert.seat) if expert.seat else (policy.light if expert.role == "light" else policy.workers[0])
-                incomplete = expert.status in ("interrupted", "failed")
-                replacement = prepared.transfer(expert.id, model, expert.role)
-                replacement.status = "interrupted" if incomplete else "idle"
+                # The next delegation selects the current seat/role model and carries over this expert's context.
+                expert.replaced_status, expert.status = expert.status, "retired"
         return prepared
 
-    def apply_settings(self, prepared: FusionRegistry, reasoning: str) -> None:
+    def apply_settings(self, prepared: FusionRegistry, reasoning: str | None) -> None:
         parent = self.parent
-        before = self.registry, self.agents, parent.saved.origin
+        before = self.registry, self.agents
         # The source-model summary may report usage (or uncertainty) after preparation. Never roll that evidence back.
         prepared.calls, prepared.tokens = self.registry.calls, self.registry.tokens
         prepared.unmetered, prepared.had_unknown = self.registry.unmetered, self.registry.had_unknown
@@ -1316,16 +1325,16 @@ class FusionRuntime:
         self.registry = prepared
         self.agents = {key: ExpertView(record, self.agents[key].controller if key in self.agents else None)
                        for key, record in prepared.agents.items()}
-        parent.saved.origin = {**parent.saved.origin, "fusionSettings": self.settings_snapshot(prepared.policy)}
         try:
-            parent._set_fusion_mode(self, None, native_model(prepared.policy.main), reasoning)
+            parent._set_fusion_mode(self, None, native_model(prepared.policy.main), reasoning,
+                                    settings_snapshot=prepared.preset_snapshot)
         except BaseException:
-            self.registry, self.agents, parent.saved.origin = before
+            self.registry, self.agents = before
             raise
 
     def change_main(self, model: str, reasoning: str | None = None) -> bool:
         parent = self.parent
-        if parent.state is not SessionState.READY or self._active:
+        if parent.state is not SessionState.READY or self._active or self._delegations:
             raise FusionError("The main agent must be idle before its model can be changed.")
         if (not isinstance(model, str) or not model.startswith(("chatgpt:", "api:", "devin:"))
                 or parent.manager.model_info(native_model(model)) is None):
@@ -1337,22 +1346,9 @@ class FusionRuntime:
         configured = self.reasoning_for(model)
         if configured is not None:
             reasoning = configured
-        previous = (self.registry.policy, parent.requested_model, parent.transcript.model, parent.reasoning,
-                    parent.saved.model, parent.saved.reasoning, parent.saved.fusion)
-        self.registry.policy = replace(self.registry.policy, main=model)
-        parent.requested_model = native_model(model)
-        parent.transcript.model = parent.requested_model
-        if reasoning is not None:
-            parent.reasoning = reasoning
-        try:
-            self._checkpoint()
-        except BaseException:
-            (self.registry.policy, parent.requested_model, parent.transcript.model, parent.reasoning,
-             parent.saved.model, parent.saved.reasoning, parent.saved.fusion) = previous
-            raise
-        parent.refresh_context()
-        parent._notify("settings")
-        parent._changed()
+        # A session-only choice must not advance the last applied global preset.
+        prepared = self._prepare_policy(replace(self.registry.policy, main=model))
+        self.apply_settings(prepared, reasoning)
         return True
 
     def authorize_worker(self, model: str) -> bool:
@@ -1639,10 +1635,15 @@ class FusionRuntime:
         if self.gate("v3"):
             policy = self.registry.policy
             if profile is not None and profile.name in ("Runner", "QualitySampler") and not writes:
-                # A read-only check has no frozen work item: the harness seats it by kind — the
-                # Runner at L3, the QualitySampler at L2, L1 only once an L2 sample is on record.
-                seat = self._check_seat(profile.name, route_turn)
-                model = policy.seat_model(seat)
+                # Current evidence seats fresh checks only; a resumed check keeps its seat even across a model change.
+                try:
+                    previous = self.registry.workstream_expert(scope, role, identity=profile.name,
+                                                               reuse=profile.reuse, resume=resume)
+                except FusionError as error:
+                    return Outcome(str(error), True)
+                seat = previous.seat if previous is not None else self._check_seat(profile.name, route_turn)
+                if seat:
+                    model = policy.seat_model(seat)
             else:
                 record = self.registry.allocation_for(brief.workstream if brief is not None else scope, role)
                 if record is None:
@@ -1682,11 +1683,12 @@ class FusionRuntime:
         snapshots = {key: replace(expert) for key, expert in self.registry.agents.items()}
         calls = self.registry.calls
         saved_fusion = self.parent.saved.fusion
+        workstream = record["workstream"] if record is not None else scope
         try:
             self.check_budget()
-            expert = (self.registry.assign(scope, model, role, seat=seat) if paths is None else
-                      self.registry.assign_workstream(scope, paths, model, role, identity=profile.name if profile else "",
-                                                      reuse=profile.reuse if profile else True, seat=seat))
+            expert = (self.registry.assign(scope, model, role, resume=resume, seat=seat) if paths is None else
+                      self.registry.assign_workstream(workstream, paths, model, role, identity=profile.name if profile else "",
+                                                      reuse=profile.reuse if profile else True, resume=resume, seat=seat))
             transferred_new = bool(expert.transferred_from and expert.started_at == 0)
             self.registry.begin(expert.id, resume=resume)
             expert.task = task
@@ -1704,7 +1706,7 @@ class FusionRuntime:
             return Outcome(str(error), True)
         observing = route_turn is not None and self.acceptance_enabled()
         if writes and route_turn is not None:
-            route_turn.workstreams.add(scope.casefold())
+            route_turn.workstreams.add(workstream.casefold())
             if observing:
                 route_turn.writing_route, route_turn.writing_from_plan = route_turn.route, route_turn.from_plan
                 if route_turn.workspace is None:
@@ -1984,6 +1986,8 @@ class FusionRuntime:
                         child._tools.record_reader = self.read_record if self.drive_enabled else None
                 self._active.pop(expert.id, None)
                 self._delegations.discard(running)
+                if child is not None and child._acp is not None:
+                    child._acp.arm_idle()
                 self.parent._changed()
 
     async def close(self) -> None:

@@ -18,6 +18,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from desktop.core import storage_policy
 from desktop.core.fusion.gates import GATES
 from desktop.core.fusion.reasoning import reasoning_map
 from desktop.core.sidebar_order import merge_pins
@@ -151,6 +152,16 @@ class AppSettings:
     sound_complete: str = ""
     sound_error: str = ""
     """Local PCM WAV or MP3 paths; empty means the corresponding bundled sound (resolved for display by ``core/sounds``)."""
+    storage_max_bytes: int = storage_policy.DEFAULT_MAX_BYTES
+    """The Storage page's Max: the global cap on application-managed data, see ``core/storage_policy``."""
+    storage_shares: dict[str, float] = field(default_factory=lambda: dict(storage_policy.DEFAULT_SHARES))
+    """Category -> percent of the cap; the split must total 100 and no category borrows another's headroom."""
+    storage_alert_at: int = storage_policy.DEFAULT_ALERT_AT
+    """Percent of total occupancy at which the page warns (independent of the split)."""
+    storage_full_policy: str = "stop"
+    """``stop``: refuse new writes at the cap; ``autoclean``: the writer may drop the oldest eligible objects first."""
+    storage_autoclean: list[str] = field(default_factory=lambda: list(storage_policy.DEFAULT_AUTOCLEAN))
+    """Categories auto-clean may touch: cache and the rebuildable index by default; history and dumps need explicit picks."""
     mode: str = "auto"
     projects: list[str] = field(default_factory=list)
     max_open_sessions: int = DEFAULT_MAX_OPEN_SESSIONS
@@ -433,6 +444,7 @@ def settings_from_dict(raw: object) -> AppSettings:
 
     # Each input keeps its own legal cap — the merged zone may top MAX when several projects each had a full list.
     pinned_sessions = merge_pins(valid_pinned, pins, projects, pin_folder_key)
+    storage = storage_policy.policy_from(raw)
     created: dict[str, float] = {}
     raw_created = raw.get("session_created")
     if isinstance(raw_created, dict):
@@ -495,6 +507,11 @@ def settings_from_dict(raw: object) -> AppSettings:
         sound_question=text("sound_question").strip(),
         sound_complete=text("sound_complete").strip(),
         sound_error=text("sound_error").strip(),
+        storage_max_bytes=storage.max_bytes,
+        storage_shares=storage.shares,
+        storage_alert_at=storage.alert_at,
+        storage_full_policy=storage.full_policy,
+        storage_autoclean=list(storage.autoclean),
         mode=text("mode", MODES),
         projects=projects,
         max_open_sessions=max_open,

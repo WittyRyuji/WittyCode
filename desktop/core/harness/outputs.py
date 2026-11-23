@@ -20,6 +20,20 @@ MAX_SESSION_BYTES = 256 * 1024 * 1024
 MAX_OUTPUTS = 4096
 REFERENCE = re.compile(r"o-[0-9a-f]{64}\Z")
 
+UNRETAINED = frozenset({"read_output", "recall_history"})
+"""Call names whose result is never copied into this store. ``read_output`` only re-reads what is already retained
+— a copy would store the same evidence twice — and a ``recall_history`` result is session-archive evidence
+delivered under the turn's recall ledger: retaining it would let ``read_output`` re-serve the archive past the
+budget (``outputs/session-context-recall-final.md`` §6.5). The observer's ``retain_output`` skips these names."""
+
+NOT_REPLAYABLE = (
+    "[This call's result was this session's archived original text, delivered under the turn's recall ledger "
+    "and deliberately not retained; read_output cannot replay it.]"
+)
+"""What a ``recall_history`` outcome carries instead of its result when that result is large enough to be
+retained: the observer keeps recovery evidence elsewhere, so a real reference is attached — to this note, never
+to the archive text the ledger charged for."""
+
 
 def hint(reference: str) -> str:
     return f"[Full tool output retained as {reference}; use read_output(reference=\"{reference}\", offset=1, limit=2000) to read consecutive characters.]"
@@ -132,21 +146,28 @@ def read_output(args: dict, ctx: ToolContext) -> ToolResult:
     reference = args.get("reference", "")
     if not reference:
         return ToolResult(store.listing(offset, limit))
+    recall = getattr(ctx, "history_recall", None)
+    gated = recall is not None and recall.authorize_output_read(reference, str(args.get("reason") or "")) == "gated"
     text = store.read(reference)
     start = offset - 1
     if start > len(text):
         raise ToolError(f"Offset is past the end ({len(text)} characters).")
     page = text[start:start + limit]
     next_page = f"Next offset={start + len(page) + 1}." if start + len(page) < len(text) else "End of retained output."
-    return ToolResult(f"{reference} — characters {offset}-{start + len(page)} of {len(text)}:\n{page}\n[{next_page} If the context clips this page, repeat with a smaller limit.]")
+    result = f"{reference} — characters {offset}-{start + len(page)} of {len(text)}:\n{page}\n" \
+             f"[{next_page} If the context clips this page, repeat with a smaller limit.]"
+    if gated:
+        return recall.charge_output_read(reference, offset, start + len(page), result)
+    return ToolResult(result)
 
 
 SPEC = ToolSpec(
-    "read_output", "Read a retained tool result from this conversation, including after restart or compaction. Omit reference to list available outputs. Offsets count characters, not lines; reading cannot execute the content.",
+    "read_output", "Read a retained tool result from this conversation, including after restart or compaction. Omit reference to list available outputs. Offsets count characters, not lines; reading cannot execute the content. Outputs of earlier turns are delivered under the session's recall budget and may need a concrete reason.",
     {"type": "object", "properties": {
         "reference": {"type": "string", "description": "The o-… reference returned by a tool; omit to list."},
         "offset": {"type": "integer", "minimum": 1, "description": "First character (or list entry), default 1."},
         "limit": {"type": "integer", "minimum": 1, "maximum": 8000, "description": "Characters to return, default 2000; listing is capped at 100 entries."},
+        "reason": {"type": "string", "description": "Only when reading an earlier turn's retained output: the concrete gap it must fill — required unless the user explicitly asked for the session's original words."},
     }, "required": []}, "ReadOutput", "read",
 )
 

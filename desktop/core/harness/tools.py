@@ -121,6 +121,9 @@ class ToolContext:
     read_encodings: dict[str, str] = field(default_factory=dict)
     """Content fingerprints read or written by this conversation; shared by per-call context copies."""
     supports_images: bool = False
+    history_recall: Any = None
+    """The runtime-authorized recall of this session's archive (``harness.recall_tool.bind_history`` installs it);
+    ``None`` — or a binding whose ``enabled`` is False — keeps ``recall_history`` undeclared and unknown."""
 
 
 @dataclass

@@ -7,7 +7,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import subprocess
 from contextlib import asynccontextmanager
+from dataclasses import replace
 
 import pytest
 
@@ -171,6 +174,71 @@ def test_new_facts_cannot_reestimate_an_owned_binding(tmp_path):
         registry.freeze([_item(score=0.9, new_facts="Evidence.")], 50)
 
 
+@pytest.fixture
+def linked_module_registry(tmp_path):
+    registry = _registry(tmp_path)
+    actual, entry = registry.project / "actual", registry.project / "entry"
+    actual.mkdir()
+    try:
+        if os.name == "nt":
+            junction = subprocess.run(["cmd", "/d", "/c", "mklink", "/J", "entry", "actual"],
+                                      cwd=registry.project, capture_output=True)
+            if junction.returncode:
+                pytest.skip(f"Directory junction creation failed (exit {junction.returncode}).")
+        else:
+            entry.symlink_to(actual, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"Directory link creation is unavailable (errno {error.errno}).")
+    try:
+        assert entry.resolve() == actual.resolve()
+        yield registry
+    finally:
+        entry.rmdir() if os.name == "nt" else entry.unlink()
+
+
+@pytest.mark.parametrize("saved_binding", [True, False], ids=["exact-binding", "older-alias"])
+def test_linked_module_owner_blocks_reestimate_and_checkpoint_reopens(linked_module_registry, saved_binding):
+    registry = linked_module_registry
+    item = _item(workstream="entry", paths=["entry"])
+    registry.freeze([item], 50)
+    registry.freeze([{**item, "score": 0.6, "new_facts": "Found one more check."}], 50)
+    expert = registry.assign("entry", WORKER, "worker", seat="L2")
+    registry.begin(expert.id)
+    registry.finish(expert.id, status="done", tokens=0)
+    assert (expert.scope, expert.aliases, expert.allocation_workstream) == ("actual", ("entry",), "entry")
+    if not saved_binding:
+        raw = registry.to_json()
+        del raw["agents"][0]["allocationWorkstream"]
+        registry = FusionRegistry.from_json(registry.project, raw)
+    checkpoint = registry.to_json()
+
+    with pytest.raises(FusionError, match="already has an owner"):
+        registry.freeze([{**item, "score": 0.9, "new_facts": "Found a harder check."}], 50)
+    assert registry.to_json() == checkpoint
+    reopened = FusionRegistry.from_json(registry.project, json.loads(json.dumps(checkpoint)))
+    assert reopened.to_json() == checkpoint
+    assert reopened.allocations[("entry", "worker")]["seat"] == reopened.agents[expert.id].seat == "L2"
+
+
+def test_restore_accepts_linked_binding_already_reestimated_by_an_older_version(linked_module_registry):
+    registry = linked_module_registry
+    item = _item(workstream="entry", paths=["entry"])
+    registry.freeze([item], 50)
+    expert = registry.assign("entry", WORKER, "worker", seat="L2")
+    registry.begin(expert.id)
+    registry.finish(expert.id, status="done", tokens=0)
+    checkpoint = registry.to_json()
+    # Emulate a checkpoint written before the re-estimate guard recognized the junction's owner.
+    checkpoint["allocations"][0] = allocation.seal(
+        {**item, "paths": ["actual"], "score": 0.9, "new_facts": "Found a harder check."}, 50)
+
+    reopened = FusionRegistry.from_json(registry.project, json.loads(json.dumps(checkpoint)))
+    assert reopened.to_json() == checkpoint
+    assert reopened.agents[expert.id].seat == "L2" and reopened.allocation_for("entry", "worker")["seat"] == "L1"
+    with pytest.raises(FusionError, match="seat is frozen"):
+        reopened.assign("entry", MAIN, "worker", seat="L1")
+
+
 def test_freeze_checks_dependencies_across_route_submissions(tmp_path):
     registry = _registry(tmp_path)
     registry.freeze([_item(id="a")], 50)
@@ -315,6 +383,318 @@ def test_frozen_items_seat_all_three_tiers_with_their_reasoning(tmp_path):
                 "a re-frozen item echoes its stored record, not a new score"
             await _declared_turn(main, fake, call("submit_route", _route(), call_id="route-3"), say("Plain."))
             assert _output(main, "route-3") == "Route accepted: coder (runner).", "no items means no scoring lines"
+    asyncio.run(go())
+
+
+def test_preset_change_resumes_a_frozen_seat_without_preallocating_an_expert(tmp_path):
+    route = _route(items=[_item(score=0.9)])  # L1 uses the main model, even for a worker-role brief.
+
+    async def go():
+        async with _seats(tmp_path) as (main, fake):
+            await _declared_turn(main, fake, call("submit_route", route, call_id="route"),
+                                 call("delegate_task", _brief(), call_id="before"), say("Original evidence."), say("Done."))
+            runtime = main._fusion
+            registry = runtime.registry
+            original, = registry.agents.values()
+            original.status = "interrupted"
+            runtime._checkpoint()
+            assert (original.model, original.seat) == (MAIN, "L1")
+            frozen = dict(registry.allocation_for("Inventory", "worker"))
+
+            settings = main.manager.settings
+            settings.fusion_main, settings.fusion_workers, settings.fusion_light = LIGHT, [WORKER], LIGHT
+            settings.fusion_preference = 70
+            prepared = runtime.prepare_settings(runtime.pending_settings())
+            settings.fusion_preference = 80  # A later change must remain pending after applying this preparation.
+            retired, = prepared.agents.values()
+            assert (retired.id, retired.status, retired.replaced_status, retired.seat) == (
+                original.id, "retired", "interrupted", "L1")
+            assert original.status == "interrupted" and registry.policy.main == MAIN
+            assert prepared.allocations == registry.allocations and prepared.allocations is not registry.allocations
+
+            runtime.apply_settings(prepared, "low")
+            assert main.saved.origin["fusionSettings"]["preference"] == 70
+            assert runtime.pending_settings().preference == 80
+            restored = FusionRegistry.from_json(registry.project, main.saved.fusion)
+            assert restored.preset_snapshot is None
+            checkpoint = restored.agents[retired.id]
+            assert (checkpoint.status, checkpoint.replaced_status, checkpoint.seat) == ("retired", "interrupted", "L1")
+            assert restored.allocation_for("Inventory", "worker") == frozen
+            with pytest.raises(FusionError, match="new plan"):
+                restored.freeze([_item(score=0.2, new_facts="A later audit.")], 70)
+
+            await _declared_turn(main, fake, call("submit_route", route, call_id="same-route"),
+                                 call("delegate_task", _brief(), call_id="without-resume"), say("Held."))
+            assert "explicitly resume" in _output(main, "without-resume")
+            assert list(main.agents) == [original.id] and runtime.registry.calls == 1
+            await _declared_turn(main, fake, call("submit_route", route, call_id="resume-route"),
+                                 call("delegate_task", _brief(resume=True), call_id="resume"),
+                                 say("Continued."), say("Verified."))
+            successor, = (record for record in runtime.registry.agents.values() if record.id != original.id)
+            assert (successor.model, successor.seat, successor.transferred_from) == (LIGHT, "L1", original.id)
+            assert successor.status == "done" and successor.handoff_complete and runtime.registry.calls == 2
+            assert runtime.registry.allocation_for("Inventory", "worker") == frozen
+
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("retire", [False, True], ids=["live-owner", "retired-owner"])
+def test_read_only_l1_resume_keeps_its_seat_across_turns(tmp_path, monkeypatch, retire):
+    async def go():
+        async with _seats(tmp_path) as (main, fake):
+            runtime = main._fusion
+            sampler = _brief("QualitySampler", workstream="Review")
+            with monkeypatch.context() as patch:
+                # First turn already earned the L1 review seat; later turns must not have to earn it again.
+                patch.setattr(runtime, "_check_seat", lambda *_: "L1")
+                await _declared_turn(main, fake, call("delegate_task", sampler, call_id="review"),
+                                     say("Original review evidence."), say("Reviewed."))
+            old, = runtime.registry.agents.values()
+            assert (old.seat, old.model, old.status) == ("L1", MAIN, "done")
+            old.status = "interrupted"
+            runtime._checkpoint()
+            target_model = MAIN
+            if retire:
+                target_model = LIGHT
+                runtime.apply_settings(runtime.prepare_settings(replace(runtime.registry.policy, main=LIGHT)), "low")
+                archived = runtime.registry.agents[old.id]
+                assert (archived.status, archived.replaced_status) == ("retired", "interrupted")
+            assert runtime._check_seat("QualitySampler", None) == "L2"
+            before = len(fake.requests)
+            await _declared_turn(main, fake, call("delegate_task", {**sampler, "resume": True}, call_id="review-next"),
+                                 say("Continued reviewing."), say("Done."))
+            active, = (expert for expert in runtime.registry.agents.values() if expert.status != "retired")
+            assert (active.seat, active.model, active.status) == ("L1", target_model, "done")
+            if retire:
+                assert active.id != old.id and active.transferred_from == old.id and active.handoff_complete
+            else:
+                assert active.id == old.id and "Original review evidence." in str(fake.requests[-2]["input"])
+            assert len(fake.requests) == before + 4 and runtime.registry.calls == 2
+
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("subscore", [0.5, 0.9], ids=["different-seat", "same-seat"])
+def test_retired_legacy_scope_cannot_handoff_to_an_overlapping_frozen_item(tmp_path, subscore):
+    async def go():
+        async with _seats(tmp_path, active=("route", "v3")) as (main, fake):
+            runtime = main._fusion
+            route = _route(items=[_item(id="module", workstream="src", score=0.9, paths=["src"])])
+            task = {"scope": "src", "model": WORKER, "role": "worker", "task": "Check the module."}
+            await _declared_turn(main, fake, call("submit_route", route, call_id="main-route"),
+                                 call("delegate_task", task, call_id="module-first"), say("Module evidence."), say("Done."))
+            original, = runtime.registry.agents.values()
+            assert (original.scope, original.seat) == ("src", "L1") and runtime.registry.calls == 1
+            original.status = "interrupted"
+            runtime._checkpoint()
+            runtime.apply_settings(runtime.prepare_settings(replace(runtime.registry.policy, main=LIGHT)), "low")
+            subroute = _route(items=[_item(id="submodule", workstream="src/sub", score=subscore, paths=["src/sub"])])
+            subtask = {**task, "scope": "src/sub", "resume": True}
+            await _declared_turn(main, fake, call("submit_route", subroute, call_id="sub-route"),
+                                 call("delegate_task", subtask, call_id="cross-item"), say("Held."))
+            assert runtime.registry.allocation_for("src/sub", "worker")["seat"] == ("L2" if subscore == 0.5 else "L1")
+            assert "frozen" in _output(main, "cross-item")
+            assert list(main.agents) == [original.id] and runtime.registry.calls == 1
+
+            await _declared_turn(main, fake, call("submit_route", route, call_id="resume-route"),
+                                 call("delegate_task", {**task, "resume": True}, call_id="module-resume"),
+                                 say("Continued original module."), say("Verified."))
+            successor, = (expert for expert in runtime.registry.agents.values() if expert.id != original.id)
+            assert (successor.scope, successor.seat, successor.model) == ("src", "L1", LIGHT)
+            assert successor.transferred_from == original.id and successor.handoff_complete
+            assert successor.status == "done" and runtime.registry.calls == 2
+
+    asyncio.run(go())
+
+
+def test_retired_unseated_legacy_scope_can_resume_on_its_first_frozen_seat(tmp_path):
+    async def go():
+        async with _seats(tmp_path, active=()) as (main, fake):
+            runtime = main._fusion
+            task = {"scope": "src", "model": WORKER, "role": "worker", "task": "Check the module."}
+            await _turn(main, fake, call("delegate_task", task, call_id="before-v3"),
+                        say("Original evidence."), say("Done."))
+            original, = runtime.registry.agents.values()
+            assert not original.seat and not runtime.registry.allocations
+            original.status = "interrupted"
+            runtime._checkpoint()
+            runtime.apply_settings(runtime.prepare_settings(replace(runtime.registry.policy, workers=(LIGHT,))), "low")
+            assert list(main.agents) == [original.id]
+            retired = runtime.registry.agents[original.id]
+            assert (retired.status, retired.replaced_status, retired.seat) == ("retired", "interrupted", "")
+
+            main.manager.settings.fusion_gates = _gates("route", "v3")
+            route = _route(items=[_item(workstream="src", paths=["src"])])
+            await _declared_turn(main, fake, call("submit_route", route, call_id="first-freeze"),
+                                 call("delegate_task", {**task, "task": "Continue after inspection."}, call_id="implicit"),
+                                 say("Held."))
+            assert "explicitly resume" in _output(main, "implicit")
+            assert list(main.agents) == [original.id] and runtime.registry.calls == 1
+            await _declared_turn(main, fake, call("submit_route", route, call_id="resume-route"),
+                                 call("delegate_task", {**task, "task": "Continue after inspection.", "resume": True},
+                                      call_id="first-seat"), say("Continued."), say("Verified."))
+            successor, = (record for record in runtime.registry.agents.values() if record.id != original.id)
+            assert (successor.scope, successor.seat, successor.model) == ("src", "L2", LIGHT)
+            assert successor.transferred_from == original.id and successor.handoff_complete
+            assert successor.status == "done" and runtime.registry.calls == 2
+
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("stored_alias, original_scope, alternate_scope", [
+    (False, "src/sub", r"src\sub"),
+    (True, "src/sub", r"src\sub"),
+    (True, r"src\sub", "src/sub"),
+], ids=["new-freeze", "older-checkpoint", "older-checkpoint-backslash-first"])
+def test_slash_alias_does_not_block_resuming_the_original_frozen_scope(tmp_path, stored_alias, original_scope, alternate_scope):
+    registry = _registry(tmp_path)
+    item = _item(id="original", workstream=original_scope, score=0.85, paths=[original_scope])
+    alias = {**item, "workstream": alternate_scope, "paths": [alternate_scope]}
+    competing = {**alias, "id": "competing", "score": 0.5}
+    registry.freeze([item], 50)
+    original = registry.assign(original_scope, MAIN, "worker", seat="L1")
+    registry.begin(original.id)
+    registry.finish(original.id, status="interrupted", tokens=0)
+    original.status, original.replaced_status = "retired", "interrupted"
+    registry.policy = replace(registry.policy, main=LIGHT, preference=100)
+    frozen = dict(registry.allocation_for(original_scope, "worker"))
+
+    if stored_alias:
+        # Old checkpoints could contain both raw keys; the competing item's dependency must not block the original.
+        raw = registry.to_json()
+        raw["allocations"].extend([allocation.seal(_item(id="waiting", workstream="Unfinished"), 50),
+                                   allocation.seal({**competing, "deps": ["waiting"]}, 50)])
+        registry = FusionRegistry.from_json(registry.project, raw)
+        assert registry.allocation_for(alternate_scope, "worker")["id"] == "competing"
+        with pytest.raises(FusionError, match="frozen"):
+            registry.assign(alternate_scope, WORKER, "worker", seat="L2", resume=True)
+    else:
+        with pytest.raises(FusionError, match="already frozen"):
+            registry.freeze([competing], 50)
+        # An otherwise identical spelling is still a no-op even when the current N would pick a different seat.
+        assert registry.freeze([alias], 0) == 1
+        assert list(registry.allocations.values()) == [frozen]
+        assert registry.allocation_for(alias["workstream"], "worker") == frozen
+
+    scope = original_scope if stored_alias else alternate_scope
+    successor = registry.assign(scope, LIGHT, "worker", seat="L1", resume=True)
+    assert (successor.scope, successor.seat, successor.transferred_from) == ("src/sub", "L1", original.id)
+    registry.begin(successor.id, resume=True)
+    assert registry.calls == 2 and registry.allocation_for(original_scope, "worker") == frozen
+
+
+def _legacy_same_seat_checkpoint(registry, *, deps=(), second_scope="src/sub"):
+    raw = registry.to_json()
+    first_scope = r"src\sub" if second_scope == "src/sub" else "src/sub"
+    raw["allocations"] = [
+        allocation.seal(_item(id="first", workstream=first_scope, score=0.85, paths=["src/sub"]), 50),
+        allocation.seal(_item(id="second", workstream=second_scope, score=0.9, paths=["src/sub"], deps=deps), 50),
+        allocation.seal(_item(id="before", workstream="before", paths=["before"]), 50),
+    ]
+    return FusionRegistry.from_json(registry.project, raw)
+
+
+def test_retired_legacy_scope_resumes_the_exact_same_seat_key(tmp_path):
+    registry = _legacy_same_seat_checkpoint(_registry(tmp_path))
+    original = registry.assign("src/sub", MAIN, "worker", seat="L1")
+    registry.begin(original.id)
+    registry.finish(original.id, status="interrupted", tokens=0)
+    original.status, original.replaced_status = "retired", "interrupted"
+    registry.policy = replace(registry.policy, main=LIGHT)
+    raw = registry.to_json()
+    raw["agents"][0].pop("allocationWorkstream", None)  # The old checkpoint did not retain the raw binding.
+    registry = FusionRegistry.from_json(registry.project, raw)
+
+    assert registry.allocation_for("src/sub", "worker")["id"] == "second"
+    successor = registry.assign("src/sub", LIGHT, "worker", resume=True, seat="L1")
+    assert successor.transferred_from == original.id and successor.status == "interrupted"
+    registry.begin(successor.id, resume=True)
+    registry.finish(successor.id, status="done", tokens=0)
+    registry = FusionRegistry.from_json(registry.project, registry.to_json())
+    with pytest.raises(FusionError, match="frozen"):
+        registry.assign(r"src\sub", LIGHT, "worker", resume=True, seat="L1")
+    assert registry.assign("src/sub", LIGHT, "worker", resume=True, seat="L1").id == successor.id
+
+
+@pytest.mark.parametrize("scope", ["src/sub", r"src\sub"], ids=["slash", "backslash"])
+def test_legacy_scope_checks_dependencies_of_the_exact_same_seat_key(tmp_path, scope):
+    registry = _legacy_same_seat_checkpoint(_registry(tmp_path), deps=["before"], second_scope=scope)
+    record = registry.allocation_for(scope, "worker")
+    assert record["id"] == "second" and record["seat"] == "L1"
+    expert = registry.assign(scope, registry.policy.seat_model(record["seat"]), "worker", seat=record["seat"])
+    registry = FusionRegistry.from_json(registry.project, registry.to_json())
+    with pytest.raises(FusionError, match="unfinished dependencies: before"):
+        registry.begin(expert.id)
+    assert registry.calls == 0
+
+    before = registry.assign("before", WORKER, "worker", seat="L2")
+    registry.begin(before.id)
+    registry.finish(before.id, status="done", tokens=0)
+    registry.begin(expert.id)
+    assert registry.calls == 2
+
+
+def test_frozen_slash_alias_keeps_the_same_structured_owner(tmp_path):
+    async def go():
+        async with _seats(tmp_path) as (main, fake):
+            item = _item(workstream="src/sub", paths=["src/sub"])
+            await _declared_turn(main, fake, call("submit_route", _route(items=[item]), call_id="route"),
+                                 call("delegate_task", _brief(workstream="src/sub", paths=["src/sub"]), call_id="first"),
+                                 say("Original evidence."), say("Done."))
+            original, = main.agents
+            alias = {**item, "workstream": r"src\sub", "paths": [r"src\sub"]}
+            await _declared_turn(main, fake, call("submit_route", _route(items=[alias]), call_id="alias-route"),
+                                 call("delegate_task", _brief(workstream=r"src\sub", paths=[r"src\sub"]), call_id="alias"),
+                                 say("Continued."), say("Verified."))
+            assert "src/sub [w1]: score 0.5 at N=50 seats L2" in _output(main, "alias-route")
+            assert list(main.agents) == [original] and main._fusion.registry.calls == 2
+
+    asyncio.run(go())
+
+
+def test_change_main_rpc_reopens_and_delegates_again_on_frozen_l1(tmp_path):
+    from tests.app_support import ready_core
+    from tests.fakes import until
+    from tests.test_fusion_settings_refresh import open_fusion
+
+    async def go():
+        core, fake, _, _, _ = await ready_core(tmp_path)
+        try:
+            cid, main = await open_fusion(core, tmp_path)
+            main.manager.settings.fusion_gates = _gates("route", "brief", "v3")
+            route = _route(items=[_item(score=0.9)])
+            await _declared_turn(main, fake, call("submit_route", route, call_id="route"),
+                                 call("delegate_task", _brief(), call_id="first"), say("Original evidence."), say("Done."))
+            runtime = main._fusion
+            original, = runtime.registry.agents.values()
+            assert (original.model, original.seat, original.status) == (MAIN, "L1", "done")
+            frozen = dict(runtime.registry.allocation_for("Inventory", "worker"))
+            baseline = dict(main.saved.origin["fusionSettings"])
+            main.manager.settings.fusion_preference = 75  # A session-only main switch must not consume this pending change.
+            native = main.session_id
+            fake.script(say("The original main's handoff."))
+            assert (await core.call("fusion.changeMain", {"id": cid, "model": LIGHT}))["ok"]
+            await core.call("session.close", {"id": cid})
+            await until(lambda: main.state.value == "closed")
+            reopened = await core.call("session.openSaved", {"projectId": str(tmp_path / "proj"), "id": "cg:" + native})
+            main = core._by_cid[reopened["id"]].controller
+            await until(lambda: main.state.value == "ready")
+            runtime = main._fusion
+            assert runtime.registry.policy.main == LIGHT and list(main.agents) == [original.id]
+            archived = runtime.registry.agents[original.id]
+            assert (archived.status, archived.replaced_status, archived.seat) == ("retired", "done", "L1")
+            assert main.saved.origin["fusionSettings"] == baseline
+            assert (runtime.pending_settings().main, runtime.pending_settings().preference) == (LIGHT, 75)
+
+            await _declared_turn(main, fake, call("submit_route", route, call_id="route-next"),
+                                 call("delegate_task", _brief(), call_id="next"), say("Continued."), say("Done."))
+            successor, = (expert for expert in runtime.registry.agents.values() if expert.id != original.id)
+            assert (successor.model, successor.seat, successor.transferred_from) == (LIGHT, "L1", original.id)
+            assert successor.status == "done" and successor.handoff_complete and runtime.registry.calls == 2
+            assert runtime.registry.allocation_for("Inventory", "worker") == frozen
+        finally:
+            await core.shutdown()
+
     asyncio.run(go())
 
 
