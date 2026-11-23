@@ -48,7 +48,8 @@ WORK_ITEM_ROLES = "worker (Coder, QualitySampler) or light (Runner) by default"
 ALLOCATION = f"""Before delegating writes, freeze one item per workstream in submit_route: stable id, workstream, role, score, reason, paths, deps and acceptance.
 - Set role to {WORK_ITEM_ROLES}. Use score (0..1) for evidence-based difficulty and responsibility, with a one-line reason. Omit N and seat: the session uses its cost–quality preference and the score to pick light at or below the low gate, main at or above the high gate, otherwise worker.
 - Keep the id, responsibility, paths and deps fixed. Only new_facts may justify re-scoring before assignment. All deps must succeed first.
-- With an approved plan, freeze that version's items, not replacements. Write delegation needs a frozen item and must stay within its paths. Verify the integrated result once, not per file."""
+- With an approved plan, freeze that version's items, not replacements. Write delegation needs a frozen item and must stay within its paths. Verify the integrated result once, not per file.
+- V3 exception to the sampling guidance above: if all frozen items seat L3 and there are no risk signals, selected optional checks or required L1 review, keep the Runner checks but do not add a QualitySampler. Use runner, not runner_and_sampler, in this case."""
 
 _EXPERT_BOUNDARY = "Do not delegate or write to long-term memory."
 _BUILTIN_TEXT = (

@@ -55,6 +55,19 @@ def test_the_sampler_is_decided_by_risk_plus_preference():
     assert not plan_review(0, 99, True, False).sampler
 
 
+def test_exemption_skips_only_risk_only_sampling_not_selected_checks():
+    unselected = plan_review(70, 35, True, False, [("quick spot check", 10)], suppress_risk_sampler=True)
+    assert unselected.runner and not unselected.sampler and unselected.checks == ()
+    pool = [("targeted spot check", 30)]
+    for risk in (0, 35):
+        original = plan_review(70, risk, True, False, pool)
+        exempt = plan_review(70, risk, True, False, pool, suppress_risk_sampler=True)
+        assert original.sampler and exempt == original
+    original = plan_review(90, 70, True, False)
+    assert original.review and original.sampler
+    assert plan_review(90, 70, True, False, suppress_risk_sampler=True) == original
+
+
 def test_the_l1_review_needs_high_risk_and_a_very_high_preference():
     assert plan_review(90, 70, True, False).review
     assert not plan_review(89, 100, True, False).review, "the preference bar is not traded away"

@@ -17,7 +17,7 @@ COVERAGE_BAR = 100
 """An optional check runs when its own risk plus the stronger of the
 cost–quality preference and the task risk reaches this."""
 SAMPLER_BAR = 100
-"""The QualitySampler is dispatched when the task risk plus the preference reaches this."""
+"""The threshold for risk-driven sampling when the delivery is not exempt."""
 REVIEW_RISK = 70
 """The risk index at which a delivery counts as high-risk for an L1 review."""
 REVIEW_PREFERENCE = 90
@@ -70,7 +70,8 @@ def _optional(item: object) -> OptionalCheck:
 
 
 def plan_review(preference: int, risk: int, runnable: bool, has_current_evidence: bool,
-                optional_checks: Iterable[OptionalCheck | tuple[str, int] | Mapping[str, object]] = ()) -> ReviewPlan:
+                optional_checks: Iterable[OptionalCheck | tuple[str, int] | Mapping[str, object]] = (), *,
+                suppress_risk_sampler: bool = False) -> ReviewPlan:
     """Decide the verification for one deliverable.
 
     The Runner runs the mandatory acceptance checks whenever they are runnable,
@@ -79,10 +80,10 @@ def plan_review(preference: int, risk: int, runnable: bool, has_current_evidence
     risk plus the stronger of the preference and the task risk reaches
     ``COVERAGE_BAR``; selections come back ordered by descending risk and
     deduplicated by name. The QualitySampler is dispatched when the task risk
-    plus the preference reaches ``SAMPLER_BAR``, or whenever an optional check
-    was selected for it. ``sufficient`` is false only when nothing verifies the
-    result — no runnable checks, no current evidence and no sampler — and the
-    deliverable must not be reported done.
+    plus the preference reaches ``SAMPLER_BAR``, unless risk-only sampling is
+    suppressed. A selected optional check still calls for a sampler, and an L1
+    review still needs its L2 sampling prerequisite. ``sufficient`` is false
+    only when nothing verifies the result, so it must not be reported done.
     """
     preference, risk = _index("preference", preference), _index("risk", risk)
     review = risk >= REVIEW_RISK and preference >= REVIEW_PREFERENCE
@@ -98,7 +99,7 @@ def plan_review(preference: int, risk: int, runnable: bool, has_current_evidence
     pressure = max(preference, risk)
     checks = tuple(OptionalCheck(name, check_risk) for name, check_risk in ordered
                    if check_risk + pressure >= COVERAGE_BAR)
-    by_risk = risk + preference >= SAMPLER_BAR
+    by_risk = risk + preference >= SAMPLER_BAR and (not suppress_risk_sampler or bool(checks) or review)
     sampler = by_risk or bool(checks)
     reasons.append("sampler: " + (f"dispatched, risk {risk} + preference {preference} reaches {SAMPLER_BAR}" if by_risk else
                                   f"dispatched for the {len(checks)} selected optional checks" if checks else

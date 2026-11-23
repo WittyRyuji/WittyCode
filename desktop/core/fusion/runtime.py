@@ -219,21 +219,27 @@ class WorkspaceStart:
         except (_GitError, OSError):
             return None
 
-    def changed(self, project: Path) -> set[str]:
+    def changed(self, project: Path, *, for_exemption: bool = False) -> set[str] | None:
+        """Paths changed since capture, or None when the collection is incomplete.
+
+        An exemption requires a resolvable current HEAD and includes changes hidden from Git status.
+        """
         try:
             current = Manifest.scan(project, previous=self.manifest)
             if current.truncated:
-                return set()
+                return None
             changed = set(Manifest.changed(self.manifest, current))
             if not self.commit:
-                return changed
+                return None if for_exemption else changed
             paths = changed_since(project, self.commit)
-            if paths is None:
-                return set()
+            if paths is None or (for_exemption and not _head(project)):
+                return None
+            if for_exemption:
+                return (set(paths) - self.dirty) | changed
             # Git reports old dirty paths too. Only count those if their worktree contents changed again.
             return set(paths) - self.dirty | changed & self.dirty
-        except OSError:
-            return set()
+        except (_GitError, OSError):
+            return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -284,6 +290,10 @@ class RouteTurn:
     changes: set[str] = field(default_factory=set)
     delegations: list[DelegationResult] = field(default_factory=list)
     observer_reported: bool = False
+    sampler_selected: bool = False  # An accepted route selected sampling; rerouting cannot waive it.
+    unfrozen_write: bool = False  # A main-agent edit or a writer without a frozen item disqualifies the L3 exemption.
+    exemption_start: WorkspaceStart | None = None  # First route, before the main agent can write.
+    frozen_l3_paths: set[str] = field(default_factory=set)  # Scope of L3 items actually dispatched this turn.
 
 
 @dataclass(slots=True)
@@ -451,10 +461,12 @@ class FusionRuntime:
         return route_refusal(route, action, workstreams=len(names), edits=turn.edits if turn is not None else 0)
 
     def note_edit(self) -> None:
-        """One successful edit by the main agent itself. An approved plan is its own route and is not counted."""
+        """Record a successful main-agent edit; approved plan edits don't consume the self-route quota."""
         turn = self.route_turn
-        if turn is not None and not turn.from_plan:
-            turn.edits += 1
+        if turn is not None:
+            turn.unfrozen_write = True
+            if not turn.from_plan:
+                turn.edits += 1
 
     async def _retain_turn_record(self, kind: str, turn: RouteTurn, summary: str, data: Mapping[str, Any]) -> None:
         if self.drive_writable:
@@ -468,9 +480,14 @@ class FusionRuntime:
         await self._retain_turn_record("route", turn, f"{route.destination} [{route.verification}]: {route.reason}",
                                        {**asdict(route), "source": "plan" if turn.from_plan else "submitted"})
 
+    async def _capture_exemption_start(self, turn: RouteTurn) -> None:
+        if self.gate("v3") and self.acceptance_enabled():
+            turn.exemption_start = await asyncio.to_thread(WorkspaceStart.capture, self.parent.project)
+
     async def retain_plan_route(self) -> None:
         turn = self.route_turn
         if turn is not None and turn.from_plan and turn.route is not None:
+            await self._capture_exemption_start(turn)  # The approved plan is the initial route; tools may write next.
             await self._retain_route(turn, turn.route)
 
     def _allocation_lines(self, items: tuple[dict[str, Any], ...]) -> str:
@@ -522,9 +539,12 @@ class FusionRuntime:
             turn.reroute_due = False
             if self.measurement is not None:
                 self.measurement.recorder.misroute()
+        if turn.route is None:
+            await self._capture_exemption_start(turn)  # Before this first route allows writes, including shell writes.
         if self.measurement is not None:
             self.measurement.recorder.route(route.destination)
         turn.route, turn.from_plan = route, False
+        turn.sampler_selected |= "sampler" in required_checks(route)
         turn.submitted_at = time.time()
         turn.workstreams.clear()
         await self._retain_route(turn, route)
@@ -534,14 +554,28 @@ class FusionRuntime:
     def acceptance_enabled(self) -> bool:
         return all(self.gate(name) for name in ("acceptance", "route", "brief", "report"))
 
-    async def _observe_delegation(self, turn: RouteTurn, expert: Expert, paths: tuple[str, ...], report: Report | None) -> None:
+    async def _observe_delegation(self, turn: RouteTurn, expert: Expert, paths: tuple[str, ...], report: Report | None,
+                                  *, frozen_item: bool) -> None:
         if expert.finished_at is None:
             return
+        turn.unfrozen_write |= bool(paths) and not frozen_item
         turn.delegations.append(DelegationResult(expert.label, expert.identity, paths, expert.started_at, expert.finished_at,
                                                  expert.status, report.status if report is not None else "",
                                                  bool(report.evidence) if report is not None else False, expert.seat))
         if turn.workspace is not None and (start := await asyncio.shield(turn.workspace)) is not None:
-            turn.changes.update(await asyncio.to_thread(start.changed, self.parent.project))
+            turn.changes.update(await asyncio.to_thread(start.changed, self.parent.project) or ())
+
+    def _l3_changes_covered(self, turn: RouteTurn) -> bool:
+        start = turn.exemption_start
+        if start is None or not start.commit or not turn.frozen_l3_paths:
+            return False
+        # Check at verdict time too: the main agent can still change files after the last expert returned.
+        changes = start.changed(self.parent.project, for_exemption=True)
+        if changes is None:
+            return False
+        paths = tuple(os.path.normcase(path).replace("\\", "/") for path in turn.frozen_l3_paths)
+        names = (os.path.normcase(path).replace("\\", "/") for path in changes)
+        return all(any(name == path or name.startswith(path + "/") for path in paths) for name in names)
 
     def _acceptance_signals(self, turn: RouteTurn, writes: list[DelegationResult]) -> tuple[str, ...]:
         """The risk signals so far: a non-clean Coder report, an Observer report, workspace
@@ -604,10 +638,18 @@ class FusionRuntime:
         if self.gate("v3"):
             checks, signals, risk = self._check_facts(turn, writes, last_write)
             declared = required_checks(route)
+            sampler_selected = turn.sampler_selected or "sampler" in declared
+            # V3 writers carry their frozen seats even across re-routes. Use the stored seat for
+            # declared items too: a repeat submission may have been parsed at a different preference.
+            suppress_sampler = (not (signals or sampler_selected or turn.unfrozen_write)
+                                and all(work.seat == "L3" for work in writes)
+                                and all((record := self.registry.allocation_for(item["workstream"], item["role"])) is not None
+                                        and record["seat"] == "L3" for item in route.items)
+                                and self._l3_changes_covered(turn))
             plan = review_policy.plan_review(self.registry.policy.preference, risk, runnable="runner" in declared,
-                                             has_current_evidence="runner" in checks)
+                                             has_current_evidence="runner" in checks, suppress_risk_sampler=suppress_sampler)
             required = tuple(name for name, needed in (("runner", plan.runner),
-                                                       ("sampler", "sampler" in declared or plan.sampler),
+                                                       ("sampler", sampler_selected or plan.sampler),
                                                        ("review", plan.review)) if needed)
             # A self_check only explains the gap; it never waives it, and a deliverable nothing
             # verifies — no runnable check and no current evidence — cannot be marked verified.
@@ -1834,6 +1876,8 @@ class FusionRuntime:
             if not child.send_prompt(prompt, packed_context=pack is not None):
                 raise FusionError("The expert session is not ready.")
             started = True
+            if observing and writes and route_turn is not None and record is not None and seat == "L3":
+                route_turn.frozen_l3_paths.update(record["paths"])
             if writes and self.map_enabled:
                 self._map_write_paths.update(write_paths)
             clock = asyncio.get_running_loop().time
@@ -1852,10 +1896,10 @@ class FusionRuntime:
                     outcome = Outcome(f"Observer report ({fact.kind}): {fact.detail}\n"
                                       "The expert is paused; the main agent decides whether to continue with resume, reassign the work, or take it over.", True)
                     return outcome
-                record = child.saved.turns[-1] if child.saved.turns else None
-                if brief is not None and record is not None and record.start != child._turn_start:
-                    record = None  # An early failure may discard the current turn, but not the previous one.
-                finished = record is not None and record.status == "done" and not child.stop_hook_blocked
+                expert_turn = child.saved.turns[-1] if child.saved.turns else None
+                if brief is not None and expert_turn is not None and expert_turn.start != child._turn_start:
+                    expert_turn = None  # An early failure may discard the current turn, but not the previous one.
+                finished = expert_turn is not None and expert_turn.status == "done" and not child.stop_hook_blocked
                 needs_report = (finished and reporting is not None and reporting.attempted
                                 and reporting.accepted is None and not reporting.followed_up)
                 end, limit = child.last_turn_end, child._fusion_step_limit
@@ -1991,7 +2035,8 @@ class FusionRuntime:
                     finally:
                         await self._close_brief(stored_brief)
                 if observing and started and route_turn is not None:
-                    await self._observe_delegation(route_turn, expert, write_paths, structured_report if accepted else None)
+                    await self._observe_delegation(route_turn, expert, write_paths, structured_report if accepted else None,
+                                                  frozen_item=record is not None)
             finally:
                 if observed is not None:
                     self.observer_runs.pop(expert.id, None)
