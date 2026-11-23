@@ -242,6 +242,12 @@ class AcpRun:
             return
         if target.startswith(PREFIX):
             self.violation = f"The ACP model called unregistered Fusion tool {tool_label(name)} over the guarded bridge."
+        elif not name:
+            self.violation = ("[ACP_TOOL_UNNAMED] Devin ACP did not report a tool name; "
+                              "WittyCode stopped the turn because it could not verify the guarded bridge target.")
+        elif name not in NATIVE_IO and name not in MCP_WRAPPERS:
+            self.violation = ("[ACP_TOOL_UNSUPPORTED] Devin ACP reported an unsupported tool outside the guarded bridge; "
+                              "WittyCode stopped the turn.")
         else:
             self.violation = f"The ACP model attempted tool {tool_label(name)} outside the guarded bridge."
         self._stop()

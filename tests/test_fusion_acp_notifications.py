@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from desktop.core.devin.policy import CANCELLED
 from desktop.core.fusion.acp import AcpRun
 from desktop.core.fusion.acp_server import MCP_CALL, MCP_LIST, PREFIX, SERVER, hook, tool_label
@@ -74,6 +76,33 @@ def test_native_tool_is_judged_immediately_and_named_without_leaking_input():
     notify(run, toolCallId="exec:0#1", rawInput={"command": "echo SECRET_TEXT && rm -rf x"}, _meta=meta("exec"))
     assert "exec" in run.violation and "guarded bridge" in run.violation
     assert "SECRET_TEXT" not in run.violation and "rm -rf" not in run.violation
+
+
+@pytest.mark.parametrize(("name", "code"), [
+    (None, "ACP_TOOL_UNNAMED"),
+    ("mcp__unrelated-server__private-tool", "ACP_TOOL_UNSUPPORTED"),
+])
+def test_refusal_distinguishes_missing_and_unsupported_tool_names_without_leaking(name, code):
+    run = make_run()
+    notify(run, toolCallId="opaque", title=PREFIX + "read_file", _meta=meta(name) if name else {},
+           rawInput={"file_path": "PRIVATE_INPUT"})
+    assert run.violation.startswith(f"[{code}]") and "guarded bridge" in run.violation
+    assert "PRIVATE_INPUT" not in run.violation and (name is None or name not in run.violation)
+    assert not run._seen and not run._pending
+    assert permit(run, "opaque", meta=meta(PREFIX + "read_file"), rawInput={}) == CANCELLED
+
+
+@pytest.mark.parametrize(("name", "raw"), [
+    (MCP_LIST, {"server_name": SERVER}),
+    (PREFIX + "read_file", {"file_path": "example.py"}),
+])
+def test_an_opaque_call_id_uses_explicit_tool_metadata(name, raw):
+    # A real Fable run gave these calls no tool name prefix in their ids.
+    run = make_run()
+    notify(run, toolCallId="opaque", _meta=meta(name), rawInput=raw)
+    notify(run, "tool_call_update", toolCallId="opaque", _meta=meta(name), status="in_progress")
+    notify(run, "tool_call_update", toolCallId="opaque", _meta=meta(name), status="completed")
+    assert not run.violation and not run._seen and not run._pending
 
 
 def test_unregistered_bridge_tool_gets_only_a_fixed_label():
