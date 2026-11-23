@@ -333,7 +333,7 @@ def test_a_real_run_of_an_api_model_from_the_command_line(tmp_path, monkeypatch,
     printed = capsys.readouterr().out
     (out,) = (tmp_path / "runs").iterdir()
     assert out.name.endswith("-try") and (out / "summary.md").read_text(encoding="utf-8") in printed
-    assert "[2/2] probe-long-output: FAIL (done), 912 tokens" in printed and "- 通过：**0 / 2**" in printed
+    assert "[2/2] probe-long-output: FAIL (done), 912 tokens" in printed and "- 通过：**0 / 2**" in printed, [line for line in printed.splitlines() if "probe" in line or "通过" in line]
     saved = report.load(out)
     assert saved["about"]["suite"] == "custom" and saved["about"]["settings"] == {"think_chinese": False, "chatgpt_compact_at": 70}
     assert [(task.id, task.end, task.tokens["total"], task.tokens["cacheRead"]) for task in saved["tasks"]] == [("probe-gbk-csv", "done", 912, 300), ("probe-long-output", "done", 912, 300)]

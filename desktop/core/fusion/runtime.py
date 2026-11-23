@@ -1442,6 +1442,7 @@ class FusionRuntime:
         if self.parent.manager.model_info(native) is None:
             return Outcome("The requested expert model is unavailable; no fallback was selected.", True)
         legacy_steps: int | None = None
+        brief_text = task
         if brief is None:
             # The legacy entry has no estimate of its own: it always gets the band's ceiling.
             band = self._step_band(paths=len(set(paths or ())), acceptance="", text=task)
@@ -1515,7 +1516,9 @@ class FusionRuntime:
                 await self._sync_map_for_delegate(scope, write_paths if writes else ())
             if self.drive_writable:
                 # A cancelled waiter must still close a brief written by the worker thread.
-                brief_write = asyncio.create_task(self._retain_record("brief", expert, task, write_paths))
+                # Retained as the caller sent it: its pointer is a content hash the main agent recomputes from the
+                # delegation, so the derived budget note stays out of the brief's body.
+                brief_write = asyncio.create_task(self._retain_record("brief", expert, brief_text, write_paths))
                 await asyncio.shield(brief_write)
             child = await self._open(view, created=created, profile=profile)
             if not await child.update_settings(autonomy=self.parent.autonomy, mode="auto",

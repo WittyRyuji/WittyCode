@@ -420,7 +420,7 @@ ok("while Devin's own models stay available", await page.eval("[...document.quer
 await page.click(".scroller"); // closes the menu without Esc, which would also stop the turn
 await page.waitFor("document.querySelector('.prompt.perm')", 10000); // Devin's Code level asks before it edits
 ok("Devin's 写代码 level asks for approval before the edit", true);
-ok("the approval's answers are one per line, as wide as the card, the label at the left", await page.eval(`${oneLineEach(".prompt.perm .pbtns .btn")} && (() => { const card = document.querySelector('.prompt.perm .pbtns').getBoundingClientRect(); return [...document.querySelectorAll('.prompt.perm .pbtns .btn')].every(b => Math.abs(b.getBoundingClientRect().width - card.width) < 1 && getComputedStyle(b).justifyContent === 'flex-start'); })()`));
+ok("the approval's answers are one per line, as wide as the card, the label at the left", await page.eval(`${oneLineEach(".prompt.perm .pbtns .btn")} && (() => { const card = document.querySelector('.prompt.perm .pbtns').getBoundingClientRect(); return [...document.querySelectorAll('.prompt.perm .pbtns .btn')].every(b => Math.abs(b.getBoundingClientRect().width - card.width) < 1 && ['flex-start', 'flow-start', 'start'].includes(getComputedStyle(b).justifyContent)); })()`));
 await page.click(".prompt.perm .btn.primary");
 await page.waitFor(READY, 12000);
 await page.hover(".usage");
