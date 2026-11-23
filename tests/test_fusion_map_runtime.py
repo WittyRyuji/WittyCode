@@ -11,7 +11,7 @@ from desktop.core.transcript import NoticeBlock
 from tests.chatgpt_support import finish_turn
 from tests.fake_responses import call, say
 from tests.fakes import until
-from tests.test_fusion_identity_runtime import _brief, _fusion, _output, _turn
+from tests.test_fusion_identity_runtime import LEGACY, _brief, _fusion, _output, _turn
 from tests.test_fusion_inject_runtime import _prompt, _rated_report
 from tests.test_fusion_route_runtime import _report, _route
 
@@ -133,13 +133,76 @@ def test_existing_file_wins_then_updates_one_entry_and_imports_hand_edit(tmp_pat
 
 
 @pytest.mark.parametrize("route", [False, True])
-def test_only_writing_delegation_is_refused_before_location(tmp_path, route):
+def test_read_only_delegation_does_not_choose_location(tmp_path, route):
     async def go():
         async with _fusion(tmp_path, active=(*_ACTIVE, "route") if route else _ACTIVE) as (main, fake):
-            await _turn(main, fake, _delegate(call_id="blocked"), _delegate("Runner", read_only=True), _report(), say("Reviewed."))
-            assert "Call choose_map_location" in _output(main, "blocked")
+            await _turn(main, fake, _delegate("Runner", read_only=True), _report(), say("Reviewed."))
             agent, = main.agents.values()
             assert agent.name == "Runner-Inventory" and agent.record.status == "done"
+            assert main._fusion.drive.meta("map_location") is None and not main.transcript.turns[-1].prompts
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("structured", [True, False], ids=["structured", "legacy"])
+def test_first_write_delegation_chooses_map_in_the_same_call(tmp_path, structured):
+    async def go():
+        gates = tuple(gate for gate in (*_ACTIVE, "route") if structured or gate != "brief")
+        async with _fusion(tmp_path, active=gates) as (main, fake):
+            if structured:
+                args = _brief()
+                del args["budget"]
+            else:
+                args = {key: LEGACY[key] for key in ("model", "role", "task")} | {"scope": "inventory.txt"}
+            delegated = call("delegate_task", args, call_id="first")
+            fake.script(_route(), delegated, say("First run done."), say("Reviewed."))
+            assert main.send_prompt("Check the inventory.")
+            await until(lambda: main.transcript.pending_prompts())
+            prompt, = main.transcript.pending_prompts()
+            question, = prompt.questions
+            assert prompt.tool_call_id == "first" and len(question.options) == 2 and "项目地图" in question.question
+            assert not main.agents and main._fusion.drive.meta("map_location") is None
+            assert main.answer_question(prompt.id, None)
+            await finish_turn(main)
+            agent, = main.agents.values()
+            assert agent.record.status == "done" and "First run done." in _output(main, "first")
+            assert main._fusion.drive.meta("map_location") == "local"
+            assert len(main.transcript.turns[-1].prompts) == 1
+            assert not (main.project / ".witty_map.md").exists()
+
+            await _turn(main, fake, _route(), call("delegate_task", args, call_id="second"), say("Second run done."), say("Reviewed."))
+            assert not main.transcript.turns[-1].prompts
+            assert "Second run done." in _output(main, "second") and main._fusion.registry.calls == 2
+    asyncio.run(go())
+
+
+def test_default_budget_uses_the_cap_after_the_map_question(tmp_path):
+    async def go():
+        async with _fusion(tmp_path, active=(*_ACTIVE, "route"), max_seconds=12) as (main, fake):
+            settings = main.manager.settings
+            settings.max_steps = 100
+            args = _brief()
+            del args["budget"]
+            fake.script(_route(), call("delegate_task", args, call_id="delegate"), say("Done."), say("Reviewed."))
+            assert main.send_prompt("Check the inventory.")
+            await until(lambda: main.transcript.pending_prompts())
+            prompt, = main.transcript.pending_prompts()
+            assert prompt.tool_call_id == "delegate"
+            settings.max_steps = 7
+            assert main.answer_question(prompt.id, None)
+            await finish_turn(main)
+            agent, = main.agents.values()
+            assert agent.record.status == "done" and agent.controller.turn_step_limit() == 7
+            assert "Default budget: 7 steps, 12 seconds" in _output(main, "delegate")
+            assert "Budget: 7 steps, 12 seconds" in agent.record.task
+    asyncio.run(go())
+
+
+def test_missing_route_still_refuses_without_asking_for_map_location(tmp_path):
+    async def go():
+        async with _fusion(tmp_path, active=(*_ACTIVE, "route")) as (main, fake):
+            await _turn(main, fake, _delegate(), say("Reviewed."))
+            assert "submit a route first" in _output(main, "delegate")
+            assert not main.agents and not main.transcript.turns[-1].prompts
             assert main._fusion.drive.meta("map_location") is None
     asyncio.run(go())
 

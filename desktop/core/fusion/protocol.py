@@ -34,12 +34,12 @@ BRIEF_PARAMETERS: dict[str, Any] = {
         "budget": {"type": "object", "properties": {
             "steps": {"type": "integer", "minimum": 1},
             "seconds": {"type": "integer", "minimum": 1},
-        }, "anyOf": [{"required": ["steps"]}, {"required": ["seconds"]}], "additionalProperties": False,
-            "description": "Requested limit on steps, seconds, or both; steps are clamped into the configured "
-                           "min/max or the adaptive suggestion for the task's size, under the global per-turn cap."},
+        }, "additionalProperties": False,
+            "description": "Optional: positive integer steps, seconds, or both. Omit or use {} for the session's defaults. "
+                           "Configured step bounds and time cap still apply."},
         "resume": {"type": "boolean", "default": False, "description": "Continue an interrupted workstream only after inspecting the evidence; give a new brief."},
     },
-    "required": ["workstream", "identity", "goal", "constraints", "acceptance", "paths", "budget"],
+    "required": ["workstream", "identity", "goal", "constraints", "acceptance", "paths"],
 }
 REPORT_PARAMETERS: dict[str, Any] = {
     "type": "object",
@@ -102,7 +102,7 @@ ROUTE_DECLARATION: dict[str, Any] = {
 }
 CHOOSE_MAP_DECLARATION: dict[str, Any] = {
     "name": "choose_map_location",
-    "description": "Before the first writing delegation, ask the user where this project's map should live. Does not ask again once chosen.",
+    "description": "Optionally choose the project map location early. Otherwise the first writing delegation asks. Does not ask again once chosen.",
     "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
 }
 UPDATE_MAP_DECLARATION: dict[str, Any] = {
@@ -267,11 +267,12 @@ def parse_brief(args: Mapping[str, Any]) -> tuple[Brief | None, str]:
     identity = _IDENTITIES.get(name)
     if identity is not None and "edit" in identity.tools and not read_only and not paths:
         return None, "Declare write paths for this identity, or set read_only to true for research."
-    budget = args.get("budget")
-    if not isinstance(budget, Mapping) or not budget or any(
+    budget = args.get("budget", {})
+    if not isinstance(budget, Mapping) or any(
         key not in ("steps", "seconds") or type(value) is not int or value < 1 for key, value in budget.items()
     ):
-        return None, "Provide a budget with steps, seconds, or both, each a positive integer."
+        return None, ("Budget must be an object with steps, seconds, or both, each a positive integer. "
+                      "Omit budget or use {} for the session defaults.")
     return Brief(workstream.strip(), name, goal.strip(), constraints.strip(), acceptance.strip(),
                  tuple(path.strip() for path in paths), dict(budget), read_only, resume), ""
 

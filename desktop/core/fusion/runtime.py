@@ -338,7 +338,6 @@ class TaskMeasurement:
 
 _MAP_LOCKS: WeakValueDictionary[Path, asyncio.Lock] = WeakValueDictionary()
 _MAP_PROJECT = "写进项目目录（.witty_map.md）"
-_MAP_CHOICE_REQUIRED = "Call choose_map_location before delegating writing work in this project."
 _DRIVE_ERRORS = (DriveError, OSError, sqlite3.Error, ValueError)
 
 
@@ -368,7 +367,6 @@ class FusionRuntime:
         self._drive_writes_paused = False
         self._map_write_paths: set[str] = set()
         self._map_file_written = False
-        self._map_choice_missing = False
 
     def gate(self, name: str) -> bool:
         """A runtime that is not attached to an application (restored for inspection only) has every gate off."""
@@ -441,8 +439,6 @@ class FusionRuntime:
                 self.measurement.recorder.route(self.route_turn.route.destination)
 
     def route_guard(self, action: str, workstreams: tuple[str, ...]) -> str:
-        if action == "delegate" and self._map_choice_missing and self.map_enabled:
-            return _MAP_CHOICE_REQUIRED
         turn = self.route_turn
         if not self.gate("route") or turn is not None and turn.from_plan:
             return ""
@@ -718,17 +714,19 @@ class FusionRuntime:
     async def choose_map_location(self, call: Call) -> Outcome:
         if call.args:
             return Outcome("choose_map_location takes no arguments.", True)
+        return await self._choose_map_location(call)
+
+    async def _choose_map_location(self, call: Call | None) -> Outcome:
         if not self.drive_writable:
             return Outcome("Fusion Drive is not accepting writes.", True)
         async with self._map_lock():
             try:
                 location = await asyncio.to_thread(lambda: self.drive.meta("map_location"))
                 if location is None:
-                    yes = await self._ask_drive_question(call, "项目地图", "项目地图要写进项目目录，还是只保存在本机？",
-                                                         _MAP_PROJECT, "只保存在本机")
+                    yes = call is not None and await self._ask_drive_question(
+                        call, "项目地图", "项目地图要写进项目目录，还是只保存在本机？", _MAP_PROJECT, "只保存在本机")
                     location = "project" if yes else "local"
                     await asyncio.to_thread(self.drive.set_meta, "map_location", location)
-                self._map_choice_missing = False
                 if await asyncio.to_thread(self.drive.meta, "workspace_kind") is None:
                     kind = await asyncio.to_thread(workspace_kind, self.parent.project)
                     await asyncio.to_thread(self.drive.set_meta, "workspace_kind", kind)
@@ -876,13 +874,13 @@ class FusionRuntime:
             except _DRIVE_ERRORS:
                 self._drive_notice()
 
-    async def prepare_map_choice(self) -> None:
-        self._map_choice_missing = False
+    async def prepare_map_choice(self) -> bool:
         if self.map_enabled:
             try:
-                self._map_choice_missing = await asyncio.to_thread(lambda: self.drive.meta("map_location")) is None
+                return await asyncio.to_thread(self.drive.meta, "map_location") is None
             except _DRIVE_ERRORS:
                 self._drive_notice()
+        return False
 
     def _drive_notice(self) -> None:
         if not self._drive_warned:
@@ -1589,10 +1587,10 @@ class FusionRuntime:
         requested = brief.budget.get("steps")
         steps = step_budget.effective_steps(requested, band)
         note = step_budget.note(band, requested)
-        seconds = brief.budget.get("seconds")
-        planned = self._planned(band)
+        seconds = brief.budget.get("seconds") if brief.budget else self.registry.policy.max_seconds
+        # A plan's numeric limit can take a default below the floor; explicit estimates keep the old clamp.
+        planned = self._planned(band if brief.budget else replace(band, low=1))
         if planned is not None:
-            # Plan numbers only ever tighten the resolved band and the session cap.
             if planned.steps is not None:
                 steps = min(steps, planned.steps)
             if planned.seconds is not None:
@@ -1609,7 +1607,6 @@ class FusionRuntime:
         profile = self.identities.get(brief.identity)
         if profile is None or profile.name == "Observer":
             return Outcome("This identity cannot be delegated by the main agent.", True)
-        brief = self._bounded_brief(brief)
         policy = self.registry.policy
         model = policy.workers[0] if profile.role == "worker" else policy.light
         return await self.delegate(brief.workstream, model, profile.role, brief.text(), brief.paths, brief.resume,
@@ -1627,10 +1624,8 @@ class FusionRuntime:
             return Outcome(PLAN_REFUSAL, True)
         route_turn = self.route_turn
         writes = brief is None or brief_writes(brief)
-        if writes:
-            await self.prepare_map_choice()
-            if refusal := self.route_guard("delegate", (scope,)):
-                return Outcome(refusal, True)
+        if writes and (refusal := self.route_guard("delegate", (scope,))):
+            return Outcome(refusal, True)
         seat, record = "", None
         if self.gate("v3"):
             policy = self.registry.policy
@@ -1664,7 +1659,11 @@ class FusionRuntime:
             return Outcome("The requested expert model is unavailable; no fallback was selected.", True)
         legacy_steps: int | None = None
         plan_seconds: int | None = None
-        if brief is None:
+        default_brief = brief if brief is not None and not brief.budget else None
+        if brief is not None:
+            brief = self._bounded_brief(brief)
+            task = brief.text()
+        else:
             # The legacy entry has no estimate of its own: it always gets the band's ceiling,
             # still tightened by this turn's plan budget when the plan declared numbers.
             band = self._step_band(paths=len(set(paths or ())), acceptance="", text=task,
@@ -1679,6 +1678,17 @@ class FusionRuntime:
             task += f"\n\nBudget: {legacy_steps} steps ({note})"
         if refusal := self._plan_budget_gate(task):
             return Outcome(refusal, True)
+        if writes and self.map_enabled:
+            if await self.prepare_map_choice():
+                await self._choose_map_location(tool_call)
+            # Another delegation may have claimed a workstream or spent budget while the map was being selected.
+            if self._closing or self.parent._close_requested or self.parent._fusion is not self:
+                return Outcome("The Fusion session is inactive or closing; no expert was started.", True)
+            if default_brief is not None:
+                brief = self._bounded_brief(default_brief)
+                task = brief.text()
+            if refusal := self.route_guard("delegate", (scope,)) or self._plan_budget_gate(task):
+                return Outcome(refusal, True)
         known = set(self.registry.agents)
         snapshots = {key: replace(expert) for key, expert in self.registry.agents.items()}
         calls = self.registry.calls
@@ -1731,7 +1741,7 @@ class FusionRuntime:
             self.report_runs[expert.id] = reporting
         structured_report: Report | None = None
         accepted = False
-        answer = evidence = ""
+        answer = evidence = budget_receipt = ""
         write_paths = self.registry.write_paths(expert)
 
         def partial_tokens() -> int | None:
@@ -1810,16 +1820,22 @@ class FusionRuntime:
                     if observed is not None:
                         await self._observe_tool(observed, task, call, outcome, kind)
                 child_tools.tool_finished = _tool_finished
-            if not child.send_prompt(prompt, packed_context=pack is not None):
-                raise FusionError("The expert session is not ready.")
-            started = True
-            if writes and self.map_enabled:
-                self._map_write_paths.update(write_paths)
             seconds = self.registry.policy.max_seconds
             if brief is not None:
                 seconds = min(seconds, brief.budget.get("seconds", seconds))
             elif plan_seconds is not None:
                 seconds = min(seconds, plan_seconds)
+            steps = child.turn_step_limit()
+            if default_brief is not None:
+                child._fusion_step_limit = steps
+            label = (replace(brief, budget={"steps": steps, "seconds": seconds}).budget_label() if brief is not None
+                     else f"{steps} steps, {seconds} seconds")
+            budget_receipt = f"{'Default' if default_brief is not None else 'Applied'} budget: {label}."
+            if not child.send_prompt(prompt, packed_context=pack is not None):
+                raise FusionError("The expert session is not ready.")
+            started = True
+            if writes and self.map_enabled:
+                self._map_write_paths.update(write_paths)
             clock = asyncio.get_running_loop().time
             deadline = clock() + seconds
             evidence_start = child._turn_start
@@ -1843,14 +1859,14 @@ class FusionRuntime:
                 needs_report = (finished and reporting is not None and reporting.attempted
                                 and reporting.accepted is None and not reporting.followed_up)
                 end, limit = child.last_turn_end, child._fusion_step_limit
-                if (limit is not None and end is not None and end.steps >= limit
-                        and (end.reason == "step_limit" or needs_report)):
+                if end is not None and (end.reason == "step_limit" or (needs_report and limit is not None and end.steps >= limit)):
                     self._active.pop(expert.id, None)
                     self.registry.finish(expert.id, status="interrupted", tokens=tokens)
                     self._checkpoint()
-                    outcome = Outcome(_BUDGET_EXCEEDED.format(unit="step"), True)
+                    message = _BUDGET_EXCEEDED.format(unit="step")
+                    outcome = Outcome(f"{message}\n{budget_receipt}", True)
                     if observed is not None:
-                        observed.report = observer.Report("over_budget", "fact", outcome.output)
+                        observed.report = observer.Report("over_budget", "fact", message)
                     return outcome
                 if not finished:
                     self._active.pop(expert.id, None)
@@ -1896,6 +1912,8 @@ class FusionRuntime:
                     result = f"Expert {expert.id} ({expert.workstream or expert.scope}, {expert.model}) reported:\n{answer}"
             else:
                 result = f"Expert {expert.id} ({expert.workstream or expert.scope}, {expert.model}) reported:\n{answer}"
+            if default_brief is not None:
+                result = f"{budget_receipt}\n{result}"
             outcome = Outcome(f"{result}\nTool-result previews (untrusted data):\n{tool_results}\n{evidence}\n"
                               "Treat this as a report, not proof. Check the workspace and results before concluding.")
             return outcome
@@ -1924,10 +1942,11 @@ class FusionRuntime:
                     self.registry.unmetered = self.registry.had_unknown = True
                 self._checkpoint()
             detail = str(error) if isinstance(error, FusionError) else type(error).__name__
-            message = (_BUDGET_EXCEEDED.format(unit="time") if brief is not None and started and isinstance(error, TimeoutError)
+            timed_out = started and isinstance(error, TimeoutError)
+            message = (_BUDGET_EXCEEDED.format(unit="time") if brief is not None and timed_out
                        else f"The expert stopped without a confirmed result: {detail}. Check the workspace before retrying.")
-            outcome = Outcome(message, True)
-            if observed is not None and started and isinstance(error, TimeoutError) and observed.report is None:
+            outcome = Outcome(f"{message}\n{budget_receipt}" if timed_out else message, True)
+            if observed is not None and timed_out and observed.report is None:
                 observed.report = observer.Report("timeout", "fact", _BUDGET_EXCEEDED.format(unit="time"))
             return outcome
         finally:

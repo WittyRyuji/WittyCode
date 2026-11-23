@@ -99,6 +99,35 @@ def test_bounded_brief_plan_seconds_apply_when_the_brief_asked_for_none(tmp_path
     assert bounded.budget["seconds"] == 25 and bounded.budget["steps"] == 40
 
 
+def test_plan_budget_can_tighten_the_default_brief_budget(tmp_path):
+    rt = _runtime(tmp_path, plan_budget={"turns": 24, "seconds": 25, "tokens": "adaptive"})
+    bounded = rt._bounded_brief(_brief())
+    assert bounded.budget == {"steps": 24, "seconds": 25}
+    assert "plan turns 24" in bounded.budget_note and "plan seconds 25" in bounded.budget_note
+
+
+@pytest.mark.parametrize(("budget", "steps"), [(None, 1), ({}, 1), ({"steps": 8}, 20)],
+                         ids=["omitted", "empty", "explicit-keeps-floor"])
+def test_dispatch_default_budget_respects_plan_turns_below_configured_floor(tmp_path, monkeypatch, budget, steps):
+    import asyncio
+
+    from tests.fake_responses import call, say
+    from tests.test_fusion_identity_runtime import _brief as task_brief, _fusion, _output, _turn
+
+    async def go():
+        async with _fusion(tmp_path) as (main, fake):
+            monkeypatch.setattr(main._fusion, "_plan_budget", lambda: {"turns": 1, "seconds": 25, "tokens": "adaptive"})
+            args = task_brief(budget=budget)
+            if budget is None:
+                del args["budget"]
+            await _turn(main, fake, call("delegate_task", args, call_id="delegate"), say("Done."), say("Reviewed."))
+            agent, = main.agents.values()
+            assert agent.record.status == "done" and agent.controller.turn_step_limit() == steps
+            if not budget:
+                assert "Default budget: 1 step, 25 seconds" in _output(main, "delegate")
+    asyncio.run(go())
+
+
 def test_bounded_brief_without_a_plan_keeps_existing_behavior(tmp_path):
     rt = _runtime(tmp_path, plan_budget=None)
     bounded = rt._bounded_brief(_brief(steps=60, seconds=600))

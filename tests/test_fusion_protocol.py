@@ -56,10 +56,22 @@ def test_brief_allows_exact_limits():
     assert brief.text().endswith("Budget: 1 step")
 
 
-@pytest.mark.parametrize("key", BRIEF)
+@pytest.mark.parametrize("key", [key for key in BRIEF if key != "budget"])
 def test_brief_requires_each_field(key):
     brief, problem = parse_brief({name: value for name, value in BRIEF.items() if name != key})
     assert brief is None and problem
+
+
+@pytest.mark.parametrize("empty", [False, True], ids=["omitted", "empty-object"])
+def test_brief_accepts_a_default_budget(empty):
+    args = dict(BRIEF)
+    if empty:
+        args["budget"] = {}
+    else:
+        del args["budget"]
+    brief, problem = parse_brief(args)
+    assert not problem and brief is not None and brief.budget == {}
+    assert validate_arguments(BRIEF_PARAMETERS, args) == args
 
 
 @pytest.mark.parametrize("changes, message", [
@@ -89,7 +101,7 @@ def test_brief_requires_each_field(key):
     ({"read_only": True}, "no write paths"),
     ({"paths": []}, "Declare write paths"),
     ({"budget": "12 steps"}, "positive integer"),
-    ({"budget": {}}, "positive integer"),
+    ({"budget": None}, "positive integer"),
     ({"budget": {"steps": 2, "minutes": 3}}, "positive integer"),
     ({"budget": {"seconds": 0}}, "positive integer"),
     ({"budget": {"steps": -1}}, "positive integer"),
@@ -99,6 +111,8 @@ def test_brief_requires_each_field(key):
 def test_invalid_brief(changes, message):
     brief, problem = parse_brief({**BRIEF, **changes})
     assert brief is None and message in problem
+    if "budget" in changes:
+        assert "steps, seconds, or both" in problem and "Omit budget" in problem
 
 
 def test_parsers_refuse_non_objects():

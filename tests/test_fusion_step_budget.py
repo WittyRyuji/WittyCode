@@ -10,7 +10,7 @@ from desktop.core.fusion import step_budget
 from desktop.core.fusion.step_budget import Band, Side
 from tests.app_support import ready_core
 from tests.fake_responses import call, say
-from tests.test_fusion_identity_runtime import WORKER, _brief, _fusion, _turn
+from tests.test_fusion_identity_runtime import WORKER, _brief, _fusion, _output, _turn
 
 pytestmark = pytest.mark.fusion_gates
 
@@ -106,6 +106,53 @@ def test_requested_steps_are_clamped_into_the_adaptive_band_for_every_identity(t
                 assert agent.record.status == "done", "a report may be submitted well before the floor"
                 # The record shows the effective count and where it came from.
                 assert f"Budget: {expected} steps (adaptive {expected}-{'40' if expected == 20 else '32'}; requested 8)" in agent.record.task
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize(("empty", "manual", "global_limit", "expected"), [
+    (False, False, 100, 40),
+    (True, True, 100, 15),
+    (False, True, 10, 10),
+], ids=["omitted-adaptive", "empty-manual", "omitted-global-cap"])
+def test_default_budget_is_applied_and_reported(tmp_path, empty, manual, global_limit, expected):
+    async def go():
+        async with _fusion(tmp_path, max_seconds=12) as (main, fake):
+            main.manager.settings.max_steps = global_limit
+            if manual:
+                _band(main, 5, 15)
+            brief = _brief(budget={})
+            if not empty:
+                del brief["budget"]
+            await _turn(main, fake, call("delegate_task", brief, call_id="default"), say("Done."), say("Reviewed."))
+            agent, = main.agents.values()
+            assert main._fusion.registry.calls == 1 and agent.record.status == "done"
+            assert agent.controller._fusion_step_limit == expected
+            assert f"Budget: {expected} steps, 12 seconds" in agent.record.task
+            assert f"Default budget: {expected} steps, 12 seconds" in _output(main, "default")
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize(("unit", "steps", "seconds", "expected"), [
+    ("step", 1, 12, "1 step, 12 seconds"),
+    ("time", 5, 1, "5 steps, 1 second"),
+])
+def test_default_budget_is_reported_when_expert_hits_its_limit(tmp_path, unit, steps, seconds, expected):
+    async def go():
+        async with _fusion(tmp_path, max_seconds=seconds) as (main, fake):
+            _band(main, steps, steps)
+            worker = (call("list_dir", {"directory_path": "."}) if unit == "step"
+                      else [("hold", "expert"), *say("Too late.")])
+            try:
+                await _turn(main, fake, call("delegate_task", _brief(budget={}), call_id="delegate"),
+                            worker, say("Reviewed the interruption."))
+            finally:
+                if unit == "time":
+                    fake.release("expert")
+            agent, = main.agents.values()
+            assert agent.record.status == "interrupted" and main._fusion.registry.calls == 1
+            receipt = _output(main, "delegate")
+            assert f"exceeded its {unit} budget" in receipt
+            assert f"Default budget: {expected}" in receipt
     asyncio.run(go())
 
 
