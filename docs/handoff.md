@@ -6,7 +6,9 @@ Fusion 固定路由的分支交接见 [handoff-fusion-dev.md](handoff-fusion-dev
 
 ## 当前状态
 
-- 2026-11-24（GPT-6.2 起顶层 instructions 不进缓存，**已实现但已回退，待真实验证**）：官方 Prompt caching 文档写明 GPT-6.2 及更新模型把顶层 `instructions` 追加在 `input` 之后、每次按非缓存输入计费，可复用的指令应放进 `input` 开头的 developer 消息。实现在 `446698e`（`Shape.cache_developer_instructions`，带测试），但没能在真实套餐后端上确认不带顶层 `instructions` 的请求会被接受，已用 `7b5fc95` 回退。验证时以 gpt-6.2-sol 为主模型的真实请求在改动前后都在约 2 秒内失败，原因没查。下一步：先查清这个失败，再用一次真实请求验证，通过后重新应用 `446698e`。合并 Fusion 席位后的测试失败已修，剩下 3 项未定位的见 `docs/known-issues.md`；这批修复的 QualitySampler 抽查两次都没跑完，未抽查。
+- 2026-11-24（归档索引丢失时会话归档会分叉，**未修，需要先设计**）：`session/index.sqlite` 丢失而各会话的清单还在时，重开的普通 Devin 会话找不到自己所属的归档（`AppCore._archive_sid_of` 查的是索引，提交 `8ca6056`），切到别的引擎时会另建一个归档；`SessionArchive.enter` 的归属检查也只看索引。产品代码里没有任何地方调用 `rebuild_index`。试过两种补法，抽查实测都有问题，没有合入：① 查找时调用 `rebuild_index`：重建中途失败会留下空索引，重试仍然分叉；重建跑在界面线程，1 万条事件卡 0.5 秒，10 万条卡 44 秒。② 切换前在工作线程扫描全部清单：`session_archive_io.read_json` 每次按 64 MiB 上限读，1,000 份清单要 17 秒；Windows 下读句柄打开期间，别的会话对同一份清单的 `os.replace` 会报 PermissionError；空会话的直接切换没有登记可取消的任务，查找期间关闭会话会留下没有标签页的控制器。下一步：先定索引丢失或陈旧时怎么发现、在后台怎么重建，再让身份查找和 `enter` 的归属检查共用；`read_json` 改成按文件实际大小读；Windows 下的原子替换加重试，或让读句柄允许共享删除。
+
+- 2026-11-24（GPT-6.2 起顶层 instructions 不进缓存，**已实现但已回退，待真实验证**）：官方 Prompt caching 文档写明 GPT-6.2 及更新模型把顶层 `instructions` 追加在 `input` 之后、每次按非缓存输入计费，可复用的指令应放进 `input` 开头的 developer 消息。实现在 `446698e`（`Shape.cache_developer_instructions`，带测试），但没能在真实套餐后端上确认不带顶层 `instructions` 的请求会被接受，已用 `7b5fc95` 回退。验证时以 gpt-6.2-sol 为主模型的真实请求在改动前后都在约 2 秒内失败，原因没查。下一步：先查清这个失败，再用一次真实请求验证，通过后重新应用 `446698e`。合并 Fusion 席位后的测试失败已修，剩下 2 项未定位的整机测试见 `docs/known-issues.md`；这批修复已由 QualitySampler 抽查，抽出的图片交互问题已修（`1ed1509`），归档索引丢失的问题见上一条。
 
 - 2026-11-24（Fusion + Devin Fable 5.2 xhigh，**首轮未通过；原工具拒绝尚未复现**）：`757b681` 的隔离复测限定一次命名、一次正文。命名沿用原产品的 low 档与 12 秒时限，ACP 有文本返回并正常结束，整个命名门约 8 秒，但应用未取得可用标题、未发正文；本次没有抓取原始标题或校验分类，尚不能断定是格式校验还是接收条件失败。用测试夹具预置标题后，xhigh 正文成功识别合成图、通过私有桥读真实夹具文件并正常结束，未触发 `ACP_TOOL_UNNAMED`／`ACP_TOOL_UNSUPPORTED`。真实 Fable 正文事件使用无名称前缀的调用 ID，工具名在推理元数据中。下一步分别定位命名接收条件（仅记录标题长度、行数、校验与账户条件结果）和用户原始工具拒绝（复现时收集诊断码）；不放宽守卫，不自动追加付费请求。
 
