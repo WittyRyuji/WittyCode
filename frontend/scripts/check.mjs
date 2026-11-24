@@ -281,7 +281,7 @@ ok("the TPS tooltip says in its first line that the figure is an estimate", awai
 // settings: the button, the pages, and a change that takes effect at once
 await page.click(".foot-btn", 1);
 ok("the settings button opens the settings", await page.eval("!!document.querySelector('.settings')"));
-ok("settings include Fusion, customization and plugins, and keep About last", await page.eval("[...document.querySelectorAll('.snav')].map(e => e.textContent.trim()).join(',') === '外观,账号与模型,会话,Fusion,自定义,共享记忆5,外部程序,项目,插件,关于'"));
+ok("settings include Fusion, customization, plugins and storage, and keep About last", await page.eval("[...document.querySelectorAll('.snav')].map(e => e.textContent.trim()).join(',') === '外观,账号与模型,会话,Fusion,自定义,共享记忆5,外部程序,项目,插件,存储,关于'"));
 await page.click(".snav", 2);
 ok("the session page includes model / reasoning / permission / mode defaults", await page.eval("document.querySelectorAll('.sessions-columns > section:first-child .field').length === 4"));
 await page.click(".snav", 0);

@@ -148,12 +148,17 @@
 .about-text p { margin: 0; }
 
 /* ---------------------------------------------------------------- lightbox and drop */
-.lightbox { flex-direction: column; background: rgba(0, 0, 0, 0.88); }
-.lightbox figure { margin: 0; text-align: center; }
-.lightbox img { max-width: 86vw; max-height: 78vh; border: var(--bw) solid #fff; background: #fff; }
-.lightbox figcaption { margin-top: 12px; color: #e6e6e6; font: 12px var(--font-mono); }
-.lb-close { position: absolute; top: 18px; right: 18px; width: 36px; height: 36px; border: var(--bw) solid #fff; color: #fff; display: inline-flex; align-items: center; justify-content: center; }
+.lightbox { flex-direction: column; overflow: hidden; background: rgba(0, 0, 0, 0.88); }
+.lightbox figure { margin: 0; text-align: center; pointer-events: none; }
+.lb-image-frame { display: grid; place-items: center; }
+.lightbox img { max-width: 86vw; max-height: 78vh; border: var(--bw) solid #fff; background: #fff; pointer-events: auto; user-select: none; }
+.lightbox img[data-pannable] { cursor: grab; touch-action: none; }
+.lightbox img[data-panning] { cursor: grabbing; }
+.lightbox figcaption { position: relative; margin-top: 12px; color: #e6e6e6; font: 12px var(--font-mono); }
+.lightbox figcaption span { display: inline-block; max-width: 86vw; padding: 3px 6px; background: #151515; overflow-wrap: anywhere; pointer-events: auto; }
+.lb-close { position: absolute; top: 18px; right: 18px; width: 36px; height: 36px; border: var(--bw) solid #fff; background: #151515; color: #fff; display: inline-flex; align-items: center; justify-content: center; }
 .lb-close:hover { background: #fff; color: #000; }
+.image-menu-layer { position: fixed; z-index: 1201; }
 
 .drop-overlay { position: absolute; inset: 0; z-index: 50; background: color-mix(in srgb, var(--bg) 82%, transparent); display: flex; align-items: center; justify-content: center; pointer-events: none; }
 .drop-box { padding: 30px 52px; border: var(--bw) dashed var(--ink); background: var(--bg); color: var(--fg); font-weight: 700; font-size: 15px; box-shadow: 5px 5px 0 var(--shadow-hard); }

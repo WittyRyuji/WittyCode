@@ -15,9 +15,12 @@ import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication, QImage
 
+from desktop.core.context_envelope import strip as strip_context
 from desktop.core.session_state import SessionState
+from tests.app_support import without_numbered_reply
 from tests.devin_support import make_engine as make_devin
 from tests.e2e_support import open_rig
+from tests.fake_devin import is_title_prompt
 from tests.fake_responses import call, say, usage
 from tests.fakes import until
 from tests.support import tiny_png
@@ -33,7 +36,7 @@ def user_parts(request):
 
 def user_text(request) -> str:
     parts = user_parts(request)
-    return parts[0]["text"] if parts else ""
+    return without_numbered_reply(parts[0]["text"]) if parts else ""
 
 
 class Model:
@@ -129,7 +132,8 @@ def test_chinese_and_english_mixed_can_be_typed_and_arrive_unchanged(qapp, loop,
 
 
 def devin_prompts(harness) -> list[str]:
-    return [request["prompt"][0]["text"] for request in harness.requests("session/prompt")]
+    prompts = (request["prompt"][0]["text"] for request in harness.requests("session/prompt"))
+    return [strip_context(text) for text in prompts if not is_title_prompt(text)]
 
 
 async def devin_listed(rig) -> None:
@@ -154,7 +158,8 @@ def test_you_can_type_and_send_while_the_session_is_still_connecting(qapp, loop,
             assert await rig.count(".qs-row .qs-icons button") == 4, "and can be seen, changed, taken back and sent"
             assert await rig.js("document.querySelectorAll(\".qs-row .qs-icons button\")[3].disabled"), "sending it now has to wait for the connection"
             assert await rig.js("document.querySelector('.input').value") == "", "the box is empty again"
-            await wait_for(lambda: devin_prompts(harness) == ["你好 hello"], 15, "the message to be sent once ready")
+            await wait_for(lambda: len(devin_prompts(harness)) > 0, 15, "the message to be sent once ready")
+            assert devin_prompts(harness) == ["你好 hello"]
             await rig.wait_for(".qs-row", 0)  # the real turn replaces the waiting one ...
             assert await rig.count(".block.user") == 1 and await rig.text(".block.user .body") == "你好 hello"  # ... with the same words
             await rig.wait_text(".statusbar .st-left", "就绪", timeout=15)
@@ -383,8 +388,9 @@ def test_a_pasted_picture_becomes_an_attachment_and_goes_out_with_the_message(qa
         await rig.type("what is this")
         await rig.press("Enter")
         await model.asked()
-        parts = user_parts(model.requests[-1])
-        assert [p["type"] for p in parts].count("input_image") == 1 and parts[0]["text"] == "what is this"
+        request = model.requests[-1]
+        parts = user_parts(request)
+        assert [p["type"] for p in parts].count("input_image") == 1 and user_text(request) == "what is this"
         await rig.wait_for(".block.user .att-img", 1)
         await finish(rig, model)
 
@@ -600,8 +606,9 @@ def test_files_dropped_from_explorer_are_attached(qapp, loop, tmp_path):
         assert await rig.text(".att-row .fname") == "notes.txt"
         await rig.send("read it")
         await model.asked()
-        texts = [p.get("text", "") for p in user_parts(model.requests[-1])]
-        assert texts[0] == "read it" and any("notes.txt" in t and "remember the milk" in t for t in texts[1:]) and notes.exists()
+        request = model.requests[-1]
+        texts = [p.get("text", "") for p in user_parts(request)[1:]]
+        assert user_text(request) == "read it" and any("notes.txt" in t and "remember the milk" in t for t in texts) and notes.exists()
         await finish(rig, model)
 
     run(loop, scenario())

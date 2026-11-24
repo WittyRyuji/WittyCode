@@ -4,6 +4,7 @@ import { messageOf } from "../../lib/errors";
 import { INLINE_IMAGE_DATA } from "../../lib/inlineMedia";
 import { useStore } from "../../store";
 import { MediaPreview, videoWidth, VIDEO_FRAME } from "../MediaPreview";
+import { useImageMenu } from "../ImageMenu";
 
 type Props = { sessionId: string; path: string; label: string };
 const errorText = (message: string) => <span className="inline-media-error" role="status">{message}</span>;
@@ -72,7 +73,9 @@ export function InlinePicture({ sessionId, path, label }: Props) {
       width: img?.naturalWidth, height: img?.naturalHeight });
   }}>{picture}</button>;
   const action = `播放 GIF：${label}`;
-  return <span className="inline-media inline-picture" ref={box} title={path}>
+  const { show, menu } = useImageMenu();
+  return <span className="inline-media inline-picture" ref={box} title={path} onContextMenu={image ? (e) => show(e) : undefined}>
+    {menu}
     {image?.animation ? <span className="inline-gif">
       {surface}
       {!started && <button type="button" className="inline-gif-toggle" aria-label={action} title={action} onClick={() => setStarted(true)}>
