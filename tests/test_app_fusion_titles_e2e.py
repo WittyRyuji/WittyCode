@@ -89,7 +89,7 @@ def test_new_session_titles_before_the_first_turn(qapp, loop, tmp_path, entry, m
     run(loop, scenario())
 
 
-def test_invalid_first_title_restores_draft_after_three_retries(qapp, loop, tmp_path):
+def test_invalid_first_title_restores_draft_after_three_attempts(qapp, loop, tmp_path):
     async def scenario():
         rig = await open_rig(tmp_path)
         try:
@@ -98,7 +98,7 @@ def test_invalid_first_title_restores_draft_after_three_retries(qapp, loop, tmp_
             rig.plan.fake.title_answer = "不是\n单行标题"
             question = "检查库存接口"
             await rig.send(question)
-            await until(lambda: len(rig.plan.fake.title_requests) == 4)
+            await until(lambda: len(rig.plan.fake.title_requests) == 3)
             await rig.wait_for(".preparing-turn", 0)
             await until(lambda: not rig.core.order[-1].naming)
             assert await rig.js("document.querySelector('.input').value") == question
@@ -110,7 +110,7 @@ def test_invalid_first_title_restores_draft_after_three_retries(qapp, loop, tmp_
             await rig.press("Enter")
             await rig.wait_text(".srow.open .stitle", "库存接口检查")
             await rig.wait_text(".transcript", "已检查库存接口。")
-            assert len(rig.plan.requests) == 1 and len(rig.plan.fake.title_requests) == 5
+            assert len(rig.plan.requests) == 1 and len(rig.plan.fake.title_requests) == 4
         finally:
             await rig.finish()
 

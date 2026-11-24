@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from desktop.core.chatgpt.controller import ChatGPTController
 
 log = logging.getLogger(__name__)
-TIMEOUT = 12.0
+LEGACY_TIMEOUT = 12.0
 ATTEMPT = "fusionTitleAttempt"
 
 
@@ -76,8 +76,9 @@ async def generate(controller: ChatGPTController, question: str, model: str, acc
             return None
     text, finished, tool_call, requested = "", None, False, not native
     title = None
+    timeout = session_title.FIRST_TIMEOUT if draft else LEGACY_TIMEOUT
     try:
-        async with asyncio.timeout(TIMEOUT), contextlib.aclosing(stream(request)) as events:
+        async with asyncio.timeout(timeout), contextlib.aclosing(stream(request)) as events:
             async for event in events:
                 if isinstance(event, Started):
                     requested = True

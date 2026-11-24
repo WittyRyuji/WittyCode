@@ -76,9 +76,9 @@ def test_failed_title_never_enters_the_sidebar(tmp_path):
             plan.fake.title_answer = "两行\n无效标题"
             cid = await new_session(core, events, tmp_path / "proj")
             conv = core._by_cid[cid]
-            with pytest.raises(AppError, match="重试 3 次后仍未成功"):
+            with pytest.raises(AppError, match="尝试 3 次后仍未成功"):
                 await core.call("session.send", {"id": cid, "text": "检查库存接口"})
-            assert len(plan.fake.title_requests) == 4 and not plan.requests
+            assert len(plan.fake.title_requests) == 3 and not plan.requests
             assert not conv.in_history and row_keys(core, conv) == []
         finally:
             await core.shutdown()

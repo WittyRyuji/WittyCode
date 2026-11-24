@@ -2515,7 +2515,7 @@ class AppCore:
         conv.naming = True
         self._flush(conv)
         try:
-            for attempt in range(session_title.FIRST_RETRIES + 1):
+            for attempt in range(1, session_title.FIRST_MAX_ATTEMPTS + 1):
                 if not allowed():
                     break
                 reason = ""
@@ -2523,7 +2523,8 @@ class AppCore:
                     if own:
                         title = await generate(controller, question, model, account, allowed, draft=True) if account is not None else None
                     else:
-                        title = session_title.clean(await devin_side.ask(self.devin, conv.project, prompt, timeout=12), first=True)
+                        answer = await devin_side.ask(self.devin, conv.project, prompt, timeout=session_title.FIRST_TIMEOUT)
+                        title = session_title.clean(answer, first=True)
                 except ChatGPTError as error:
                     title = None
                     reason = " " + chatgpt_error_text(error)
@@ -2536,8 +2537,8 @@ class AppCore:
                     self._flush(conv)  # Publish the title before dispatching the first main prompt.
                     self._emit_sidebar()  # The named draft is a sidebar row at once, not after the reply.
                     return
-                if attempt == session_title.FIRST_RETRIES:
-                    raise AppError(f"自动命名重试 {session_title.FIRST_RETRIES} 次后仍未成功，首条消息没有发出。{reason}")
+                if attempt == session_title.FIRST_MAX_ATTEMPTS:
+                    raise AppError(f"自动命名尝试 {attempt} 次后仍未成功，首条消息没有发出。{reason}")
                 await asyncio.sleep(0.2)
             raise AppError("会话已变化，首条消息没有发出。")
         finally:
