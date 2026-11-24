@@ -1,4 +1,4 @@
-"""Cross-process locks for small plugin configuration transactions (never hold one in the UI thread)."""
+"""Cross-process locks for small file transactions (never hold one in the UI thread)."""
 
 from contextlib import contextmanager
 from pathlib import Path
@@ -9,12 +9,10 @@ from desktop.core.plugin_http import PluginError
 
 
 @contextmanager
-def lock_file(file: Path):
+def lock_file(file: Path, *, busy_message: str = "插件配置正在使用中，请稍后重试。"):
     file.parent.mkdir(parents=True, exist_ok=True)
     with file.with_suffix(".lock").open("a+b") as stream:
-        if not stream.tell():
-            stream.write(b"0")
-            stream.flush()
+        # Windows can lock a byte past EOF; do not write a starter byte before acquiring the lock.
         deadline = time.monotonic() + 65
         while True:
             stream.seek(0)
@@ -28,7 +26,7 @@ def lock_file(file: Path):
                 break
             except OSError:
                 if time.monotonic() >= deadline:
-                    raise PluginError("插件配置正在使用中，请稍后重试。")
+                    raise PluginError(busy_message)
                 time.sleep(.05)
         try:
             yield

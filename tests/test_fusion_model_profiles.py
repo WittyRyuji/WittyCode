@@ -4,7 +4,10 @@ app's non-blocking prefetch on model selection. Every fetch is an injected fake;
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import subprocess
+import sys
 import threading
 import time
 import urllib.request
@@ -52,14 +55,33 @@ def entries() -> list[aa_catalog.Entry]:
     return aa_catalog.parse(LEADERBOARD)
 
 
-def seeded(root: Path, model: str = MODEL, effort: str = "high", **fields) -> dict:
+def catalog_path(root: Path) -> Path:
+    return root / "fusion-profiles" / "models.json"
+
+
+def catalog_at(root: Path) -> dict:
+    return json.loads(catalog_path(root).read_text(encoding="utf-8"))["models"]
+
+
+def legacy_path(root: Path, model: str, effort: str) -> Path:
+    digest = hashlib.sha256(f"{model}\x00{effort}".encode("utf-8")).hexdigest()
+    return catalog_path(root).with_name(f"{digest}.json")
+
+
+def seeded(root: Path, model: str = MODEL, effort: str = "high", *, legacy: bool = False, **fields) -> dict:
     record = {"model": model, "effort": effort, "source": profiles.SOURCE, "score": 50.0, "costIn": 1.0,
               "costOut": 8.0, "taskCostUSD": 2.5, "timeMinutes": 9.0, "fetchedAt": 1_760_000_000.0,
               "confidence": profiles.CONFIDENCE_EXACT}
     record.update(fields)
-    path = profiles._file(root, model, effort)
+    path = legacy_path(root, model, effort) if legacy else catalog_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(record), encoding="utf-8")
+    if legacy:
+        payload = record
+    else:
+        models = catalog_at(root) if path.exists() else {}
+        models.setdefault(model, {})[effort] = record
+        payload = {"models": models}
+    path.write_text(json.dumps(payload), encoding="utf-8")
     return record
 
 
@@ -78,7 +100,7 @@ def test_ensure_fetches_and_stores_the_exact_pair(tmp_path):
     assert record["score"] == 55.25 and record["taskCostUSD"] == 1.5 and record["timeMinutes"] == 9.5
     assert record["source"] == profiles.SOURCE and record["confidence"] == profiles.CONFIDENCE_EXACT
     assert record["fetchedAt"] == 1_761_234_567.0
-    assert json.loads(profiles._file(tmp_path, MODEL, "high").read_text(encoding="utf-8")) == record
+    assert catalog_at(tmp_path) == {MODEL: {"high": record}}
     assert profiles.load(tmp_path, MODEL, "high") == record
 
 
@@ -97,8 +119,33 @@ def test_a_stored_record_is_a_hit_and_sends_no_request(tmp_path):
     assert attempts == []
 
 
+def test_legacy_profiles_are_imported_together_without_fetching_or_mutating(tmp_path):
+    high = seeded(tmp_path, legacy=True, provenance={"url": aa_catalog.URL, "label": "Demo High", "tier": "High", "cells": {"score": "50"}})
+    low = seeded(tmp_path, OTHER_MODEL, "low", legacy=True, score=26.0)
+    seeded(tmp_path, MODEL, "medium", legacy=True, confidence="invalid")
+    folder = catalog_path(tmp_path).parent
+    corrupt = folder / ("a" * 64 + ".json")
+    corrupt.write_text("{broken", encoding="utf-8")
+    wrong_name = folder / ("b" * 64 + ".json")
+    wrong_name.write_text(json.dumps({**high, "effort": "extra"}), encoding="utf-8")
+    directory = folder / ("c" * 64 + ".json")
+    directory.mkdir()
+    before = {path: path.read_bytes() for path in folder.iterdir() if path.is_file()}
+
+    assert profiles.load(tmp_path, MODEL, "high") == high
+    assert set(folder.iterdir()) == {*before, directory}  # A read before the migration is still read-only.
+    calls = []
+    assert profiles.ensure(tmp_path, MODEL, "high", lambda *pair: calls.append(pair)) == high
+    assert calls == []
+    assert catalog_at(tmp_path) == {MODEL: {"high": high}, OTHER_MODEL: {"low": low}}
+    assert all(path.read_bytes() == data for path, data in before.items())
+    seeded(tmp_path, legacy=True, score=99.0)  # A later write by a downgraded app is not authoritative.
+    profiles.migrate(tmp_path)
+    assert profiles.load(tmp_path, MODEL, "high") == high
+
+
 def test_efforts_are_exact_and_never_mixed(tmp_path):
-    seeded(tmp_path, MODEL, "high", score=80.0)
+    high = seeded(tmp_path, MODEL, "high", score=80.0)
     seen = []
 
     def fetch(model, effort):
@@ -108,17 +155,15 @@ def test_efforts_are_exact_and_never_mixed(tmp_path):
     medium = profiles.ensure(tmp_path, MODEL, "medium", fetch)
     assert seen == ["medium"] and medium["effort"] == "medium" and medium["score"] == 31.0
     assert profiles.load(tmp_path, MODEL, "high")["score"] == 80.0
-    assert profiles._file(tmp_path, MODEL, "high") != profiles._file(tmp_path, MODEL, "medium")
+    assert catalog_at(tmp_path) == {MODEL: {"high": high, "medium": medium}}
 
 
-def test_keys_are_short_hashes_that_do_not_collide(tmp_path):
-    path = profiles._file(tmp_path, MODEL, "high")
-    assert path.suffix == ".json" and len(path.stem) == 64 and all(c in "0123456789abcdef" for c in path.stem)
+def test_nested_keys_keep_case_and_separators_exact(tmp_path):
     profiles.ensure(tmp_path, "m:e", "f", lambda m, e: {"score": 1.0})
     profiles.ensure(tmp_path, "m", "e:f", lambda m, e: {"score": 2.0})
     profiles.ensure(tmp_path, "api:a:b", "", lambda m, e: {"score": 3.0})
     profiles.ensure(tmp_path, "API:A:B", "", lambda m, e: {"score": 4.0})  # case-insensitive filesystems stay exact
-    assert len(list((tmp_path / profiles.FOLDER).iterdir())) == 4
+    assert list(catalog_path(tmp_path).parent.glob("*.json")) == [catalog_path(tmp_path)]
     assert profiles.load(tmp_path, "m:e", "f")["score"] == 1.0
     assert profiles.load(tmp_path, "m", "e:f")["score"] == 2.0
     assert profiles.load(tmp_path, "api:a:b", "")["score"] == 3.0
@@ -156,24 +201,38 @@ def test_an_expired_fallback_retries_but_never_becomes_permanent(tmp_path):
     assert upgraded["confidence"] == profiles.CONFIDENCE_EXACT and upgraded["score"] == 44.0
 
 
-def test_a_corrupt_or_malformed_record_is_a_miss_not_a_crash(tmp_path):
+def test_a_corrupt_or_malformed_catalog_is_a_miss_not_a_crash(tmp_path):
     seeded(tmp_path)
-    path = profiles._file(tmp_path, MODEL, "high")
-    path.write_text("{not json", encoding="utf-8")
+    catalog_path(tmp_path).write_text("{not json", encoding="utf-8")
     assert profiles.load(tmp_path, MODEL, "high") is None
     record = profiles.ensure(tmp_path, MODEL, "high", lambda m, e: {"score": 7.0})
-    assert record["score"] == 7.0 and json.loads(path.read_text(encoding="utf-8")) == record
+    assert record["score"] == 7.0 and catalog_at(tmp_path) == {MODEL: {"high": record}}
 
 
 def test_load_rejects_wrong_keys_and_non_finite_fields(tmp_path):
-    path = profiles._file(tmp_path, MODEL, "high")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    base = seeded(tmp_path, MODEL, "high")
-    for broken in ({**base, "model": OTHER_MODEL}, {**base, "confidence": "sure"},
+    path = catalog_path(tmp_path)
+    base = seeded(tmp_path)
+    for broken in ({**base, "model": OTHER_MODEL}, {**base, "effort": "low"}, {**base, "confidence": "sure"},
                    {**base, "fetchedAt": "yesterday"}, {**base, "score": float("inf")},
                    {**base, "taskCostUSD": float("nan")}):
-        path.write_text(json.dumps(broken), encoding="utf-8")
+        path.write_text(json.dumps({"models": {MODEL: {"high": broken}}}), encoding="utf-8")
         assert profiles.load(tmp_path, MODEL, "high") is None, broken
+
+
+def test_a_failed_replace_leaves_the_previous_catalog_intact(tmp_path, monkeypatch):
+    seeded(tmp_path)
+    path = catalog_path(tmp_path)
+    before = path.read_bytes()
+
+    def failed_replace(*args):
+        raise OSError("simulated write failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(profiles.os, "replace", failed_replace)
+        with pytest.raises(OSError, match="simulated write failure"):
+            profiles.ensure(tmp_path, OTHER_MODEL, "low", lambda *_: {"score": 42.0})
+    assert path.read_bytes() == before
+    assert not list(path.parent.glob("*.tmp"))
 
 
 def test_non_finite_offers_are_dropped(tmp_path):
@@ -196,10 +255,49 @@ def test_concurrent_ensure_loses_nothing_and_fetches_once_per_key(tmp_path):
         records = list(pool.map(lambda key: profiles.ensure(tmp_path, key[0], key[1], fetch), keys))
         list(pool.map(lambda key: profiles.ensure(tmp_path, key[0], key[1], fetch), keys))
     assert sorted(calls) == sorted(keys)
-    assert len(list((tmp_path / profiles.FOLDER).iterdir())) == len(keys)
+    assert list(catalog_path(tmp_path).parent.glob("*.json")) == [catalog_path(tmp_path)]
+    stored = catalog_at(tmp_path)
+    assert sum(len(efforts) for efforts in stored.values()) == len(keys)
     for record, (model, effort) in zip(records, keys):
         assert record["confidence"] == profiles.CONFIDENCE_EXACT
+        assert stored[model][effort] == record
         assert profiles.load(tmp_path, model, effort) == record
+
+
+def test_distinct_processes_merge_into_the_latest_catalog(tmp_path):
+    worker = """
+from pathlib import Path
+import sys, time
+from desktop.core.fusion import profiles
+
+root, model, other = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+
+def fetch(*pair):
+    (root / model).touch()
+    deadline = time.monotonic() + 10
+    while not (root / other).exists():
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.01)
+    return {"score": 42}
+
+write = profiles._write
+
+def slow_write(path, models):
+    time.sleep(0.2)  # Widen the window between reading the catalog and replacing it.
+    write(path, models)
+
+profiles._write = slow_write
+assert profiles.ensure(root, model, "high", fetch)["score"] == 42
+"""
+
+    def run(pair):
+        return subprocess.run([sys.executable, "-c", worker, str(tmp_path), *pair], capture_output=True, text=True, timeout=30)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        for completed in pool.map(run, [("first", "second"), ("second", "first")]):
+            assert completed.returncode == 0, completed.stderr
+    assert {model: levels["high"]["score"] for model, levels in catalog_at(tmp_path).items()} == {"first": 42, "second": 42}
 
 
 def test_an_unknown_task_cost_stays_unknown(tmp_path):
@@ -212,12 +310,14 @@ def test_team_snapshot_reads_only_local_records(tmp_path):
     seeded(tmp_path, MODEL, "high", score=51.5, taskCostUSD=1.75, timeMinutes=12.4, costIn=None, costOut=None)
     seeded(tmp_path, OTHER_MODEL, "low", confidence=profiles.CONFIDENCE_FALLBACK, source=profiles.CONFIDENCE_FALLBACK,
            score=profiles.FALLBACK_SCORE, taskCostUSD=None, timeMinutes=None, costIn=None, costOut=None)
+    before = catalog_path(tmp_path).read_bytes()
     snapshot = profiles.team_snapshot(tmp_path, {"main": (MODEL, "high"), "worker": (OTHER_MODEL, "low"),
                                                  "light": ("devin:demo-tiny", "low")})
     assert f"main: {MODEL} @ high — capability 51.5, task cost $1.75 per task, ~12.4 min per task, confidence exact" in snapshot
     assert f"worker: {OTHER_MODEL} @ low — capability {profiles.FALLBACK_SCORE:g}, task cost unknown, confidence fallback" in snapshot
     assert "light: devin:demo-tiny @ low — no local profile" in snapshot
-    assert len(list((tmp_path / profiles.FOLDER).iterdir())) == 2  # Read-only: nothing written.
+    assert list(catalog_path(tmp_path).parent.iterdir()) == [catalog_path(tmp_path)]
+    assert catalog_path(tmp_path).read_bytes() == before  # Read-only: nothing written.
 
 
 def test_ids_and_seats_are_validated(tmp_path):
@@ -383,6 +483,24 @@ def _recording_source(calls, delay=None):
         return {"score": 42.0, "taskCostUSD": 1.5, "timeMinutes": 3.0}
 
     return fetch
+
+
+def test_startup_imports_profiles_without_touching_the_api_models_file(tmp_path):
+    async def go():
+        root = default_settings_path().parent
+        original = seeded(root, legacy=True)
+        providers = root / "models.json"
+        providers.write_text('{"customModels": []}\n', encoding="utf-8")
+        before = providers.read_bytes()
+        core, _, _, _, _ = await ready_core(tmp_path)
+        try:
+            await until(lambda: catalog_path(root).is_file())
+            assert catalog_at(root) == {MODEL: {"high": original}}
+            assert providers.read_bytes() == before
+            assert legacy_path(root, MODEL, "high").is_file()
+        finally:
+            await core.shutdown()
+    asyncio.run(go())
 
 
 def test_choosing_a_default_model_prefetches_its_profile(tmp_path):

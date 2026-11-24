@@ -1357,6 +1357,9 @@ class AppCore:
 
     async def _m_app_init(self, params: dict[str, Any]) -> dict[str, Any]:
         self._close_video_preview()  # reloading the page may skip the old player's React cleanup
+        if not self._hydrated and not self.offline:
+            from desktop.core.fusion import profiles
+            self._spawn(asyncio.to_thread(profiles.migrate, default_settings_path().parent), quiet=True)
         self._hydrate()
         for conv in self.order:  # a page that has just (re)started knows nothing of the open conversations yet
             conv.meta, conv.sent_ids, conv.sent_versions, conv.dirty = {}, [], {}, True

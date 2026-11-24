@@ -1,14 +1,10 @@
 """Local capability/cost profiles of the models Fusion can seat, fed by the public Artificial Analysis leaderboard.
 
-Each profile is one small JSON file under ``<app data>/fusion-profiles/``, keyed by a fixed-length hash of the exact
-page model id (``chatgpt:…``, ``api:<provider>:…``, ``devin:…``) and reasoning effort — a different effort of the
-same model is a different record and is never mixed in; hashing keeps Windows paths short and cannot collide on
-case-insensitive filesystems. A stored record is a cache hit: reading it never touches the network. On a miss the
-injected ``fetch`` callable supplies the leaderboard fields; a failure keeps any earlier value and, with none,
-stores a mid-low estimate with unknown cost so Fusion still has something to plan with instead of nothing. The
-estimate is not permanent: after ``FALLBACK_RETRY_SECONDS`` the next ensure retries the source once, and a failed
-retry only moves the throttle timestamp, keeping the record retryable rather than a forever-negative. Writes are
-atomic and one file per key, so concurrent prefetch of different seats loses nothing.
+Profiles share ``<app data>/fusion-profiles/models.json``, indexed by exact page model id and reasoning effort.
+The old per-pair files are imported without fetching or changing them. Reads are local; on a miss the injected
+``fetch`` callable supplies the leaderboard fields. A failure stores a mid-low estimate with unknown cost, or
+keeps the earlier estimate and moves its retry timestamp. Fetches do not hold the catalog write lock; each write
+merges into the latest catalog and replaces the file atomically, including across app processes.
 
 ``taskCostUSD`` is the leaderboard's USD per task and ``timeMinutes`` its minutes per task — the reference for
 estimating what a *task* costs, not the price the user pays; ``costIn`` / ``costOut`` hold per-1M-token figures when
@@ -29,8 +25,10 @@ from pathlib import Path
 from typing import Any
 
 from desktop.core.fusion import planning
+from desktop.core.plugin_lock import lock_file
 
 FOLDER = "fusion-profiles"
+FILE = "models.json"
 SOURCE = "artificialanalysis"
 """The single public source these profiles are allowed to come from."""
 FALLBACK_SCORE = 20.0
@@ -46,12 +44,13 @@ Fetch = Callable[[str, str], Mapping[str, Any] | None]
 """``fetch(model, effort)`` -> the source's fields for exactly that pair, or ``None`` when it has none. May raise."""
 
 _locks_guard = threading.Lock()
-_locks: dict[Path, threading.Lock] = {}
+_locks: dict[tuple[Path, str, str], threading.Lock] = {}
 
 
-def _lock_for(path: Path) -> threading.Lock:
+def _lock_for(path: Path, model: str, effort: str) -> threading.Lock:
+    key = (path, model, effort)
     with _locks_guard:
-        return _locks.setdefault(path, threading.Lock())
+        return _locks.setdefault(key, threading.Lock())
 
 
 def _check(model: Any, effort: Any) -> tuple[str, str]:
@@ -62,10 +61,9 @@ def _check(model: Any, effort: Any) -> tuple[str, str]:
     return model.strip(), effort.strip()
 
 
-def _file(root: Path, model: str, effort: str) -> Path:
-    """The record's own path: one fixed-length digest per (model, effort), short on Windows and free of case folds."""
+def _legacy_name(model: str, effort: str) -> str:
     key = hashlib.sha256(f"{model}\x00{effort}".encode("utf-8")).hexdigest()
-    return Path(root) / FOLDER / f"{key}.json"
+    return f"{key}.json"
 
 
 def _number(value: Any) -> float | None:
@@ -108,13 +106,14 @@ def _fallback(model: str, effort: str, at: float) -> dict[str, Any]:
             "confidence": CONFIDENCE_FALLBACK}
 
 
-def load(root: Path, model: str, effort: str) -> dict[str, Any] | None:
-    """The stored record for exactly this (model, effort); ``None`` when absent, corrupt or malformed. Never fetches."""
-    model, effort = _check(model, effort)
+def _read_json(path: Path) -> Any:
     try:
-        record = json.loads(_file(root, model, effort).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError):
+        return None  # Other I/O errors must not be mistaken for an empty catalog by a writer.
+
+
+def _validated(record: Any, model: str, effort: str) -> dict[str, Any] | None:
     if (not isinstance(record, dict) or record.get("model") != model or record.get("effort") != effort
             or record.get("confidence") not in (CONFIDENCE_EXACT, CONFIDENCE_FALLBACK)):
         return None
@@ -130,20 +129,100 @@ def load(root: Path, model: str, effort: str) -> dict[str, Any] | None:
     return record
 
 
-def _write(path: Path, record: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+def _read_catalog(path: Path) -> dict[str, Any] | None:
+    data = _read_json(path)
+    models = data.get("models") if isinstance(data, dict) else None
+    return models if isinstance(models, dict) else None
+
+
+def _find(models: dict[str, Any], model: str, effort: str) -> dict[str, Any] | None:
+    by_effort = models.get(model)
+    return _validated(by_effort.get(effort), model, effort) if isinstance(by_effort, dict) else None
+
+
+def load(root: Path, model: str, effort: str) -> dict[str, Any] | None:
+    """Read an exact pair without fetching or writing, even while startup is still migrating the old files."""
+    model, effort = _check(model, effort)
+    folder = Path(root) / FOLDER
+    try:
+        models = _read_catalog(folder / FILE)
+        if models is not None:
+            return _find(models, model, effort)
+        return _validated(_read_json(folder / _legacy_name(model, effort)), model, effort)
+    except OSError:
+        return None
+
+
+def _legacy_catalog(folder: Path) -> dict[str, dict[str, Any]]:
+    models: dict[str, dict[str, Any]] = {}
+    for path in folder.glob("*.json"):
+        if (len(path.stem) != 64 or any(c not in "0123456789abcdef" for c in path.stem)
+                or path.is_symlink() or not path.is_file()):
+            continue
+        data = _read_json(path)
+        if not isinstance(data, dict):
+            continue
+        try:
+            model, effort = _check(data.get("model"), data.get("effort"))
+            if path.name != _legacy_name(model, effort):
+                continue
+        except ValueError:
+            continue
+        record = _validated(data, model, effort)
+        if record is not None:
+            models.setdefault(model, {})[effort] = record
+    return models
+
+
+def _write(path: Path, models: Mapping[str, Any]) -> None:
     handle, temp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
     try:
         with os.fdopen(handle, "w", encoding="utf-8") as stream:
-            json.dump(record, stream, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+            json.dump({"models": models}, stream, ensure_ascii=False, indent=2, sort_keys=True)
             stream.write("\n")
-        os.replace(temp, path)
+        for attempt in range(10):
+            try:
+                os.replace(temp, path)
+                break
+            except PermissionError as error:
+                # A lock-free reader on Windows can briefly prevent the atomic replacement.
+                if getattr(error, "winerror", None) not in (5, 32) or attempt == 9:
+                    raise
+                time.sleep(0.025)
     except BaseException:
         try:
             os.unlink(temp)
         except OSError:
             pass
         raise
+
+
+def _catalog_lock(path: Path):
+    return lock_file(path, busy_message="Fusion 模型评分档案正在使用中，请稍后重试。")
+
+
+def _import_locked(path: Path) -> dict[str, Any]:
+    models = _read_catalog(path)
+    if models is None:
+        models = _legacy_catalog(path.parent)
+        if models:
+            _write(path, models)
+    return models
+
+
+def _catalog_after_migration(path: Path) -> dict[str, Any]:
+    models = _read_catalog(path)
+    if models is not None:
+        return models
+    if not path.parent.is_dir():
+        return {}
+    with _catalog_lock(path):
+        return _import_locked(path)
+
+
+def migrate(root: Path) -> None:
+    """Import old profiles once if there is no readable catalog yet. No fetch and no removal of old records."""
+    _catalog_after_migration(Path(root) / FOLDER / FILE)
 
 
 def ensure(root: Path, model: str, effort: str, fetch: Fetch, *, clock: Callable[[], float] = time.time) -> dict[str, Any]:
@@ -156,9 +235,9 @@ def ensure(root: Path, model: str, effort: str, fetch: Fetch, *, clock: Callable
     so the next call is a hit instead of another request.
     """
     model, effort = _check(model, effort)
-    path = _file(root, model, effort)
-    with _lock_for(path):
-        record = load(root, model, effort)
+    path = Path(root) / FOLDER / FILE
+    with _lock_for(path.resolve(), model, effort):
+        record = _find(_catalog_after_migration(path), model, effort)
         if record is not None and (
                 record["confidence"] == CONFIDENCE_EXACT or clock() - record["fetchedAt"] < FALLBACK_RETRY_SECONDS):
             return record
@@ -166,15 +245,25 @@ def ensure(root: Path, model: str, effort: str, fetch: Fetch, *, clock: Callable
             offered = fetch(model, effort)
         except Exception:
             offered = None
-        if isinstance(offered, Mapping):
-            record = _record(model, effort, offered, clock())
-        elif record is None:
-            record = _fallback(model, effort, clock())
-        else:
-            # The estimate stays an estimate — never a permanent negative — and the retry is throttled by fetchedAt.
-            record = {**record, "fetchedAt": clock()}
-        _write(path, record)
-        return record
+        with _catalog_lock(path):
+            models = _import_locked(path)
+            record = _find(models, model, effort)  # Another process may have written while we were fetching.
+            if record is not None and record["confidence"] == CONFIDENCE_EXACT:
+                return record
+            now = clock()
+            if isinstance(offered, Mapping):
+                record = _record(model, effort, offered, now)
+            elif record is None:
+                record = _fallback(model, effort, now)
+            elif now - record["fetchedAt"] < FALLBACK_RETRY_SECONDS:
+                return record
+            else:
+                record = {**record, "fetchedAt": now}  # Throttle the next retry; keep the estimate until a hit.
+            if not isinstance(models.get(model), dict):
+                models[model] = {}
+            models[model][effort] = record
+            _write(path, models)
+            return record
 
 
 def _money(value: Any) -> str:

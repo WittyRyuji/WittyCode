@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import json
 from fractions import Fraction
-from pathlib import Path
 
 import pytest
 
@@ -175,18 +174,9 @@ def test_required_facts_uncertainties_decisions_and_acceptance():
 
 # --------------------------------------------------------------------------- the snapshot itself
 
-def seeded(root: Path, model: str, effort: str, **fields) -> None:
-    record = {"model": model, "effort": effort, "source": profiles.SOURCE, "score": 51.5,
-              "taskCostUSD": 1.75, "timeMinutes": 12.4, "costIn": None, "costOut": None,
-              "fetchedAt": 1_760_000_000.0, "confidence": profiles.CONFIDENCE_EXACT}
-    record.update(fields)
-    path = profiles._file(root, model, effort)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(record), encoding="utf-8")
-
-
 def test_the_snapshot_keeps_the_profile_facts_and_appends_the_contract(tmp_path):
-    seeded(tmp_path, MODEL, "high")
+    profiles.ensure(tmp_path, MODEL, "high", lambda *_: {"score": 51.5, "taskCostUSD": 1.75, "timeMinutes": 12.4},
+                    clock=lambda: 1_760_000_000.0)
     snapshot = profiles.team_snapshot(tmp_path, {"main": (MODEL, "high"), "worker": (OTHER_MODEL, "low")})
     # The hit keeps the matched (model, effort) identifier, capability, task cost, speed and the fetch date.
     assert f"main: {MODEL} @ high — capability 51.5, task cost $1.75 per task, ~12.4 min per task" in snapshot
