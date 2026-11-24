@@ -24,7 +24,7 @@ import { quitWarning } from "./lib/quit";
 import { frontOfPartition, pinnedOrder, sameSessionPartition } from "./lib/sessionOrder";
 import { moveBefore, orderProjects } from "./lib/projectOrder";
 import { effortLabel, permissionsFor, startingLevel } from "./lib/vocab";
-import { COMPACT_AT_DEFAULT, clampCompactAt, emptyLiveData, type LiveData } from "./liveReducer";
+import { COMPACT_AT_DEFAULT, DEFAULT_RECONNECT_INTERVAL, DEFAULT_RECONNECT_LIMIT, clampCompactAt, emptyLiveData, type LiveData } from "./liveReducer";
 import { LIVE, liveSeed } from "./mode";
 
 /** The skills and commands the design page shows after a slash (the live app reads the user's files). */
@@ -241,6 +241,8 @@ export interface Store extends LiveData {
   setModelsVisible: (ids: string[], visible: boolean) => void;
   setMaxOpen: (n: number) => void;
   setMaxSteps: (n: number) => void;
+  setReconnectInterval: (n: number) => void;
+  setReconnectLimit: (n: number) => void;
   /** the shared memory: the master switch, the engines that get it, and the state the memory page last heard of */
   setMemoryEnabled: (on: boolean) => void;
   setMemoryRecall: (on: boolean) => void;
@@ -315,6 +317,8 @@ function mockData(): LiveData {
     providers: API_PROVIDERS,
     maxOpen: 4,
     maxSteps: 80,
+    reconnectInterval: DEFAULT_RECONNECT_INTERVAL,
+    reconnectLimit: DEFAULT_RECONNECT_LIMIT,
     devinPath: "",
     hiddenModels: [],
     themeChoice: "dark",
@@ -858,6 +862,8 @@ export const useStore = create<Store>((set, get) => ({
     set((s) => ({ hiddenModels: visible ? s.hiddenModels.filter((id) => !ids.includes(id)) : [...s.hiddenModels, ...ids.filter((id, i) => !s.hiddenModels.includes(id) && ids.indexOf(id) === i)] })),
   setMaxOpen: (maxOpen) => set({ maxOpen: Math.max(1, Math.min(16, maxOpen)) }),
   setMaxSteps: (maxSteps) => set({ maxSteps }),
+  setReconnectInterval: (reconnectInterval) => set({ reconnectInterval }),
+  setReconnectLimit: (reconnectLimit) => set({ reconnectLimit }),
   setMemoryEnabled: (memoryEnabled) => set({ memoryEnabled }),
   setMemoryRecall: (memoryRecall) => set({ memoryRecall }),
   setMemoryCapture: (memoryCapture) => set({ memoryCapture }),

@@ -140,7 +140,7 @@ def test_bad_gateway_shows_the_30_second_retry_notice(qapp, loop, tmp_path):
             await new_conversation(rig)
             rig.plan.script(http_error(502, {"error": {"message": "Bad gateway"}}, {"Retry-After": "60"}))
             await rig.send("检查库存接口")
-            await rig.wait_text(".block.notice", "服务暂时出错（HTTP 502），30 秒后自动重试（第 1/4 次）。", timeout=10)
+            await rig.wait_text(".block.notice", "服务暂时出错（HTTP 502），30 秒后自动重试（第 1/5 次）。", timeout=10)
             assert len(rig.plan.requests) == 1
             if evidence := os.environ.get("WITTYCODE_TEST_EVIDENCE"):
                 await rig.shot(".block.notice", Path(evidence) / "bad-gateway-retry.png")

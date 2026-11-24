@@ -54,6 +54,10 @@ MAX_OPEN_SESSIONS_RANGE = (1, 16)
 DEFAULT_MAX_OPEN_SESSIONS = 4
 DEFAULT_MAX_STEPS = 80
 MAX_STEPS_RANGE = (1, 2**53 - 1)  # positive integers that survive the JSON/JavaScript bridge exactly
+RECONNECT_INTERVAL_RANGE = (1, 3600)
+RECONNECT_LIMIT_RANGE = (0, 5)
+DEFAULT_RECONNECT_INTERVAL = 30
+DEFAULT_RECONNECT_LIMIT = RECONNECT_LIMIT_RANGE[1]
 STEP_BUDGET_RANGE = (1, 1000)
 """Bounds of one delegation's step budget; the global per-turn cap still applies on top of it."""
 STEP_BUDGET_DEFAULT = (16, 32)
@@ -117,6 +121,9 @@ class AppSettings:
     """The percent of the window at which that happens (``COMPACT_AT_RANGE``)."""
     max_steps: int = DEFAULT_MAX_STEPS
     """Model decision steps allowed in one turn of the own loop; read again between steps."""
+    reconnect_interval: int = DEFAULT_RECONNECT_INTERVAL
+    reconnect_limit: int = DEFAULT_RECONNECT_LIMIT
+    """Automatic HTTP 502 retries in the own loop; zero disables them."""
     fusion_main: str = ""
     fusion_workers: list[str] = field(default_factory=list)
     fusion_light: str = ""
@@ -277,6 +284,10 @@ def settings_from_dict(raw: object) -> AppSettings:
         if isinstance(value, str) and (allowed is None or value in allowed):
             return value
         return getattr(defaults, name)
+
+    def integer(name: str, bounds: tuple[int, int]) -> int:
+        value = raw.get(name)
+        return value if type(value) is int and bounds[0] <= value <= bounds[1] else getattr(defaults, name)
 
     projects: list[str] = []
     raw_projects = raw.get("projects")
@@ -479,6 +490,8 @@ def settings_from_dict(raw: object) -> AppSettings:
         chatgpt_compact=chatgpt_compact,
         chatgpt_compact_at=compact_at,
         max_steps=max_steps,
+        reconnect_interval=integer("reconnect_interval", RECONNECT_INTERVAL_RANGE),
+        reconnect_limit=integer("reconnect_limit", RECONNECT_LIMIT_RANGE),
         fusion_main=text("fusion_main"),
         fusion_workers=list(dict.fromkeys(item for item in raw.get("fusion_workers", []) if isinstance(item, str) and item.strip()))[:1] if isinstance(raw.get("fusion_workers"), list) else [],
         fusion_light=text("fusion_light"),

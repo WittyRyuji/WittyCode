@@ -50,6 +50,9 @@ export interface SettingsView {
   maxOpen: number;
   /** own-loop steps per turn; missing on an older sender: 80 */
   maxSteps?: number;
+  /** HTTP 502 retry interval in seconds and retry count; older senders omit these. */
+  reconnectInterval?: number;
+  reconnectLimit?: number;
   fusionMain?: string;
   fusionWorkers?: string[];
   fusionLight?: string;
@@ -103,7 +106,7 @@ export interface SettingsView {
 export type FollowUp = "queue" | "steer";
 export type Language = "auto" | "zh-CN" | "en";
 export type FusionSettingKey = "fusionMain" | "fusionWorkers" | "fusionLight" | "fusionReasoning" | "fusionPreference" | "fusionMaxSeconds" | "fusionSteps";
-export type SettingKey = "theme" | "fontScale" | "followUp" | "maxOpen" | "maxSteps" | "sidebarWidth" | "conversationWidth" | "inspectorWidth" | "devinPath" | "memoryEnabled" | "memoryRecall" | "memoryCapture" | "memoryCurate" | "memoryEngines" | "compactAuto" | "compactAt" | "thinkChinese" | "answerLanguage" | "thinkingLanguage" | "numberedReply" | "soundEnabled" | SoundKey | FusionSettingKey;
+export type SettingKey = "theme" | "fontScale" | "followUp" | "maxOpen" | "maxSteps" | "reconnectInterval" | "reconnectLimit" | "sidebarWidth" | "conversationWidth" | "inspectorWidth" | "devinPath" | "memoryEnabled" | "memoryRecall" | "memoryCapture" | "memoryCurate" | "memoryEngines" | "compactAuto" | "compactAt" | "thinkChinese" | "answerLanguage" | "thinkingLanguage" | "numberedReply" | "soundEnabled" | SoundKey | FusionSettingKey;
 export type SoundKind = "question" | "complete" | "error";
 export type SoundKey = "soundQuestion" | "soundComplete" | "soundError";
 export type SettingValue = string | number | boolean | string[] | Record<string, string> | Record<string, number | boolean>;

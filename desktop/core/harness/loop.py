@@ -53,13 +53,13 @@ from desktop.core.chatgpt.responses import (
 
 from desktop.core.harness.compact import estimate_item, estimate_items, estimate_text, fixed_tokens, is_overflow
 from desktop.core.harness.history import prune_tool_images, replayable
+from desktop.core.settings import DEFAULT_RECONNECT_INTERVAL, DEFAULT_RECONNECT_LIMIT
 
 log = logging.getLogger("desktop.harness")
 
 MAX_STEPS = 80
 RETRY_DELAYS = (1.5, 4.0, 10.0, 25.0)
-"""Seconds to wait before each repeat of a request that failed in a way that may pass; four repeats at most."""
-BAD_GATEWAY_RETRY_DELAY = 30.0
+"""Default backoff and retry limit for transient failures other than HTTP 502."""
 RETRY_LONGEST = 60.0
 """The longest pause a server's ``Retry-After`` is obeyed for (a turn that waits longer is better stopped and said so)."""
 OUTPUT_LIMIT = 60_000
@@ -322,12 +322,16 @@ class AgentLoop:
         measured: tuple[int, int] | None = None,
         floor: int = 0,
         retry_delays: Sequence[float] | None = None,
+        reconnect_interval: int = DEFAULT_RECONNECT_INTERVAL,
+        reconnect_limit: int = DEFAULT_RECONNECT_LIMIT,
         pause: Callable[[float], Awaitable[object]] | None = None,
         jitter: Callable[[], float] | None = None,
         max_continuations: int = 0,
     ) -> None:
         self.stream = stream
         self._retry_delays = tuple(RETRY_DELAYS if retry_delays is None else retry_delays)
+        self._reconnect_interval = reconnect_interval
+        self._reconnect_limit = reconnect_limit
         self._pause = pause or asyncio.sleep
         self._jitter = jitter or random.random
         self.tools = tools
@@ -462,18 +466,18 @@ class AgentLoop:
                     shortened = True
                 elif self._acknowledged and getattr(error, "code", None) in ("network", "stream", "stream_idle", "timeout"):
                     raise  # no blind resend after an accepted request goes silent; an explicit busy refusal can retry
-                elif repeats < len(self._retry_delays) and is_transient(error) and self.observer.retry_allowed():
-                    delay = self._retry_pause(repeats, error)
-                    repeats += 1
-                    log.warning("the request failed (%s); asking again in %.1f s (%d of %d)", error, delay, repeats, len(self._retry_delays))
-                    self.observer.notice(f"{self._why(error)}，{delay:.0f} 秒后自动重试（第 {repeats}/{len(self._retry_delays)} 次）。")
-                    await self._pause(delay)
                 else:
-                    raise
+                    reconnect = getattr(error, "status", None) == 502
+                    limit = self._reconnect_limit if reconnect else len(self._retry_delays)
+                    if repeats >= limit or not is_transient(error) or not self.observer.retry_allowed():
+                        raise
+                    delay = self._reconnect_interval if reconnect else self._retry_pause(repeats, error)
+                    repeats += 1
+                    log.warning("the request failed (%s); asking again in %.1f s (%d of %d)", error, delay, repeats, limit)
+                    self.observer.notice(f"{self._why(error)}，{delay:.0f} 秒后自动重试（第 {repeats}/{limit} 次）。")
+                    await self._pause(delay)
 
     def _retry_pause(self, repeats: int, error: BaseException) -> float:
-        if getattr(error, "status", None) == 502:
-            return BAD_GATEWAY_RETRY_DELAY
         base = self._retry_delays[repeats]
         asked = getattr(error, "retry_after", None)
         if isinstance(asked, (int, float)) and asked > 0:

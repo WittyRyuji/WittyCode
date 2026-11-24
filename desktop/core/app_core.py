@@ -85,6 +85,8 @@ from desktop.core.settings import (
     MAX_REMEMBERED_SESSIONS,
     MAX_SESSION_TITLE,
     MEMORY_ENGINES,
+    RECONNECT_INTERVAL_RANGE,
+    RECONNECT_LIMIT_RANGE,
     STEP_BUDGET_RANGE,
     SIDEBAR_WIDTH_RANGE,
     CONVERSATION_WIDTH_RANGE,
@@ -620,6 +622,8 @@ class AppCore:
             "compactAuto": self.settings.chatgpt_compact,
             "compactAt": self.settings.chatgpt_compact_at,
             "maxSteps": self.settings.max_steps,
+            "reconnectInterval": self.settings.reconnect_interval,
+            "reconnectLimit": self.settings.reconnect_limit,
             "fusionMain": self.settings.fusion_main,
             "fusionWorkers": list(self.settings.fusion_workers),
             "fusionLight": self.settings.fusion_light,
@@ -4382,6 +4386,10 @@ class AppCore:
             s.chatgpt_compact_at = value
         elif key == "maxSteps" and _is_int(value) and MAX_STEPS_RANGE[0] <= value <= MAX_STEPS_RANGE[1]:
             s.max_steps = value
+        elif key == "reconnectInterval" and _is_int(value) and RECONNECT_INTERVAL_RANGE[0] <= value <= RECONNECT_INTERVAL_RANGE[1]:
+            s.reconnect_interval = value
+        elif key == "reconnectLimit" and _is_int(value) and RECONNECT_LIMIT_RANGE[0] <= value <= RECONNECT_LIMIT_RANGE[1]:
+            s.reconnect_limit = value
         elif key in ("fusionMain", "fusionLight") and isinstance(value, str) and len(value) <= 512 and (not value or value.startswith(("chatgpt:", "api:", "devin:"))):
             setattr(s, "fusion_main" if key == "fusionMain" else "fusion_light", value)
             seats = True

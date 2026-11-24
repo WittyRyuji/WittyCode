@@ -17,6 +17,7 @@ import { ConnectionsPage } from "./ConnectionsPage";
 import { CustomizationPage } from "./CustomizationPage";
 import { FactorySettings } from "./FactorySettings";
 import { StepLimitSetting } from "./StepLimitSetting";
+import { ReconnectSettings } from "./ReconnectSettings";
 import { SoundSettings } from "./SoundSettings";
 import { ProviderEditor } from "./ProviderEditor";
 import { ProvidersPage } from "./ProvidersPage";
@@ -173,6 +174,7 @@ function SessionsPage() {
       </Field>
       </section>
       </div>
+      <ReconnectSettings />
       <SoundSettings />
     </>
   );

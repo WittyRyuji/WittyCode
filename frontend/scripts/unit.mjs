@@ -763,6 +763,15 @@ test("the configurable step limit arrives with init and live settings, with the 
   assert.equal(play(state, ["settings", { settings: SETTINGS }]).state.maxSteps, 80);
 });
 
+test("HTTP 502 reconnect settings default to 30 seconds and 5 retries and keep an explicit zero", () => {
+  const empty = emptyLiveData();
+  assert.deepEqual([empty.reconnectInterval, empty.reconnectLimit], [30, 5]);
+  const { state } = play(started(), ["settings", { settings: { ...SETTINGS, reconnectInterval: 12, reconnectLimit: 0 } }]);
+  assert.deepEqual([state.reconnectInterval, state.reconnectLimit], [12, 0]);
+  const defaults = play(state, ["settings", { settings: SETTINGS }]).state;
+  assert.deepEqual([defaults.reconnectInterval, defaults.reconnectLimit], [30, 5]);
+});
+
 test("ChatGPT Plan compaction: the switch and the percent come with the settings, a view without them is the default", () => {
   const empty = emptyLiveData();
   assert.deepEqual([empty.compactAuto, empty.compactAt, COMPACT_AT_DEFAULT], [true, 85, 85]);

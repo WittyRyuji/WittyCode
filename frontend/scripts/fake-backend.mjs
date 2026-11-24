@@ -989,6 +989,8 @@ function fakeBackend(config) {
       else if (p.key === "fontScale" && ["sm", "md", "lg"].includes(v)) s.fontScale = v;
       else if (p.key === "maxOpen" && Number.isInteger(v) && v >= 1 && v <= 16) s.maxOpen = v;
       else if (p.key === "maxSteps" && Number.isSafeInteger(v) && v >= 1) s.maxSteps = v;
+      else if (p.key === "reconnectInterval" && Number.isInteger(v) && v >= 1 && v <= 3600) s.reconnectInterval = v;
+      else if (p.key === "reconnectLimit" && Number.isInteger(v) && v >= 0 && v <= 5) s.reconnectLimit = v;
       else if (p.key === "sidebarWidth" && Number.isInteger(v) && v >= 220 && v <= 440) s.sidebarWidth = v;
       else if (p.key === "inspectorWidth" && Number.isInteger(v) && (v === 0 || v >= 340 && v <= 4000)) s.inspectorWidth = v;
       else if (p.key === "devinPath" && typeof v === "string") s.devinPath = v.trim();

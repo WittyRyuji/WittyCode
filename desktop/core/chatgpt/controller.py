@@ -1187,6 +1187,8 @@ class ChatGPTController:
                 shape=self.manager.shape,
                 conversation=self.session_id,
                 max_steps=self.turn_step_limit,
+                reconnect_interval=self.manager.settings.reconnect_interval,
+                reconnect_limit=self.manager.settings.reconnect_limit,
                 max_continuations=2,
                 **self._carried_measure(model),
             )

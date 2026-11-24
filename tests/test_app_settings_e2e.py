@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+from pathlib import Path
 
 import pytest
 from PySide6.QtCore import Qt
 
 from desktop.core import sounds
 from tests.e2e_support import open_rig
+from tests.fake_responses import http_error
 from tests.ui_support import run, wait_for
 
 pytestmark = pytest.mark.ui
@@ -52,6 +55,42 @@ def test_notification_controls_are_last_show_paths_and_select_reset_preview_and_
             await rig.click_text(".snav", "会话")
             assert await rig.js("document.querySelector('[aria-label=\"提示音总开关\"]').getAttribute('aria-checked')") == "false"
             assert played == [str(custom)], "reloading does not replay sounds"
+        finally:
+            await rig.finish()
+
+    run(loop, scenario())
+
+
+def test_reconnect_settings_save_and_control_the_next_conversation_turn(qapp, loop, tmp_path):
+    async def scenario():
+        rig = await open_rig(tmp_path)
+        try:
+            await rig.press(",", Qt.KeyboardModifier.ControlModifier)
+            await rig.click_text(".snav", "会话")
+            await rig.wait_text(".reconnect-settings h3", "重连设置")
+            interval, limit = ('input[aria-label="重连间隔"]', 'input[aria-label="重连上限"]')
+            assert await rig.js(f"document.querySelector({json.dumps(interval)}).value") == "30"
+            assert await rig.js(f"document.querySelector({json.dumps(limit)}).value") == "5"
+            await rig.js("document.querySelector('.reconnect-settings').scrollIntoView({block: 'center'})")
+            if evidence := os.environ.get("WITTYCODE_TEST_EVIDENCE"):
+                await rig.shot(".reconnect-settings", Path(evidence) / "reconnect-settings.png")
+
+            for selector, attr in ((interval, "reconnect_interval"), (limit, "reconnect_limit")):
+                await rig.click(selector)
+                await rig.press("A", Qt.KeyboardModifier.ControlModifier)
+                await rig.type("1")
+                await rig.press("Enter")
+                await wait_for(lambda: getattr(rig.core.settings, attr) == 1)
+
+            await rig.click('.settings-body [aria-label="关闭"]')
+            await rig.core.call("session.new", {"projectId": str(rig.project)})
+            await rig.wait_text(".statusbar .st-left", "就绪")
+            error = http_error(502, {"error": {"message": "Bad gateway"}}, {"Retry-After": "60"})
+            rig.plan.script(error, error)
+            await rig.send("检查库存接口")
+            await rig.wait_text(".block.notice", "1 秒后自动重试（第 1/1 次）")
+            await rig.wait_for(".block.error", 1)
+            assert len(rig.plan.requests) == 2
         finally:
             await rig.finish()
 

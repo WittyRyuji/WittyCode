@@ -43,6 +43,8 @@ export interface LiveData {
   providers: ApiProvider[];
   maxOpen: number;
   maxSteps: number;
+  reconnectInterval: number;
+  reconnectLimit: number;
   devinPath: string;
   /** model ids left out of the conversation's model menu (a model in use is shown anyway) */
   hiddenModels: string[];
@@ -114,6 +116,8 @@ export const ALL_ENGINES: Engine[] = ["devin", "chatgpt", "factory"];
 export const COMPACT_AT_MIN = 50;
 export const COMPACT_AT_MAX = 95;
 export const COMPACT_AT_DEFAULT = 85;
+export const DEFAULT_RECONNECT_INTERVAL = 30;
+export const DEFAULT_RECONNECT_LIMIT = 5;
 export const clampCompactAt = (percent: number): number => Math.max(COMPACT_AT_MIN, Math.min(COMPACT_AT_MAX, Math.round(percent)));
 export const NO_MEMORY: MemoryState = { latest: 0, unseen: 0, seen: 0, pending: 0 };
 
@@ -144,6 +148,8 @@ export function emptyLiveData(theme: ThemeChoice = "system", fontScale: FontScal
     providers: [],
     maxOpen: 4,
     maxSteps: 80,
+    reconnectInterval: DEFAULT_RECONNECT_INTERVAL,
+    reconnectLimit: DEFAULT_RECONNECT_LIMIT,
     devinPath: "",
     hiddenModels: [],
     themeChoice: theme,
@@ -248,6 +254,8 @@ export function settingsFields(v: SettingsView): Partial<LiveData> {
   return {
     maxOpen: v.maxOpen,
     maxSteps: v.maxSteps ?? 80,
+    reconnectInterval: v.reconnectInterval ?? DEFAULT_RECONNECT_INTERVAL,
+    reconnectLimit: v.reconnectLimit ?? DEFAULT_RECONNECT_LIMIT,
     devinPath: v.devinPath ?? "",
     hiddenModels: v.hiddenModels ?? [],
     themeChoice: v.theme,
