@@ -1118,7 +1118,7 @@ Fusion 固定路由的分支交接见 [handoff-fusion-dev.md](handoff-fusion-dev
 - **下一步（需要用户）**：重启 WittyCode，在设置 > 账号与模型 点 `Continue with ChatGPT`，在浏览器授权一次，再发一条消息。然后按 `docs/chatgpt-plan-harness.md` 第 4 节逐项核实，结果记回那份文档；第一次请求被拒就先看 `Shape`（`WITTYCODE_CHATGPT_SHAPE`）。
 - OpenAI 项目的资格：开源应用才能直接用——需要公开仓库和许可证，**精确定义没有查到**；以后收费或托管要填 `https://openai.com/form/sign-in-with-chatgpt-interest/`。
 - 换成 OpenAI 官方品牌的按钮素材。
-- 多语言（按偏好语言）、BYOK 走自己的循环、Claude / Gemini 订阅（先核对原始条款）：都还没开始。
+- 多语言（按偏好语言）、BYOK 走自己的循环、Claude / Gemini 订阅（先核对原始条款）：都还没开始。（2026-11-24 补：Gemini 的条款已核对，订阅不能走 API，Antigravity 订阅登录只许人直接驱动，见 `docs/knowledge.md` 第 104 条。）
 - 还没提交 git，也没推 GitHub（已问用户，还没答）。
 
 ### 2026-11-04 记忆 Hook（应用侧）、会话被命名成记忆简介的 bug、ChatGPT 套餐调研（主会话）
