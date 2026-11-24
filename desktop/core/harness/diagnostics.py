@@ -8,7 +8,6 @@ from collections.abc import Mapping
 from typing import Any
 
 from desktop.core.chatgpt.responses import Finished
-from desktop.core.harness.history import message_text
 
 MAX_RECORDS = 128
 _REASONS = frozenset({
@@ -63,15 +62,8 @@ class RequestTrace:
                 result = fingerprint(value)
             cache[key] = result
             return result
-        # Compare the fixed fields outside input separately. A developer prefix participates in the item-wise comparison.
         fixed = digest([request.get(key) for key in ("model", "instructions", "tools", "reasoning", "wc_reasoning_effort")])
-        inputs = request.get("input") or ()
-        items = [digest(item) for item in inputs]
-        instructions = request.get("instructions")
-        if "instructions" not in request and inputs:
-            first = inputs[0]
-            if isinstance(first, Mapping) and first.get("type") == "message" and first.get("role") == "developer":
-                instructions = message_text(first)
+        items = [digest(item) for item in request.get("input") or ()]
         shared = 0
         if self._fixed == fixed:
             for before, after in zip(self._items, items):
@@ -81,7 +73,7 @@ class RequestTrace:
         self._fixed, self._items = fixed, items
         record: dict[str, Any] = {
             "at": round(time.time(), 3), "seconds": round(max(seconds, 0), 3), "failed": failed,
-            "model_hash": digest(request.get("model")), "instructions_hash": digest(instructions),
+            "model_hash": digest(request.get("model")), "instructions_hash": digest(request.get("instructions")),
             "tools_hash": digest(request.get("tools")), "reasoning_hash": digest([request.get("reasoning"), request.get("wc_reasoning_effort")]),
             "input_hash": digest(items), "input_items": len(items), "shared_prefix_items": shared,
         }

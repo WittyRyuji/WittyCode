@@ -10,7 +10,7 @@ page offers to ask again, and no request is made with it.
 
 ``stream`` is the one function the loop calls to ask the model: it takes a fresh access token, posts the request and reads
 the events. ``WITTYCODE_CHATGPT_SHAPE`` (a JSON object of ``responses.Shape`` fields) changes what the request looks like
-without a new build. For example, ``{"cache_developer_instructions": false}`` restores top-level instructions on GPT-6.2+.
+without a new build, for the parts of the route that were not verified on a real account.
 """
 
 from __future__ import annotations
