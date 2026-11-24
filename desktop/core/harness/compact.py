@@ -134,7 +134,8 @@ def estimate_items(items: Sequence[Mapping[str, Any]]) -> int:
 
 
 def fixed_tokens(instructions: str, declarations: Sequence[Mapping[str, Any]], shape: Shape = Shape()) -> int:
-    """Tokens of what every request holds besides the conversation: the instructions and the tools, as they are sent."""
+    """Estimate the full instructions and tools, separate from the history view. Even when sent as the first developer
+    message, the stable instructions aren't in the view and must be counted here."""
     return estimate_text(instructions) + estimate_text(json.dumps(declare_tools(declarations, shape), ensure_ascii=False))
 
 
@@ -443,7 +444,8 @@ def _request(model: str, reasoning: str | None, previous: str, part: Sequence[st
         items=[user_message(body)],
         tools=[],
         reasoning=reasoning,
-        shape=Shape(encrypted_reasoning=False, reasoning_summary=None, parallel_tool_calls=False),
+        # These are task instructions for a standalone summary, not the stable session prefix.
+        shape=Shape(encrypted_reasoning=False, reasoning_summary=None, parallel_tool_calls=False, cache_developer_instructions=False),
     )
 
 
@@ -463,14 +465,20 @@ SUMMARY_TASK = "WittyCode summary task: write a summary of the conversation abov
 OnRequest = Callable[[dict[str, Any], Finished | None, float, bool], None]
 
 
+def _request_tokens(request: Mapping[str, Any]) -> int:
+    """Estimate a built summary request. Developer instructions in input are already counted with the other items."""
+    size = estimate_items(request.get("input") or ())
+    if "instructions" in request:
+        size += estimate_text(str(request["instructions"] or ""))
+    return size + estimate_text(json.dumps(request.get("tools") or [], ensure_ascii=False))
+
+
 def prefix_summary_request(base: Mapping[str, Any], items: Sequence[Mapping[str, Any]], window: int) -> dict[str, Any] | None:
     """Reuse the main Responses prefix when it fits; no experimental cache or server-compaction parameters."""
     if any(tool_images_of(item) for item in items):
         return None  # The text summary keeps the picture description, not the tool attachment.
-    request = {**base, "input": [*items, user_message(SUMMARY_TASK + INSTRUCTIONS)], "tool_choice": "none"}
-    size = estimate_items(request["input"]) + estimate_text(str(request.get("instructions") or ""))
-    size += estimate_text(json.dumps(request.get("tools") or [], ensure_ascii=False))
-    return request if size <= budget(window) else None
+    request = {**base, "input": [*(base.get("input") or ()), *items, user_message(SUMMARY_TASK + INSTRUCTIONS)], "tool_choice": "none"}
+    return request if _request_tokens(request) <= budget(window) else None
 
 
 async def ask(
@@ -544,7 +552,7 @@ async def summarise(
     ceiling = window - reserve(window) if window is not None else None
     while pending:
         empty = _request(model, reasoning, summary, [])
-        overhead = fixed_tokens(INSTRUCTIONS, []) + estimate_items(empty["input"])
+        overhead = _request_tokens(empty)
         available = min(budget, ceiling - overhead - 16) if ceiling is not None else budget
         if available < PIECE_LABEL + 8:
             raise CompactionFailed("The previous summary and instructions leave no room for more evidence; use a larger context window.")
@@ -565,7 +573,7 @@ async def summarise(
             group.append(pending.popleft())
             used += cost
         request = _request(model, reasoning, summary, group)
-        if ceiling is not None and fixed_tokens(INSTRUCTIONS, []) + estimate_items(request["input"]) > ceiling:
+        if ceiling is not None and _request_tokens(request) > ceiling:
             raise CompactionFailed("The complete summary request exceeds the model's context budget; no request was sent.")
         summary = await ask(stream, model, reasoning, summary, group, on_usage, request=request, on_request=on_request)
     return summary

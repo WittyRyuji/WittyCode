@@ -18,6 +18,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import re
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -44,6 +45,8 @@ class Shape:
     parallel_tool_calls: bool = True
     cache_key: bool = False
     """Optional cache-accounting isolation. GPT-5.6+ routes automatically; a changing key can prevent reuse."""
+    cache_developer_instructions: bool = True
+    """On GPT-6.2+, send reusable instructions as the first developer message instead of a top-level field."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,6 +171,15 @@ def declare_tools(tools: Sequence[Mapping[str, Any]], shape: Shape) -> list[dict
     return [{"type": "namespace", "name": NAMESPACE, "description": "Tools for working in the user's project.", "tools": functions}]
 
 
+_GPT_MODEL = re.compile(r"gpt-([1-9][0-9]*)(?:\.(0|[1-9][0-9]*))?(?:-[a-z0-9]+)*")
+
+
+def can_cache_developer_instructions(model: str) -> bool:
+    """GPT-6.2+ Plan model slugs only; leave unknown and API provider ids alone."""
+    match = _GPT_MODEL.fullmatch(model)
+    return match is not None and (int(match[1]), int(match[2] or "0")) >= (6, 2)
+
+
 def build_request(
     *,
     model: str,
@@ -178,13 +190,16 @@ def build_request(
     shape: Shape = Shape(),
     conversation: str = "",
 ) -> dict[str, Any]:
-    request: dict[str, Any] = {
-        "model": model,
-        "instructions": instructions,
-        "input": [dict(item) for item in items],
-        "store": False,
-        "stream": True,
-    }
+    request: dict[str, Any] = {"model": model}
+    inputs = [dict(item) for item in items]
+    if shape.cache_developer_instructions and can_cache_developer_instructions(model):
+        # GPT-6.2+ appends top-level instructions after the cacheable prefix. The Plan Responses endpoint
+        # documents requests without that field, so omit it rather than sending an uncached placeholder.
+        if instructions:
+            inputs.insert(0, {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": instructions}]})
+    else:
+        request["instructions"] = instructions
+    request.update(input=inputs, store=False, stream=True)
     if tools:
         request["tools"] = declare_tools(tools, shape)
         request["tool_choice"] = "auto"
