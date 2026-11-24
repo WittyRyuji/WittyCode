@@ -43,7 +43,7 @@ from typing import Any
 from desktop.core.chatgpt.errors import is_transient
 from desktop.core.chatgpt.responses import Finished, Shape, Started, TextDone, build_request, declare_tools, user_message
 from desktop.core.harness.history import tool_images_of
-from desktop.core.harness.prompt import context_update
+from desktop.core.harness.prompt import context_refresh, context_update
 
 log = logging.getLogger("desktop.harness.compact")
 
@@ -680,7 +680,15 @@ async def compact(
     mechanical = False
     try:
         has_retained = any(item.get("wc_output_ref") for item in covered)
-        reused = prefix_summary_request(prefix_request, view[:cut], window) if prefix_request is not None and not has_retained else None
+        reused = None
+        if prefix_request is not None and not has_retained:
+            items = view[:cut]
+            last_update = max((i for i, item in enumerate(items) if item.get("wc_context_update")), default=-1)
+            last_refresh = max((i for i, item in enumerate(items) if item.get("wc_context_refresh")), default=-1)
+            if last_update > last_refresh and any(item.get("wc_context_refresh") for item in view[cut:]):
+                # Invalidate the old updates in the summary request without changing the kept tail.
+                items = [*items, context_refresh()]
+            reused = prefix_summary_request(prefix_request, items, window)
         if reused is not None:
             summary = await ask(stream, model, reasoning, told, parts, on_usage, request=reused, on_request=on_request)
         else:

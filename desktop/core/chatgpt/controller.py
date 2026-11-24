@@ -56,7 +56,7 @@ from desktop.core.harness.loop import INTERRUPTED, AgentLoop, Call, Observer, Ou
 from desktop.core.harness.mcp import McpClient, McpError, McpTool, parse_tools
 from desktop.core.harness.permissions import LEVELS
 from desktop.core.harness.diagnostics import MAX_RECORDS, RequestTrace
-from desktop.core.harness.prompt import build_instructions, changed_context, context_update
+from desktop.core.harness.prompt import build_instructions, changed_context, context_refresh, context_update
 from desktop.core.harness.store import FIRST_PROMPT, SavedSession, SavedTurn, diff_to_json, pair_in_place, paired, recover
 from desktop.core.harness.tools import ToolContext, ToolError
 from desktop.core.harness.toolset import HarnessTools
@@ -1149,6 +1149,8 @@ class ChatGPTController:
             snapshot = self.saved.prompt
             if not snapshot.get("instructions"):
                 snapshot.update(instructions=instructions, current=instructions, sections=sections)
+                if any(old.get("wc_context_update") for old in compact.view_of(self.saved.items, self.saved.compaction)):
+                    self.saved.items.append(context_refresh())
             else:
                 update = changed_context(snapshot["sections"], sections) if isinstance(snapshot.get("sections"), dict) else (
                     context_update(instructions) if snapshot.get("current") != instructions else None

@@ -250,6 +250,17 @@ def context_update(instructions: str) -> dict[str, object]:
     }
 
 
+def context_refresh() -> dict[str, object]:
+    """Supersede earlier updates without introducing rules that would force a compaction cut."""
+    return {
+        "type": "message", "role": "developer", "wc_context_refresh": True,
+        "content": [{"type": "input_text", "text": (
+            "WittyCode context update: the instruction snapshot at the start of the conversation now contains the complete current "
+            "rules. All context-update messages before this one no longer apply."
+        )}],
+    }
+
+
 def build_instructions(
     project: Path,
     *,
