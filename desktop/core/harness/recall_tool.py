@@ -2,10 +2,9 @@
 
 The gate, the walk and the shared turn ledger live in ``session_recall`` / ``recall_budget``; this module is the
 production adapter that gives the tools layer a runtime-authorized way in. ``bind_history`` installs a
-``ToolContext.history_recall`` callback bound to the controller's ``_archive_binding``: the tool is declared only
-while that binding carries a live ``archive`` (a ``SessionArchive`` — ``.latest()[0]`` is the newest committed
-generation, ``read_generation`` yields its snapshot). With no binding nothing changes: no declaration, the name is
-unknown to the model, and every test that counted the tool list stays green.
+``ToolContext.history_recall`` callback. It declares the tool from the first request of a session that archives,
+even if the archive is still pending or fails to open. Calls require a usable ``SessionArchive`` (``.latest()[0]``
+is the newest committed generation, ``read_generation`` yields its snapshot).
 
 What the service needs and only the runtime has is read at call time, never at bind time: the real user message
 (``turn.user_block.text`` — the injected ``sent`` text is not what the user wrote), the active view
@@ -23,7 +22,7 @@ layers keep that from happening: the observer skips retention for the names in `
 result big enough to be retained carries a real reference to ``outputs.NOT_REPLAYABLE`` instead, so the archive
 text never enters the store at all.
 
-Wiring, in the controller once its archive binding exists::
+Wiring, in the controller before its first request::
 
     recall_tool.bind_history(self._context, self)   # in _ensure_tools, after the ToolContext is made
 """
@@ -90,12 +89,12 @@ def _latest_of(archive: Any) -> Callable[[], "int | None"]:
 
 
 class HistoryRecall:
-    """The ``ToolContext.history_recall`` callback. Resolves the controller's ``_archive_binding`` at call time,
-    so a binding that appears after the tools are made still opens the archive, and one that loses its ``archive``
-    disables the tool without another wiring step."""
+    """Fix the declaration when the tools are wired; resolve the archive anew for each call."""
 
     def __init__(self, controller: Any) -> None:
         self.controller = controller
+        self.declared = (bool(getattr(controller, "_archive_pending", False) or getattr(controller, "_archive_broken", False))
+                         or getattr(controller, "_archive_binding", None) is not None)
 
     # ---- the runtime authorization ----------------------------------------
 
@@ -103,10 +102,15 @@ class HistoryRecall:
         binding = getattr(self.controller, "_archive_binding", None)
         return getattr(binding, "archive", None) if binding is not None else None
 
+    def _available_archive(self) -> Any:
+        if not self.declared or getattr(self.controller, "_archive_broken", False):
+            return None
+        return self._archive()
+
     @property
     def enabled(self) -> bool:
-        """A live archive authorizes recall; without one the tool is not even declared."""
-        return self._archive() is not None
+        """Only a live, healthy archive authorizes a call, regardless of the declaration."""
+        return self._available_archive() is not None
 
     # ---- what only the runtime knows ----------------------------------------
 
@@ -193,8 +197,8 @@ class HistoryRecall:
         same need gate and then the shared ledger. A hash that was never attached to a tool result of this
         session is refused outright: a listed or pasted ``o-…`` is not authorization, not even under the
         user's own explicit ask."""
-        if not self.enabled:
-            return "free"  # no archive authorization: the plain read stays as it was
+        if self._archive() is None:
+            return "free"  # no archive store: the plain read stays as it was
         provenance = self.output_provenance()
         if provenance is None:
             raise ToolError("read_output cannot prove which turn this output belongs to; it is refused rather than guessed.")
@@ -229,7 +233,7 @@ class HistoryRecall:
     # ---- the call -----------------------------------------------------------
 
     def __call__(self, question: str, reason: str = "") -> str:
-        archive = self._archive()
+        archive = self._available_archive()
         if archive is None:
             return "[recall] denied: " + UNAVAILABLE
         turn_id = self._turn_id()
@@ -249,8 +253,7 @@ class HistoryRecall:
 
 
 def bind_history(ctx: ToolContext, controller: Any) -> HistoryRecall:
-    """Install this session's recall callback on the tools' context — one line in the controller once
-    ``_archive_binding`` exists. Idempotent: rebinding the same controller keeps the callback already installed."""
+    """Install the adapter before declaring tools. Rebinding the same controller keeps its original contract."""
     bound = ctx.history_recall
     if not isinstance(bound, HistoryRecall) or bound.controller is not controller:
         bound = HistoryRecall(controller)

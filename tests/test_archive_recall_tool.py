@@ -1,4 +1,4 @@
-"""``recall_history`` as a built-in tool: declared only under a live archive binding, answered through
+"""``recall_history`` as a built-in tool: declared for sessions that archive, answered through
 ``HarnessTools`` by the gate/walk/ledger service, budgeted by the shared turn ledger, and never replayable
 through ``read_output``.
 
@@ -97,23 +97,30 @@ def test_no_binding_keeps_everything_as_it_was(tmp_path):
     assert outcome.is_error and recall_tool.UNAVAILABLE in outcome.output
 
 
-def test_a_binding_without_an_archive_declares_nothing(tmp_path):
-    for ctl in (controller(tmp_path, {}, archive=None),          # binding itself absent
-                controller(tmp_path, {}, archive=False)):        # binding present, archive None
+def test_a_binding_without_a_usable_archive_is_declared_but_refused(tmp_path):
+    broken = controller(tmp_path, {}, archive=True)
+    broken._archive_broken = True
+    for ctl in (controller(tmp_path, {}, archive=False), broken):
         t = tools(tmp_path, ctl)
-        assert recall_tool.NAME not in [d["name"] for d in t.declarations()]
-        assert not t.known(recall_tool.NAME)
+        assert recall_tool.NAME in [d["name"] for d in t.declarations()]
+        assert t.known(recall_tool.NAME)
+        verdict = t.check(call("超时上限"))
+        assert verdict.verdict == DENY and recall_tool.UNAVAILABLE in verdict.reason
         outcome = run(t.run(call("超时上限")))
         assert outcome.is_error and recall_tool.UNAVAILABLE in outcome.output
 
 
-def test_a_late_binding_still_enables_the_tool(tmp_path):
+def test_a_pending_binding_declares_the_tool_before_enabling_reads(tmp_path):
     ctl = controller(tmp_path, {}, archive=None)
+    ctl._archive_pending = True
     t = tools(tmp_path, ctl)
-    assert recall_tool.NAME not in [d["name"] for d in t.declarations()]
+    declared = t.declarations()
+    assert recall_tool.NAME in [d["name"] for d in declared]
+    assert t.known(recall_tool.NAME) and t.check(call("超时上限")).verdict == DENY
     ctl._archive_binding = SimpleNamespace(archive=FakeArchive({1: gen(None, [rec("e1", "我们把超时上限定为 30 秒")])}, tmp_path))
-    assert recall_tool.NAME in [d["name"] for d in t.declarations()]
-    assert t.known(recall_tool.NAME)
+    ctl._archive_pending = False
+    assert t.declarations() == declared
+    assert t.known(recall_tool.NAME) and t.check(call("超时上限")).verdict == ALLOW
 
 
 # ---------------------------------------------------------------------- the call

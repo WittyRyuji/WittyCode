@@ -625,7 +625,7 @@ class ChatGPTController:
                 protected.append(path)
         self._context = self._context or ToolContext(self.project, threading.Event(), protected=tuple(protected), outputs=self._outputs)
         if self._fusion_parent is None and self._fusion_identity is None:
-            # The recall tool is declared only while ``_archive_binding`` holds a live archive (harness/recall_tool).
+            # Record the recall contract before preparing the first request, not at the archive checkpoint.
             recall_tool.bind_history(self._context, self)
         info = self.manager.model_info(self.running_model)
         self._context.supports_images = info is not None and info.supports_images
@@ -2020,10 +2020,10 @@ class ChatGPTController:
         conversation backend — ``gpt`` on the ChatGPT plan, ``wittyharness`` on API providers (the harness is the
         conversation), ``fusion`` on Fusion routing. The ACP stretch's native id comes only from the real
         handshake (``_acp.session`` / the persisted ``saved.origin['fusionAcp']['session']``) — before one
-        exists nothing may be written, so ``None`` means "not yet archivable". A fusion session on a local
-        driver is still ``fusion`` (its ``_fusion`` state, not a model prefix) with the driver's own connection
-        and the local driver's native id — our session id. A backend switch starts a new archive instance; a
-        switch back resumes the old one."""
+        exists nothing may be written, so ``None`` means "not yet archivable". A Fusion session on a local
+        driver is still ``fusion`` (its ``_fusion`` state, not a model prefix) and uses our session id. Local
+        backends sharing that id and driver get separate connection keys, so a switch creates a new archive
+        instance and a switch back resumes the old one."""
         model = self.running_model or self.model or ""
         if model.startswith("devin:"):
             acp = getattr(self._acp, "session", "")
@@ -2032,9 +2032,10 @@ class ChatGPTController:
             native = acp or (saved_native if isinstance(saved_native, str) else "")
             return ("fusion", "devin", native) if native else None
         driver = "api" if model.startswith("api:") else "gpt"
-        if self._fusion is not None:
-            return "fusion", driver, self.session_id
-        return ("wittyharness" if driver == "api" else "gpt"), driver, self.session_id
+        backend = "fusion" if self._fusion is not None else ("wittyharness" if driver == "api" else "gpt")
+        binding = self._archive_binding
+        connection = binding.local_connection(backend, driver) if binding is not None else driver
+        return backend, connection, self.session_id
 
     def _archive_before_handoff(self) -> None:
         """Fusion ACP knows its real native session id and is about to write retained handoff text: bind
@@ -2057,11 +2058,11 @@ class ChatGPTController:
         binding = self._archive_binding
         if binding is None:
             return
-        segment = self._archive_segment()
-        if segment is None:
-            return  # the ACP stretch has no real native id yet; nothing is written until the handshake
-        backend, connection, native = segment
         try:
+            segment = self._archive_segment()
+            if segment is None:
+                return  # the ACP stretch has no real native id yet; nothing is written until the handshake
+            backend, connection, native = segment
             binding.ensure_instance(backend, native, connection)
             binding.sync(self.saved.items, self.saved.turns)
         except Exception:

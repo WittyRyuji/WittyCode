@@ -2,7 +2,7 @@
 a new conversation mirrors its durable log into a runtime-bound archive at its checkpoints and moves its output
 store there, a verified compaction commits a snapshot generation while every failure path aborts or refuses, a
 reopened session rebinds through ``saved.origin`` (old sessions are never migrated), and ``recall_history`` is
-declared only while a live archive is bound."""
+declared for sessions that archive and callable only once an archive is usable."""
 
 from __future__ import annotations
 
@@ -14,7 +14,8 @@ from desktop.core import session_archive
 from desktop.core.chatgpt.archive_binding import ArchiveBinding
 from desktop.core.chatgpt.controller import ARCHIVE_ORIGIN
 from desktop.core.chatgpt.responses import user_message
-from desktop.core.harness import compact
+from desktop.core.harness import compact, recall_tool
+from desktop.core.harness.loop import Call
 from desktop.core.harness.store import SavedTurn
 from desktop.core.session_archive import ArchiveError
 from desktop.core.transcript import Turn, TurnStatus
@@ -95,6 +96,8 @@ def test_a_reopened_session_rebinds_and_an_old_one_is_never_migrated(tmp_path):
             engine.sessions.save(saved)
             legacy = await engine.open_saved(folder, session_id)
             assert legacy._archive_binding is None and not legacy._archive_pending
+            await legacy._ensure_tools()
+            assert "recall_history" not in declared(legacy)
             await engine.close_all()
 
     run(go())
@@ -209,20 +212,21 @@ def test_a_broken_archive_blocks_compaction_but_not_the_conversation(tmp_path, m
 # ----------------------------------------------------------------------------------------------- the recall tool
 
 
-def test_recall_is_declared_only_while_a_live_archive_is_bound(tmp_path):
+def test_recall_declaration_does_not_follow_archive_availability(tmp_path):
     async def go() -> None:
         with FakeResponses(token=ACCESS_TOKEN) as fake:
             fake.script(say("the answer"))
             engine, controller = await opened(tmp_path, fake)
-            await controller._ensure_tools()
-            assert "recall_history" not in declared(controller), "no archive yet: the tool stays unknown"
+            tools = await controller._ensure_tools()
+            offered = tools.declarations()
+            assert "recall_history" in declared(controller), "the pending archive declares the tool"
+            bound = tools.context.history_recall
+            assert bound is not None and not bound.enabled
             controller.send_prompt("first question")
             await finish_turn(controller)
-            assert "recall_history" in declared(controller), "a live archive declares the tool"
-            bound = controller._context.history_recall
-            assert bound is not None and bound.enabled
+            assert bound.enabled and tools.declarations() == offered
             controller._archive_binding = None
-            assert not bound.enabled and "recall_history" not in declared(controller), "a lost binding undeclares it"
+            assert not bound.enabled and tools.declarations() == offered, "a lost binding doesn't change the contract"
             await engine.close_all()
 
     run(go())
@@ -391,8 +395,8 @@ def test_the_archive_segment_uses_only_real_native_ids(tmp_path):
             assert local["backend"] == "fusion" and local["native"] == controller.session_id
 
             controller._fusion = None
-            assert controller._archive_segment() == ("gpt", "gpt", controller.session_id), \
-                "without real fusion state the stretch is a plain local backend, not a fusion look-alike"
+            assert controller._archive_segment() == ("gpt", "gpt:gpt", controller.session_id), \
+                "the plain backend must not reuse the driver key already bound to the Fusion backend"
             await engine.close_all()
 
     run(go())
@@ -401,7 +405,7 @@ def test_the_archive_segment_uses_only_real_native_ids(tmp_path):
 def test_a_reopened_session_whose_archive_cannot_be_restored_refuses_to_compact(tmp_path, monkeypatch):
     """The marker exists but ``ArchiveBinding.restore`` fails: the session opens anyway with its old view,
     marked broken — ``_compact`` refuses instead of degrading to a legacy, unarchived compaction, the
-    archive output store is never adopted and ``recall_history`` stays undeclared."""
+    archive output store is never adopted, and the declared ``recall_history`` refuses calls."""
     async def go() -> None:
         with FakeResponses(token=ACCESS_TOKEN) as fake:
             fake.script(say("the answer"), say("unreached"))
@@ -429,7 +433,10 @@ def test_a_reopened_session_whose_archive_cannot_be_restored_refuses_to_compact(
             turn = reopened.transcript.turns[-1]
             assert turn.status is TurnStatus.FAILED and "归档" in failed_error(turn)
             assert reopened.saved.compaction == {}, "the old view is untouched"
-            assert "recall_history" not in declared(reopened), "no binding: the tool stays undeclared"
+            assert "recall_history" in declared(reopened), "a failed restore does not remove the declared tool"
+            recall = Call("i1", "c1", "recall_history", "", {"question": "zebra0"})
+            outcome = await reopened._tools.run(recall)
+            assert outcome.is_error and recall_tool.UNAVAILABLE in outcome.output
             assert reopened._outputs.root != archive_root(tmp_path) / sid / "output", \
                 "the archive's store was never adopted"
             await engine.close_all()

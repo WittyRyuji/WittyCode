@@ -139,6 +139,8 @@ def test_summary_reads_middle_evidence_and_every_request_fits(tmp_path, window):
     asyncio.run(go())
 
 
+# Patch OutputStore.put rather than the controller's initial store: the first checkpoint
+# replaces that instance with the archive's metered store, which also delegates to OutputStore.put.
 def test_retention_failure_keeps_the_live_result_but_stops_requests(tmp_path, monkeypatch):
     async def go():
         project = tmp_path / "project"
@@ -148,12 +150,12 @@ def test_retention_failure_keeps_the_live_result_but_stops_requests(tmp_path, mo
             fake.script(call("read_file", {"file_path": "evidence.txt"}), say("Continued."))
             engine = make_engine(tmp_path, fake)
             ctl = await engine.open_new(project, model="gpt-6.1-sol")
-            original_put = ctl._outputs.put
+            original_put = OutputStore.put
             attempts = []
-            def full(text):
+            def full(store, text):
                 attempts.append(text)
                 raise OSError("demo output storage full")
-            monkeypatch.setattr(ctl._outputs, "put", full)
+            monkeypatch.setattr(OutputStore, "put", full)
             try:
                 ctl.send_prompt("Read evidence.txt")
                 await finish_turn(ctl)
@@ -164,7 +166,7 @@ def test_retention_failure_keeps_the_live_result_but_stops_requests(tmp_path, mo
                 result = next(item["output"] for item in ctl.saved.items if item.get("type") == "function_call_output")
                 assert "EVIDENCE" in result and "not" in result.lower() and "retain" in result.lower()
                 assert_paired(engine.sessions.load(ctl.session_id).items)
-                monkeypatch.setattr(ctl._outputs, "put", original_put)
+                monkeypatch.setattr(OutputStore, "put", original_put)
                 ctl.send_prompt("Storage is available; continue")
                 await finish_turn(ctl)
                 assert len(fake.requests) == 2
@@ -187,15 +189,15 @@ def test_parallel_retention_failures_pair_every_completed_result(tmp_path, monke
                                for name in ("first", "second", "third")]))
             engine = make_engine(tmp_path, fake)
             ctl = await engine.open_new(project, model="gpt-6.1-sol")
-            original_put = ctl._outputs.put
+            original_put = OutputStore.put
             attempts = []
-            def full(text):
+            def full(store, text):
                 name = next(name for name in ("first", "second", "third") if name + " evidence" in text)
                 attempts.append(name)
                 if name in fail_names:
                     raise OSError("demo output storage full")
-                return original_put(text)
-            monkeypatch.setattr(ctl._outputs, "put", full)
+                return original_put(store, text)
+            monkeypatch.setattr(OutputStore, "put", full)
             try:
                 ctl.send_prompt("Read all three files")
                 await finish_turn(ctl)
@@ -227,10 +229,10 @@ def test_retention_failure_does_not_repeat_a_completed_write(tmp_path, monkeypat
             ctl = await engine.open_new(tmp_path / "project", model="gpt-6.1-sol")
             tools = await ctl._ensure_tools()
             tools.check = lambda call: Verdict("allow")
-            original_put = ctl._outputs.put
-            def full(text):
+            original_put = OutputStore.put
+            def full(store, text):
                 raise OSError("demo output storage full")
-            monkeypatch.setattr(ctl._outputs, "put", full)
+            monkeypatch.setattr(OutputStore, "put", full)
             try:
                 ctl.send_prompt("Make one change")
                 await finish_turn(ctl)
@@ -238,7 +240,7 @@ def test_retention_failure_does_not_repeat_a_completed_write(tmp_path, monkeypat
                 assert_paired(ctl.saved.items)
                 result = next(item["output"] for item in ctl.saved.items if item.get("type") == "function_call_output")
                 assert "WRITE COMPLETED" in result and "before repeating" in result
-                monkeypatch.setattr(ctl._outputs, "put", original_put)
+                monkeypatch.setattr(OutputStore, "put", original_put)
                 ctl.send_prompt("Check before continuing")
                 await finish_turn(ctl)
                 assert writes == ["done"] and ctl.saved.turns[-1].status == "done"
@@ -257,16 +259,16 @@ def test_cancel_during_retention_keeps_the_completed_reference(tmp_path, monkeyp
             fake.script(call("read_file", {"file_path": "evidence.txt"}))
             engine = make_engine(tmp_path, fake)
             ctl = await engine.open_new(project, model="gpt-6.1-sol")
-            original_put = ctl._outputs.put
+            original_put = OutputStore.put
             started, release = threading.Event(), threading.Event()
             attempts = []
-            def held(text):
+            def held(store, text):
                 attempts.append(text)
                 started.set()
                 if not release.wait(10):
                     raise OSError("demo retention timed out")
-                return original_put(text)
-            monkeypatch.setattr(ctl._outputs, "put", held)
+                return original_put(store, text)
+            monkeypatch.setattr(OutputStore, "put", held)
             try:
                 ctl.send_prompt("Read evidence.txt")
                 await until(started.is_set)

@@ -187,28 +187,36 @@ def test_six_big_tool_results_share_the_room_the_request_has_and_nothing_too_big
         engine, controller = await opened(tmp_path, None)
         engine._windows[SOL] = WINDOW
         engine.settings.chatgpt_compact_at = percent  # (the user's point of compacting, not a number of the code)
-        service = Strict(WINDOW, six_files(controller.project), say("要点如下：" + "每个文件都是同一个字重复。" * 300), say("整理好了。"))
+        at = WINDOW * percent // 100
+        # The six reads can leave up to 5% of the threshold unused (checked below). Make the reply
+        # larger than that gap so the follow-up needs compaction regardless of whole-line clipping.
+        sentence = "每个文件都是同一个字重复。"
+        reply = "要点如下：" + sentence * (at // (20 * len(sentence)) + 1)
+        service = Strict(WINDOW, six_files(controller.project), say(reply), say("整理好了。"))
         engine.stream = service
         controller.send_prompt(REQUEST)
         await finish_turn(controller)
         assert controller.transcript.turns[-1].status is TurnStatus.DONE
         assert service.refused == [], "every request could be sent"
         assert service.summaries == [], "the six results were made to fit below the point of compacting: nothing to summarise"
-        first, second = service.mains
-        at = int(WINDOW * percent / 100)
-        assert at * 0.95 < request_size(second) < at, "as much of the six results as fits below the user's point, no more"
+        _, second = service.mains
+        second_size = request_size(second)
+        assert at * 0.95 < second_size < at, "as much of the six results as fits below the user's point, no more"
         outputs = [item for item in controller.saved.items if item["type"] == "function_call_output"]
         sizes = [compact.estimate_text(item["output"]) for item in outputs]
         assert len(outputs) == 6 and all("had to share what is left of the context window" in item["output"] for item in outputs)
         assert max(sizes) - min(sizes) <= max(sizes) * 0.03, "shared alike: no result crowded out the others"
 
         # the next message: the conversation is past the point now, and the summary stops where the new message begins
-        controller.send_prompt("继续，整理成表格。")
+        follow_up = "继续，整理成表格。"
+        added = [controller.saved.items[-1], user_message(follow_up)]
+        assert second_size + compact.estimate_items(added) > at, "the uncompressed follow-up crosses the user's point"
+        controller.send_prompt(follow_up)
         await finish_turn(controller)
         assert controller.transcript.turns[-1].status is TurnStatus.DONE and service.refused == []
         items, record = controller.saved.items, controller.saved.compaction
         assert len(items) == 1 + 6 + 6 + 1 + 1 + 1 and len([i for i in items if i["type"] == "function_call_output"]) == 6, "the log keeps everything"
-        assert record["upto"] == 14 and "继续，整理成表格。" in text_of(items[14])
+        assert record["upto"] == 14 and follow_up in text_of(items[14])
         assert record["after"] < record["before"]
         assert REQUEST in body_of(service.summaries[0]), "the user's request is in what the summary model read"
         last = service.mains[-1]

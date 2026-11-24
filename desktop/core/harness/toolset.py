@@ -142,15 +142,14 @@ class HarnessTools:
             declared.append(dict(debate_bridge.DECLARE_TOPIC_DECLARATION))
         if self.work_plan_submitter is not None:
             declared.append(dict(debate_bridge.SUBMIT_WORK_PLAN_DECLARATION))
-        if self._history_bound():
+        if self._history_declared():
             declared.append(dict(recall_tool.DECLARATION))
         for name, (_, tool) in self._mcp.items():
             declared.append({"name": name, "description": tool.description, "parameters": tool.input_schema})
         return [item for item in declared if not self.identity_refusal(item["name"])] if self.identity_tools is not None else declared
 
-    def _history_bound(self) -> bool:
-        """A runtime archive binding authorizes ``recall_history``: without one it is not declared and not known."""
-        return bool(getattr(getattr(self.context, "history_recall", None), "enabled", False))
+    def _history_declared(self) -> bool:
+        return bool(getattr(self.context.history_recall, "declared", False))
 
     def identity_refusal(self, name: str) -> str:
         kinds = self.identity_tools
@@ -192,7 +191,7 @@ class HarnessTools:
                 or (name == fusion_tools.UPDATE_MAP and self.map_updater is not None)
                 or (name == debate_bridge.DECLARE_TOPIC and self.topic_declarer is not None)
                 or (name == debate_bridge.SUBMIT_WORK_PLAN and self.work_plan_submitter is not None)
-                or (name == recall_tool.NAME and self._history_bound()))
+                or (name == recall_tool.NAME and self._history_declared()))
 
     def _identity_check(self, call: Call) -> Verdict | None:
         reason = self.identity_refusal(call.name)
@@ -288,7 +287,8 @@ class HarnessTools:
             return Verdict(ALLOW)  # Validated opaque references only, confined to this conversation.
         if call.name == recall_tool.NAME:
             # A read of this session's own archive under the turn ledger; it is never an action on the workspace.
-            return Verdict(ALLOW) if self._history_bound() else Verdict(DENY, recall_tool.UNAVAILABLE)
+            return (Verdict(ALLOW) if getattr(self.context.history_recall, "enabled", False)
+                    else Verdict(DENY, recall_tool.UNAVAILABLE))
         if call.name == fusion_tools.READ_RECORD:
             return Verdict(ALLOW) if self.record_reader is not None else Verdict(DENY, "Fusion Drive is unavailable.")
         if call.name == fusion_tools.SUBMIT_REPORT:
@@ -483,12 +483,12 @@ class HarnessTools:
                 return Outcome(asking.SKIPPED, cancelled=True)
             return Outcome(asking.result(views, answers))
         if call.name == recall_tool.NAME:
+            bound = self.context.history_recall
+            if not getattr(bound, "enabled", False):
+                return Outcome("Refused: " + recall_tool.UNAVAILABLE, True)
             question, reason, problem = recall_tool.parse(call.args)
             if problem:
                 return Outcome(problem, True)
-            bound = getattr(self.context, "history_recall", None)
-            if not getattr(bound, "enabled", False):
-                return Outcome("Refused: " + recall_tool.UNAVAILABLE, True)
             # Disk IO on the session archive; a worker thread keeps the loop free like the registry's sync handlers.
             text = await asyncio.to_thread(bound, question, reason)
             outcome = Outcome(text, text.startswith("[recall] denied"))

@@ -36,6 +36,13 @@ class ArchiveBinding:
         meter = getattr(manager, 'archive_meter', None)
         return cls(SessionArchive.open(manager.root.parent / 'session', sid, meter=meter() if meter else None), native_id)
 
+    def local_connection(self, backend: str, driver: str) -> str:
+        """One local native id can run both ordinary and Fusion backends. Preserve the first backend's
+        driver-only key (including existing archives); namespace the other backend without changing the native id."""
+        owner = next((identity['backend'] for identity in self.archive.manifest['identities']
+                      if (identity['connection'], identity['native']) == (driver, self.native_id)), None)
+        return f'{backend}:{driver}' if owner is not None and owner != backend else driver
+
     def ensure_instance(self, backend: str, native_id: str, connection: str) -> Instance:
         item = self.instance
         if not item or (item.backend, item.connection, item.native_id) != (backend, connection, native_id):
