@@ -8,9 +8,11 @@ import json
 import pytest
 
 from desktop.core.chatgpt.engine import SHAPE_ENV, shape_from_env
-from desktop.core.chatgpt.responses import Shape, build_request, can_cache_developer_instructions, user_message
+from desktop.core.chatgpt.responses import Shape, build_request, can_cache_developer_instructions, developer_message, user_message
 from desktop.core.harness import compact
 from desktop.core.harness.diagnostics import RequestTrace, fingerprint
+from desktop.core.llm.responses_api import responses_body
+from desktop.core.llm.wire import RESPONSES, Route
 from evals.metrics import prefix_breaks
 from tests.chatgpt_support import finish_turn, make_engine
 from tests.fake_responses import DEFAULT_MODELS, FakeResponses, say
@@ -140,3 +142,98 @@ def test_compaction_reuses_the_developer_prefix_and_counts_it_toward_the_budget(
     for shape in (Shape(), Shape(cache_developer_instructions=False)):
         tools_size = compact.fixed_tokens("", [TOOL], shape)
         assert compact.fixed_tokens(instructions, [TOOL], shape) - tools_size == compact.estimate_text(instructions) - compact.estimate_text("")
+
+
+# ---------------------------------------------------------------------- the API-key route (``api:`` ids, ``llm.responses_api``)
+
+
+def api_request(**kwargs) -> dict:
+    args = dict(model="api:demo:gpt-6.2-sol", instructions=INSTRUCTIONS, items=[user_message("one")], tools=[TOOL], reasoning="low")
+    return build_request(**{**args, **kwargs})
+
+
+def api_route(base_url: str = "https://api.openai.com/v1", model: str = MODEL, **kwargs) -> Route:
+    return Route(RESPONSES, base_url, model, **kwargs)
+
+
+def test_the_official_api_route_places_instructions_like_the_plan_route():
+    request = api_request()
+    original = copy.deepcopy(request)
+    body = responses_body(request, api_route())
+    assert "instructions" not in body
+    assert body["input"] == [DEVELOPER, user_message("one")]
+    assert body["model"] == MODEL and body["tools"] == [TOOL]
+    assert request == original, "the loop's request and its items are not changed"
+
+
+@pytest.mark.parametrize("base_url, model", [
+    ("https://api.openai.com/v1/", "gpt-6.1-sol"),      # an older generation keeps the documented field
+    ("https://api.openai.com/v1", "claude-sonnet"),    # another provider's slug
+    ("https://api.openai.com/v1", "o4"),               # another OpenAI family
+    ("https://api.example.com/v1", MODEL),             # a compatible gateway
+    ("https://openai.azure.com/v1", MODEL),
+    ("http://api.openai.com/v1", MODEL),               # not HTTPS
+    ("https://api.openai.com/v2", MODEL),              # not v1
+    ("https://api.openai.com", MODEL),                 # no version path
+])
+def test_other_routes_and_models_keep_top_level_instructions(base_url, model):
+    body = responses_body(api_request(), api_route(base_url, model))
+    assert body["instructions"] == INSTRUCTIONS and body["input"] == [user_message("one")]
+
+
+def test_empty_instructions_stay_a_fieldless_official_request_not_an_empty_message():
+    body = responses_body(api_request(instructions=""), api_route())
+    assert "instructions" not in body and body["input"] == [user_message("one")]
+
+
+def test_a_developer_prefix_already_in_the_input_is_not_duplicated():
+    items = [DEVELOPER, user_message("one")]
+    body = responses_body(api_request(items=items), api_route())
+    assert "instructions" not in body and body["input"] == items
+    other = developer_message("other rules")
+    body = responses_body(api_request(items=[other, user_message("one")]), api_route())
+    assert body["input"] == [DEVELOPER, other, user_message("one")]
+
+
+@pytest.mark.parametrize("extra_args, instructions", [
+    ({"instructions": "my own"}, "my own"),            # an explicit field replaces, never duplicates
+    ({"input": []}, INSTRUCTIONS),                     # an explicit input wins whole; the field is left
+])
+def test_user_extra_args_naming_instructions_or_input_win(extra_args, instructions):
+    body = responses_body(api_request(), api_route(extra_args=extra_args))
+    assert body["instructions"] == instructions and body["input"] == ([] if "input" in extra_args else [user_message("one")])
+
+
+def test_reasoning_args_of_the_current_effort_also_win_and_none_does_not_resurrect():
+    body = responses_body(api_request(), api_route(reasoning_args={"low": {"instructions": "per-effort"}}))
+    assert body["instructions"] == "per-effort" and body["input"] == [user_message("one")]
+    body = responses_body(api_request(), api_route(reasoning_args={"low": {"instructions": None}}))
+    assert "instructions" not in body and body["input"] == [user_message("one")]
+    # An override of another effort is not this request's and does not count.
+    body = responses_body(api_request(), api_route(reasoning_args={"high": {"instructions": "per-effort"}}))
+    assert "instructions" not in body and body["input"][0] == DEVELOPER
+
+
+@pytest.mark.parametrize("native, override, moved", [
+    ("gpt-6.1-sol", MODEL, True),     # extraArgs promotes: the model the body asks for decides
+    (MODEL, "gpt-6.1-sol", False),   # extraArgs demotes: the older model keeps the field
+    (MODEL, MODEL, True),
+    ("gpt-6.1-sol", "custom-m", False),
+])
+def test_the_model_the_body_asks_for_decides_not_the_route(native, override, moved):
+    body = responses_body(api_request(), api_route(model=native, extra_args={"model": override}))
+    assert body["model"] == override
+    if moved:
+        assert "instructions" not in body and body["input"][0] == DEVELOPER
+    else:
+        assert body["instructions"] == INSTRUCTIONS and body["input"] == [user_message("one")]
+
+
+def test_reasoning_args_model_of_the_current_effort_decides_the_same_way():
+    promoted = responses_body(api_request(), api_route(model="gpt-6.1-sol", reasoning_args={"low": {"model": MODEL}}))
+    assert promoted["model"] == MODEL and "instructions" not in promoted and promoted["input"][0] == DEVELOPER
+    demoted = responses_body(api_request(), api_route(reasoning_args={"low": {"model": "gpt-6.1-sol"}}))
+    assert demoted["model"] == "gpt-6.1-sol" and demoted["instructions"] == INSTRUCTIONS
+    # extraArgs still has the last word over reasoningArgs: 6.2 by effort, 6.1 in the end.
+    final = responses_body(api_request(), api_route(reasoning_args={"low": {"model": MODEL}}, extra_args={"model": "gpt-6.1-sol"}))
+    assert final["model"] == "gpt-6.1-sol" and final["instructions"] == INSTRUCTIONS

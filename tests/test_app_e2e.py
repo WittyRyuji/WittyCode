@@ -1427,8 +1427,8 @@ def test_a_devin_conversation_goes_from_the_model_menu_to_the_answer_and_an_appr
             # closed, it is a saved session in the list, named as Devin's
             await rig.click(".tab-x")
             await rig.wait_for(".tab", 0)
-            await rig.wait_text(".srow", "hello devin", timeout=15)
-            assert "· Devin" in await rig.text(".srow .ssub")
+            await rig.wait_text(".srow:not(.open) .stitle", "会话主题摘要", timeout=15)
+            assert "· Devin" in await rig.text(".srow:not(.open) .ssub")
         finally:
             await rig.finish()
 

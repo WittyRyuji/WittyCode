@@ -17,7 +17,7 @@ from desktop.core.llm.backend import ApiBackend, api_failure, is_api_model, rout
 from desktop.core.llm.wire import ANTHROPIC, CHAT, RESPONSES
 from desktop.core.providers import ApiModelSpec, ProviderError, ProviderStore, _Key
 from tests.fake_responses import say
-from tests.llm_support import FakeApi, http_error
+from tests.llm_support import FakeApi, http_error, lines_of
 
 
 def settings_with(tmp_path: Path, base_url: str, **entry: Any) -> Path:
@@ -177,6 +177,53 @@ def test_a_responses_model_with_a_level_asks_for_reasoning_and_its_encrypted_con
             body = api.posts[0][2]
             assert body["reasoning"]["effort"] == "medium" and body["include"] == ["reasoning.encrypted_content"]
             assert body["store"] is False and body["stream"] is True
+
+    asyncio.run(go())
+
+
+class WireTap:
+    """The ``HttpClient`` a wire-level test needs: keeps what would be POSTed and answers a canned event stream."""
+
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, str, dict[str, str], Any]] = []
+
+    async def stream_lines(self, method: str, url: str, *, headers=None, json_body=None, body=None, timeout=0.0):
+        self.sent.append((method, url, dict(headers or {}), json_body if json_body is not None else body))
+        async for line in lines_of(say("ok")):
+            yield line
+
+
+def test_the_official_responses_route_sends_instructions_as_the_first_developer_message(tmp_path):
+    """``POST https://api.openai.com/v1/responses`` with a GPT-6.2+ slug bills top-level instructions uncached."""
+
+    async def go() -> None:
+        tap = WireTap()
+        store = store_for(settings_with(tmp_path, "https://api.openai.com/v1", provider="openai", model="gpt-6.2-sol"))
+        request = request_for(model_id_of(store))
+        events = await ask(ApiBackend(store, http=tap), request)
+        assert isinstance(events[-1], Finished)
+        ((method, url, _headers, body),) = tap.sent
+        assert (method, url) == ("POST", "https://api.openai.com/v1/responses")
+        assert "instructions" not in body
+        assert body["input"] == [
+            {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "be brief"}]},
+            user_message("hi"),
+        ]
+        assert request["instructions"] == "be brief" and request["input"] == [user_message("hi")], "the loop's request is not changed"
+
+    asyncio.run(go())
+
+
+def test_a_compatible_gateway_model_keeps_top_level_instructions_on_the_wire(tmp_path):
+    async def go() -> None:
+        with FakeApi() as api:
+            api.script(list(say("ok")))
+            store = store_for(settings_with(tmp_path, api.base_url, provider="openai", model="gpt-6.2-sol"))
+            events = await ask(ApiBackend(store), request_for(model_id_of(store)))
+            assert isinstance(events[-1], Finished)
+            ((path, headers, body),) = api.posts
+            assert path == "/v1/responses" and body["model"] == "gpt-6.2-sol"
+            assert body["instructions"] == "be brief" and body["input"] == [user_message("hi")]
 
     asyncio.run(go())
 

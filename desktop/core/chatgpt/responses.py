@@ -182,6 +182,11 @@ def can_cache_developer_instructions(model: str) -> bool:
     return match is not None and (int(match[1]), int(match[2] or "0")) >= (6, 2)
 
 
+def developer_message(text: str) -> dict[str, Any]:
+    """Reusable instructions as a leading developer message: cached like the rest of ``input`` on GPT-6.2+."""
+    return {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": text}]}
+
+
 def build_request(
     *,
     model: str,
@@ -198,7 +203,7 @@ def build_request(
         # GPT-6.2+ appends top-level instructions after the cacheable prefix. The Plan Responses endpoint
         # documents requests without that field, so omit it rather than sending an uncached placeholder.
         if instructions:
-            inputs.insert(0, {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": instructions}]})
+            inputs.insert(0, developer_message(instructions))
     else:
         request["instructions"] = instructions
     request.update(input=inputs, store=False, stream=True)
