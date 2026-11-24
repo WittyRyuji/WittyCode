@@ -198,17 +198,18 @@ def long_view(turns: int = 6, size: int = 200) -> list[dict[str, Any]]:
     return view
 
 
-def test_the_front_of_the_view_becomes_a_summary_and_the_rest_stays_word_for_word():
+@pytest.mark.parametrize("model", ["gpt-6.1-sol", "gpt-6.2-sol"])
+def test_the_front_of_the_view_becomes_a_summary_and_the_rest_stays_word_for_word(model):
     view = long_view()
     script = Script(say("The summary.", used=usage(900, 40)))
     seen = []
-    result = run(compact.compact(view, stream=script, model="m", reasoning="low", window=4000, on_usage=seen.append))
+    result = run(compact.compact(view, stream=script, model=model, reasoning="low", window=4000, on_usage=seen.append))
     assert result is not None and not result.mechanical and result.problem == ""
     assert result.view[0] == compact.summary_item("The summary.")
     assert result.view[1:] == view[result.cut :] and 0 < result.cut < len(view)
     assert result.before == compact.estimate_items(view) and result.after == compact.estimate_items(result.view) < result.before
     request = script.requests[0]
-    assert request["model"] == "m" and request["reasoning"]["effort"] == "low"
+    assert request["model"] == model and request["reasoning"]["effort"] == "low"
     assert "tools" not in request and request["instructions"] == compact.INSTRUCTIONS
     assert "include" not in request, "no encrypted reasoning is asked for"
     body = request["input"][0]["content"][0]["text"]
