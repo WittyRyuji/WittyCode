@@ -156,6 +156,7 @@
 .lightbox img[data-panning] { cursor: grabbing; }
 .lightbox figcaption { position: relative; margin-top: 12px; color: #e6e6e6; font: 12px var(--font-mono); }
 .lightbox figcaption span { display: inline-block; max-width: 86vw; padding: 3px 6px; background: #151515; overflow-wrap: anywhere; pointer-events: auto; }
+.lightbox figcaption .notice-text { margin-top: 4px; font-family: var(--font-sans); }
 .lb-close { position: absolute; top: 18px; right: 18px; width: 36px; height: 36px; border: var(--bw) solid #fff; background: #151515; color: #fff; display: inline-flex; align-items: center; justify-content: center; }
 .lb-close:hover { background: #fff; color: #000; }
 .image-menu-layer { position: fixed; z-index: 1201; }

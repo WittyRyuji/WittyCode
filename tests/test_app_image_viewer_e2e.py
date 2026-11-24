@@ -23,6 +23,7 @@ ATTACHMENT = ".block.user .att-img img"
 INLINE = ".inline-picture img"
 VIEWER = ".lightbox img"
 MENU = ".image-menu-layer .menu"
+NOTICE = ".lightbox [role=status] .notice-text"
 
 
 def picture(path, width, height, color):
@@ -61,6 +62,12 @@ async def copy_picture(rig, clipboard, selector, expected, *, evidence=None):
     await rig.wait_for(MENU, 0)
 
 
+async def no_copy_menu(rig, selector):
+    assert await rig.js(f"document.querySelector({json.dumps(selector)}).dispatchEvent("
+                        'new MouseEvent("contextmenu", {bubbles: true, cancelable: true, button: 2}))')
+    assert not await rig.exists(MENU)
+
+
 async def bounds(rig):
     return json.loads(await rig.js(f"JSON.stringify(document.querySelector('{VIEWER}').getBoundingClientRect())"))
 
@@ -93,9 +100,11 @@ def test_chat_pictures_copy_and_the_viewer_zooms_pans_and_resets(qapp, loop, tmp
             model.next(say("Here is the local image:\n\n![Result](result.png)"), hold=False)
             assert await rig.drop_files([attachment]) == Qt.DropAction.CopyAction
             await natural_width(rig, ".att-row .att-thumb")
+            await no_copy_menu(rig, ".att-row .att-text")
             await copy_picture(rig, clipboard, ".att-row .att-thumb", attached)
             await rig.send("Compare these pictures")
             await natural_width(rig, ATTACHMENT)
+            await no_copy_menu(rig, ".block.user .att-img")
             await copy_picture(rig, clipboard, ATTACHMENT, attached)
             # Leave the sidebar's temporary project path out of both screenshots.
             await rig.press("b", Qt.KeyboardModifier.ControlModifier)
@@ -172,6 +181,101 @@ def test_chat_pictures_copy_and_the_viewer_zooms_pans_and_resets(qapp, loop, tmp
             await rig.wait_for(".lightbox", 0)
         finally:
             clipboard.clear()
+            await rig.finish()
+
+    run(loop, scenario())
+
+
+async def send_inline_picture(rig, width, height):
+    picture(rig.project / "result.png", width, height, "#4b3875")
+    model = await new_conversation(rig)
+    model.next(say("Here is the local image:\n\n![Result](result.png)"), hold=False)
+    await rig.send("Show me the picture")
+    await natural_width(rig, INLINE, width)
+
+
+def test_copy_failure_is_visible_in_the_viewer(qapp, loop, tmp_path):
+    evidence = Path(folder) if (folder := os.environ.get("WITTYCODE_TEST_EVIDENCE")) else None
+
+    async def scenario():
+        rig = await open_rig(tmp_path, size=(1280, 840))
+        try:
+            await send_inline_picture(rig, 960, 600)
+            # Keep the temporary project path out of the screenshot.
+            await rig.press("b", Qt.KeyboardModifier.ControlModifier)
+            await rig.wait_for(".sidebar", 0)
+            await rig.click(INLINE)
+            await natural_width(rig, VIEWER, 960)
+            await rig.js('''
+                window.clipboardWrites = 0;
+                Object.defineProperty(navigator.clipboard, "write", {value: () => {
+                    window.clipboardWrites++;
+                    return Promise.reject(new DOMException("Clipboard write denied", "NotAllowedError"));
+                }});
+            ''')
+            await rig.click(VIEWER, right=True)
+            await rig.wait_for(f"{MENU} [role=menuitem]", 1)
+            await rig.click_text(f"{MENU} [role=menuitem]", "复制图片")
+            await wait_for(lambda: rig.js(f'''document.querySelector({json.dumps(NOTICE)})
+                ?.checkVisibility({{checkOpacity: true, checkVisibilityCSS: true}}) ?? false'''),
+                5, "the copy failure message is visible")
+            assert await rig.js("window.clipboardWrites") == 1
+            assert await rig.texts(NOTICE) == ["没能将图片复制到剪贴板。"]
+            assert await rig.js(f'''(() => {{
+                const notice = document.querySelector({json.dumps(NOTICE)});
+                const r = notice.getBoundingClientRect();
+                return notice.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2));
+            }})()'''), "the notice, not the scrim, must receive hits at its center"
+            if evidence:
+                await rig.shot(".lightbox", evidence / "image-copy-failed-in-viewer.png")
+        finally:
+            await rig.finish()
+
+    run(loop, scenario())
+
+
+def test_escape_closes_the_image_menu_before_the_viewer(qapp, loop, tmp_path):
+    async def scenario():
+        rig = await open_rig(tmp_path)
+        try:
+            await send_inline_picture(rig, 960, 600)
+            await rig.click(INLINE)
+            await natural_width(rig, VIEWER, 960)
+            await rig.click(VIEWER, right=True)
+            await rig.wait_for(f"{MENU} [role=menuitem]", 1)
+
+            await rig.press("Escape")
+            await rig.wait_for(MENU, 0)
+            assert await rig.exists(".lightbox")
+            await rig.press("Escape")
+            await rig.wait_for(".lightbox", 0)
+        finally:
+            await rig.finish()
+
+    run(loop, scenario())
+
+
+def test_inline_copy_menu_only_opens_over_the_image(qapp, loop, tmp_path):
+    async def scenario():
+        rig = await open_rig(tmp_path)
+        try:
+            await send_inline_picture(rig, 120, 80)
+            assert await rig.js(f'''(() => {{
+                const img = document.querySelector({json.dumps(INLINE)});
+                const wrapper = img.closest(".inline-picture");
+                const r = img.getBoundingClientRect();
+                const clientX = r.right + 20, clientY = r.top + r.height / 2;
+                const hit = document.elementFromPoint(clientX, clientY);
+                return hit === wrapper && hit.dispatchEvent(new MouseEvent("contextmenu", {{
+                    bubbles: true, cancelable: true, button: 2, clientX, clientY,
+                }}));
+            }})()'''), "the point is blank space in the wrapper and the event is not consumed"
+            assert not await rig.exists(MENU)
+
+            await rig.click(INLINE, right=True)
+            await rig.wait_for(f"{MENU} [role=menuitem]", 1)
+            assert await rig.texts(".menu-label") == ["复制图片"]
+        finally:
             await rig.finish()
 
     run(loop, scenario())

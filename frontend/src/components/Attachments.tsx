@@ -19,11 +19,10 @@ export function AttachmentCard({ a, onRemove }: { a: AttachmentView; onRemove?: 
         className="att-main"
         onMouseDown={(e) => e.preventDefault()}
         onClick={() => picture && openLightbox(a)}
-        onContextMenu={picture ? (e) => show(e, a.id) : undefined}
         disabled={!picture}
         title={picture ? "点击查看大图" : a.name}
       >
-        {picture ? <img className="att-thumb" src={a.url} alt="" /> : <span className={`ficon ficon-${a.kind}`}>{EXT[a.kind]}</span>}
+        {picture ? <img className="att-thumb" src={a.url} alt="" onContextMenu={(e) => show(e, a.id)} /> : <span className={`ficon ficon-${a.kind}`}>{EXT[a.kind]}</span>}
         <span className="att-text">
           <span className="fname">{a.name}</span>
           <span className="fmeta">
@@ -51,9 +50,8 @@ export function SentAttachments({ items }: { items: AttachmentView[] }) {
     <div className="atts">
       {items.map((a) =>
         a.kind === "image" && a.url ? (
-          <button key={a.id} type="button" className="att-img" onClick={() => openLightbox(a)}
-            onContextMenu={(e) => show(e, a.id)} title={`${a.name} · 点击查看大图`}>
-            <img src={a.url} alt={a.name} />
+          <button key={a.id} type="button" className="att-img" onClick={() => openLightbox(a)} title={`${a.name} · 点击查看大图`}>
+            <img src={a.url} alt={a.name} onContextMenu={(e) => show(e, a.id)} />
           </button>
         ) : (
           <AttachmentCard key={a.id} a={a} />

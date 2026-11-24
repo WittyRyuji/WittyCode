@@ -64,8 +64,9 @@ export function InlinePicture({ sessionId, path, label }: Props) {
   const { box, result, setResult } = useVisibleMedia(load);
   const [started, setStarted] = useState(false);
   const image = result && "data" in result ? result.data : undefined;
+  const { show, menu } = useImageMenu();
   const picture = image && <img src={(started && image.animation) || image.url} alt={label} draggable={false}
-    onError={() => setResult({ error: unreadable })} />;
+    onContextMenu={show} onError={() => setResult({ error: unreadable })} />;
   const surface = image && <button type="button" className="inline-zoom" title={`查看大图：${label}`} onClick={(e) => {
     const img = e.currentTarget.querySelector("img");
     const url = image.animation ?? image.url;
@@ -73,8 +74,7 @@ export function InlinePicture({ sessionId, path, label }: Props) {
       width: img?.naturalWidth, height: img?.naturalHeight });
   }}>{picture}</button>;
   const action = `播放 GIF：${label}`;
-  const { show, menu } = useImageMenu();
-  return <span className="inline-media inline-picture" ref={box} title={path} onContextMenu={image ? (e) => show(e) : undefined}>
+  return <span className="inline-media inline-picture" ref={box} title={path}>
     {menu}
     {image?.animation ? <span className="inline-gif">
       {surface}

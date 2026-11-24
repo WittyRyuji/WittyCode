@@ -213,6 +213,7 @@ export function ChatGPTWelcome() {
 const FIT_PICTURE = { scale: 1, x: 0, y: 0 };
 
 function Lightbox({ a, close }: { a: AttachmentView; close: () => void }) {
+  const notice = useStore((s) => s.notice);
   const [view, setView] = useState(FIT_PICTURE);
   const [panning, setPanning] = useState(false);
   const scrim = useRef<HTMLDivElement>(null);
@@ -246,6 +247,7 @@ function Lightbox({ a, close }: { a: AttachmentView; close: () => void }) {
 
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
       if (e.key === "Escape") close();
       else if (e.key === "0" && !e.ctrlKey && !e.metaKey && !e.altKey) {
         e.preventDefault();
@@ -263,7 +265,7 @@ function Lightbox({ a, close }: { a: AttachmentView; close: () => void }) {
         <div className="lb-image-frame" ref={frame}>
           <img src={a.url} alt={a.name} draggable={false} data-pannable={view.scale > 1 ? "" : undefined}
             data-panning={panning ? "" : undefined} style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.scale})` }}
-            onContextMenu={(e) => show(e)} onDoubleClick={reset}
+            onContextMenu={show} onDoubleClick={reset}
             onPointerDown={(e) => {
               if (e.button !== 0 || view.scale <= 1 || drag.current) return;
               e.currentTarget.setPointerCapture(e.pointerId);
@@ -284,10 +286,13 @@ function Lightbox({ a, close }: { a: AttachmentView; close: () => void }) {
               setPanning(false);
             }} />
         </div>
-        <figcaption><span>
-          {a.name} · {a.width ? `${a.width}×${a.height} · ` : ""}
-          {formatBytes(a.size)}
-        </span></figcaption>
+        <figcaption>
+          <span>
+            {a.name} · {a.width ? `${a.width}×${a.height} · ` : ""}
+            {formatBytes(a.size)}
+          </span>
+          <div role="status">{notice && <span key={notice.id} className="notice-text">{notice.text}</span>}</div>
+        </figcaption>
       </figure>
       <button type="button" className="lb-close" aria-label="关闭" onClick={close} autoFocus>
         <X size={18} />

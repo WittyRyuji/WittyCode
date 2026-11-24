@@ -30,10 +30,9 @@ async function asPng(img: HTMLImageElement, full?: { id?: string; attachmentId: 
 export function useImageMenu() {
   const [source, setSource] = useState<{ anchor: Anchor; img: HTMLImageElement; full?: { id?: string; attachmentId: string } } | null>(null);
   const say = useStore((s) => s.say);
-  const show = (e: MouseEvent<HTMLElement>, attachmentId?: string) => {
-    const target = e.currentTarget;
-    const img = target instanceof HTMLImageElement ? target : target.querySelector("img");
-    if (!img?.naturalWidth) return;
+  const show = (e: MouseEvent<HTMLImageElement>, attachmentId?: string) => {
+    const img = e.currentTarget;
+    if (!img.naturalWidth) return;
     e.preventDefault();
     e.stopPropagation();
     setSource({ anchor: { x: e.clientX, y: e.clientY }, img,
