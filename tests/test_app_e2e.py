@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
+from pathlib import Path
 
 import pytest
 from PySide6.QtCore import Qt
@@ -21,7 +23,7 @@ from tests.app_support import without_numbered_reply
 from tests.devin_support import make_engine as make_devin
 from tests.e2e_support import open_rig
 from tests.fake_devin import is_title_prompt
-from tests.fake_responses import call, say, usage
+from tests.fake_responses import call, http_error, say, usage
 from tests.fakes import until
 from tests.support import tiny_png
 from tests.ui_support import release, run, wait_for
@@ -127,6 +129,23 @@ def test_chinese_and_english_mixed_can_be_typed_and_arrive_unchanged(qapp, loop,
         model.go()
         await rig.wait_text(".statusbar .st-left", "就绪")
         await finish(rig, model)
+
+    run(loop, scenario())
+
+
+def test_bad_gateway_shows_the_30_second_retry_notice(qapp, loop, tmp_path):
+    async def scenario():
+        rig = await open_rig(tmp_path)
+        try:
+            await new_conversation(rig)
+            rig.plan.script(http_error(502, {"error": {"message": "Bad gateway"}}, {"Retry-After": "60"}))
+            await rig.send("检查库存接口")
+            await rig.wait_text(".block.notice", "服务暂时出错（HTTP 502），30 秒后自动重试（第 1/4 次）。", timeout=10)
+            assert len(rig.plan.requests) == 1
+            if evidence := os.environ.get("WITTYCODE_TEST_EVIDENCE"):
+                await rig.shot(".block.notice", Path(evidence) / "bad-gateway-retry.png")
+        finally:
+            await rig.finish()
 
     run(loop, scenario())
 

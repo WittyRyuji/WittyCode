@@ -13,8 +13,8 @@ Invariants worth knowing:
 - A step is one request. A turn ends when a step brings no tool call and nothing the user said meanwhile is waiting
   (``Observer.take_steer``), or at the configured step budget (default ``MAX_STEPS``).
 - A request that fails before any of its answer arrived, in a way that may pass (the connection broke, the server is busy or
-  overloaded: ``errors.is_transient``), is sent again after a pause that grows (``RETRY_DELAYS``, or the server's own
-  ``Retry-After``), and the user is told. Nothing of the failed attempt is in the history, so the repeat is the same request.
+  overloaded: ``errors.is_transient``), is sent again after a pause (fixed for HTTP 502, otherwise ``RETRY_DELAYS`` or
+  the server's ``Retry-After``), and the user is told. Nothing of the failed attempt is in the history, so the repeat is the same request.
 - A tool never raises into the loop: its failure is its result, which the model reads and reacts to.
 - Whatever the model wrote as the arguments of a call is checked here (valid JSON, an object); the tool checks the rest.
 """
@@ -59,6 +59,7 @@ log = logging.getLogger("desktop.harness")
 MAX_STEPS = 80
 RETRY_DELAYS = (1.5, 4.0, 10.0, 25.0)
 """Seconds to wait before each repeat of a request that failed in a way that may pass; four repeats at most."""
+BAD_GATEWAY_RETRY_DELAY = 30.0
 RETRY_LONGEST = 60.0
 """The longest pause a server's ``Retry-After`` is obeyed for (a turn that waits longer is better stopped and said so)."""
 OUTPUT_LIMIT = 60_000
@@ -471,6 +472,8 @@ class AgentLoop:
                     raise
 
     def _retry_pause(self, repeats: int, error: BaseException) -> float:
+        if getattr(error, "status", None) == 502:
+            return BAD_GATEWAY_RETRY_DELAY
         base = self._retry_delays[repeats]
         asked = getattr(error, "retry_after", None)
         if isinstance(asked, (int, float)) and asked > 0:

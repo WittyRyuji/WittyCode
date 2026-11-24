@@ -412,6 +412,18 @@ def test_a_request_the_server_refused_as_busy_is_sent_again_after_a_pause_and_th
     assert notices == ["服务暂时出错（HTTP 503），2 秒后自动重试（第 1/4 次）。", "请求太频繁（HTTP 429），5 秒后自动重试（第 2/4 次）。"]
 
 
+def test_bad_gateway_uses_a_fixed_30_second_pause_for_each_retry():
+    errors = [ChatGPTError("bad gateway", status=502, retry_after=asked) for asked in (60.0, None, 10.0, 120.0, None)]
+    stream = Flaky(errors, Script(say("never")))
+    pauses, observer = Pauses(), Recorder()
+    with pytest.raises(ChatGPTError, match="bad gateway"):
+        run_flaky(stream, pauses, observer)
+    assert stream.attempts == 5 and pauses.seconds == [30.0] * 4
+    assert [entry[1] for entry in observer.log if entry[0] == "notice"] == [
+        f"服务暂时出错（HTTP 502），30 秒后自动重试（第 {attempt}/4 次）。" for attempt in range(1, 5)
+    ]
+
+
 def test_a_connection_that_broke_and_an_answer_cut_off_before_it_began_are_sent_again():
     stream = Flaky([ChatGPTError("reset", code="network", transient=True), ChatGPTError("The stream ended before the response was complete.", code="stream")], Script(say("ok")))
     pauses = Pauses()
