@@ -252,7 +252,7 @@ def test_a_seconds_only_budget_gets_the_effective_ceiling(tmp_path):
                         say("Checked."), say("Reviewed."))
             agent, = main.agents.values()
             assert agent.controller._fusion_step_limit == 32
-            assert "Budget: 32 steps, 60 seconds (adaptive 16-32)" in agent.record.task
+            assert "Budget: 32 steps, 30 seconds (adaptive 16-32)" in agent.record.task
     asyncio.run(go())
 
 

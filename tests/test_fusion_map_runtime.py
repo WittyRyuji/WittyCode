@@ -290,7 +290,8 @@ def test_turn_refreshes_fingerprint_and_marks_only_involved_modules(tmp_path, ac
                                _update("other", paths=["other.txt"], call_id="other"))
             before = _records(main)
             route = [_route()] if acceptance else []
-            check = [_delegate("Runner", call_id="verify"), _report()] if acceptance else []
+            check = [_delegate("Runner", call_id="verify"), call("read_file", {"file_path": "inventory.txt"}),
+                     _report(evidence=["inventory.txt: Two boxes."])] if acceptance else []
             await _turn(main, fake, *route, _delegate(), _write_inventory(), _rated_report(before["map:stock"]), *check, say("Reviewed."))
             after = _records(main)
             changed = after["map:stock"]

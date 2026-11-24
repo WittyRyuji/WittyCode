@@ -379,6 +379,7 @@ export type Engine = "devin" | "chatgpt" | "factory";
 export type SourceId = string;
 
 export interface ModelChoice {
+  fusionBackend?: string;
   id: string;
   label: string;
   note?: string;

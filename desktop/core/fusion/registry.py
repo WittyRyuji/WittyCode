@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from desktop.core.fusion.backends import backend_for
 from desktop.core.fusion import allocation
 from desktop.core.fusion.identity import display_name, load
 from desktop.core.fusion.metrics import RETAINED_TASKS, retained_tasks
@@ -28,8 +29,8 @@ class FusionError(ValueError):
     """A Fusion action cannot be performed under the session's policy."""
 
 
-def _model(value: Any, *, external: bool = False) -> bool:
-    return isinstance(value, str) and bool(value.strip()) and value.startswith(("chatgpt:", "api:", "devin:") if external else ("chatgpt:", "api:"))
+def _model(value: Any) -> bool:
+    return isinstance(value, str) and backend_for(value) is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,20 +43,22 @@ class Policy:
     max_seconds: int = 900
     preference: int = 50  # 0 favours cost, 100 favours quality
     reasoning: Mapping[str, str] = field(default_factory=dict)
+    max_seconds_adaptive: bool = False  # Legacy/session-specific policies have an explicit hard limit.
 
     def __post_init__(self) -> None:
         try:
             object.__setattr__(self, "reasoning", reasoning_map(self.reasoning))
         except ValueError as error:
             raise FusionError(str(error)) from error
-        if not _model(self.main, external=True):
+        if not _model(self.main):
             raise FusionError("Choose a valid Fusion main model.")
-        if not self.workers or not all(_model(model, external=True) for model in self.workers):
+        if not self.workers or not all(_model(model) for model in self.workers):
             raise FusionError("Choose at least one valid worker model.")
-        if not _model(self.light, external=True):
+        if not _model(self.light):
             raise FusionError("Choose a valid lightweight model.")
         if (isinstance(self.max_calls, bool) or not isinstance(self.max_calls, int) or self.max_calls < 0
                 or isinstance(self.max_tokens, bool) or not isinstance(self.max_tokens, int) or self.max_tokens < 0
+                or type(self.max_seconds_adaptive) is not bool
                 or isinstance(self.max_seconds, bool) or not isinstance(self.max_seconds, int) or not 1 <= self.max_seconds <= 86_400
                 or isinstance(self.preference, bool) or not isinstance(self.preference, int) or not 0 <= self.preference <= 100):
             raise FusionError("The Fusion policy is invalid.")
@@ -78,7 +81,8 @@ class Policy:
 
     def to_json(self) -> dict[str, Any]:
         return {"main": self.main, "workers": list(self.workers), "light": self.light, "maxCalls": self.max_calls,
-                "maxTokens": self.max_tokens, "maxSeconds": self.max_seconds, "preference": self.preference,
+                "maxTokens": self.max_tokens, "maxSeconds": self.max_seconds, "maxSecondsAdaptive": self.max_seconds_adaptive,
+                "preference": self.preference,
                 "reasoning": dict(self.reasoning)}
 
     @classmethod
@@ -86,7 +90,8 @@ class Policy:
         if not isinstance(raw, Mapping) or not isinstance(raw.get("workers"), list):
             raise FusionError("The Fusion policy is missing or damaged.")
         return cls(raw.get("main"), tuple(raw["workers"]), raw.get("light"), raw.get("maxCalls"), raw.get("maxTokens", 0),
-                   raw.get("maxSeconds", 900), raw.get("preference", 50), raw.get("reasoning", {}))
+                   raw.get("maxSeconds", 900), raw.get("preference", 50), raw.get("reasoning", {}),
+                   raw.get("maxSecondsAdaptive", "maxSeconds" not in raw))
 
 
 @dataclass(slots=True)
@@ -174,7 +179,7 @@ class FusionRegistry:
         return expert.paths if expert.workstream else (expert.scope,)
 
     def assign_workstream(self, workstream: str, paths: tuple[str, ...], model: str, role: str, *, identity: str = "",
-                          reuse: bool = True, resume: bool = False, seat: str = "") -> Expert:
+                          reuse: bool = True, resume: bool = False, seat: str = "", recover: Expert | None = None) -> Expert:
         if not self.policy.allowed(model, role, seat):
             raise FusionError("The requested model is not in the authorised pool for this role.")
         if identity and identity not in _IDENTITIES:
@@ -183,7 +188,7 @@ class FusionRegistry:
         if not isinstance(paths, (list, tuple)) or len(paths) > 128:
             raise FusionError("Provide up to 128 project-relative write paths; an empty list reserves the project.")
         canonical = tuple(dict.fromkeys(self._scope(path) for path in paths))
-        previous = self.workstream_expert(label, role, identity=identity, reuse=reuse, resume=resume)
+        previous = self.workstream_expert(label, role, identity=identity, reuse=reuse, resume=resume, recover=recover)
         if previous is not None:
             if previous.seat and previous.seat != seat:
                 raise FusionError("This workstream's seat is frozen; the route cannot reseat it.")
@@ -202,16 +207,22 @@ class FusionRegistry:
         self.agents[expert.id] = expert
         return expert
 
-    def workstream_expert(self, workstream: str, role: str, *, identity: str, reuse: bool, resume: bool) -> Expert | None:
+    def workstream_expert(self, workstream: str, role: str, *, identity: str, reuse: bool, resume: bool,
+                          recover: Expert | None = None) -> Expert | None:
         """Resolve an owner or pending predecessor without changing ownership or choosing a model."""
         label = self._workstream(workstream).casefold()
         matches = [agent for agent in self.agents.values() if agent.identity == identity
                    and (agent.workstream or agent.scope).casefold() == label]
         owners = [agent for agent in matches if agent.status != "retired"]
-        if resume and len(owners) > 1:
-            raise FusionError("Several experts match this workstream; use a unique workstream before resuming.")
         if any(owner.status == "running" for owner in owners):
             raise FusionError("This expert is already running.")
+        if recover is not None:
+            if (identity not in ("Runner", "QualitySampler") or recover.paths or recover.role != role
+                    or not any(owner is recover for owner in owners)):
+                raise FusionError("The original verification expert is no longer available.")
+            return recover
+        if resume and len(owners) > 1:
+            raise FusionError("Several experts match this workstream; use a unique workstream before resuming.")
         if not (reuse or resume):
             return None
         if owners:
@@ -501,7 +512,7 @@ class FusionRegistry:
             ident, scope, model, role, status = (item.get(k) for k in ("id", "scope", "model", "role", "status"))
             seat = item.get("seat", "")
             if (not isinstance(ident, str) or len(ident) != 32 or any(c not in "0123456789abcdef" for c in ident)
-                    or role not in ("worker", "light") or not _model(model, external=True)
+                    or role not in ("worker", "light") or not _model(model)
                     or seat not in ("", *allocation.SEATS)
                     or (status != "retired" and not result.policy.allowed(model, role, seat))
                     or status not in ("idle", "running", "done", "failed", "interrupted", "retired")):

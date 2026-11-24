@@ -129,7 +129,10 @@ class GuardedFake(Fake):
                 tool, arguments = "delegate_task", {"scope": "src", "model": "devin:swe-2-high", "role": "worker", "task": "[fusion-shell] Create the marker with a command."}
             elif action == "delegate-acp-slow":
                 tool, arguments = "delegate_task", {"scope": "src", "model": "devin:swe-2-high", "role": "worker", "task": "[fusion-slow] Wait for cancellation."}
-            elif action in ("read", "truncated-tools"):
+            elif action == "recheck" and "Continue only this incomplete check." in current:
+                tool, arguments = "submit_report", {"status": "done", "summary": "Count confirmed.",
+                                                     "evidence": ["evidence.txt: Counted 7 units."]}
+            elif action in ("read", "recheck", "truncated-tools"):
                 tool, arguments = "read_file", {"file_path": "evidence.txt"}
             elif action == "plan":
                 tool, arguments = "submit_plan", {"plan": "Inspect the module, implement the change, and run tests."}

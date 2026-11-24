@@ -2,16 +2,16 @@
 
 import type { Bridge, TestResult } from "../bridge";
 import type { ApiProvider, ChatGPTAccount, DevinAccount, EnvState, ProviderDraft } from "../types";
-import { envNameOf, sameProviderEndpoint } from "../lib/models";
-import { CHATGPT_ACCOUNT, DEVIN_ACCOUNT } from "./data";
-import { mockImporter } from "./importer";
-import { mockMemory } from "./memory";
+import { envNameOf, sameProviderEndpoint } from "../lib/models.ts";
+import { CHATGPT_ACCOUNT, DEVIN_ACCOUNT } from "./data.ts";
+import { mockImporter } from "./importer.ts";
+import { mockMemory } from "./memory.ts";
 
-const sleep = (ms: number) => new Promise<void>((r) => window.setTimeout(r, ms));
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 let devin: DevinAccount = { ...DEVIN_ACCOUNT };
 let chatgpt: ChatGPTAccount = { ...CHATGPT_ACCOUNT };
-let devinCancelled = false;
+let devinAttempt = 0;
 let chatgptCancelled = false;
 let chatgptAttempt = 0;
 let maximized = false;
@@ -49,15 +49,15 @@ export const mockBridge: Bridge = {
   devin: {
     account: async () => ({ ...devin }),
     async login() {
-      devinCancelled = false;
+      const attempt = ++devinAttempt;
       devin = { ...devin, auth: "signing-in" };
       await sleep(2600); // the browser is open, the user signs in
-      if (devinCancelled) return { ...devin };
+      if (attempt !== devinAttempt) return { ...devin };
       devin = { ...DEVIN_ACCOUNT, enabled: true };
       return { ...devin };
     },
     async cancelLogin() {
-      devinCancelled = true;
+      ++devinAttempt;
       devin = { ...devin, auth: "signed-out" };
       return { ...devin };
     },

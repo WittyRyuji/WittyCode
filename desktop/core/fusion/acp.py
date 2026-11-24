@@ -267,18 +267,7 @@ class AcpRun:
         kind = update.get("sessionUpdate")
         if kind in ("agent_message_chunk", "agent_thought_chunk"):
             text = update.get("content", {}).get("text", "")
-            if not isinstance(text, str):
-                return
-            block = "text" if kind == "agent_message_chunk" else "thinking"
-            if block != self._block:
-                self._flush()
-                self._block, self._item = block, uuid.uuid4().hex
-            self._text += text
-            if block == "text":
-                self.reported = self.reported or bool(text.strip())
-                self.watcher.text_delta(self._item, text)
-            else:
-                self.watcher.thinking_delta(self._item, text)
+            self.append_chunk("text" if kind == "agent_message_chunk" else "thinking", text)
         elif kind == "tool_call":
             call_id = update.get("toolCallId")
             pending = self._pending.get(call_id) if isinstance(call_id, str) else None
@@ -314,6 +303,19 @@ class AcpRun:
             if isinstance(used, int) and isinstance(size, int):
                 self.host.context = ContextState(used=used, window=size, model=self.host.model)
                 self.host._notify("context")
+
+    def append_chunk(self, block: str, text: str) -> None:
+        if not isinstance(text, str):
+            return
+        if block != self._block:
+            self._flush()
+            self._block, self._item = block, uuid.uuid4().hex
+        self._text += text
+        if block == "text":
+            self.reported = self.reported or bool(text.strip())
+            self.watcher.text_delta(self._item, text)
+        else:
+            self.watcher.thinking_delta(self._item, text)
 
     def _permission_target(self, call: Any) -> bool:
         # Devin permission requests repeat only the call id and approval meta, never the raw input; the earlier
@@ -560,7 +562,7 @@ class AcpRun:
             if result.get("stopReason") == "cancelled" and not self.boundary:
                 raise ChatGPTError("ACP 回合中断，未自动重放。", code="fusion_acp")
             if not self.reported and not self.boundary:
-                raise ChatGPTError("ACP 没有返回报告，未自动重放。", code="fusion_acp")
+                raise ChatGPTError("ACP 没有返回报告。", code="fusion_acp_no_report")
             saved["upto"] = len(self.host.saved.items)
             self.host._save_now(required=True)
             return TurnEnd(self.boundary or "done", steps=self.steps)

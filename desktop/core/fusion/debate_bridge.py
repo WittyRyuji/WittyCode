@@ -212,16 +212,14 @@ async def discuss(controller: ChatGPTController, topic: str) -> DebateResult:
             raise DebateError("The debate was stopped.")
         page = policy.seat_model(seat.upper())
         model = native_model(page)
-        native = model.startswith("devin:")
+        from desktop.core.fusion.backends import GUARDED
+        from desktop.core.fusion.summary import seat_stream
+        native = model.startswith(GUARDED)
         items = [user_message(_bound(text))]
         fusion.check_budget(compact.estimate_items(items) + compact.estimate_text(instructions))
         request = build_request(model=model, instructions=instructions, items=items, tools=[],
                                 reasoning=fusion.reasoning_for(page, SEAT_ROLE[seat.upper()]), shape=controller.manager.shape)
-        if native:
-            from desktop.core.fusion.summary import AcpSummary
-            stream = AcpSummary(controller.manager, before_prompt=alive).stream
-        else:
-            stream = controller.manager.stream
+        stream = seat_stream(controller, model, before_prompt=alive)
         body, finished, tool_call, requested = "", None, False, not native
         try:
             async with asyncio.timeout(SEAT_SECONDS), contextlib.aclosing(stream(request)) as events:

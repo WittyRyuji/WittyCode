@@ -116,4 +116,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # Factory launches the isolated interpreter (-I), which ignores PYTHONIOENCODING.
+    # MCP JSONL is UTF-8 even when the Windows pipe code page isn't.
+    sys.stdin.reconfigure(encoding="utf-8")
+    sys.stdout.reconfigure(encoding="utf-8")
     raise SystemExit(main())

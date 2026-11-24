@@ -73,6 +73,7 @@ export interface LiveData {
   fusionMaxCalls: number;
   fusionMaxTokens: number;
   fusionMaxSeconds: number;
+  fusionMaxSecondsAdaptive: boolean;
   /** per-delegation step band shared by all experts; each side is adaptive or the remembered number */
   fusionStepsMin: number;
   fusionStepsMinAdaptive: boolean;
@@ -173,6 +174,7 @@ export function emptyLiveData(theme: ThemeChoice = "system", fontScale: FontScal
     fusionMaxCalls: 8,
     fusionMaxTokens: 500000,
     fusionMaxSeconds: 900,
+    fusionMaxSecondsAdaptive: true,
     fusionStepsMin: 16,
     fusionStepsMinAdaptive: true,
     fusionStepsMax: 32,
@@ -279,6 +281,7 @@ export function settingsFields(v: SettingsView): Partial<LiveData> {
     fusionMaxCalls: v.fusionMaxCalls ?? 8,
     fusionMaxTokens: v.fusionMaxTokens ?? 500000,
     fusionMaxSeconds: v.fusionMaxSeconds ?? 900,
+    fusionMaxSecondsAdaptive: v.fusionMaxSecondsAdaptive ?? (v.fusionMaxSeconds === undefined),
     fusionStepsMin: v.fusionStepsMin ?? 16,
     fusionStepsMinAdaptive: v.fusionStepsMinAdaptive ?? true,
     fusionStepsMax: v.fusionStepsMax ?? 32,

@@ -48,7 +48,7 @@ def _notices(main):
 def test_missing_runner_continues_once_within_the_same_user_turn(tmp_path, verify):
     async def go():
         async with _fusion(tmp_path, active=GATES) as (main, fake):
-            continuation = [_delegate("Runner", call_id="verify"), _report()] if verify else []
+            continuation = [_delegate("Runner", call_id="verify"), _passed_runner_report()] if verify else []
             await _turn(main, fake, _route(), _delegate(), _report(), say("First answer."), *continuation, say("Final answer."))
             assert len(main.saved.turns) == 1 and len(fake.requests) == (7 if verify else 5)
             message, = _continuations(main)
@@ -170,6 +170,17 @@ def test_reroute_cannot_drop_an_accepted_sampler_requirement(tmp_path, preferenc
             assert verdict["checks"] == ["runner"] and not verdict["signals"]
             assert verdict["status"] == "unverified" and verdict["missing"] == ["sampler"]
             assert "Missing checks: sampler." in _continuations(main)[0]
+    asyncio.run(go())
+
+
+def test_main_edit_after_a_recovered_check_invalidates_its_evidence(tmp_path):
+    async def go():
+        async with _fusion(tmp_path, active=GATES) as (main, fake):
+            await _turn(main, fake, _route(), _delegate(), _report(), _delegate("Runner", call_id="check"),
+                        say("Incomplete check."), _passed_runner_report(), _route("self", call_id="self"), _edit(),
+                        say("Draft."), say("No new evidence."))
+            assert "Check attempt 1:" in _output(main, "check")
+            assert _verdict(main)["status"] == "unverified" and _verdict(main)["missing"] == ["runner"]
     asyncio.run(go())
 
 
@@ -319,8 +330,8 @@ def test_legacy_delegation_records_an_unfrozen_write(tmp_path):
 def test_coder_concerns_require_sampling_even_with_a_fresh_runner(tmp_path):
     async def go():
         async with _fusion(tmp_path, active=GATES) as (main, fake):
-            await _turn(main, fake, _route(), _delegate(), _report("concerns"), _delegate("Runner", call_id="verify"), _report(),
-                        say("First answer."), _delegate("QualitySampler", call_id="sample"), _report(), say("Final answer."))
+            await _turn(main, fake, _route(), _delegate(), _report("concerns"), _delegate("Runner", call_id="verify"), _passed_runner_report(),
+                        say("First answer."), _delegate("QualitySampler", call_id="sample"), _passed_runner_report(), say("Final answer."))
             assert "Missing checks: sampler." in _continuations(main)[0]
             verdict = _verdict(main)
             assert verdict["signals"] == ["concerns"] and verdict["checks"] == ["runner", "sampler"] and verdict["status"] == "verified"
@@ -343,8 +354,10 @@ def test_explanation_after_the_write_satisfies_the_gate_and_is_retained(tmp_path
 def test_runner_before_the_last_coder_is_stale_and_failed_checks_mark_repairs(tmp_path, runner_status):
     async def go():
         async with _fusion(tmp_path, active=GATES) as (main, fake):
-            await _turn(main, fake, _route(), _delegate(), _report(), _delegate("Runner", call_id="verify"), _report(runner_status),
+            runner = _passed_runner_report() if runner_status == "done" else _report(runner_status)
+            await _turn(main, fake, _route(), _delegate(), _report(), _delegate("Runner", call_id="verify"), runner,
                         _delegate(call_id="fix"), _report(), say("First answer."), say("Final answer."))
+            assert [work.identity for work in main._fusion.route_turn.delegations] == ["Coder", "Runner", "Coder"]
             verdict = _verdict(main)
             assert verdict["checks"] == [] and verdict["status"] == "unverified"
             assert verdict["missing"] == (["runner"] if runner_status == "done" else ["runner", "sampler"])
@@ -377,7 +390,7 @@ def test_workspace_signal_only_counts_changes_during_delegations(tmp_path, git, 
             written = "spill.txt" if outside else "inventory.txt"
             continuation = [say("No further checks.")] if outside else []
             await _turn(main, fake, _route(), _delegate(), call("create_file", {"file_path": written, "content": "New text"}), _report(),
-                        _delegate("Runner", call_id="verify"), _report(), say("Reviewed."), *continuation)
+                        _delegate("Runner", call_id="verify"), _passed_runner_report(), say("Reviewed."), *continuation)
             verdict = _verdict(main)
             assert (main.project / written).is_file()
             assert ("out_of_scope" in verdict["signals"]) == outside

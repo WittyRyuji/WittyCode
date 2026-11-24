@@ -35,7 +35,7 @@ const DEMO_SKILLS: SkillItem[] = [
 
 /** The ChatGPT plan's models, Devin's, and those of the user's API providers: the one list the model menu and the settings use. */
 export function buildModels(providers: ApiProvider[]): ModelChoice[] {
-  return [...CHATGPT_MODELS, ...DEVIN_MODELS, ...providers.flatMap(modelsOfProvider)];
+  return [...CHATGPT_MODELS, ...DEVIN_MODELS, ...providers.flatMap(modelsOfProvider)].map((m) => ({ ...m, fusionBackend: m.source === "chatgpt" ? "plan" : m.source.split(":")[0] }));
 }
 
 /** The settings a session (or the defaults) end up with when the model changes: whatever the new model and its engine
@@ -342,6 +342,7 @@ function mockData(): LiveData {
     fusionMaxCalls: 8,
     fusionMaxTokens: 500000,
     fusionMaxSeconds: 900,
+    fusionMaxSecondsAdaptive: true,
     fusionStepsMin: 16,
     fusionStepsMinAdaptive: true,
     fusionStepsMax: 32,
@@ -871,6 +872,13 @@ export const useStore = create<Store>((set, get) => ({
   setMemoryEngines: (memoryEngines) => set({ memoryEngines }),
   setCompactAuto: (compactAuto) => set({ compactAuto }),
   setFusionSetting: (key, value) => {
+    if (key === "fusionMaxSeconds") {
+      if (typeof value === "number") return set({ fusionMaxSeconds: value, fusionMaxSecondsAdaptive: false });
+      if (typeof value === "object" && !Array.isArray(value) && typeof value.seconds === "number" && typeof value.adaptive === "boolean") {
+        set({ fusionMaxSeconds: value.seconds, fusionMaxSecondsAdaptive: value.adaptive });
+      }
+      return;
+    }
     if (key !== "fusionSteps") return set({ [key]: value } as Partial<LiveData>);
     if (typeof value !== "object" || Array.isArray(value)) return;
     const { min, minAdaptive, max, maxAdaptive } = value;

@@ -55,6 +55,7 @@ from desktop.core.cache import Cache
 from desktop.core import storage_policy
 from desktop.core import storage_meter
 from desktop.core.conversation_history import ConversationHistory, prepend as prepend_history
+from desktop.core.fusion.backends import GUARDED, PREFIXES
 from desktop.core.catalog import API_PREFIX, Catalog, Target, build_catalog, settings_for_model
 from desktop.core.chatgpt.errors import ChatGPTError
 from desktop.core.hooks import Hooks
@@ -399,6 +400,7 @@ class AppCore:
         self.devin = devin
         self.chatgpt = chatgpt
         if chatgpt is not None:
+            chatgpt.factory = factory
             chatgpt.devin = devin
             chatgpt.archive_meter = self.archive_meter
             """The shared usage meter the session archives write through (``chatgpt/archive_binding``):
@@ -632,6 +634,7 @@ class AppCore:
             "fusionMaxCalls": self.settings.fusion_max_calls,
             "fusionMaxTokens": self.settings.fusion_max_tokens,
             "fusionMaxSeconds": self.settings.fusion_max_seconds,
+            "fusionMaxSecondsAdaptive": self.settings.fusion_max_seconds_adaptive,
             "fusionStepsMin": self.settings.fusion_steps_min,
             "fusionStepsMinAdaptive": self.settings.fusion_steps_min_adaptive,
             "fusionStepsMax": self.settings.fusion_steps_max,
@@ -996,9 +999,13 @@ class AppCore:
                             continue  # older ACPs can omit the flag; allocation alone says nothing about a live draft
                         self._admit_history(live)
                     rows.append(SavedRow(devin_row, item.id, "devin", item.title or "", self._latest(devin_row, item.modified_at), item.message_count or 0, created=_aware(item.created_at)))
-        if self.chatgpt is not None and (self.settings.chatgpt_enabled or self._has_api_models()):
+        own_loop = self.settings.chatgpt_enabled or self._has_api_models()
+        guarded = (self.devin is not None and self.settings.devin_enabled or self.factory is not None and self.settings.factory_enabled)
+        if self.chatgpt is not None and (own_loop or guarded):
             with contextlib.suppress(Exception):
                 for item in await self.chatgpt.list_sessions(folder, SESSION_LIST_LIMIT):
+                    if not own_loop and not item.fusion:
+                        continue  # A native Fusion seat uses the host's archive, not its standalone CLI index.
                     chatgpt_row = CHATGPT_ROW_PREFIX + item.id
                     stamp = datetime.fromtimestamp(item.modified_at, timezone.utc)
                     page_model = self.catalog.page_id("chatgpt", item.model) if item.model and self.catalog is not None else ""
@@ -2067,12 +2074,12 @@ class AppCore:
             try:
                 policy = Policy(self.settings.fusion_main, tuple(self.settings.fusion_workers), self.settings.fusion_light,
                                 0, 0, self.settings.fusion_max_seconds, self.settings.fusion_preference,
-                                self.settings.fusion_reasoning)
+                                self.settings.fusion_reasoning, self.settings.fusion_max_seconds_adaptive)
             except FusionError as error:
                 raise AppError("请先在设置中配置 Fusion 的主模型、工作模型和轻量模型。") from error
             page_model = policy.main
             target = self.catalog.target(page_model)
-            if self.chatgpt is None or self.chatgpt.model_info(page_model if page_model.startswith("devin:") else target.model) is None:
+            if self.chatgpt is None or self.chatgpt.model_info(page_model if page_model.startswith(GUARDED) else target.model) is None:
                 raise AppError("Fusion 主模型当前不可用；不会自动替换成其他模型。")
         settings = self._open_settings(page_model, base)
         if policy is not None:
@@ -2096,7 +2103,7 @@ class AppCore:
         self._select_next = True
         self._opening_meta = settings
         try:
-            if policy is not None and page_model.startswith("devin:"):
+            if policy is not None and page_model.startswith(GUARDED):
                 controller = await self.chatgpt.open_new(folder, model=page_model, reasoning=settings.get("reasoning", ""),
                                                          autonomy=settings.get("autonomy", "code"), mode=settings.get("mode", "auto"))
             else:
@@ -3724,7 +3731,8 @@ class AppCore:
                 restored = self._fusion_series(retained, registry.agents)
             else:
                 policy = Policy(self.settings.fusion_main, tuple(self.settings.fusion_workers), self.settings.fusion_light,
-                                0, 0, self.settings.fusion_max_seconds, self.settings.fusion_preference, self.settings.fusion_reasoning)
+                                0, 0, self.settings.fusion_max_seconds, self.settings.fusion_preference,
+                                self.settings.fusion_reasoning, self.settings.fusion_max_seconds_adaptive)
         except FusionError as error:
             raise AppError("Fusion 配置不可用；请检查设置或保留的专家配置，原会话未改变。") from error
         return policy, retained, restored
@@ -3739,7 +3747,7 @@ class AppCore:
 
     def _prefetch_profile(self, model: Any, effort: Any = "") -> None:
         """Fetch the model's public profile in the background: a selection never waits for it or fails on it."""
-        if not isinstance(model, str) or not model.startswith(("chatgpt:", "api:", "devin:")):
+        if not isinstance(model, str) or not model.startswith(PREFIXES):
             return
         key = (model, effort if isinstance(effort, str) else "")
         now = time.monotonic()
@@ -4390,10 +4398,10 @@ class AppCore:
             s.reconnect_interval = value
         elif key == "reconnectLimit" and _is_int(value) and RECONNECT_LIMIT_RANGE[0] <= value <= RECONNECT_LIMIT_RANGE[1]:
             s.reconnect_limit = value
-        elif key in ("fusionMain", "fusionLight") and isinstance(value, str) and len(value) <= 512 and (not value or value.startswith(("chatgpt:", "api:", "devin:"))):
+        elif key in ("fusionMain", "fusionLight") and isinstance(value, str) and len(value) <= 512 and (not value or value.startswith(PREFIXES)):
             setattr(s, "fusion_main" if key == "fusionMain" else "fusion_light", value)
             seats = True
-        elif key == "fusionWorkers" and isinstance(value, list) and len(value) <= 1 and all(isinstance(item, str) and len(item) <= 512 and item.startswith(("chatgpt:", "api:", "devin:")) for item in value):
+        elif key == "fusionWorkers" and isinstance(value, list) and len(value) <= 1 and all(isinstance(item, str) and len(item) <= 512 and item.startswith(PREFIXES) for item in value):
             s.fusion_workers = list(dict.fromkeys(value))
             seats = True
         elif key == "fusionReasoning":
@@ -4417,8 +4425,12 @@ class AppCore:
             s.fusion_max_calls = value
         elif key == "fusionMaxTokens" and _is_int(value) and 1 <= value <= 2**53 - 1:
             s.fusion_max_tokens = value
-        elif key == "fusionMaxSeconds" and _is_int(value) and 1 <= value <= 86_400:
-            s.fusion_max_seconds = value
+        elif key == "fusionMaxSeconds":
+            pair = {"seconds": value, "adaptive": False} if _is_int(value) else value
+            if not (isinstance(pair, Mapping) and set(pair) == {"seconds", "adaptive"} and type(pair["adaptive"]) is bool
+                    and _is_int(pair["seconds"]) and 1 <= pair["seconds"] <= 86_400):
+                raise AppError("这个设置的值不合法。")
+            s.fusion_max_seconds, s.fusion_max_seconds_adaptive = pair["seconds"], pair["adaptive"]
         elif key == "fusionSteps":
             pair = value if isinstance(value, Mapping) else {}
             low, high = pair.get("min"), pair.get("max")

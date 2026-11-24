@@ -4,12 +4,16 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import hashlib
+import os
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from desktop.core import session_title
 from desktop.core.chatgpt.errors import ChatGPTError, RequestNotSent
 from desktop.core.chatgpt.responses import CallBegun, CallDone, Finished, Started, TextDelta, TextDone, build_request, user_message
+from desktop.core.fusion.backends import GUARDED
+from desktop.core.fusion.summary import seat_stream
 from desktop.core.fusion.registry import FusionError
 from desktop.core.harness import compact
 from desktop.core.harness.diagnostics import MAX_RECORDS
@@ -26,6 +30,9 @@ ATTEMPT = "fusionTitleAttempt"
 def source(controller: ChatGPTController, model: str) -> Any:
     """Only compare in memory; never persist an account or provider configuration with the title."""
     manager = controller.manager
+    if model.startswith("factory:"):
+        factory = manager.factory
+        return (factory, factory.settings.factory_path, hashlib.sha256(os.environ.get("FACTORY_API_KEY", "").encode()).digest()) if factory else None
     if model.startswith("devin:"):
         devin = manager.devin
         account = devin.cached_account() if devin is not None else {}
@@ -55,14 +62,10 @@ async def generate(controller: ChatGPTController, question: str, model: str, acc
     except FusionError:
         return
 
-    native = model.startswith("devin:")
+    native = model.startswith(GUARDED)
     request = build_request(model=model, instructions=instructions, items=items, tools=[],
                             reasoning=controller._summary_effort(), shape=controller.manager.shape)
-    if native:
-        from desktop.core.fusion.summary import AcpSummary
-        stream = AcpSummary(controller.manager, before_prompt=still_allowed).stream
-    else:
-        stream = controller.manager.stream
+    stream = seat_stream(controller, model, before_prompt=still_allowed)
 
     if not draft:
         # Existing sessions checkpoint the attempt; a draft must not become an archive just for naming.

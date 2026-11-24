@@ -13,6 +13,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from desktop.core.fusion.backends import GUARDED, backend_for
 from desktop.core.providers import EFFORTS
 
 DEVIN_PREFIX = "devin:"
@@ -63,6 +64,8 @@ class Catalog:
             target = catalog.target(item["id"])
             if not target.model:
                 continue
+            if backend := backend_for(item["id"]):
+                item["fusionBackend"] = backend.name  # Older cached rows predate seat capability metadata.
             catalog.models.append(item)
             catalog._targets[item["id"]] = target
             catalog._page_ids[(target.engine, target.model)] = item["id"]
@@ -84,7 +87,7 @@ class Catalog:
         found = self._page_ids.get((engine, model))
         if found is not None:
             return found
-        if model.startswith(API_PREFIX) or (engine == OWN_ENGINE and model.startswith(DEVIN_PREFIX)):
+        if model.startswith(API_PREFIX) or (engine == OWN_ENGINE and model.startswith(GUARDED)):
             return model
         return ENGINE_PREFIXES.get(engine, "") + model
 
@@ -129,6 +132,8 @@ def build_catalog(
     catalog = Catalog()
 
     def add(item: dict[str, Any], target: Target, native: str) -> None:
+        if backend := backend_for(item["id"]):
+            item["fusionBackend"] = backend.name
         catalog.models.append(item)
         catalog._targets[item["id"]] = target
         catalog._page_ids[(target.engine, native)] = item["id"]

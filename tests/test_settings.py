@@ -23,6 +23,22 @@ from desktop.core.settings import (
 )
 
 
+@pytest.mark.parametrize(("raw", "seconds", "adaptive"), [
+    ({}, 900, True), ({"fusion_max_seconds": 900}, 900, False), ({"fusion_max_seconds": 1}, 1, False),
+    ({"fusion_max_seconds": -1}, 900, True), ({"fusion_max_seconds": True}, 900, True),
+    ({"fusion_max_seconds": 18, "fusion_max_seconds_adaptive": True}, 18, True),
+])
+def test_expert_timeout_migrates_in_memory_and_round_trips(tmp_path, raw, seconds, adaptive):
+    path = tmp_path / "settings.json"
+    before = json.dumps(raw)
+    path.write_text(before, encoding="utf-8")
+    settings = load_settings(path)
+    assert (settings.fusion_max_seconds, settings.fusion_max_seconds_adaptive) == (seconds, adaptive)
+    assert path.read_text(encoding="utf-8") == before
+    save_settings(settings, path)
+    assert load_settings(path) == settings
+
+
 def test_session_pins_sanitize_and_round_trip_with_old_settings(tmp_path):
     path = tmp_path / "settings.json"
     a, b = (tmp_path / "a").resolve(), (tmp_path / "b").resolve()

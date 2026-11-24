@@ -12,8 +12,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
+import re
 import shutil
+import sys
 import time
 from typing import Any
 import uuid
@@ -23,6 +26,7 @@ from desktop.core.context_envelope import strip, wrap
 from desktop.core.devin.rpc import AcpClient
 from desktop.core.engine_errors import EngineRpcError
 from desktop.core.engine_items import split_handoff
+from desktop.core.factory_guard import guarded_factory_client
 from desktop.core.hooks import Hooks, PromptContext, PromptEvent
 from desktop.core.prompts import ActionView, OptionView, QuestionView, OPTION_LABELS, UNSUPPORTED_OPTIONS
 from desktop.core.session_state import LiveSettings, SessionState, SESSION_STATE_LABELS, SteerOutcome
@@ -32,6 +36,53 @@ from desktop.core.usage import Tokens
 
 FACTORY_PERMISSIONS = ("off", "low", "medium", "high")
 EXEC_ARGS = ("exec", "--input-format", "stream-jsonrpc", "--output-format", "stream-jsonrpc")
+
+
+def _registered_path_dirs():
+    """Read just the two persistent PATH values; never change the current process environment."""
+    import winreg
+
+    for hive, name in ((winreg.HKEY_CURRENT_USER, r"Environment"),
+                       (winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment")):
+        try:
+            with winreg.OpenKey(hive, name) as key:
+                value, kind = winreg.QueryValueEx(key, "Path")
+            if kind in (winreg.REG_SZ, winreg.REG_EXPAND_SZ):
+                for entry in winreg.ExpandEnvironmentStrings(value).split(";"):
+                    directory = Path(entry.strip().strip('"'))
+                    if directory.is_absolute():
+                        yield directory
+        except OSError:
+            continue
+
+
+def _find_factory_cli(name):
+    """Prefer the process PATH; then try known installs, never recurse through the user's disk."""
+    if path := shutil.which(name):
+        return path
+    if sys.platform != "win32":
+        binary = Path.home() / ".local" / "bin" / name
+        return str(binary) if binary.is_file() and os.access(binary, os.X_OK) else None
+    for directory in _registered_path_dirs():
+        binary = directory / "droid.exe"
+        if binary.is_file():
+            return str(binary)
+    standalone = Path.home() / "bin" / "droid.exe"  # Official standalone Windows installer.
+    if standalone.is_file():
+        return str(standalone)
+    local = os.environ.get("LOCALAPPDATA")
+    if local and Path(local).is_absolute():
+        bundles = []
+        for folder in (Path(local) / "Factory").glob("app-*"):
+            match = re.fullmatch(r"app-(\d+(?:\.\d+)*)(?:-([0-9A-Za-z.-]+))?", folder.name)
+            if match:
+                version = tuple(map(int, match[1].split(".")))
+                bundles.append((version, not match[2], match[2] or "", folder))
+        for *_, folder in sorted(bundles, reverse=True):
+            binary = folder / "resources" / "bin" / "droid.exe"
+            if binary.is_file():
+                return str(binary)
+    return None
 
 
 class FactoryClient(AcpClient):
@@ -57,7 +108,7 @@ class FactoryEngine:
     def __init__(self, settings, root: Path, *, client_factory=None, locate=None):
         self.settings, self.root = settings, Path(root)
         self._client_factory = client_factory
-        self._locate = locate or shutil.which
+        self._locate = locate or _find_factory_cli
         self.controllers = []
         self._listeners, self._account_listeners = [], []
         self.memory = None
@@ -85,7 +136,10 @@ class FactoryEngine:
 
     def binary(self):
         path = self.settings.factory_path.strip()
-        return str(Path(path)) if path and Path(path).is_file() else self._locate("droid") if not path else None
+        if path:
+            binary = Path(path)
+            return str(binary.resolve()) if binary.is_file() else None
+        return self._locate("droid")
 
     async def account(self):
         path = await asyncio.to_thread(self.binary)
@@ -100,6 +154,10 @@ class FactoryEngine:
     def _notify(self, controller, kind="transcript"):
         for callback in list(self._listeners):
             callback(controller, kind)
+
+    def guarded_client(self, project, **handlers):
+        """Fusion-only factory; a guard refusal must never retry via client()."""
+        return guarded_factory_client(self, project, **handlers)
 
     def client(self, project, **handlers):
         if self._client_factory is not None:

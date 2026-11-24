@@ -132,7 +132,8 @@ class AppSettings:
     fusion_preference: int = 50
     fusion_max_calls: int = 8  # Legacy defaults are kept for settings compatibility, not applied to new sessions.
     fusion_max_tokens: int = 500_000
-    fusion_max_seconds: int = 900
+    fusion_max_seconds: int = 900  # Remembered manual limit, not an adaptive ceiling.
+    fusion_max_seconds_adaptive: bool = True
     fusion_steps_min: int = STEP_BUDGET_DEFAULT[0]
     """Manual floor for a delegation's step budget, remembered while its Adaptive box is checked."""
     fusion_steps_min_adaptive: bool = True
@@ -365,6 +366,11 @@ def settings_from_dict(raw: object) -> AppSettings:
         fusion_reasoning = {}
     raw_gates = raw.get("fusion_gates")
     fusion_gates = {name: raw_gates[name] for name in GATES if isinstance(raw_gates.get(name), bool)} if isinstance(raw_gates, dict) else {}
+    seconds = raw.get("fusion_max_seconds")
+    has_seconds = type(seconds) is int and 1 <= seconds <= 86_400
+    adaptive = raw.get("fusion_max_seconds_adaptive")
+    # Old files with a valid explicit timeout keep that limit; loading does not rewrite them.
+    seconds_adaptive = adaptive if type(adaptive) is bool else not has_seconds
     steps_min, steps_max = raw.get("fusion_steps_min"), raw.get("fusion_steps_max")
     min_adaptive, max_adaptive = raw.get("fusion_steps_min_adaptive"), raw.get("fusion_steps_max_adaptive")
     # The group stands or falls together: a half-saved or both-manual-inverted range must not clamp a delegation sideways.
@@ -499,7 +505,8 @@ def settings_from_dict(raw: object) -> AppSettings:
         fusion_preference=raw.get("fusion_preference") if isinstance(raw.get("fusion_preference"), int) and not isinstance(raw.get("fusion_preference"), bool) and 0 <= raw["fusion_preference"] <= 100 else defaults.fusion_preference,
         fusion_max_calls=raw.get("fusion_max_calls") if isinstance(raw.get("fusion_max_calls"), int) and not isinstance(raw.get("fusion_max_calls"), bool) and 1 <= raw["fusion_max_calls"] <= 1000 else defaults.fusion_max_calls,
         fusion_max_tokens=raw.get("fusion_max_tokens") if isinstance(raw.get("fusion_max_tokens"), int) and not isinstance(raw.get("fusion_max_tokens"), bool) and 1 <= raw["fusion_max_tokens"] <= 2**53 - 1 else defaults.fusion_max_tokens,
-        fusion_max_seconds=raw.get("fusion_max_seconds") if isinstance(raw.get("fusion_max_seconds"), int) and not isinstance(raw.get("fusion_max_seconds"), bool) and 1 <= raw["fusion_max_seconds"] <= 86_400 else defaults.fusion_max_seconds,
+        fusion_max_seconds=seconds if has_seconds else defaults.fusion_max_seconds,
+        fusion_max_seconds_adaptive=seconds_adaptive,
         fusion_steps_min=steps_min,
         fusion_steps_min_adaptive=min_adaptive,
         fusion_steps_max=steps_max,

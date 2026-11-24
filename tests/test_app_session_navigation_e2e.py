@@ -183,7 +183,10 @@ def test_real_model_menu_keeps_one_sidebar_row_after_switch_and_close(qapp, loop
             model.next(say("先检查输入映射。"), hold=False)
             await rig.send("检查库存导入与重复行")
             await rig.wait_for(".send.stop", 0)
-            await rig.wait_text(".tab", "会话主题摘要")
+            await rig.wait_for(".srow.open .stitle")
+            title = await rig.text(".srow.open .stitle")
+            assert title.strip() and title != "新会话"
+            assert await rig.text(".tab.current .tab-title") == title
             await rig.click(".controls .chip", 0)
             await rig.wait_for(".menu-item")
             await rig.click_text(".menu-item", "SWE-2")
@@ -201,6 +204,8 @@ def test_real_model_menu_keeps_one_sidebar_row_after_switch_and_close(qapp, loop
             await rig.click(".srow")
             await rig.wait_for(".tab", 1)
             await rig.wait_text(".user .body", "检查库存导入与重复行")
+            assert await rig.text(".srow.open .stitle") == title
+            assert await rig.text(".tab.current .tab-title") == title
             assert await rig.count(".srow") == 1
         finally:
             await rig.finish()

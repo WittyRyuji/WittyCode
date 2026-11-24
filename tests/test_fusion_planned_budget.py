@@ -158,14 +158,14 @@ def test_malformed_budget_keeps_global_session_and_plan_caps(tmp_path, monkeypat
 def test_bounded_brief_without_a_plan_keeps_existing_behavior(tmp_path):
     rt = _runtime(tmp_path, plan_budget=None)
     bounded = rt._bounded_brief(_brief(steps=60, seconds=600))
-    assert bounded.budget["steps"] == 40 and bounded.budget["seconds"] == 600
+    assert bounded.budget["steps"] == 40 and bounded.budget["seconds"] == 60
     assert "plan" not in bounded.budget_note
 
 
 def test_plan_budget_needs_v3(tmp_path):
     rt = _runtime(tmp_path, plan_budget={"turns": 20, "seconds": 30, "tokens": "adaptive"}, v3=False)
     bounded = rt._bounded_brief(_brief(steps=60, seconds=600))
-    assert bounded.budget["steps"] == 40 and bounded.budget["seconds"] == 600
+    assert bounded.budget["steps"] == 40 and bounded.budget["seconds"] == 60
     assert "plan" not in bounded.budget_note
 
 

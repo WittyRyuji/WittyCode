@@ -61,6 +61,7 @@ export interface SettingsView {
   fusionMaxCalls?: number;
   fusionMaxTokens?: number;
   fusionMaxSeconds?: number;
+  fusionMaxSecondsAdaptive?: boolean;
   /** per-delegation step band shared by all experts; each side is adaptive or the remembered number; missing on an older sender: 16/adaptive, 32/adaptive */
   fusionStepsMin?: number;
   fusionStepsMinAdaptive?: boolean;

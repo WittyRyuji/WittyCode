@@ -24,15 +24,18 @@ SECONDS = 90.0
 
 
 async def ask(engine: ChatGPTEngine, prompt: str, *, timeout: float = SECONDS, model_id: str = "", instructions: str = SYSTEM,
-              on_usage: Callable[[Usage, str], None] | None = None) -> str | None:
+              on_usage: Callable[[Usage, str], None] | None = None, fusion_host=None, reasoning=None) -> str | None:
     """The model's answer to ``prompt``, or ``None`` when the plan cannot be used now (not signed in, no permission, an
     error: the reason is only logged, it is not the user's turn that failed)."""
     from desktop.core.llm.backend import is_api_model
 
     api = is_api_model(model_id)
-    account = engine.cached_account()
-    if not api and (account.get("auth") != "signed-in" or not account.get("planEnabled")):
-        return None
+    if fusion_host is not None and not model_id:
+        return None  # Never pick the ordinary Plan side model for an unconfigured Fusion seat.
+    if not api and fusion_host is None:
+        account = engine.cached_account()
+        if account.get("auth") != "signed-in" or not account.get("planEnabled"):
+            return None
     try:
         if model_id:
             model = engine.model_info(model_id)
@@ -43,10 +46,14 @@ async def ask(engine: ChatGPTEngine, prompt: str, *, timeout: float = SECONDS, m
             model = next((m for m in models if m.id == PREFERRED_MODEL), None) or (models[0] if models else None)
             if model is None:
                 return None
-        effort = "low" if "low" in model.efforts else None
+        effort = reasoning or ("low" if "low" in model.efforts else None)
         request = build_request(model=model_id or model.id, instructions=instructions, items=[user_message(prompt)], tools=[], reasoning=effort, shape=engine.shape)
         text = ""
-        stream = engine.stream(request)
+        if fusion_host is not None:
+            from desktop.core.fusion.summary import seat_stream
+            stream = seat_stream(fusion_host, model_id)(request)
+        else:
+            stream = engine.stream(request)
         try:
             async with asyncio.timeout(timeout):
                 async for event in stream:

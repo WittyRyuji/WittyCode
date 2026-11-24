@@ -30,6 +30,31 @@ async def select_fusion(rig):
     await rig.click_text(".menu-item", "Fusion")
 
 
+def test_factory_catalog_model_can_be_picked_for_each_seat(qapp, loop, tmp_path, monkeypatch):
+    from tests.fusion_backend_support import factory_peer
+
+    async def scenario():
+        rig = await open_rig(tmp_path, factory_engine=factory_peer(tmp_path, monkeypatch))
+        try:
+            await select_fusion(rig)
+            await rig.wait_text(".settings-body h2", "Fusion")
+            for role in ("main", "worker", "light"):
+                row = f'.fusion-model-row[data-role="{role}"]'
+                await rig.click(row + " .fusion-model-picker .selectbox")
+                option = row + " .fusion-model-picker .menu-item:enabled"
+                await rig.wait_text(option, "Factory Wire")  # The catalog arrives asynchronously on the page.
+                await rig.click_text(option, "Factory Wire")
+                await rig.wait_for(row + '[data-model="factory:demo-wire"]')
+            s = rig.core.settings
+            assert (s.fusion_main, s.fusion_workers, s.fusion_light) == ("factory:demo-wire", ["factory:demo-wire"], "factory:demo-wire")
+            if evidence := os.environ.get("WITTYCODE_TEST_EVIDENCE"):
+                await rig.shot(".settings-body", Path(evidence) / "factory-seats.png")
+            assert not rig.plan.requests and not rig.plan.fake.title_requests
+        finally:
+            await rig.finish()
+    run(loop, scenario())
+
+
 def test_configure_and_start_fusion_with_a_local_fake(qapp, loop, tmp_path):
     async def scenario():
         rig = await open_rig(tmp_path)
@@ -75,9 +100,10 @@ def test_configure_and_start_fusion_with_a_local_fake(qapp, loop, tmp_path):
             await rig.send("请检查模块")
             await rig.wait_text(".chip-model .chip-v", "Fusion")
             await rig.wait_text(".transcript", "主代理已检查报告")
-            await rig.wait_text(".tab-title", "会话主题摘要")
-            await rig.wait_text(".srow.open .stitle", "会话主题摘要")
-            assert "会话主题摘要" not in await rig.text(".transcript")
+            title = await rig.text(".srow.open .stitle")
+            assert title.strip() and title != "新会话"
+            assert await rig.text(".tab-title") == title
+            assert title not in await rig.text(".transcript")
             await rig.wait_for(".agent-history-toggle")
             await rig.click(".agent-history-toggle")
             await rig.wait_text(".agent-chip", "src")
@@ -116,9 +142,9 @@ def test_configure_and_start_fusion_with_a_local_fake(qapp, loop, tmp_path):
             assert "cost x0.50" in rig.plan.requests[0]["instructions"] and "quality x1.50" in rig.plan.requests[0]["instructions"]
             assert len(rig.plan.requests) == 3
             await rig.click(".tab.current .tab-x")
-            await rig.wait_text(".srow:not(.open) .stitle", "会话主题摘要")
-            await rig.click_text(".srow:not(.open)", "会话主题摘要")
-            await rig.wait_text(".tab-title", "会话主题摘要")
+            await rig.wait_text(".srow:not(.open) .stitle", title)
+            await rig.click_text(".srow:not(.open)", title)
+            await rig.wait_text(".tab-title", title)
             await rig.wait_text(".transcript", "主代理已检查报告")
             assert len(rig.plan.fake.title_requests) == 1
         finally:
@@ -321,12 +347,15 @@ def test_the_step_band_saves_as_one_group_in_fusion_settings(qapp, loop, tmp_pat
             await rig.press(Qt.Key.Key_Comma, Qt.KeyboardModifier.ControlModifier)
             await rig.wait_for(".settings")
             await rig.click_text(".snav", "Fusion")
-            await rig.wait_for(".fusion-step-budget")
-            box = '.fusion-step-budget input[aria-label="委派最小步数 Adaptive"]'
-            low = '.fusion-step-budget input[aria-label="委派最小步数"]'
-            hi_box = '.fusion-step-budget input[aria-label="委派最大步数 Adaptive"]'
-            high = '.fusion-step-budget input[aria-label="委派最大步数"]'
-            button = ".fusion-step-budget .btn"
+            steps = '[role="group"][aria-label="委派步数范围"]'
+            seconds = '[role="group"][aria-label="单个专家最长运行秒数"]'
+            button = steps + " .step-save"
+            await rig.wait_for(button, 1)
+            await rig.wait_for(seconds + " .step-save", 1)
+            box = steps + ' input[aria-label="委派最小步数 Adaptive"]'
+            low = steps + ' input[aria-label="委派最小步数"]'
+            hi_box = steps + ' input[aria-label="委派最大步数 Adaptive"]'
+            high = steps + ' input[aria-label="委派最大步数"]'
             state = f"JSON.stringify([document.querySelector({json.dumps(box)}).checked," \
                     f"document.querySelector({json.dumps(hi_box)}).checked," \
                     f"document.querySelector({json.dumps(low)}).disabled, document.querySelector({json.dumps(low)}).value," \
@@ -334,7 +363,7 @@ def test_the_step_band_saves_as_one_group_in_fusion_settings(qapp, loop, tmp_pat
             assert json.loads(await rig.js(state)) == [True, True, True, "16", True, "32"], "both sides adaptive, inputs off, base numbers"
             adaptive_bg = await rig.js(f"getComputedStyle(document.querySelector({json.dumps(low)})).backgroundColor")
             if evidence := os.environ.get("WITTYCODE_TEST_EVIDENCE"):
-                await rig.js('document.querySelector(".fusion-step-budget").scrollIntoView()')
+                await rig.js(f"document.querySelector({json.dumps(steps)}).scrollIntoView()")
                 await rig.shot(".settings", Path(evidence) / "fusion-step-budget.png")
             # Unchecking lets the user type; checking again remembers the typed number.
             await rig.click(box)
@@ -371,9 +400,15 @@ def test_the_step_band_saves_as_one_group_in_fusion_settings(qapp, loop, tmp_pat
             nx, hx, cx, kx, bx, nw, bw, nh, bh = json.loads(rect)
             assert abs(nx - hx) <= 1 and abs(cx - kx) <= 1, "the two Adaptive rows line up"
             assert abs(bx - nx) <= 1 and abs(bw - nw) <= 1 and abs(bh - nh) <= 1, "the save key matches the number box"
+            # Both saves can be enabled at once; applying one group must not commit the other's draft.
+            await rig.click(seconds + ' input[aria-label="最长秒数 Adaptive"]')
+            await rig.wait_for(seconds + " .step-save:enabled", 1)
             await rig.click(button)
             await until(lambda: rig.core.settings.fusion_steps_min == 60 and not rig.core.settings.fusion_steps_min_adaptive
                         and rig.core.settings.fusion_steps_max == 90 and not rig.core.settings.fusion_steps_max_adaptive)
+            assert rig.core.settings.fusion_max_seconds_adaptive
+            await rig.click(seconds + " .step-save:enabled")
+            await until(lambda: not rig.core.settings.fusion_max_seconds_adaptive)
             # The backend refuses a crafted bad group on its own and keeps the last valid one.
             for value in ({"min": 91, "minAdaptive": False, "max": 90, "maxAdaptive": False},
                           {"min": 5, "minAdaptive": False, "max": 15}):
@@ -384,7 +419,7 @@ def test_the_step_band_saves_as_one_group_in_fusion_settings(qapp, loop, tmp_pat
             await rig.press(Qt.Key.Key_Comma, Qt.KeyboardModifier.ControlModifier)
             await rig.wait_for(".settings")
             await rig.click_text(".snav", "Fusion")
-            await rig.wait_for(".fusion-step-budget")
+            await rig.wait_for(button, 1)
             assert json.loads(await rig.js(state)) == [False, False, False, "60", False, "90"]
         finally:
             await rig.finish()

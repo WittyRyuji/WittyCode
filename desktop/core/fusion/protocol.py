@@ -36,7 +36,7 @@ BRIEF_PARAMETERS: dict[str, Any] = {
             "steps": {"type": "integer", "minimum": 1, "maximum": _MAX_BRIEF_BUDGET},
             "seconds": {"type": "integer", "minimum": 1, "maximum": _MAX_BRIEF_BUDGET},
         }, "additionalProperties": False,
-            "description": "Optional: positive integer steps and/or seconds. Invalid entries are ignored; omitted values use the session defaults."},
+            "description": "Optional step and time estimates. Omitted seconds are sized from steps in Adaptive mode. Manual, plan and safety limits always apply."},
         "resume": {"type": "boolean", "default": False, "description": "Continue an interrupted workstream only after inspecting the evidence; give a new brief."},
     },
     "required": ["workstream", "identity", "goal", "constraints", "acceptance", "paths"],

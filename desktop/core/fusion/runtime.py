@@ -27,6 +27,7 @@ from desktop.core.fusion.protocol import (
     rating_item_text, report_guidance, settle_ratings,
 )
 from desktop.core.fusion.reasoning import configured_effort
+from desktop.core.fusion.backends import PREFIXES
 from desktop.core.fusion.registry import Expert, FusionError, FusionRegistry, Policy
 from desktop.core.harness import asking
 from desktop.core.harness import todo
@@ -278,6 +279,7 @@ class RouteTurn:
     workstreams: set[str] = field(default_factory=set)
     edits: int = 0
     """Edits the main agent made itself in this turn; a new route does not reset it."""
+    last_main_edit: float = 0.0
     latest_finished: float = 0.0
     reroute_due: bool = False
     submitted_at: float = 0.0
@@ -294,6 +296,25 @@ class RouteTurn:
     unfrozen_write: bool = False  # A main-agent edit or a writer without a frozen item disqualifies the L3 exemption.
     exemption_start: WorkspaceStart | None = None  # First route, before the main agent can write.
     frozen_l3_paths: set[str] = field(default_factory=set)  # Scope of L3 items actually dispatched this turn.
+
+    def last_write(self) -> float:
+        return max(self.last_main_edit, max((work.finished for work in self.delegations if work.paths), default=0.0))
+
+
+@dataclass(slots=True)
+class CheckAttempt:
+    """Recovery state owned by one live delegate call. Never reconstructed from session history."""
+    expert: Expert | None = None
+    reason: str = ""
+    steps: int = 0
+    seconds: int = 0
+    number: int = 1
+
+    def budget_label(self) -> str:
+        return f"{self.steps} {'step' if self.steps == 1 else 'steps'}, {self.seconds} {'second' if self.seconds == 1 else 'seconds'}"
+
+
+_MAX_CHECK_ATTEMPTS = 3
 
 
 @dataclass(slots=True)
@@ -465,6 +486,7 @@ class FusionRuntime:
         turn = self.route_turn
         if turn is not None:
             turn.unfrozen_write = True
+            turn.last_main_edit = time.time()
             if not turn.from_plan:
                 turn.edits += 1
 
@@ -610,7 +632,7 @@ class FusionRuntime:
         writes = [work for work in turn.delegations if work.paths] if turn is not None else []
         if not writes:
             return "L2"
-        checks, _, risk = self._check_facts(turn, writes, max(work.finished for work in writes))
+        checks, _, risk = self._check_facts(turn, writes, turn.last_write())
         if "sampler" in checks and review_policy.plan_review(self.registry.policy.preference, risk,
                                                             runnable=False, has_current_evidence=False).review:
             return "L1"
@@ -623,7 +645,7 @@ class FusionRuntime:
         writes = [work for work in turn.delegations if work.paths]
         if not writes:
             return None
-        last_write = max(work.finished for work in writes)
+        last_write = turn.last_write()
         route = turn.route
         skip = route.reason if route.verification == "self_check" and turn.submitted_at >= last_write else ""
         from_plan = turn.from_plan
@@ -648,9 +670,12 @@ class FusionRuntime:
                                 and self._l3_changes_covered(turn))
             plan = review_policy.plan_review(self.registry.policy.preference, risk, runnable="runner" in declared,
                                              has_current_evidence="runner" in checks, suppress_risk_sampler=suppress_sampler)
+            # Even a discretionary check that actually ran against this delivery cannot fail silently.
+            attempted = {kind for kind, name, seat in _CHECK_KINDS if any(
+                work.identity == name and work.seat == seat and work.started > last_write for work in turn.delegations)}
             required = tuple(name for name, needed in (("runner", plan.runner),
                                                        ("sampler", sampler_selected or plan.sampler),
-                                                       ("review", plan.review)) if needed)
+                                                       ("review", plan.review)) if needed or name in attempted)
             # A self_check only explains the gap; it never waives it, and a deliverable nothing
             # verifies — no runnable check and no current evidence — cannot be marked verified.
             missing = tuple(check for check in required if check not in checks)
@@ -658,9 +683,12 @@ class FusionRuntime:
                 missing = ("runner",)
             return AcceptanceVerdict(route, from_plan, checks, missing, signals, skip)
         signals = self._acceptance_signals(turn, writes)
-        checks = tuple(check for check, identity_name in (("runner", "Runner"), ("sampler", "QualitySampler"))
-                       if any(work.identity == identity_name and work.report_status and work.finished > last_write for work in turn.delegations))
-        missing = () if skip else tuple(check for check in checks_after(route, signals) if check not in checks)
+        kinds = (("runner", "Runner"), ("sampler", "QualitySampler"))
+        checks = tuple(check for check, name in kinds if _current_evidence(turn.delegations, name, last_write))
+        # A prose-only change may explain why there was nothing runnable. It cannot erase a failed run.
+        attempted = {check for check, name in kinds if any(work.identity == name for work in turn.delegations)}
+        required = attempted if skip else set(checks_after(route, signals)) | attempted
+        missing = tuple(check for check, _ in kinds if check in required and check not in checks)
         return AcceptanceVerdict(route, from_plan, checks, missing, signals, skip)
 
     async def retain_verdict(self, verdict: AcceptanceVerdict) -> None:
@@ -1129,14 +1157,15 @@ class FusionRuntime:
             return
         model = native_model(self.registry.policy.light)
         events = tuple(run.events)
-        if model.startswith("devin:") or not observer.precondition(events):
-            return  # The available side-request helper accepts ChatGPT and API models.
+        if not observer.precondition(events):
+            return
         from desktop.core.chatgpt import side
 
         async def ask(prompt: str) -> str | None:
             with contextlib.suppress(FusionError):
                 self.check_budget()
-                return await side.ask(self.parent.manager, prompt, model_id=model, timeout=10,
+                return await side.ask(self.parent.manager, prompt, model_id=model, timeout=10, fusion_host=self.parent,
+                                      reasoning=self.reasoning_for(self.registry.policy.light, "light"),
                                       on_usage=lambda usage, used: self.parent._add_usage(
                                           usage, measures_context=False, counts_speed=False, model=used))
             return None
@@ -1320,7 +1349,8 @@ class FusionRuntime:
     def _global_preset(self) -> dict[str, Any]:
         settings = self.parent.manager.settings
         return {"main": settings.fusion_main, "workers": list(settings.fusion_workers), "light": settings.fusion_light,
-                "maxSeconds": settings.fusion_max_seconds, "preference": settings.fusion_preference,
+                "maxSeconds": settings.fusion_max_seconds, "maxSecondsAdaptive": settings.fusion_max_seconds_adaptive,
+                "preference": settings.fusion_preference,
                 "reasoning": dict(settings.fusion_reasoning)}
 
     def pending_settings(self) -> Policy | None:
@@ -1330,7 +1360,7 @@ class FusionRuntime:
         if not all(desired[key] for key in ("main", "workers", "light")):
             return None
         previous = self.parent.saved.origin.get("fusionSettings", self.settings_snapshot(current))
-        delta = {key: value for key, value in desired.items() if value != previous.get(key)}
+        delta = {key: value for key, value in desired.items() if value != previous.get(key, False if key == "maxSecondsAdaptive" else None)}
         return Policy.from_json({**current.to_json(), **delta}) if delta else None
 
     def prepare_settings(self, policy: Policy) -> FusionRegistry:
@@ -1376,7 +1406,7 @@ class FusionRuntime:
         parent = self.parent
         if parent.state is not SessionState.READY or self._active or self._delegations:
             raise FusionError("The main agent must be idle before its model can be changed.")
-        if (not isinstance(model, str) or not model.startswith(("chatgpt:", "api:", "devin:"))
+        if (not isinstance(model, str) or not model.startswith(PREFIXES)
                 or parent.manager.model_info(native_model(model)) is None):
             raise FusionError("The chosen main model is unavailable; no fallback was selected.")
         if model == self.registry.policy.main:
@@ -1394,7 +1424,7 @@ class FusionRuntime:
     def authorize_worker(self, model: str) -> bool:
         policy = self.registry.policy
         if (not isinstance(model, str) or self.parent.manager.model_info(native_model(model)) is None
-                or not model.startswith(("chatgpt:", "api:", "devin:")) or len(policy.workers) >= 32):
+                or not model.startswith(PREFIXES) or len(policy.workers) >= 32):
             raise FusionError("The model is unavailable or the worker pool is full.")
         if model in policy.workers:
             return False
@@ -1563,9 +1593,14 @@ class FusionRuntime:
         budget = workplan.get("budget") if isinstance(workplan, Mapping) else None
         return budget if isinstance(budget, Mapping) else None
 
+    @property
+    def _seconds_cap(self) -> int:
+        policy = self.registry.policy
+        return step_budget.MAX_SECONDS if policy.max_seconds_adaptive else policy.max_seconds
+
     def _planned(self, band: step_budget.Band) -> step_budget.PlannedBudget | None:
         """The plan's budget resolved against this delegation's band and the session run-time cap."""
-        return step_budget.planned_budget(self._plan_budget(), band, self.registry.policy.max_seconds)
+        return step_budget.planned_budget(self._plan_budget(), band, self._seconds_cap)
 
     def _plan_tokens(self) -> int | None:
         """The plan's session-wide token estimate for this turn; ``None`` for adaptive or no plan."""
@@ -1615,8 +1650,8 @@ class FusionRuntime:
                     "review the spend before delegating further.")
         return ""
 
-    def _bounded_brief(self, brief: Brief) -> Brief:
-        """Clamp the requested steps into the configured band and record where the numbers came from."""
+    def _bounded_brief(self, brief: Brief, retry: CheckAttempt | None = None) -> Brief:
+        """Resolve the budget once for the prompt, observer, step limit and wall clock."""
         risk = 0
         if self.gate("v3"):
             profile = self.identities.get(brief.identity)
@@ -1630,18 +1665,33 @@ class FusionRuntime:
         steps = step_budget.effective_steps(requested, band)
         note = step_budget.note(band, requested)
         use_default_caps = not brief.budget or bool(brief.ignored_budget)
-        seconds = brief.budget.get("seconds", self.registry.policy.max_seconds if use_default_caps else None)
-        # Honor a plan cap below the band floor for defaulted budgets; valid explicit estimates keep the old clamp.
-        planned = self._planned(replace(band, low=1) if use_default_caps else band)
+        # Failure is new sizing information for an adaptive side, never permission to exceed a manual cap.
+        requested_seconds = brief.budget.get("seconds")
+        if retry is not None:
+            grow_steps = retry.reason != "timeout"
+            requested_steps = retry.steps * (2 if grow_steps else 1)
+            if grow_steps and self.parent.manager.settings.fusion_steps_max_adaptive and requested_steps > band.high:
+                band = replace(band, high=min(self.parent.manager.settings.max_steps, requested_steps))
+                note += f"; adaptive recovery ceiling {band.high}"
+            steps = step_budget.effective_steps(requested_steps, band)
+            requested_seconds = retry.seconds * (1 if retry.reason == "step limit" else 2)
+            note += f"; recovery {retry.number} after {retry.reason} ({retry.budget_label()})"
+        # Honor a plan cap below the band floor for defaulted budgets, including on recovery.
+        planned = self._planned(replace(band, low=1) if use_default_caps or retry is not None else band)
+        seconds_cap = self._seconds_cap
         if planned is not None:
             if planned.steps is not None:
                 steps = min(steps, planned.steps)
             if planned.seconds is not None:
-                seconds = min(seconds, planned.seconds) if seconds is not None else planned.seconds
+                seconds_cap = min(seconds_cap, planned.seconds)
             note = f"{note}; {planned.note}"
-        budget = {**brief.budget, "steps": steps}
-        if seconds is not None:
-            budget["seconds"] = seconds
+        budget = {"steps": steps}
+        if requested_seconds is not None:
+            budget["seconds"] = min(requested_seconds, seconds_cap)
+        elif self.registry.policy.max_seconds_adaptive:
+            budget["seconds"] = min(step_budget.adaptive_seconds(steps), seconds_cap)
+        elif use_default_caps or planned is not None and planned.seconds is not None:
+            budget["seconds"] = seconds_cap
         return replace(brief, budget=budget, budget_note=note)
 
     async def delegate_brief(self, brief: Brief, *, tool_call: Call | None = None) -> Outcome:
@@ -1657,20 +1707,43 @@ class FusionRuntime:
                 return Outcome("A read-only brief must have no write paths.", True)
         policy = self.registry.policy
         model = policy.workers[0] if profile.role == "worker" else policy.light
-        return await self.delegate(brief.workstream, model, profile.role, brief.text(), brief.paths, brief.resume,
-                                   brief=brief, profile=profile, tool_call=tool_call)
+        turn, route = self.parent._turn, self.route_turn
+        check = (CheckAttempt() if turn is not None and route is not None and self.acceptance_enabled()
+                 and profile.name in ("Runner", "QualitySampler") and not brief.paths and "edit" not in profile.tools else None)
+        receipts = []
+        while True:
+            result = await self.delegate(brief.workstream, model, profile.role, brief.text(), brief.paths, brief.resume,
+                                         brief=brief, profile=profile, tool_call=tool_call, check=check)
+            if not check or not check.reason:
+                break
+            receipts.append(f"Check attempt {check.number}: {check.reason} ({check.budget_label()}).")
+            if (check.number >= _MAX_CHECK_ATTEMPTS or self.parent._turn is not turn or self.route_turn is not route
+                    or self._closing or self.parent._close_requested or self.parent._fusion is not self):
+                break
+            check.number += 1
+        if receipts:
+            result.output = "\n".join(receipts) + "\n" + result.output
+        return result
 
     async def delegate(self, scope: str, model: str, role: str, task: str, paths: tuple[str, ...] | None = None, resume: bool = False,
-                       *, brief: Brief | None = None, profile: identity.Identity | None = None, tool_call: Call | None = None) -> Outcome:
+                       *, brief: Brief | None = None, profile: identity.Identity | None = None, tool_call: Call | None = None,
+                       check: CheckAttempt | None = None) -> Outcome:
         from desktop.core.harness.outputs import hint
         from desktop.core.harness.tools import ToolError
         from desktop.core.harness.toolset import PLAN_REFUSAL
 
+        retry = replace(check) if check is not None and check.reason else None
+        recovering = retry.expert if retry is not None else None
+        if check is not None:
+            check.reason = ""  # Refusals, cancellation and setup failures must not inherit the last failure.
         if self._closing or self.parent._close_requested or self.parent._fusion is not self:
             return Outcome("The Fusion session is inactive or closing; no expert was started.", True)
         if (self.parent._turn_mode or self.parent.mode) == "spec":
             return Outcome(PLAN_REFUSAL, True)
         route_turn = self.route_turn
+        if recovering is not None and route_turn is not None and route_turn.last_write() >= recovering.started_at:
+            # Its preserved tool results refer to an older delivery. Start the same check without that history.
+            recovering, resume = None, False
         writes = brief is None or brief_writes(brief)
         if writes and (refusal := self.route_guard("delegate", (scope,))):
             return Outcome(refusal, True)
@@ -1681,10 +1754,11 @@ class FusionRuntime:
                 # Current evidence seats fresh checks only; a resumed check keeps its seat even across a model change.
                 try:
                     previous = self.registry.workstream_expert(scope, role, identity=profile.name,
-                                                               reuse=profile.reuse, resume=resume)
+                                                               reuse=profile.reuse, resume=resume, recover=recovering)
                 except FusionError as error:
                     return Outcome(str(error), True)
-                seat = previous.seat if previous is not None else self._check_seat(profile.name, route_turn)
+                owner = retry.expert if retry is not None else previous
+                seat = owner.seat if owner is not None else self._check_seat(profile.name, route_turn)
                 if seat:
                     model = policy.seat_model(seat)
             else:
@@ -1712,7 +1786,9 @@ class FusionRuntime:
         defaulted_brief = brief if default_brief or ignored_budget else None
         brief_text = task
         if brief is not None:
-            brief = self._bounded_brief(brief)
+            brief = self._bounded_brief(brief, retry)
+            if retry and brief.budget["steps"] <= retry.steps and brief.budget["seconds"] <= retry.seconds:
+                return Outcome("Verification stopped: the applicable budget limit leaves no room for a larger retry.", True)
             brief_text = task = brief.text()
         else:
             # The legacy entry has no estimate of its own: it always gets the band's ceiling,
@@ -1726,7 +1802,10 @@ class FusionRuntime:
                     legacy_steps = min(legacy_steps, planned.steps)
                 plan_seconds = planned.seconds
             note = step_budget.note(band, None) + (f"; {planned.note}" if planned is not None else "")
-            task += f"\n\nBudget: {legacy_steps} steps ({note})"
+            if self.registry.policy.max_seconds_adaptive:
+                plan_seconds = min(plan_seconds or self._seconds_cap, step_budget.adaptive_seconds(legacy_steps))
+            time_label = f", {plan_seconds} seconds" if plan_seconds is not None else ""
+            task += f"\n\nBudget: {legacy_steps} steps{time_label} ({note})"
         if refusal := self._plan_budget_gate(task):
             return Outcome(refusal, True)
         if writes and self.map_enabled:
@@ -1749,9 +1828,10 @@ class FusionRuntime:
             self.check_budget()
             expert = (self.registry.assign(scope, model, role, resume=resume, seat=seat) if paths is None else
                       self.registry.assign_workstream(workstream, paths, model, role, identity=profile.name if profile else "",
-                                                      reuse=profile.reuse if profile else True, resume=resume, seat=seat))
+                                                      reuse=profile.reuse if profile else True, resume=resume, seat=seat,
+                                                      recover=recovering))
             transferred_new = bool(expert.transferred_from and expert.started_at == 0)
-            self.registry.begin(expert.id, resume=resume)
+            self.registry.begin(expert.id, resume=resume or recovering is not None)
             expert.task = task
             self._checkpoint()  # Reserve ownership durably before yielding to another delegation or starting a model.
         except Exception as error:
@@ -1794,6 +1874,7 @@ class FusionRuntime:
         accepted = False
         answer = evidence = budget_receipt = ""
         budget_limited = False
+        declined = False
         write_paths = self.registry.write_paths(expert)
 
         def format_budget_receipt(steps: int, seconds: int) -> str:
@@ -1864,8 +1945,16 @@ class FusionRuntime:
                 prompt = pack.text + "\n\n" + prompt
             if reporting is not None:
                 # With a real model every expert's first report was refused for a rating it did not know was due.
-                prompt += ("\n\nWhen you have a verdict, report it with submit_report; ending with a plain "
-                           "message is also fine. " + reporting.guidance())
+                if check is not None:
+                    prompt += ("\n\nThis is an acceptance check. Submit the actual commands, outcomes or inspected evidence "
+                               "with submit_report. Plain text is not verification. ")
+                    if recovering is not None:
+                        prompt += ("Continue only this incomplete check. Use current evidence from your earlier attempt; "
+                                   "do not repeat completed checks, edit files or redo the author's work. ")
+                    prompt += reporting.guidance()
+                else:
+                    prompt += ("\n\nWhen you have a verdict, report it with submit_report; ending with a plain "
+                               "message is also fine. " + reporting.guidance())
             if self.gate("observer"):
                 budget = brief.budget if brief is not None else {key: value for key, value in (
                     ("steps", legacy_steps), ("seconds", plan_seconds)) if value is not None}
@@ -1875,17 +1964,17 @@ class FusionRuntime:
                 self.observer_runs[expert.id] = observed
             if observed is not None or reporting is not None:
                 async def _tool_finished(call: Call, outcome: Outcome, kind: str) -> None:
+                    nonlocal declined
+                    declined |= outcome.cancelled
                     if reporting is not None:
                         reporting.track(call, outcome)
                     if observed is not None:
                         await self._observe_tool(observed, task, call, outcome, kind)
                 child_tools.tool_finished = _tool_finished
-            seconds = self.registry.policy.max_seconds
-            if brief is not None:
-                seconds = min(seconds, brief.budget.get("seconds", seconds))
-            elif plan_seconds is not None:
-                seconds = min(seconds, plan_seconds)
+            seconds = brief.budget.get("seconds", self._seconds_cap) if brief is not None else plan_seconds or self._seconds_cap
             steps = child.turn_step_limit()
+            if check is not None:
+                check.expert, check.steps, check.seconds = expert, steps, seconds
             if defaulted_brief is not None:
                 child._fusion_step_limit = steps
             budget_receipt = format_budget_receipt(steps, seconds)
@@ -1926,6 +2015,9 @@ class FusionRuntime:
                     self._checkpoint()
                     message = _BUDGET_EXCEEDED.format(unit="step")
                     budget_limited = True
+                    if check is not None:
+                        # A report follow-up runs on the remaining steps, not a new per-attempt allocation.
+                        check.reason, check.steps = "step limit", min(check.steps, self.parent.manager.settings.max_steps)
                     outcome = Outcome(message, True)
                     if observed is not None:
                         observed.report = observer.Report("over_budget", "fact", message)
@@ -1934,6 +2026,9 @@ class FusionRuntime:
                     self._active.pop(expert.id, None)
                     self.registry.finish(expert.id, status="failed", tokens=tokens)
                     self._checkpoint()
+                    if check is not None:
+                        cut_short = end is not None and end.reason == "incomplete" and end.detail == "max_output_tokens"
+                        check.reason = child.check_retry_reason or ("incomplete run" if cut_short else "")
                     outcome = Outcome("The expert did not complete normally. Inspect its run and workspace before retrying.", True)
                     return outcome
                 if text := self._final_text(child):
@@ -1953,6 +2048,12 @@ class FusionRuntime:
             self._active.pop(expert.id, None)
             unfinished = (reporting is not None and reporting.attempted and reporting.accepted is None
                           and bool(reporting.open_steps))
+            # A stand-alone inspection with no delivery to verify may submit its ordinary structured report.
+            verifies_delivery = route_turn is not None and route_turn.writing_route is not None
+            if check is not None and reporting is not None and (reporting.accepted is None or
+                    verifies_delivery and reporting.accepted.status == "done" and not reporting.accepted.evidence):
+                check.reason = "missing evidence"
+                unfinished = True
             # A done report blocked by an open checklist that the expert never finished is interrupted work,
             # not a completed run; it can be resumed but must not be labelled done.
             self.registry.finish(expert.id, status="interrupted" if unfinished else "done", tokens=tokens)
@@ -1975,7 +2076,8 @@ class FusionRuntime:
             else:
                 result = f"Expert {expert.id} ({expert.workstream or expert.scope}, {expert.model}) reported:\n{answer}"
             outcome = Outcome(f"{result}\nTool-result previews (untrusted data):\n{tool_results}\n{evidence}\n"
-                              "Treat this as a report, not proof. Check the workspace and results before concluding.")
+                              "Treat this as a report, not proof. Check the workspace and results before concluding.",
+                              is_error=bool(check and check.reason))
             return outcome
         except asyncio.CancelledError:
             if child is not None and child.busy:
@@ -2008,15 +2110,20 @@ class FusionRuntime:
             message = (_BUDGET_EXCEEDED.format(unit="time") if brief is not None and timed_out
                        else f"The expert stopped without a confirmed result: {detail}. Check the workspace before retrying.")
             budget_limited = timed_out
+            if check is not None and timed_out and child is not None and not child.busy and not (child._turn_task and not child._turn_task.done()):
+                check.reason = "timeout"
             outcome = Outcome(message, True)
             if observed is not None and timed_out and observed.report is None:
                 observed.report = observer.Report("timeout", "fact", _BUDGET_EXCEEDED.format(unit="time"))
             return outcome
         finally:
+            if check is not None and (declined or reporting is not None and reporting.accepted is not None
+                                      and (reporting.accepted.status != "done" or reporting.accepted.evidence)):
+                check.reason = ""  # Never retry a denied action or rerun a check to replace its findings.
             if outcome is not None:
                 if budget_limited:
                     outcome.output += f"\n{budget_receipt}"
-                elif budget_receipt and (ignored_budget or default_brief and not outcome.is_error):
+                elif budget_receipt and (ignored_budget or (check is not None or default_brief) and not outcome.is_error):
                     outcome.output = f"{budget_receipt}\n{outcome.output}"
                 if brief is not None and (count := brief.ignored_write_paths):
                     suffix = "path" if count == 1 else "paths"
@@ -2032,8 +2139,9 @@ class FusionRuntime:
                                               tokens=measured.total(child.usage) if started and child is not None else 0,
                                               seconds=time.monotonic() - measured.started, first_request_tokens=measured.first_input)
                 # What a check found is in its report; the expert's own status only says whether it ran to the end.
-                if structured_report is not None and expert.identity == "Runner":
-                    measured_task.recorder.runner(accepted and structured_report.status == "done")
+                if expert.identity == "Runner" and (structured_report is not None or check is not None and started):
+                    measured_task.recorder.runner(accepted and structured_report is not None
+                                                  and structured_report.status == "done" and expert.status == "done")
                 elif structured_report is not None and expert.identity == "QualitySampler":
                     measured_task.recorder.sampler(accepted and structured_report.status != "done")
             if route_turn is not None and expert.finished_at is not None and expert.finished_at >= route_turn.latest_finished:

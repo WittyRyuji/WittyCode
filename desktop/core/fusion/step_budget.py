@@ -42,6 +42,14 @@ class Band:
     source: str
 
 
+MAX_SECONDS = 86_400  # Per-attempt safety limit, also the largest legal manual ceiling.
+
+
+def adaptive_seconds(steps: int) -> int:
+    """Estimate wall time from the resolved work allowance when the brief has no time estimate."""
+    return min(MAX_SECONDS, max(60, 30 * steps))
+
+
 def acceptance_items(text: str) -> int:
     """Count bullet/numbered lines as discernible acceptance items; a non-empty text
     without markers counts as one item."""

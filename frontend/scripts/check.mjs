@@ -1076,6 +1076,7 @@ await import("./check-plan.mjs");
 await import("./check-usage-plan-updates.mjs");
 await import("./check-turn-navigation.mjs");
 await import("./check-step-limit.mjs");
+await import("./check-fusion-timeout.mjs");
 await import("./check-connections.mjs");
 console.log(failed ? `${failed} check(s) FAILED` : "all checks passed");
 process.exit(failed ? 1 : 0);

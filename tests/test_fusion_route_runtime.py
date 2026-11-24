@@ -23,8 +23,8 @@ def _route(destination="coder", verification="runner", *, reason="Matches the si
     return call("submit_route", {"destination": destination, "verification": verification, "reason": reason}, call_id=call_id)
 
 
-def _report(status="done", *, call_id="report"):
-    return call("submit_report", {"status": status, "summary": "Inventory checked.", "evidence": [], "notes": [], "ratings": []}, call_id=call_id)
+def _report(status="done", *, call_id="report", evidence=()):
+    return call("submit_report", {"status": status, "summary": "Inventory checked.", "evidence": list(evidence), "notes": [], "ratings": []}, call_id=call_id)
 
 
 def _edit(call_id="edit"):

@@ -91,7 +91,11 @@ class AcpSummary(AcpRun):
             await self.close()
 
 
-def summary_stream(manager):
-    def stream(request):
-        return AcpSummary(manager).stream(request)
-    return stream
+def seat_stream(controller, model, *, before_prompt=None):
+    """Tool-free requests belong to the selected seat even when it has no Responses transport."""
+    if model.startswith("factory:"):
+        from desktop.core.fusion.factory_seat import summary
+        return lambda request: summary(controller, request, before_prompt)
+    if model.startswith("devin:"):
+        return lambda request: AcpSummary(controller.manager, before_prompt=before_prompt).stream(request)
+    return controller.manager.stream

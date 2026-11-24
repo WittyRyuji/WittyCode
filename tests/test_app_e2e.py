@@ -1443,10 +1443,13 @@ def test_a_devin_conversation_goes_from_the_model_menu_to_the_answer_and_an_appr
             await rig.click(".block.activity .gsum")
             await rig.click(".block.activity .irow")
             await rig.wait_text(".idetail", "审批：允许（仅此一次）")  # (the answer given is written on the tool)
-            # closed, it is a saved session in the list, named as Devin's
+            title = await rig.text(".srow.open .stitle")
+            assert title.strip() and title != "新会话"
+            assert await rig.text(".tab.current .tab-title") == title
             await rig.click(".tab-x")
             await rig.wait_for(".tab", 0)
-            await rig.wait_text(".srow:not(.open) .stitle", "会话主题摘要", timeout=15)
+            await rig.wait_text(".srow:not(.open) .stitle", title, timeout=15)
+            assert await rig.text(".srow:not(.open) .stitle") == title
             assert "· Devin" in await rig.text(".srow:not(.open) .ssub")
         finally:
             await rig.finish()

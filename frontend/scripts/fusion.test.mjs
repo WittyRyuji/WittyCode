@@ -11,21 +11,17 @@ test("the agent tool uses the same Sub-Agent name as the team inspector", () => 
 });
 
 const models = [
-  { id: "chatgpt:visible", label: "Visible", source: "chatgpt" },
-  { id: "api:demo:hidden", label: "Hidden API", source: "api:demo" },
-  { id: "devin:worker", label: "Devin Worker", source: "devin" },
-  { id: "factory:other", label: "Factory", source: "factory" },
+  { id: "chatgpt:visible", label: "Visible", source: "chatgpt", fusionBackend: "plan" },
+  { id: "api:demo:hidden", label: "Hidden", source: "api:demo", fusionBackend: "api" },
+  { id: "new:guarded", label: "Guarded", source: "new", fusionBackend: "new" },
+  { id: "chatgpt:standalone", label: "Not a seat", source: "chatgpt" },
 ];
 
-test("Fusion choices honour hidden models and include guarded ACP models", () => {
-  const hidden = ["api:demo:hidden"];
-  assert.deepEqual(fusionChoices(models, hidden, false).map((m) => m.id), ["chatgpt:visible"]);
-  assert.deepEqual(fusionChoices(models, hidden, true).map((m) => m.id), ["chatgpt:visible", "devin:worker"]);
-  assert.equal(fusionDisabledReason(models[2]), "");
+test("Fusion choices follow catalog capabilities and honour hidden models", () => {
+  assert.deepEqual(fusionChoices(models, [models[1].id]), [models[0], models[2]]);
+  assert.deepEqual(fusionChoices(models, [models[2].id]), [models[0], models[1]]);
   assert.equal(fusionDisabledReason(models[2], true), "");
   assert.equal(fusionDisabledReason({ ...models[2], disabledReason: "Unavailable" }), "Unavailable");
-  assert.equal(fusionDisabledReason(models[0]), "");
-  assert.deepEqual(fusionChoices(models, [...hidden, "devin:worker"], true).map((m) => m.id), ["chatgpt:visible"]);
 });
 
 test("live settings hydrate and explicitly clear Fusion effort overrides, including older senders", () => {
@@ -36,6 +32,17 @@ test("live settings hydrate and explicitly clear Fusion effort overrides, includ
   assert.deepEqual(updated.fusionReasoning, levels);
   assert.deepEqual(applyEvent(updated, "settings", { settings: { fusionReasoning: {} } }).patch.fusionReasoning, {});
   assert.deepEqual(applyEvent(updated, "settings", { settings: {} }).patch.fusionReasoning, {});
+});
+
+test("timeout hydrates both fields, preserving explicit legacy seconds", () => {
+  const initial = emptyLiveData();
+  const view = (settings) => applyEvent(initial, "settings", { settings }).patch;
+  assert.equal(initial.fusionMaxSecondsAdaptive, true);
+  assert.equal(view({}).fusionMaxSecondsAdaptive, true);
+  assert.equal(view({ fusionMaxSeconds: 7 }).fusionMaxSecondsAdaptive, false);
+  const remembered = view({ fusionMaxSeconds: 7, fusionMaxSecondsAdaptive: true });
+  assert.equal(remembered.fusionMaxSecondsAdaptive, true);
+  assert.equal(remembered.fusionMaxSeconds, 7);
 });
 
 test("Fusion efforts are independent by role and legacy defaults split without changing other roles", () => {
@@ -60,7 +67,7 @@ test("Fusion efforts are independent by role and legacy defaults split without c
 test("Fusion is the first composer model choice and the only checked item when selected", () => {
   const picked = [];
   const input = {
-    models, providers: [], current: "chatgpt:visible", hidden: [],
+    models: [...models, { id: "devin:worker", label: "Worker", source: "devin" }], providers: [], current: "chatgpt:visible", hidden: [],
     devin: { enabled: true, auth: "signed-in" },
     chatgpt: { available: true, enabled: true, auth: "signed-in", planEnabled: true },
     onPick: (id) => picked.push(id), onManage: () => {},
