@@ -3926,7 +3926,10 @@ class AppCore:
 
     def _archive_sid_of(self, controller: Any) -> str | None:
         """The logical-session sid this runtime was bound to, if any — only its own bound state counts; an id the
-        page or another party passes in is never taken as an identity."""
+        page or another party passes in is never taken as an identity. A native Devin session reopened from
+        history has lost the in-memory sid, so the archive's own index answers for it, by the session id its
+        endpoint returned: only an ordinary Devin instance counts, a missing index means "never archived"
+        (nothing is created), and an unreadable one raises so the switch rolls back instead of forking a second sid."""
         binding = getattr(controller, "_archive_binding", None)
         if binding is not None:
             return binding.archive.sid
@@ -3934,7 +3937,18 @@ class AppCore:
         if isinstance(sid, str) and sid:
             return sid
         origin = getattr(getattr(controller, "saved", None), "origin", None)
-        return origin.get("sessionArchive") if isinstance(origin, dict) else None
+        if isinstance(origin, dict):
+            return origin.get("sessionArchive")
+        native = getattr(controller, "session_id", None)
+        if getattr(controller, "engine", "") != "devin" or not isinstance(native, str) or not native:
+            return None
+        from desktop.core.session_archive import INDEX_NAME, resolve_local
+
+        root = self.session_archive_root()
+        if not (root / INDEX_NAME).is_file():
+            return None
+        owner = resolve_local(root, "devin", native)
+        return owner["sid"] if owner is not None and owner["backend"] == "devin" else None
 
     def _adopt_archive(self, old: Any, new: Any) -> None:
         """Hand the trusted logical-session sid to the freshly opened controller, so an engine switch stays one

@@ -2,14 +2,17 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
 
-from desktop.core.app_core import AppError
+from desktop.core.app_core import AppCore, AppError
 from desktop.core.chatgpt.errors import ChatGPTError
 from desktop.core.fusion.registry import Policy
+from desktop.core.session_archive import INDEX_NAME, SessionArchive
+from desktop.core.session_archive_io import ArchiveIOError
 from desktop.core.usage import Tokens
 from tests.app_support import ready_core
 from tests.chatgpt_support import finish_turn
@@ -143,6 +146,8 @@ def test_cross_engine_pause_restores_expert_owner_budget_and_usage_without_doubl
                 fake.script(say("Persistent expert context."))
             await core.call("session.send", {"id": cid, "text": "Inspect with an expert" if main_model == SOL else "[fusion-delegate] Inspect"})
             await finish_turn(main)
+            archive_sid = core._archive_sid_of(main)
+            assert archive_sid
             conv = core._by_cid[cid]
             core._feed_usage(conv)
             expert, owner = next(iter(main.agents)), main.session_id
@@ -164,8 +169,10 @@ def test_cross_engine_pause_restores_expert_owner_budget_and_usage_without_doubl
             conv = core._by_cid[cid]
             await until(lambda: conv.controller.state.value == "ready")
             native_source = conv.controller
+            assert core._archive_sid_of(native_source) == archive_sid
             assert (await choose(core, cid, "fusion"))["ok"]
             main = conv.controller
+            assert core._archive_sid_of(main) == archive_sid
             assert main.session_id != owner and main._fusion.owner == owner and list(main.agents) == [expert]
             assert main._fusion.registry.calls == 1 and main._fusion.registry.policy.max_calls == 3
             assert main._fusion.registry.policy.main == main_model and main.transcript.model == main.model
@@ -184,12 +191,38 @@ def test_cross_engine_pause_restores_expert_owner_budget_and_usage_without_doubl
                 fake.script(say("Continued."))
             await core.call("session.send", {"id": cid, "text": "Continue with the same expert" if main_model == SOL else "[fusion-delegate] Continue"})
             await finish_turn(main)
+            assert main._archive_broken is False
             assert list(main.agents) == [expert] and main._fusion.registry.calls == 2
             assert "Persistent expert context." in str(fake.requests[-2 if main_model == SOL else -1]["input"])
             assert main.agents[expert].controller.saved.origin["parent"] == owner
         finally:
             await core.shutdown()
     asyncio.run(go())
+
+
+def test_archive_sid_lookup_only_recovers_native_devin_identities(tmp_path):
+    root = tmp_path / "archive"
+    core = SimpleNamespace(session_archive_root=lambda: root)
+    controller = SimpleNamespace(engine="devin", session_id="native-1")
+
+    assert AppCore._archive_sid_of(core, controller) is None
+    assert not root.exists()
+    root.mkdir()
+    assert AppCore._archive_sid_of(core, controller) is None
+    assert list(root.iterdir()) == []
+
+    archive = SessionArchive.create(root)
+    archive.enter("devin", "devin", "native-1")
+    archive.enter("fusion", "devin", "native-2")
+    assert AppCore._archive_sid_of(core, controller) == archive.sid
+    for session_id in ("native-2", "unregistered", "", None):
+        assert AppCore._archive_sid_of(core, SimpleNamespace(engine="devin", session_id=session_id)) is None
+    assert AppCore._archive_sid_of(core, SimpleNamespace(engine="chatgpt", session_id="native-1")) is None
+    assert AppCore._archive_sid_of(core, SimpleNamespace(engine="devin", session_id="native-1", _archive_sid="kept")) == "kept"
+
+    (root / INDEX_NAME).write_bytes(b"not a SQLite database")
+    with pytest.raises((sqlite3.Error, ArchiveIOError)):
+        AppCore._archive_sid_of(core, controller)
 
 
 @pytest.mark.parametrize("scenario", ["native-main", "native-expert", "change-main"])
