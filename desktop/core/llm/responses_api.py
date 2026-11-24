@@ -18,6 +18,7 @@ def responses_body(request: Mapping[str, Any], route: Route) -> dict[str, Any]:
     """The JSON body for the route, from the loop's request."""
     body = dict(request)
     body.pop("wc_reasoning_effort", None)
+    body.pop("wc_session", None)
     body["model"] = route.model
     body["input"] = for_responses(body.get("input") or (), supports_images=route.supports_images)
     reasoning = body.get("reasoning")

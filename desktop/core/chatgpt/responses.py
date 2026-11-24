@@ -47,6 +47,8 @@ class Shape:
     """Optional cache-accounting isolation. GPT-5.6+ routes automatically; a changing key can prevent reuse."""
     cache_developer_instructions: bool = True
     """On GPT-6.2+, send reusable instructions as the first developer message instead of a top-level field."""
+    session_header: bool = True
+    """Route ChatGPT Plan requests for the same conversation using the ``session_id`` header."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,6 +219,8 @@ def build_request(
         request["include"] = ["reasoning.encrypted_content"]
     if shape.cache_key and conversation:
         request["prompt_cache_key"] = conversation
+    if shape.session_header and conversation:
+        request["wc_session"] = conversation  # internal only; the Plan transport sends it as a header
     return request
 
 

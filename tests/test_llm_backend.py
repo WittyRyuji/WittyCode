@@ -208,6 +208,34 @@ def test_the_thoughts_another_api_wrote_are_not_sent_to_a_responses_endpoint_but
 # ------------------------------------------------------------------------------------------------ the engine in front of it
 
 
+@pytest.mark.parametrize("provider, endpoint, turn", [
+    ("openai", "/v1/responses", say("ok")),
+    ("generic-chat-completion-api", "/v1/chat/completions", [
+        {"id": "c1", "choices": [{"index": 0, "delta": {"content": "ok"}, "finish_reason": "stop"}]}, "[DONE]",
+    ]),
+])
+def test_api_providers_do_not_receive_plan_session_routing(tmp_path, provider, endpoint, turn):
+    from tests.chatgpt_support import make_engine
+
+    async def go():
+        with FakeApi() as api:
+            api.script(turn)
+            store = store_for(settings_with(tmp_path, api.base_url, provider=provider))
+            engine = make_engine(tmp_path, None, signed_in=False, api=ApiBackend(store))
+            session_id = "a" * 32
+            request = build_request(model=model_id_of(store), instructions="Be brief.", items=[user_message("hi")],
+                                    tools=[], reasoning="off", conversation=session_id)
+            assert request["wc_session"] == session_id
+            events = [event async for event in engine.stream(request)]
+            assert isinstance(events[-1], Finished)
+            ((path, headers, body),) = api.posts
+            assert path == endpoint
+            assert "session_id" not in headers
+            assert not any(key.startswith("wc_") for key in body)
+
+    asyncio.run(go())
+
+
 def test_the_engine_knows_an_api_models_name_window_and_pictures_and_nothing_of_one_that_is_gone(tmp_path):
     from tests.chatgpt_support import make_engine
 

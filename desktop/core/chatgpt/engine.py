@@ -20,6 +20,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import time
 import uuid
 import webbrowser
@@ -276,9 +277,13 @@ class ChatGPTEngine:
         client_id = self.accounts.active_id()
         token = await self.tokens.access_token(client_id)
         info = self.model_info(str(request.get("model") or ""))
-        body = {**request, "input": for_responses(request.get("input") or (), supports_images=info is not None and info.supports_images)}
+        session_id = request.get("wc_session")
+        body = {key: value for key, value in request.items() if not key.startswith("wc_")}
+        body["input"] = for_responses(request.get("input") or (), supports_images=info is not None and info.supports_images)
         for attempt in range(2):
             headers = {"Authorization": f"Bearer {token}", "Accept": "text/event-stream", "originator": APP_NAME.lower()}
+            if isinstance(session_id, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", session_id):
+                headers["session_id"] = session_id
             lines = self.http.stream_lines("POST", f"{self.base_url}/responses", headers=headers, json_body=body, timeout=stream_idle_timeout(request))
             begun = False
             retry = False
