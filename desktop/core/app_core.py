@@ -1033,9 +1033,7 @@ class AppCore:
 
     # ------------------------------------------------------------------ models and accounts
 
-    async def _load_models(self) -> None:
-        folder = self.settings.projects[0] if self.settings.projects else str(Path.home())
-
+    async def _load_models(self, *, startup: bool = False) -> None:
         async def from_factory() -> list[Any]:
             if self.factory is None or not self.settings.factory_enabled:
                 return []
@@ -1044,12 +1042,18 @@ class AppCore:
             return []
 
         async def from_devin() -> list[Any]:
-            if self.devin is None or not self.settings.devin_enabled:
-                return []
-            with contextlib.suppress(Exception):
-                account = await self.devin.account()
+            try:
+                # The startup account event and catalog must use the same sign-in check.
+                account = await self._refresh_accounts() if startup else None
+                if self.devin is None or not self.settings.devin_enabled:
+                    return []
+                if account is None:
+                    account = await self.devin.account()
                 if account.get("auth") == "signed-in":
-                    return list(await self.devin.list_models())
+                    # app.init also runs on page reload, when the engine may have an old in-memory catalog.
+                    return list(await self.devin.list_models(refresh=startup))
+            except Exception as error:
+                log.warning("could not refresh the Devin models: %s", error)
             return []
 
         async def from_chatgpt() -> list[Any]:
@@ -1092,8 +1096,8 @@ class AppCore:
             conv.dirty = True
         self._schedule_flush()
 
-    def _schedule_models(self) -> None:
-        self._spawn(self._load_models(), quiet=True)
+    def _schedule_models(self, *, startup: bool = False) -> None:
+        self._spawn(self._load_models(startup=startup), quiet=True)
 
     def _on_devin_account(self, account: Mapping[str, Any]) -> None:
         """The engine noticed a change of the account (a sign-in finished, a sign-out)."""
@@ -1152,12 +1156,13 @@ class AppCore:
             self.say(f"读取 API Provider 失败：{error_text(error)}")
             return []
 
-    async def _refresh_accounts(self) -> None:
-        """The slow part of the accounts (``devin auth status``) once the page is up."""
+    async def _refresh_accounts(self) -> dict[str, Any]:
+        """Publish the accounts once the page is up and return the Devin status for model discovery."""
         devin = await self._devin_account()
         # Read when it is sent, not while the slow one was awaited: the user may have dismissed the one-time note or
         # signed in meanwhile, and a late event with the old values would bring it all back.
         self.emit("accounts", {"devin": devin, "chatgpt": self._chatgpt_now()})
+        return devin
 
     # ------------------------------------------------------------------ the cache
 
@@ -1358,8 +1363,7 @@ class AppCore:
         self._schedule_flush()
         for folder in list(self.settings.projects):
             self._spawn(self._reload_project(folder), quiet=True)
-        self._schedule_models()
-        self._spawn(self._refresh_accounts(), quiet=True)
+        self._schedule_models(startup=True)
         devin = self._cached_devin() or {
             "cli": "found" if self.devin is not None else "missing",
             "auth": "checking" if self.devin is not None else "signed-out",

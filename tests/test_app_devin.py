@@ -6,6 +6,7 @@ fake (``tests/app_support``)."""
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -13,6 +14,7 @@ from desktop.core.app_core import AppError
 from desktop.core.cache import Cache
 from desktop.core.devin.controller import DevinController
 from desktop.core.devin.errors import DevinError
+from desktop.core.devin.models import DevinModel
 from desktop.core.session_state import SessionState
 from tests.app_support import make_core, ready_core, without_numbered_reply
 from tests.devin_support import make_engine
@@ -84,6 +86,33 @@ def test_the_devin_models_are_in_the_catalog_under_their_own_prefix(tmp_path):
         cached = Catalog.from_items(events.last("models")["models"])
         assert cached.engine_of("devin:swe-2-high") == "devin" and cached.page_id("devin", "swe-2-high") == "devin:swe-2-high"
         await core.shutdown()
+
+    run(scenario())
+
+
+def test_startup_refreshes_devin_even_with_a_warm_model_cache(tmp_path):
+    async def scenario():
+        harness = make_engine(tmp_path)
+        engine = harness.engine
+        await engine.account()  # warm credentials too, so the account check does not invalidate the old list
+        account = engine.account = AsyncMock(wraps=engine.account)
+        engine._models = [DevinModel("swe-2-high", "SWE-2")]
+        cache = Cache(tmp_path / "catalog-cache")
+        cache.save_index({"models": [{"id": "devin:swe-2-high", "label": "SWE-2", "source": "devin"}]})
+        core, _, events, _, _ = make_core(tmp_path, plan=False, projects=False, devin_engine=engine, cache=cache)
+        engine.settings = core.settings
+        try:
+            init = await core.call("app.init")
+            assert [m["id"] for m in init["models"]] == ["devin:swe-2-high"]
+            await until(lambda: events.of("models"))
+            assert events.last("accounts")["devin"]["auth"] == "signed-in"
+            assert "devin:glm-5-2" in [m["id"] for m in events.last("models")["models"]]
+            account.assert_awaited_once()
+            assert len(harness.requests("session/new")) == len(harness.requests("session/delete")) == 1
+            assert not harness.requests("session/prompt")
+        finally:
+            await core.shutdown()
+        assert "devin:glm-5-2" in [m["id"] for m in cache.load_index()["models"]]
 
     run(scenario())
 
