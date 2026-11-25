@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { X } from "lucide-react";
 import { useStore } from "../store";
 import { sourceLabel } from "../lib/models";
 import { effortLabel, reasoningChoices } from "../lib/vocab";
@@ -74,7 +75,8 @@ export function FusionSettings() {
     const choices = model ? reasoningChoices(model) : [];
     const unsupported = !!effort && !choices.some((item) => item.value === effort);
     const value = !id ? "思考等级" : effort ? `${effortLabel(effort)}${unsupported ? "（已不支持）" : ""}` : !model ? "模型不可用" : choices.length ? "默认" : "不支持";
-    return <div className="fusion-model-row" key={`${role}:${index}:${id || "empty"}`} data-role={role} data-model={id} role="group" aria-label={`${label} ${name(id)}`} style={remove ? { gridTemplateColumns: "minmax(0,1fr) 160px auto" } : undefined}>
+    const removeLabel = `删除${label}：${name(id)}`;
+    return <div className="fusion-model-row" key={`${role}:${index}:${id || "empty"}`} data-role={role} data-model={id} role="group" aria-label={`${label} ${name(id)}`}>
       <div className="fusion-model-picker" title={name(id)}>
         <Select value={id ? name(id) : "请选择"} items={modelItems} ariaLabel={`${label}选择：${name(id)}`} />
       </div>
@@ -84,7 +86,9 @@ export function FusionSettings() {
           ...choices.map((choice) => ({ id: choice.value, label: choice.label, checked: effort === choice.value, onSelect: () => setReasoning(role, id, choice.value) })),
         ]} />
       </div>
-      {remove && <button type="button" className="btn small danger" aria-label={`删除${label} ${name(id)}`} onClick={remove}>删除</button>}
+      {remove && <button type="button" className="btn danger fusion-model-remove" title={removeLabel} aria-label={removeLabel} onClick={remove}>
+        <X size={16} aria-hidden="true" />
+      </button>}
     </div>;
   };
 
@@ -132,15 +136,17 @@ export function FusionSettings() {
     <>
       <h3 className="settings-section-title">自有 Fusion</h3>
       <p className="page-note">在输入框的模型菜单选择 Fusion；已有会话也可在空闲时切换。修改配置后，Fusion 会话在下一轮发送时应用，不打断正在运行的主代理或专家。</p>
-      <Field label="主模型" hint="主代理负责任务分析、分配和最终验收；L1 固定选择一个模型。更换主模型时，下一轮发送前自动交接上下文，历史记录保留。">
-        {modelRow(s.fusionMain, "main", items([s.fusionMain], (id) => set("fusionMain", id), true, s.fusionMain))}
-      </Field>
-      <Field label="工作模型" hint="供 Sub-Agent 执行工作任务使用；可以添加多位候选，主代理按任务和偏好选择。">
-        {poolRows("worker")}
-      </Field>
-      <Field label="轻量模型" hint="供简单任务使用，不会为了保活定时调用；顺序保留优先级，第一个仍写入旧版兼容字段。">
-        {poolRows("light")}
-      </Field>
+      <div className="fusion-seats">
+        <Field label="主模型" hint="主代理负责任务分析、分配和最终验收；L1 固定选择一个模型。更换主模型时，下一轮发送前自动交接上下文，历史记录保留。">
+          {modelRow(s.fusionMain, "main", items([s.fusionMain], (id) => set("fusionMain", id), true, s.fusionMain))}
+        </Field>
+        <Field label="工作模型" hint="供 Sub-Agent 执行工作任务使用；可以添加多位候选，主代理按任务和偏好选择。">
+          {poolRows("worker")}
+        </Field>
+        <Field label="轻量模型" hint="供简单任务使用，不会为了保活定时调用；顺序保留优先级，第一个仍写入旧版兼容字段。">
+          {poolRows("light")}
+        </Field>
+      </div>
       <Field label="成本与质量倾向" hint="影响候选模型排序，并参与派工与审核时的偏好判断：0 是成本优先，100 是质量优先。它只表达偏好，不承诺价格、结果质量、费用上限或账单金额。">
         <PreferenceInput value={s.fusionPreference} onChange={(v) => set("fusionPreference", v)} />
       </Field>
