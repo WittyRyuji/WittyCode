@@ -1,4 +1,4 @@
-"""Fusion's score/cost catalog and public leaderboard prefetch, with no external requests."""
+"""Fusion's score/cost catalog and event-driven leaderboard refresh, with no external requests."""
 from __future__ import annotations
 
 import asyncio
@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from desktop.core.fusion import aa_catalog, profiles
+from desktop.core.providers import ProviderStore
 from desktop.core.settings import AppSettings, default_settings_path
 from tests.app_support import MODEL, OTHER_MODEL, make_core
 from tests.fakes import until
@@ -275,6 +276,23 @@ def test_batch_uses_one_public_page_for_all_models(tmp_path):
                                    "devin:unlisted": UNKNOWN}
 
 
+def test_a_failed_download_is_not_retried_until_a_new_batch(tmp_path):
+    downloads = []
+
+    def loader():
+        downloads.append(1)
+        if len(downloads) == 1:
+            raise OSError("offline")
+        return LEADERBOARD
+
+    profiles.refresh(tmp_path, [SOL, "devin:unlisted"], aa_catalog.source(loader=loader))
+    assert downloads == [1]
+    assert catalog_at(tmp_path) == {SOL: UNKNOWN, "devin:unlisted": UNKNOWN}
+    profiles.refresh(tmp_path, [], aa_catalog.source(loader=loader))
+    assert downloads == [1, 1]
+    assert profiles.load(tmp_path, SOL) == MEASURED
+
+
 def test_startup_upgrades_old_estimates_and_uses_api_native_id_without_editing_provider_settings(tmp_path):
     async def go():
         root = default_settings_path().parent
@@ -299,48 +317,86 @@ def test_startup_upgrades_old_estimates_and_uses_api_native_id_without_editing_p
     asyncio.run(go())
 
 
-def test_a_ready_session_prefetches_the_connected_model(tmp_path):
+def test_startup_checks_available_models_once_and_using_them_does_not_lookup_again(tmp_path):
     async def go():
         core, _, events, _, _ = make_core(tmp_path, settings=AppSettings())
-        core._profiles_source = lambda _: MEASURED
+        root = default_settings_path().parent
+        asked = []
+
+        def fetch(model):
+            asked.append(model)
+            return None  # Even unknown models must not be retried on selection or session ready.
+
+        core._profiles_source = fetch
         try:
             await core.call("app.init")
-            await until(lambda: events.of("models"))
+            await until(lambda: profiles.load(root, OTHER_MODEL) == UNKNOWN)
+            assert set(asked) == {m["id"] for m in core.catalog.models}
+            assert len(asked) == len(set(asked))
+            startup_calls = asked[:]
+            await core.call("app.init")
+            await until(lambda: len(events.of("models")) >= 2)
             await core.call("session.new", {"projectId": str(tmp_path / "proj")})
-            await until(lambda: profiles.load(default_settings_path().parent, MODEL) == MEASURED)
+            await core.call("session.choose", {"field": "model", "value": OTHER_MODEL})
+            await core.call("settings.set", {"key": "fusionMain", "value": OTHER_MODEL})
+            await core.call("settings.set", {"key": "fusionReasoning", "value": {"main:" + OTHER_MODEL: "low"}})
+            await asyncio.gather(*list(core._tasks))
+            assert asked == startup_calls
         finally:
             await core.shutdown()
     asyncio.run(go())
 
 
-def test_model_selection_prefetches_without_waiting_and_effort_changes_reuse_the_record(tmp_path):
+def test_adding_models_gets_one_fresh_batch_without_blocking_the_provider_save(tmp_path, monkeypatch):
     async def go():
-        gate = threading.Event()
-        asked = []
-
-        def fetch(model):
-            asked.append(model)
-            gate.wait(15)
-            return MEASURED
-
-        core, _, events, _, _ = make_core(tmp_path, settings=AppSettings())
-        core._profiles_source = fetch
         root = default_settings_path().parent
+        store = ProviderStore(root / "models.json", sidecar=root / "providers.json")
+        draft = {"id": "demo", "name": "Demo", "kind": "openai", "baseUrl": "https://example.invalid/v1",
+                 "keyMode": "none", "models": [{"id": "gpt-6.1-sol", "displayName": "Custom Sol"}]}
+        store.save(draft)
+        saved_id = store.api_models()[0].id
+        seed(root, {saved_id: UNKNOWN})
+        gate = threading.Event()
+        threads = []
+
+        def open_page(*args, **kwargs):
+            threads.append(threading.get_ident())
+            if len(threads) == 2:
+                gate.wait(15)
+                # The existing model must not be re-scored by the addition batch.
+                return FakeResponse(LEADERBOARD.replace("51.5", "99").encode())
+            return FakeResponse(LEADERBOARD.encode())
+
+        monkeypatch.setattr(aa_catalog, "_urlopen", open_page)
+        core, _, events, _, _ = make_core(tmp_path, providers=store, projects=False)
         try:
             await core.call("app.init")
-            await until(lambda: events.of("models"))
-            assert await core.call("session.choose", {"field": "model", "value": OTHER_MODEL}) == {"ok": True}
-            await until(lambda: bool(asked))
-            assert profiles.load(root, OTHER_MODEL) is None
+            await until(lambda: profiles.load(root, saved_id) == MEASURED)
+            assert len(threads) == 1
+            resaved = await core.call("providers.save", {"draft": {**draft, "name": "Renamed"}})
+            assert resaved["name"] == "Renamed"
+            await until(lambda: len(events.of("models")) >= 2)
+            assert len(threads) == 1
+
+            rows = [*draft["models"], {"id": "gpt-6-luna", "displayName": "Custom Luna"},
+                    {"id": "grok-demo", "displayName": "Custom Grok"}]
+            saved = await asyncio.wait_for(core.call("providers.save", {"draft": {**draft, "models": rows}}), 10)
+            assert len(saved["models"]) == 3
+            await until(lambda: len(threads) >= 2)
+            ids = {spec.native: spec.id for spec in store.api_models()}
+            assert profiles.load(root, ids["gpt-6-luna"]) is None
             gate.set()
-            await until(lambda: profiles.load(root, OTHER_MODEL) == MEASURED)
-            await core.call("session.choose", {"field": "reasoning", "value": "high"})
-            await core.call("settings.set", {"key": "fusionMain", "value": OTHER_MODEL})
-            await core.call("settings.set", {"key": "fusionReasoning", "value": {"main:" + OTHER_MODEL: "low"}})
-            await core.call("settings.set", {"key": "fusionLight", "value": MODEL})
-            await until(lambda: profiles.load(root, MODEL) == MEASURED)
-            assert asked == [OTHER_MODEL, MODEL]
-            assert catalog_at(root) == {MODEL: MEASURED, OTHER_MODEL: MEASURED}
+            await until(lambda: profiles.load(root, ids["gpt-6-luna"]) == {"score": 54.2, "cost": 2.30})
+            assert profiles.load(root, ids["grok-demo"]) == {"score": 42, "cost": None}
+            assert profiles.load(root, saved_id) == MEASURED
+            assert len(threads) == 2 and threading.get_ident() not in threads
+
+            # A new native model can reuse the old display-based page ID, but not its score.
+            rows[0] = {**rows[0], "id": "unlisted-model"}
+            await core.call("providers.save", {"draft": {**draft, "models": rows}})
+            assert next(spec.id for spec in store.api_models() if spec.native == "unlisted-model") == saved_id
+            await until(lambda: profiles.load(root, saved_id) == UNKNOWN)
+            assert len(threads) == 3
         finally:
             gate.set()
             await core.shutdown()

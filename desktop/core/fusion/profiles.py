@@ -151,14 +151,14 @@ def _request(fetch: Fetch, model: str) -> Profile:
         return _compact(None)
 
 
-def _save(path: Path, updates: Mapping[str, Profile]) -> dict[str, Profile]:
+def _save(path: Path, updates: Mapping[str, Profile], *, replace: bool = False) -> dict[str, Profile]:
     with _catalog_lock(path):
         models, changed = _read(path)
         for model, offered in updates.items():
             prior = models.get(model)
-            # Don't replace a measured score with a cost-only lookup or a transient miss. Keep both numbers
-            # from the same reference; a new score must not inherit the cost of an unrelated leaderboard row.
-            use_offer = (prior is None or offered["score"] is not None
+            # During startup, a transient miss must not erase a score. An added native model, however,
+            # may reuse another model's display-based ID, so the old reference cannot be kept for it.
+            use_offer = (replace or prior is None or offered["score"] is not None
                          or (prior["score"] is None and offered["cost"] is not None))
             if use_offer and offered != prior:
                 models[model] = offered
@@ -168,13 +168,13 @@ def _save(path: Path, updates: Mapping[str, Profile]) -> dict[str, Profile]:
         return models
 
 
-def refresh(root: Path, selected: Iterable[str], fetch: Fetch) -> None:
-    """Upgrade old files and refresh saved/configured models in one startup batch, without model calls."""
+def refresh(root: Path, selected: Iterable[str], fetch: Fetch, *, include_saved: bool = True) -> None:
+    """Refresh saved and selected models at startup, or just newly added models on a provider save."""
     path = Path(root) / FOLDER / FILE
-    models, changed = _read(path)
+    models, changed = _read(path) if include_saved else ({}, False)
     keys = dict.fromkeys([*models, *(_check(model) for model in selected)])
     if keys or changed:
-        _save(path, {model: _request(fetch, model) for model in keys})
+        _save(path, {model: _request(fetch, model) for model in keys}, replace=not include_saved)
 
 
 def load(root: Path, model: str) -> Profile | None:

@@ -1,7 +1,7 @@
 """The public Artificial Analysis model leaderboard: the single external source of Fusion's model profiles.
 
-``source()`` returns the ``profiles.ensure`` fetch: it downloads the leaderboard page once per ``CACHE_SECONDS``
-window, parses its HTML table and matches the normalized model name. A scored Max row is preferred; otherwise
+Each ``source()`` serves one refresh batch: it downloads the leaderboard page once, parses its HTML table and
+matches the normalized model name. A scored Max row is preferred; otherwise
 use the best measured score. Cost is the USD per benchmark task from that reference, not the user's actual price.
 
 The request is a plain unauthenticated GET to one fixed https URL: no keys, no cookies, no body, and nothing about
@@ -13,7 +13,6 @@ from __future__ import annotations
 import math
 import re
 import threading
-import time
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping
@@ -26,10 +25,6 @@ HOST = "artificialanalysis.ai"
 MAX_BYTES = 4 * 1024 * 1024
 """The leaderboard is ~1.5 MB; a much larger answer is not the public table and is refused."""
 TIMEOUT_SECONDS = 20.0
-CACHE_SECONDS = 600.0
-"""One page serves every prefetch in the window; ``profiles.ensure`` throttles per record across runs."""
-FAIL_SECONDS = 60.0
-"""A failed download is not retried for every seat of the same batch."""
 
 _ANNOTATION = re.compile(r"^(?P<name>.+?)\s*\((?P<inside>[^()]{1,48})\)\s*$")
 _TRAILING_NOTE = re.compile(r",\s*(?:default(?:\s+fallback)?|fallback)\s*$", re.IGNORECASE)
@@ -235,42 +230,30 @@ def download(url: str = URL, *, timeout: float = TIMEOUT_SECONDS, limit: int = M
 
 
 class Leaderboard:
-    """The parsed page, downloaded at most once per ``ttl``; a failure is not retried for ``FAIL_SECONDS``."""
+    """One batch's parsed page. Even a failed download is attempted only once in that batch."""
 
-    def __init__(self, *, loader: Callable[[], str] = download, ttl: float = CACHE_SECONDS,
-                 clock: Callable[[], float] = time.monotonic) -> None:
-        self._loader, self._ttl, self._clock = loader, ttl, clock
+    def __init__(self, *, loader: Callable[[], str] = download) -> None:
+        self._loader = loader
         self._lock = threading.Lock()
         self._entries: list[Entry] | None = None
-        self._loaded_at = 0.0
-        self._failed_at = 0.0
         self._error: Exception | None = None
 
     def entries(self) -> list[Entry]:
-        now = self._clock()
-        if self._entries is not None and now - self._loaded_at < self._ttl:
-            return self._entries
-        if self._error is not None and now - self._failed_at < FAIL_SECONDS:
-            raise self._error
         with self._lock:
-            now = self._clock()
-            if self._entries is not None and now - self._loaded_at < self._ttl:
-                return self._entries
-            if self._error is not None and now - self._failed_at < FAIL_SECONDS:
+            if self._error is not None:
                 raise self._error
-            try:
-                parsed = parse(self._loader())
-            except Exception as error:
-                self._error, self._failed_at = error, now
-                raise
-            self._entries, self._loaded_at, self._error = parsed, now, None
+            if self._entries is None:
+                try:
+                    self._entries = parse(self._loader())
+                except Exception as error:
+                    self._error = error
+                    raise
             return self._entries
 
     def offer(self, model: str) -> Mapping[str, Any] | None:
         return offer(self.entries(), model)
 
 
-def source(*, loader: Callable[[], str] = download, ttl: float = CACHE_SECONDS,
-           clock: Callable[[], float] = time.monotonic) -> Callable[[str], Mapping[str, Any] | None]:
-    """The ``profiles.ensure`` fetch backed by the leaderboard; ``loader`` is the only network, injectable in tests."""
-    return Leaderboard(loader=loader, ttl=ttl, clock=clock).offer
+def source(*, loader: Callable[[], str] = download) -> Callable[[str], Mapping[str, Any] | None]:
+    """A fresh lookup batch; ``loader`` is the only network, injectable in tests."""
+    return Leaderboard(loader=loader).offer

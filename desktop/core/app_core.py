@@ -122,9 +122,6 @@ QUEUE_SECONDS = 180.0
 """How long a message typed while a session connects waits for it."""
 ACTIVITY_STEP = 10.0
 """A running turn updates its displayed activity age at most this often, in seconds. Activity never changes row order."""
-PREFETCH_DEDUPE_SECONDS = 60.0
-"""Repeat model selections and session READY events ask for the same profile at most this often per app run; the
-records on disk dedupe the actual fetches."""
 EVICTION_NOTICE = "已自动关闭最久未使用的会话"
 RETRY_NOTICE = "这条消息没有发送成功：附件已放回输入框，可以直接重试。"
 RETRY_OVER_NOTICE = "这条消息没有发送成功：附件已放回输入框。"
@@ -505,9 +502,8 @@ class AppCore:
         # while it was open.
         self._spoken: dict[str, float] = {}
         self._tasks: set[asyncio.Future[Any]] = set()
-        self._profiles_source: Any = None
-        """The model-profile fetch (tests substitute a fake; the real one only ever asks Artificial Analysis)."""
-        self._prefetched_profiles: dict[str, float] = {}  # model -> monotonic of last spawn
+        self._profiles_source: Any = None  # Optional test source for a leaderboard batch.
+        self._provider_save_lock = asyncio.Lock()
         self._flush_handle: asyncio.TimerHandle | None = None
         self._sidebar_handle: asyncio.TimerHandle | None = None
         self._sidebar_reload: set[str] = set()
@@ -1033,7 +1029,7 @@ class AppCore:
 
     # ------------------------------------------------------------------ models and accounts
 
-    async def _load_models(self, *, startup: bool = False) -> None:
+    async def _load_models(self, *, startup: bool = False, refresh_profiles: bool = False) -> None:
         async def from_factory() -> list[Any]:
             if self.factory is None or not self.settings.factory_enabled:
                 return []
@@ -1095,9 +1091,14 @@ class AppCore:
         for conv in self.order:
             conv.dirty = True
         self._schedule_flush()
+        if refresh_profiles:
+            s = self.settings
+            models = [m["id"] for m in self.catalog.models]
+            models.extend((s.default_model, s.fusion_main, s.fusion_light, *s.fusion_workers))
+            self._spawn(self._refresh_profiles(models), quiet=True)
 
-    def _schedule_models(self, *, startup: bool = False) -> None:
-        self._spawn(self._load_models(startup=startup), quiet=True)
+    def _schedule_models(self, *, startup: bool = False, refresh_profiles: bool = False) -> None:
+        self._spawn(self._load_models(startup=startup, refresh_profiles=refresh_profiles), quiet=True)
 
     def _on_devin_account(self, account: Mapping[str, Any]) -> None:
         """The engine noticed a change of the account (a sign-in finished, a sign-out)."""
@@ -1359,14 +1360,12 @@ class AppCore:
         self._close_video_preview()  # reloading the page may skip the old player's React cleanup
         first_init = not self._hydrated
         self._hydrate()
-        if first_init and not self.offline:
-            self._spawn(self._refresh_profiles(), quiet=True)
         for conv in self.order:  # a page that has just (re)started knows nothing of the open conversations yet
             conv.meta, conv.sent_ids, conv.sent_versions, conv.dirty = {}, [], {}, True
         self._schedule_flush()
         for folder in list(self.settings.projects):
             self._spawn(self._reload_project(folder), quiet=True)
-        self._schedule_models(startup=True)
+        self._schedule_models(startup=True, refresh_profiles=first_init and not self.offline)
         devin = self._cached_devin() or {
             "cli": "found" if self.devin is not None else "missing",
             "auth": "checking" if self.devin is not None else "signed-out",
@@ -1453,8 +1452,6 @@ class AppCore:
             self._remember_auto_title(conv, self._row_of(conv), controller.title)
         elif kind == "state":
             self._schedule_sidebar(conv.project, reload=controller.state is SessionState.READY)
-            if controller.state is SessionState.READY:
-                self._prefetch_conv(conv)
             if conv.preview and controller.state is SessionState.DEAD:
                 self.say(f"{controller.last_error}；仍显示本地缓存，可以重新连接。")
         elif controller.state is SessionState.RUNNING and time.time() - controller.active_at >= ACTIVITY_STEP:
@@ -3471,7 +3468,6 @@ class AppCore:
             # The level and permission that go with the new model's engine.
             fixed, _ = settings_for_model(self.catalog, self._engine_defaults(value), value)
             settings.reasoning_effort = fixed.get("reasoning", "")
-            self._prefetch_profiles(value)
         elif field_name == "reasoning":
             settings.reasoning_effort = value
         elif field_name == "autonomy":
@@ -3542,10 +3538,6 @@ class AppCore:
                 raise AppError("Fusion 主模型的推理档位不可用。") from error
             if effort is not None:
                 settings["reasoning"] = effort
-        if policy is not None:
-            self._prefetch_profiles(policy.main, policy.light, *policy.workers)
-        else:
-            self._prefetch_profiles(destination)
         self._set_pending_model(conv, {"model": page_model, "settings": settings, "attachments": list(carry_ids or ()),
                                       "overLimit": over_ok, "policy": policy.to_json() if policy is not None else None})
         return {"ok": True}
@@ -3676,7 +3668,6 @@ class AppCore:
                     if not settings.get("reasoning")
                     else f"{model.get('label', page_model)} 不支持「{current.get('reasoning', '')}」推理，已改为「{settings['reasoning']}」。"
                 )
-        self._prefetch_profiles(page_model)
         return {"ok": ok}
 
     def _check_fusion_switch(self, conv: Conversation) -> None:
@@ -3739,65 +3730,26 @@ class AppCore:
             raise AppError("Fusion 配置不可用；请检查设置或保留的专家配置，原会话未改变。") from error
         return policy, retained, restored
 
-    # ------------------------------------------------------------------ model profiles (public leaderboard prefetch)
+    # ------------------------------------------------------------------ model profiles (public leaderboard)
 
-    def _profiles_fetch(self) -> Any:
-        if self._profiles_source is None:
-            from desktop.core.fusion import aa_catalog
-            self._profiles_source = aa_catalog.source()
-        return self._profiles_source
+    async def _refresh_profiles(self, models: Sequence[str], *, added: Mapping[str, str] | None = None) -> None:
+        from desktop.core.fusion import aa_catalog, profiles
 
-    def _profile_lookup(self) -> Callable[[str], Any]:
-        """Match API entries on the actual model ID, not a user label or generated entry ID."""
-        fetch = self._profiles_fetch()
-        native_ids: dict[str, str] | None = None
+        # Each startup or addition gets its own source; models in that batch share one download.
+        fetch = self._profiles_source if self._profiles_source is not None else aa_catalog.source()
+        native_ids = added
 
         def lookup(model: str) -> Any:
             nonlocal native_ids
-            if model.startswith("api:"):
+            if model.startswith(API_PREFIX):
                 if native_ids is None:
                     lister = getattr(self.providers, "api_models", None)
                     native_ids = {spec.id: spec.native for spec in lister()} if lister is not None else {}
                 model = native_ids.get(model, model)
             return fetch(model)
 
-        return lookup
-
-    async def _refresh_profiles(self) -> None:
-        from desktop.core.fusion import profiles
-        s = self.settings
-        models = [model for model in (s.default_model, s.fusion_main, s.fusion_light, *s.fusion_workers)
-                  if model.startswith(PREFIXES)]
-        await asyncio.to_thread(profiles.refresh, default_settings_path().parent, models, self._profile_lookup())
-
-    def _prefetch_profiles(self, *models: Any) -> None:
-        """Selection never waits for the public catalog; changing effort doesn't need another lookup."""
-        if self.offline:
-            return
-        now = time.monotonic()
-        for model in models:
-            if not isinstance(model, str) or not model.startswith(PREFIXES):
-                continue
-            if now - self._prefetched_profiles.get(model, -PREFETCH_DEDUPE_SECONDS) < PREFETCH_DEDUPE_SECONDS:
-                continue
-            self._prefetched_profiles[model] = now
-            self._spawn(self._profile_task(model), quiet=True)
-
-    async def _profile_task(self, model: str) -> None:
-        from desktop.core.fusion import profiles
-        try:
-            await asyncio.to_thread(profiles.ensure, default_settings_path().parent, model, self._profile_lookup())
-        except Exception:
-            # A custom model id can be private; the engine prefix is enough.
-            log.exception("prefetching a model profile for %s failed", model.partition(":")[0])
-
-    def _prefetch_conv(self, conv: Conversation) -> None:
-        fusion = getattr(conv.controller, "_fusion", None)
-        if fusion is not None:
-            policy = fusion.registry.policy
-            self._prefetch_profiles(policy.main, policy.light, *policy.workers)
-        else:
-            self._prefetch_profiles(self._page_settings(conv).get("model"))
+        selected = [model for model in models if model.startswith(PREFIXES)]
+        await asyncio.to_thread(profiles.refresh, default_settings_path().parent, selected, lookup, include_saved=added is None)
 
     async def _refresh_fusion_settings(self, conv: Conversation) -> None:
         """Adopt the global preset at a new-turn boundary, never in a running model/tool step."""
@@ -3869,7 +3821,6 @@ class AppCore:
             self._schedule_flush()
         conv.ledger.seen.update(restored[0])
         conv.ledger.model_seen.update(restored[1])
-        self._prefetch_profiles(policy.main, policy.light, *policy.workers)
         self.say("已在本会话启用 Fusion；历史和专家上下文保留，不会自动启动任务。")
         return {"ok": True}
 
@@ -4379,7 +4330,6 @@ class AppCore:
     async def _m_settings_set(self, params: dict[str, Any]) -> dict[str, Any]:
         key, value = params["key"], params["value"]
         s = self.settings
-        seats = False
         if key == "theme" and value in THEMES:
             s.theme = value
         elif key == "fontScale" and value in FONT_SCALES:
@@ -4408,10 +4358,8 @@ class AppCore:
             s.reconnect_limit = value
         elif key in ("fusionMain", "fusionLight") and isinstance(value, str) and len(value) <= 512 and (not value or value.startswith(PREFIXES)):
             setattr(s, "fusion_main" if key == "fusionMain" else "fusion_light", value)
-            seats = True
         elif key == "fusionWorkers" and isinstance(value, list) and len(value) <= 1 and all(isinstance(item, str) and len(item) <= 512 and item.startswith(PREFIXES) for item in value):
             s.fusion_workers = list(dict.fromkeys(value))
-            seats = True
         elif key == "fusionReasoning":
             from desktop.core.fusion.reasoning import reasoning_map, reasoning_model
             try:
@@ -4490,8 +4438,6 @@ class AppCore:
                 self._spawn(self._devin_path_changed(), quiet=True)
         else:
             raise AppError("这个设置的值不合法。")
-        if seats:
-            self._prefetch_profiles(s.fusion_main, s.fusion_light, *s.fusion_workers)
         self._save()
         view = self.settings_view()
         self.emit("settings", {"settings": view})
@@ -4802,9 +4748,24 @@ class AppCore:
             raise AppError("API Provider 功能不可用。")
         return self.providers
 
+    def _save_provider(self, draft: dict[str, Any]) -> tuple[dict[str, Any], dict[str, str]]:
+        store = self._providers()
+        lister = None if self.offline else getattr(store, "api_models", None)
+        before = {(spec.provider_id, spec.native) for spec in lister()} if lister is not None else set()
+        saved = store.save(draft)
+        provider = saved["id"]
+        if lister is None or all((provider, row["id"]) in before for row in saved["models"]):
+            return saved, {}
+        added = {spec.id: spec.native for spec in lister()
+                 if spec.provider_id == provider and (provider, spec.native) not in before}
+        return saved, added
+
     async def _m_providers_save(self, params: dict[str, Any]) -> dict[str, Any]:
-        saved = await asyncio.to_thread(self._providers().save, params["draft"])
+        async with self._provider_save_lock:
+            saved, added = await asyncio.to_thread(self._save_provider, params["draft"])
         self._schedule_models()
+        if added:
+            self._spawn(self._refresh_profiles(list(added), added=added), quiet=True)
         return saved
 
     async def _m_providers_remove(self, params: dict[str, Any]) -> None:
