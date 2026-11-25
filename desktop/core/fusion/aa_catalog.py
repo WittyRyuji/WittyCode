@@ -1,10 +1,8 @@
 """The public Artificial Analysis model leaderboard: the single external source of Fusion's model profiles.
 
 ``source()`` returns the ``profiles.ensure`` fetch: it downloads the leaderboard page once per ``CACHE_SECONDS``
-window (the page is ~1.5 MB of server-side HTML), parses its ``<table>`` (columns: Intelligence Index, Cost per
-Task USD, Time per Task Minutes) and matches a normalized model name and effort. If there is no exact score,
-a unique scored Max row for the same model may supply a capability ceiling, never the cost or time of the
-requested effort. An ambiguous or unavailable Max score is not used.
+window, parses its HTML table and matches the normalized model name. A scored Max row is preferred; otherwise
+use the best measured score. Cost is the USD per benchmark task from that reference, not the user's actual price.
 
 The request is a plain unauthenticated GET to one fixed https URL: no keys, no cookies, no body, and nothing about
 the workspace or its sessions ever leaves the machine. Pure: no Qt; the network lives behind the injectable
@@ -19,7 +17,7 @@ import time
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import Any
 
@@ -40,25 +38,18 @@ _EFFORT_TAIL = re.compile(r"^(?P<name>.+?)\s+(?P<effort>xhigh|max|high|medium|lo
 _EFFORT_WORDS = frozenset(("minimal", "low", "medium", "high", "max", "xhigh", "off", "none", "nonreasoning",
                            "noreasoning", "dynamic", "auto", "standard", "adaptive", "reasoning", "thinking",
                            "minimaleffort", "loweffort", "mediumeffort", "higheffort"))
-_EFFORT_ALIASES = {"nonreasoning": "off", "noreasoning": "off", "none": "off"}
-"""The only tier spellings certain enough to equate; anything else keeps its own effort or matches nothing."""
+_DEVIN_EFFORT_TAIL = re.compile(r"-(max|xhigh|high|medium|low|minimal)$", re.IGNORECASE)
 _NUMBER = re.compile(r"\d[\d,]*\.?\d*")
 
 
 @dataclass(frozen=True, slots=True)
 class Entry:
-    """One leaderboard row: the model name and optional effort annotation, its three figures, and the row's raw
-    evidence — the displayed label and tier text plus the cells the figures were read from — so a stored profile
-    can be traced back to the public row it claims."""
+    """A benchmark row. The effort is only used to choose the representative row, not stored in the profile."""
 
     name: str
     effort: str | None
     score: float | None
     task_cost: float | None
-    minutes: float | None
-    label: str = ""
-    tier: str = ""
-    cells: Mapping[str, str] = field(default_factory=dict)
 
 
 def native_id(page_id: str) -> str:
@@ -96,29 +87,21 @@ def _number(text: str | None) -> float | None:
     return value if math.isfinite(value) else None
 
 
-def _effort_key(text: str | None) -> str | None:
-    if not text:
-        return None
-    key = _norm(text)
-    return _EFFORT_ALIASES.get(key, key)
-
-
-def _split(name: str) -> tuple[str, str | None, str]:
+def _split(name: str) -> tuple[str, str | None]:
     """The model's base name, the effort the row declares, and that tier's text as displayed, in the spellings the
     leaderboard uses: ``GPT-6-Luna (high)``, ``Claude Fable 5.2 Max, Default Fallback``, ``Grok 4.7 Xhigh``.
     A trailing parenthesis without a known effort word (``(Chat)``) stays part of the name."""
-    text, effort = name.strip(), None
+    text, effort = _TRAILING_NOTE.sub("", name.strip()).strip(), None
     annotated = _ANNOTATION.match(text)
     if annotated is not None:
         inside = [word for word in re.split(r"[^a-z]+", annotated["inside"].casefold()) if word]
         found = next((word for word in inside if word in _EFFORT_WORDS), None)
         if found is not None:
             text, effort = annotated["name"], found
-    text = _TRAILING_NOTE.sub("", text).strip()
     tail = _EFFORT_TAIL.match(text)
-    if tail is not None and _norm(tail["effort"]) in _EFFORT_WORDS:
+    if effort is None and tail is not None:
         text, effort = tail["name"], tail["effort"]
-    return _norm(text), _effort_key(effort), (effort or "")[:64]
+    return _norm(text), effort.casefold() if effort else None
 
 
 class _Tables(HTMLParser):
@@ -166,10 +149,8 @@ class _Tables(HTMLParser):
 def parse(html: str) -> list[Entry]:
     """The leaderboard rows of every table that has an Intelligence Index column; other tables are ignored.
 
-    The served table stacks a group header (Intelligence/Price/Speed/Latency/Features) over the column row that
-    names ``Model`` plus ``Artificial Analysis Intelligence Index``, ``Cost per Task USD`` and ``Time per Task
-    Minutes``. Column positions — the model's too — come from that column row, not from fixed indices. Unparseable
-    or absent figures stay ``None`` — never zero or guessed.
+    The ``Model``, ``Artificial Analysis Intelligence Index`` and ``Cost per Task USD`` positions come from
+    the column header, not fixed indices. Unparseable or absent figures stay ``None``.
     """
     parser = _Tables()
     parser.feed(html)
@@ -185,49 +166,39 @@ def parse(html: str) -> list[Entry]:
         model_at = header.index("model")
         score_at = next((i for i, cell in enumerate(header) if "intelligence" in cell), None)
         cost_at = next((i for i, cell in enumerate(header) if "cost" in cell and "task" in cell), None)
-        time_at = next((i for i, cell in enumerate(header) if "time" in cell and "task" in cell), None)
         for row in table[header_at + 1:]:
             if len(row) <= model_at or not row[model_at]:
                 continue
-            name, effort, tier = _split(row[model_at])
+            name, effort = _split(row[model_at])
             if not name:
                 continue
             def cell(index: int | None) -> float | None:
                 return _number(row[index]) if index is not None and index < len(row) else None
-            def raw(index: int | None) -> str | None:
-                return row[index][:80] if index is not None and index < len(row) else None
-            cells = {key: shown for key, shown in (("score", raw(score_at)), ("taskCostUSD", raw(cost_at)),
-                                                   ("timeMinutes", raw(time_at))) if shown is not None}
-            entries.append(Entry(name, effort, cell(score_at), cell(cost_at), cell(time_at),
-                                 label=row[model_at][:128], tier=tier, cells=cells))
+            entries.append(Entry(name, effort, cell(score_at), cell(cost_at)))
     return entries
 
 
-def _offered(entry: Entry) -> dict[str, Any]:
-    return {"source": "artificialanalysis", "score": entry.score, "taskCostUSD": entry.task_cost,
-            "timeMinutes": entry.minutes,
-            "provenance": {"url": URL, "label": entry.label, "tier": entry.tier, "cells": dict(entry.cells)}}
-
-
-def offer(entries: list[Entry], model: str, effort: str) -> Mapping[str, Any] | None:
-    """Keep measurements at their own effort. A unique Max score can separately stand in as a capability ceiling."""
-    want = _norm(native_id(model))
-    if not want:
-        return None
+def offer(entries: list[Entry], model: str) -> dict[str, float | None] | None:
+    """Choose a Max measurement, or the best scored row when there is no measured Max."""
+    native = native_id(model)
+    want = _norm(native)
     candidates = [entry for entry in entries if entry.name == want]
-    effort_key = _effort_key(effort)
-    exact = [entry for entry in candidates if entry.effort == effort_key]
-    # An unlabelled row measures the bare model only when there are no competing variants.
-    offered = _offered(exact[0]) if len(exact) == 1 and (effort_key or len(candidates) == 1) else None
-    if effort_key == "max" or (offered is not None and offered["score"] is not None):
-        return offered
-    maximum = [entry for entry in candidates if entry.effort == "max"]
-    if len(maximum) != 1 or maximum[0].score is None:
-        return offered
-    row = maximum[0]
-    evidence = {"url": URL, "label": row.label, "tier": row.tier or "max",
-                "cells": {"score": row.cells["score"]} if "score" in row.cells else {}}
-    return {**(offered or {"source": "artificialanalysis"}), "score": row.score, "scoreProvenance": evidence}
+    if not candidates and model.startswith("devin:"):
+        # Devin sometimes puts its default effort in the native model ID (e.g. swe-2-1-medium).
+        base = _norm(_DEVIN_EFFORT_TAIL.sub("", native))
+        candidates = [entry for entry in entries if entry.name == base]
+    scored = [entry for entry in candidates if entry.score is not None]
+    if scored:
+        reference = [entry for entry in scored if entry.effort == "max"] or scored
+        score = max(entry.score for entry in reference)
+        costs = {entry.task_cost for entry in reference if entry.score == score and entry.task_cost is not None}
+    else:
+        score = None
+        priced = [entry for entry in candidates if entry.task_cost is not None]
+        reference = [entry for entry in priced if entry.effort == "max"] or priced
+        costs = {entry.task_cost for entry in reference}
+    cost = next(iter(costs)) if len(costs) == 1 else None
+    return {"score": score, "cost": cost} if score is not None or cost is not None else None
 
 
 class _SameHostRedirect(urllib.request.HTTPRedirectHandler):
@@ -295,11 +266,11 @@ class Leaderboard:
             self._entries, self._loaded_at, self._error = parsed, now, None
             return self._entries
 
-    def offer(self, model: str, effort: str) -> Mapping[str, Any] | None:
-        return offer(self.entries(), model, effort)
+    def offer(self, model: str) -> Mapping[str, Any] | None:
+        return offer(self.entries(), model)
 
 
 def source(*, loader: Callable[[], str] = download, ttl: float = CACHE_SECONDS,
-           clock: Callable[[], float] = time.monotonic) -> Callable[[str, str], Mapping[str, Any] | None]:
+           clock: Callable[[], float] = time.monotonic) -> Callable[[str], Mapping[str, Any] | None]:
     """The ``profiles.ensure`` fetch backed by the leaderboard; ``loader`` is the only network, injectable in tests."""
     return Leaderboard(loader=loader, ttl=ttl, clock=clock).offer

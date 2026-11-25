@@ -507,7 +507,7 @@ class AppCore:
         self._tasks: set[asyncio.Future[Any]] = set()
         self._profiles_source: Any = None
         """The model-profile fetch (tests substitute a fake; the real one only ever asks Artificial Analysis)."""
-        self._prefetched_profiles: dict[tuple[str, str], float] = {}  # (model, effort) -> monotonic of last spawn
+        self._prefetched_profiles: dict[str, float] = {}  # model -> monotonic of last spawn
         self._flush_handle: asyncio.TimerHandle | None = None
         self._sidebar_handle: asyncio.TimerHandle | None = None
         self._sidebar_reload: set[str] = set()
@@ -1357,10 +1357,10 @@ class AppCore:
 
     async def _m_app_init(self, params: dict[str, Any]) -> dict[str, Any]:
         self._close_video_preview()  # reloading the page may skip the old player's React cleanup
-        if not self._hydrated and not self.offline:
-            from desktop.core.fusion import profiles
-            self._spawn(asyncio.to_thread(profiles.migrate, default_settings_path().parent), quiet=True)
+        first_init = not self._hydrated
         self._hydrate()
+        if first_init and not self.offline:
+            self._spawn(self._refresh_profiles(), quiet=True)
         for conv in self.order:  # a page that has just (re)started knows nothing of the open conversations yet
             conv.meta, conv.sent_ids, conv.sent_versions, conv.dirty = {}, [], {}, True
         self._schedule_flush()
@@ -3457,14 +3457,11 @@ class AppCore:
                 raise AppError("所选模型不支持这个推理档位。")
             pending = {**conv.pending_model, "settings": {**conv.pending_model["settings"], "reasoning": value}}
             self._set_pending_model(conv, pending)
-            self._prefetch_profile(conv.pending_model["model"], value)
             return {"ok": True}
         ok = await self._update_live(conv, **{field_name: value})
         if ok and conv.pending_model is not None:
             pending = {**conv.pending_model, "settings": {**conv.pending_model["settings"], field_name: self._page_settings(conv).get(field_name, value)}}
             self._set_pending_model(conv, pending)
-        if ok and field_name == "reasoning":
-            self._prefetch_profile(self._page_settings(conv).get("model"), value)
         return {"ok": ok}
 
     def _set_default(self, field_name: str, value: str, *, engine: str | None = None) -> None:
@@ -3474,10 +3471,9 @@ class AppCore:
             # The level and permission that go with the new model's engine.
             fixed, _ = settings_for_model(self.catalog, self._engine_defaults(value), value)
             settings.reasoning_effort = fixed.get("reasoning", "")
-            self._prefetch_profile(value, settings.reasoning_effort)
+            self._prefetch_profiles(value)
         elif field_name == "reasoning":
             settings.reasoning_effort = value
-            self._prefetch_profile(settings.default_model, value)
         elif field_name == "autonomy":
             current = engine or self.catalog.engine_of(settings.default_model)
             if current == "factory" and value in ("off", "low", "medium", "high"):
@@ -3547,10 +3543,9 @@ class AppCore:
             if effort is not None:
                 settings["reasoning"] = effort
         if policy is not None:
-            self._prefetch_seats(policy.reasoning, [("main", policy.main), ("light", policy.light),
-                                                    *[("worker", seat) for seat in policy.workers]])
+            self._prefetch_profiles(policy.main, policy.light, *policy.workers)
         else:
-            self._prefetch_profile(destination, settings.get("reasoning", ""))
+            self._prefetch_profiles(destination)
         self._set_pending_model(conv, {"model": page_model, "settings": settings, "attachments": list(carry_ids or ()),
                                       "overLimit": over_ok, "policy": policy.to_json() if policy is not None else None})
         return {"ok": True}
@@ -3681,7 +3676,7 @@ class AppCore:
                     if not settings.get("reasoning")
                     else f"{model.get('label', page_model)} 不支持「{current.get('reasoning', '')}」推理，已改为「{settings['reasoning']}」。"
                 )
-        self._prefetch_profile(page_model, settings.get("reasoning", ""))
+        self._prefetch_profiles(page_model)
         return {"ok": ok}
 
     def _check_fusion_switch(self, conv: Conversation) -> None:
@@ -3752,50 +3747,57 @@ class AppCore:
             self._profiles_source = aa_catalog.source()
         return self._profiles_source
 
-    def _prefetch_profile(self, model: Any, effort: Any = "") -> None:
-        """Fetch the model's public profile in the background: a selection never waits for it or fails on it."""
-        if not isinstance(model, str) or not model.startswith(PREFIXES):
-            return
-        key = (model, effort if isinstance(effort, str) else "")
-        now = time.monotonic()
-        if now - self._prefetched_profiles.get(key, -PREFETCH_DEDUPE_SECONDS) < PREFETCH_DEDUPE_SECONDS:
-            return
-        self._prefetched_profiles[key] = now
-        self._spawn(self._profile_task(model, key[1]), quiet=True)
+    def _profile_lookup(self) -> Callable[[str], Any]:
+        """Match API entries on the actual model ID, not a user label or generated entry ID."""
+        fetch = self._profiles_fetch()
+        native_ids: dict[str, str] | None = None
 
-    async def _profile_task(self, model: str, effort: str) -> None:
+        def lookup(model: str) -> Any:
+            nonlocal native_ids
+            if model.startswith("api:"):
+                if native_ids is None:
+                    lister = getattr(self.providers, "api_models", None)
+                    native_ids = {spec.id: spec.native for spec in lister()} if lister is not None else {}
+                model = native_ids.get(model, model)
+            return fetch(model)
+
+        return lookup
+
+    async def _refresh_profiles(self) -> None:
+        from desktop.core.fusion import profiles
+        s = self.settings
+        models = [model for model in (s.default_model, s.fusion_main, s.fusion_light, *s.fusion_workers)
+                  if model.startswith(PREFIXES)]
+        await asyncio.to_thread(profiles.refresh, default_settings_path().parent, models, self._profile_lookup())
+
+    def _prefetch_profiles(self, *models: Any) -> None:
+        """Selection never waits for the public catalog; changing effort doesn't need another lookup."""
+        if self.offline:
+            return
+        now = time.monotonic()
+        for model in models:
+            if not isinstance(model, str) or not model.startswith(PREFIXES):
+                continue
+            if now - self._prefetched_profiles.get(model, -PREFETCH_DEDUPE_SECONDS) < PREFETCH_DEDUPE_SECONDS:
+                continue
+            self._prefetched_profiles[model] = now
+            self._spawn(self._profile_task(model), quiet=True)
+
+    async def _profile_task(self, model: str) -> None:
         from desktop.core.fusion import profiles
         try:
-            await asyncio.to_thread(profiles.ensure, default_settings_path().parent, model, effort, self._profiles_fetch())
+            await asyncio.to_thread(profiles.ensure, default_settings_path().parent, model, self._profile_lookup())
         except Exception:
-            # A provider or custom id (api:vendor:custom:name) can be private; the engine prefix is enough.
+            # A custom model id can be private; the engine prefix is enough.
             log.exception("prefetching a model profile for %s failed", model.partition(":")[0])
-
-    def _seat_effort(self, reasoning: Mapping[str, str], role: str, model: str) -> str:
-        """The effort a seat will actually run at: its configured level, else the model's own default."""
-        effort = reasoning.get(f"{role}:{model}", reasoning.get(model))
-        if effort is not None:
-            return effort
-        return (self.catalog.find(model) or {}).get("defaultEffort") or ""
-
-    def _prefetch_seats(self, reasoning: Mapping[str, str], seats: Sequence[tuple[str, str]]) -> None:
-        for role, model in seats:
-            self._prefetch_profile(model, self._seat_effort(reasoning, role, model))
-
-    def _prefetch_fusion_settings(self) -> None:
-        settings = self.settings
-        self._prefetch_seats(settings.fusion_reasoning, [("main", settings.fusion_main), ("light", settings.fusion_light),
-                                                         *[("worker", model) for model in settings.fusion_workers]])
 
     def _prefetch_conv(self, conv: Conversation) -> None:
         fusion = getattr(conv.controller, "_fusion", None)
         if fusion is not None:
             policy = fusion.registry.policy
-            self._prefetch_seats(policy.reasoning, [("main", policy.main), ("light", policy.light),
-                                                    *[("worker", model) for model in policy.workers]])
-            return
-        settings = self._page_settings(conv)
-        self._prefetch_profile(settings.get("model"), settings.get("reasoning", ""))
+            self._prefetch_profiles(policy.main, policy.light, *policy.workers)
+        else:
+            self._prefetch_profiles(self._page_settings(conv).get("model"))
 
     async def _refresh_fusion_settings(self, conv: Conversation) -> None:
         """Adopt the global preset at a new-turn boundary, never in a running model/tool step."""
@@ -3867,8 +3869,7 @@ class AppCore:
             self._schedule_flush()
         conv.ledger.seen.update(restored[0])
         conv.ledger.model_seen.update(restored[1])
-        self._prefetch_seats(policy.reasoning, [("main", policy.main), ("light", policy.light),
-                                                *[("worker", seat) for seat in policy.workers]])
+        self._prefetch_profiles(policy.main, policy.light, *policy.workers)
         self.say("已在本会话启用 Fusion；历史和专家上下文保留，不会自动启动任务。")
         return {"ok": True}
 
@@ -4425,7 +4426,6 @@ class AppCore:
                 if chosen is None or effort not in chosen.get("efforts", ()):
                     raise AppError("所选模型不支持这个思考等级。")
             s.fusion_reasoning = levels
-            seats = True
         elif key == "fusionPreference" and _is_int(value) and 0 <= value <= 100:
             s.fusion_preference = value
         elif key == "fusionMaxCalls" and _is_int(value) and 1 <= value <= 1000:
@@ -4491,7 +4491,7 @@ class AppCore:
         else:
             raise AppError("这个设置的值不合法。")
         if seats:
-            self._prefetch_fusion_settings()
+            self._prefetch_profiles(s.fusion_main, s.fusion_light, *s.fusion_workers)
         self._save()
         view = self.settings_view()
         self.emit("settings", {"settings": view})

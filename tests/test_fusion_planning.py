@@ -175,13 +175,10 @@ def test_required_facts_uncertainties_decisions_and_acceptance():
 # --------------------------------------------------------------------------- the snapshot itself
 
 def test_the_snapshot_keeps_the_profile_facts_and_appends_the_contract(tmp_path):
-    profiles.ensure(tmp_path, MODEL, "high", lambda *_: {"score": 51.5, "taskCostUSD": 1.75, "timeMinutes": 12.4},
-                    clock=lambda: 1_760_000_000.0)
+    profiles.ensure(tmp_path, MODEL, lambda _: {"score": 51.5, "cost": 1.75})
     snapshot = profiles.team_snapshot(tmp_path, {"main": (MODEL, "high"), "worker": (OTHER_MODEL, "low")})
-    # The hit keeps the matched (model, effort) identifier, capability, task cost, speed and the fetch date.
-    assert f"main: {MODEL} @ high — capability 51.5, task cost $1.75 per task, ~12.4 min per task" in snapshot
-    assert "fetched 2025-10-" in snapshot
-    assert f"worker: {OTHER_MODEL} @ low — no local profile" in snapshot  # A miss stays a miss, not a guess.
+    assert f"main: {MODEL} @ high — capability 51.5, task cost $1.75 per benchmark task" in snapshot
+    assert f"worker: {OTHER_MODEL} @ low — capability unknown, task cost unknown" in snapshot
     # The planning contract rides along: structure, estimates and limits in the same read-only view.
     assert planning.CONTRACT in snapshot
     assert "'direct' or 'candidates'" not in snapshot  # The rules are prose: the enum shows in the JSON line.
