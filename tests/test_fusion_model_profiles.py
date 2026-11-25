@@ -364,7 +364,6 @@ def test_offer_is_exact_and_falls_back_on_ambiguity():
     assert single == {"source": "artificialanalysis", "score": 51.5, "taskCostUSD": 1.75, "timeMinutes": 12.4,
                       "provenance": {"url": aa_catalog.URL, "label": "GPT-6.1-Sol Max", "tier": "Max",
                                      "cells": {"score": "51.5", "taskCostUSD": "$1.75", "timeMinutes": "12.4"}}}
-    assert aa_catalog.offer(rows, "chatgpt:gpt-6.1-sol", "high") is None  # Only its max row exists.
     assert aa_catalog.offer(rows, "devin:gpt-6-luna", "high")["score"] == 54.2
     assert aa_catalog.offer(rows, "api:demo:gpt-6-luna", "low")["score"] == 48.0
     assert aa_catalog.offer(rows, "chatgpt:gpt-6-luna", "medium") is None  # No medium row: tiers are not mixed.
@@ -378,6 +377,27 @@ def test_offer_is_exact_and_falls_back_on_ambiguity():
     plain = aa_catalog.offer(rows, "chatgpt:minichat", "")
     assert plain is not None and plain["score"] == 20.1                   # ...but it is honest data for a bare ask.
     assert aa_catalog.offer(rows, "chatgpt:duo", "") is None             # Two unannotated twins are ambiguous too.
+
+
+def test_unique_max_supplies_only_a_score_when_the_requested_score_is_missing():
+    model = "chatgpt:gpt-6.1-sol"
+    rows = entries()
+    reference = aa_catalog.offer(rows, model, "high")
+    assert reference == {"source": profiles.SOURCE, "score": 51.5, "scoreProvenance": {
+        "url": aa_catalog.URL, "label": "GPT-6.1-Sol Max", "tier": "Max", "cells": {"score": "51.5"}}}
+    assert aa_catalog.offer(rows, model, "") == reference
+    exact = aa_catalog.Entry("gpt61sol", "high", 43.0, 0.5, 4.0, label="GPT-6.1-Sol High", tier="High")
+    result = aa_catalog.offer([*rows, exact], model, "high")
+    assert result["score"] == 43.0 and result["taskCostUSD"] == 0.5 and "scoreProvenance" not in result
+    unscored = aa_catalog.Entry("gpt61sol", "high", None, 0.5, 4.0, label="GPT-6.1-Sol High", tier="High")
+    result = aa_catalog.offer([*rows, unscored], model, "high")
+    assert result["score"] == 51.5 and result["taskCostUSD"] == 0.5 and result["timeMinutes"] == 4.0
+    assert result["provenance"]["tier"] == "High" and result["scoreProvenance"]["tier"] == "Max"
+    maximum = next(row for row in rows if row.name == "gpt61sol" and row.effort == "max")
+    assert aa_catalog.offer([*rows, maximum], model, "high") is None  # Ambiguous Max is not evidence.
+    assert aa_catalog.offer([aa_catalog.Entry("gpt61sol", "max", None, 1.75, 12.4)], model, "high") is None
+    assert aa_catalog.offer([aa_catalog.Entry("gpt61sol", "xhigh", 50.0, 1.75, 12.4)], model, "high") is None
+    assert aa_catalog.offer(rows, "chatgpt:gpt-6.1-sol-mini", "high") is None  # Never another model variant.
 
 
 def test_native_id_unwraps_subscription_api_and_channel_ids():
@@ -454,6 +474,36 @@ def test_source_downloads_once_and_stores_leaderboard_fields(tmp_path):
     assert one["confidence"] == profiles.CONFIDENCE_EXACT and one["source"] == profiles.SOURCE
     assert two["score"] == 48.0 and two["confidence"] == profiles.CONFIDENCE_EXACT
     assert profiles.load(tmp_path, "chatgpt:gpt-6.1-sol", "max") == one
+
+
+def test_old_twenty_point_estimate_rechecks_immediately_and_stores_the_max_ceiling(tmp_path):
+    model = "chatgpt:gpt-6.1-sol"
+    seeded(tmp_path, model, "high", confidence="fallback", source="fallback", score=20.0,
+           costIn=None, costOut=None, taskCostUSD=None, timeMinutes=None, fetchedAt=100.0)
+    fetch = aa_catalog.source(loader=lambda: LEADERBOARD)
+    record = profiles.ensure(tmp_path, model, "high", fetch, clock=lambda: 101.0)
+    assert profiles.load(tmp_path, model, "high") == record
+    assert record["effort"] == "high" and record["score"] == 51.5 and record["confidence"] == "max_reference"
+    assert record["scoreProvenance"]["label"] == "GPT-6.1-Sol Max" and "provenance" not in record
+    assert all(record[field] is None for field in ("costIn", "costOut", "taskCostUSD", "timeMinutes"))
+    snapshot = profiles.team_snapshot(tmp_path, {"main": (model, "high")})
+    assert "@ high — capability 51.5 (Max capability ceiling; not measured at this effort), task cost unknown" in snapshot
+
+    asked = []
+
+    def unscored(*pair):
+        asked.append(pair)
+        return {"score": None, "taskCostUSD": 0.5}
+
+    assert profiles.ensure(tmp_path, model, "high", unscored, clock=lambda: 102.0) == record
+    assert not asked
+    after_retry = 101.0 + profiles.FALLBACK_RETRY_SECONDS
+    retained = profiles.ensure(tmp_path, model, "high", unscored, clock=lambda: after_retry)
+    assert retained == {**record, "fetchedAt": after_retry, "taskCostUSD": 0.5} and asked == [(model, "high")]
+    upgraded = profiles.ensure(tmp_path, model, "high", lambda *_: {"score": 43.0, "taskCostUSD": 0.5},
+                               clock=lambda: after_retry + profiles.FALLBACK_RETRY_SECONDS)
+    assert upgraded["confidence"] == "exact" and upgraded["score"] == 43.0 and upgraded["taskCostUSD"] == 0.5
+    assert "scoreProvenance" not in upgraded
 
 
 def test_the_record_keeps_the_leaderboard_row_it_came_from(tmp_path):

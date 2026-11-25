@@ -2,8 +2,8 @@
 
 Profiles share ``<app data>/fusion-profiles/models.json``, indexed by exact page model id and reasoning effort.
 The old per-pair files are imported without fetching or changing them. Reads are local; on a miss the injected
-``fetch`` callable supplies the leaderboard fields. A failure stores a mid-low estimate with unknown cost, or
-keeps the earlier estimate and moves its retry timestamp. Fetches do not hold the catalog write lock; each write
+``fetch`` supplies exact measurements or a Max capability reference, never Max cost or time for another effort.
+A failed lookup keeps the previous reference or uses a mid-low estimate. Fetches do not hold the catalog write lock; each write
 merges into the latest catalog and replaces the file atomically, including across app processes.
 
 ``taskCostUSD`` is the leaderboard's USD per task and ``timeMinutes`` its minutes per task — the reference for
@@ -36,12 +36,14 @@ FALLBACK_SCORE = 20.0
 FALLBACK_RETRY_SECONDS = 6 * 3600
 """How long a failed or absent listing is trusted before the next ensure tries the source one more time."""
 CONFIDENCE_EXACT = "exact"
+CONFIDENCE_MAX_REFERENCE = "max_reference"
 CONFIDENCE_FALLBACK = "fallback"
 
+_LOOKUP_VERSION = 2  # Old incomplete records should try the Max lookup once, even inside their retry window.
 _NUMBERS = ("score", "costIn", "costOut", "taskCostUSD", "timeMinutes")
 
 Fetch = Callable[[str, str], Mapping[str, Any] | None]
-"""``fetch(model, effort)`` -> the source's fields for exactly that pair, or ``None`` when it has none. May raise."""
+"""Source fields for the requested pair, optionally with separate evidence for a Max score, or ``None``. May raise."""
 
 _locks_guard = threading.Lock()
 _locks: dict[tuple[Path, str, str], threading.Lock] = {}
@@ -93,17 +95,21 @@ def _record(model: str, effort: str, offered: Mapping[str, Any], at: float) -> d
               "score": _number(offered.get("score")), "costIn": _number(offered.get("costIn")),
               "costOut": _number(offered.get("costOut")), "taskCostUSD": _number(offered.get("taskCostUSD")),
               "timeMinutes": _number(offered.get("timeMinutes")), "fetchedAt": float(at),
-              "confidence": CONFIDENCE_EXACT}
+              "confidence": CONFIDENCE_EXACT, "lookupVersion": _LOOKUP_VERSION}
     provenance = _provenance(offered.get("provenance"))
     if provenance is not None:
         record["provenance"] = provenance
+    score_provenance = _provenance(offered.get("scoreProvenance"))
+    if record["score"] is not None and score_provenance is not None and score_provenance["tier"].casefold() == "max":
+        record["confidence"] = CONFIDENCE_MAX_REFERENCE
+        record["scoreProvenance"] = score_provenance
     return record
 
 
 def _fallback(model: str, effort: str, at: float) -> dict[str, Any]:
     return {"model": model, "effort": effort, "source": CONFIDENCE_FALLBACK, "score": FALLBACK_SCORE,
             "costIn": None, "costOut": None, "taskCostUSD": None, "timeMinutes": None, "fetchedAt": float(at),
-            "confidence": CONFIDENCE_FALLBACK}
+            "confidence": CONFIDENCE_FALLBACK, "lookupVersion": _LOOKUP_VERSION}
 
 
 def _read_json(path: Path) -> Any:
@@ -115,11 +121,16 @@ def _read_json(path: Path) -> Any:
 
 def _validated(record: Any, model: str, effort: str) -> dict[str, Any] | None:
     if (not isinstance(record, dict) or record.get("model") != model or record.get("effort") != effort
-            or record.get("confidence") not in (CONFIDENCE_EXACT, CONFIDENCE_FALLBACK)):
+            or record.get("confidence") not in (CONFIDENCE_EXACT, CONFIDENCE_MAX_REFERENCE, CONFIDENCE_FALLBACK)):
         return None
     if _number(record.get("fetchedAt")) is None or any(
             record.get(field) is not None and _number(record.get(field)) is None for field in _NUMBERS):
         return None
+    if record["confidence"] == CONFIDENCE_MAX_REFERENCE:
+        evidence = _provenance(record.get("scoreProvenance"))
+        if record.get("score") is None or evidence is None or evidence["tier"].casefold() != "max":
+            return None
+        record["scoreProvenance"] = evidence
     if "provenance" in record:
         provenance = _provenance(record["provenance"])
         if provenance is None:
@@ -225,21 +236,22 @@ def migrate(root: Path) -> None:
     _catalog_after_migration(Path(root) / FOLDER / FILE)
 
 
-def ensure(root: Path, model: str, effort: str, fetch: Fetch, *, clock: Callable[[], float] = time.time) -> dict[str, Any]:
-    """The record for exactly this (model, effort), fetching and storing it only on a miss.
+def _exact_score(record: dict[str, Any]) -> bool:
+    return record["confidence"] == CONFIDENCE_EXACT and record.get("score") is not None
 
-    A stored exact record — or a fallback younger than ``FALLBACK_RETRY_SECONDS`` — is returned as is and ``fetch``
-    is not called, so a selection that repeats (reopening, another sign-in event, a turn ending) never multiplies
-    into extra requests. An expired fallback gets one retry; a failed retry refreshes only the timestamp that
-    throttles the next one. A first miss that cannot be answered is stored as a mid-low estimate with unknown cost,
-    so the next call is a hit instead of another request.
-    """
+
+def _current(record: dict[str, Any], now: float) -> bool:
+    return _exact_score(record) or (record.get("lookupVersion") == _LOOKUP_VERSION
+                                    and now - record["fetchedAt"] < FALLBACK_RETRY_SECONDS)
+
+
+def ensure(root: Path, model: str, effort: str, fetch: Fetch, *, clock: Callable[[], float] = time.time) -> dict[str, Any]:
+    """Keep exact scores. Recheck incomplete scores and references after the retry window or a lookup-rule change."""
     model, effort = _check(model, effort)
     path = Path(root) / FOLDER / FILE
     with _lock_for(path.resolve(), model, effort):
         record = _find(_catalog_after_migration(path), model, effort)
-        if record is not None and (
-                record["confidence"] == CONFIDENCE_EXACT or clock() - record["fetchedAt"] < FALLBACK_RETRY_SECONDS):
+        if record is not None and _current(record, clock()):
             return record
         try:
             offered = fetch(model, effort)
@@ -248,17 +260,22 @@ def ensure(root: Path, model: str, effort: str, fetch: Fetch, *, clock: Callable
         with _catalog_lock(path):
             models = _import_locked(path)
             record = _find(models, model, effort)  # Another process may have written while we were fetching.
-            if record is not None and record["confidence"] == CONFIDENCE_EXACT:
+            if record is not None and _exact_score(record):
                 return record
             now = clock()
             if isinstance(offered, Mapping):
-                record = _record(model, effort, offered, now)
+                updated = _record(model, effort, offered, now)
+                if (updated["score"] is None and record is not None
+                        and record["confidence"] == CONFIDENCE_MAX_REFERENCE):
+                    for key in ("score", "scoreProvenance", "confidence"):
+                        updated[key] = record[key]
+                record = updated
             elif record is None:
                 record = _fallback(model, effort, now)
-            elif now - record["fetchedAt"] < FALLBACK_RETRY_SECONDS:
+            elif _current(record, now):
                 return record
             else:
-                record = {**record, "fetchedAt": now}  # Throttle the next retry; keep the estimate until a hit.
+                record = {**record, "fetchedAt": now, "lookupVersion": _LOOKUP_VERSION}  # Throttle a failed retry.
             if not isinstance(models.get(model), dict):
                 models[model] = {}
             models[model][effort] = record
@@ -295,6 +312,8 @@ def team_snapshot(root: Path, seats: dict[str, tuple[str, str]]) -> str:
             continue
         score = record.get("score")
         capability = f"capability {score:g}" if isinstance(score, (int, float)) and not isinstance(score, bool) else "capability unknown"
+        if record["confidence"] == CONFIDENCE_MAX_REFERENCE:
+            capability += " (Max capability ceiling; not measured at this effort)"
         parts = []
         if record.get("taskCostUSD") is not None:
             parts.append(f"{_money(record['taskCostUSD'])} per task")

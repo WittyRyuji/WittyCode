@@ -2,11 +2,9 @@
 
 ``source()`` returns the ``profiles.ensure`` fetch: it downloads the leaderboard page once per ``CACHE_SECONDS``
 window (the page is ~1.5 MB of server-side HTML), parses its ``<table>`` (columns: Intelligence Index, Cost per
-Task USD, Time per Task Minutes) and answers exact ``(model, effort)`` lookups. Matching is by normalized name —
-the id a page model id leaves after its ``chatgpt:`` / ``devin:`` / ``api:<provider>:`` prefix, case- and
-space-folded against the row's name — and by the ``(effort)`` annotation a row may carry; anything ambiguous
-(several candidate rows, or a row whose annotation does not fit the asked effort) is ``None``, so the caller keeps
-its mid-low estimate rather than guessing across tiers.
+Task USD, Time per Task Minutes) and matches a normalized model name and effort. If there is no exact score,
+a unique scored Max row for the same model may supply a capability ceiling, never the cost or time of the
+requested effort. An ambiguous or unavailable Max score is not used.
 
 The request is a plain unauthenticated GET to one fixed https URL: no keys, no cookies, no body, and nothing about
 the workspace or its sessions ever leaves the machine. Pure: no Qt; the network lives behind the injectable
@@ -212,21 +210,24 @@ def _offered(entry: Entry) -> dict[str, Any]:
 
 
 def offer(entries: list[Entry], model: str, effort: str) -> Mapping[str, Any] | None:
-    """The leaderboard's fields for exactly this (page model id, effort) — ``None`` whenever the answer is not
-    unique: no row, several rows, or only rows of another tier. Tiers are never mixed, and a row that declares
-    no tier is only ever an answer to a bare ask — it is not a measured value for whichever effort was asked."""
+    """Keep measurements at their own effort. A unique Max score can separately stand in as a capability ceiling."""
     want = _norm(native_id(model))
     if not want:
         return None
     candidates = [entry for entry in entries if entry.name == want]
-    if not candidates:
-        return None
     effort_key = _effort_key(effort)
-    if effort_key:
-        exact = [entry for entry in candidates if entry.effort == effort_key]
-        return _offered(exact[0]) if len(exact) == 1 else None
-    plain = [entry for entry in candidates if entry.effort is None]
-    return _offered(plain[0]) if len(plain) == 1 and len(candidates) == 1 else None
+    exact = [entry for entry in candidates if entry.effort == effort_key]
+    # An unlabelled row measures the bare model only when there are no competing variants.
+    offered = _offered(exact[0]) if len(exact) == 1 and (effort_key or len(candidates) == 1) else None
+    if effort_key == "max" or (offered is not None and offered["score"] is not None):
+        return offered
+    maximum = [entry for entry in candidates if entry.effort == "max"]
+    if len(maximum) != 1 or maximum[0].score is None:
+        return offered
+    row = maximum[0]
+    evidence = {"url": URL, "label": row.label, "tier": row.tier or "max",
+                "cells": {"score": row.cells["score"]} if "score" in row.cells else {}}
+    return {**(offered or {"source": "artificialanalysis"}), "score": row.score, "scoreProvenance": evidence}
 
 
 class _SameHostRedirect(urllib.request.HTTPRedirectHandler):

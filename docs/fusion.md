@@ -18,6 +18,8 @@
 
 模型能力评分和成本参考缓存在 `%APPDATA%\WittyCode\fusion-profiles\models.json`，与 API Provider 的 `models.json` 分开。指定自定义设置文件时，评分目录跟随设置文件的位置。档案按模型 ID 和推理档位分开记录；升级后首次启动会在后台导入旧版的逐档 JSON，不联网、不删除旧文件。
 
+评分优先使用 Artificial Analysis 对当前推理档位的实测分；缺少实测分时，若同一模型有唯一的 Max 实测分，就用它作为能力上限参考（`confidence: "max_reference"`），不把 Max 的成本、耗时或实际运行档位套给当前席位。两种评分都找不到且没有其他实测数据时，才使用 20 分占位；旧占位在升级后下次用到时会重查。
+
 ## 固定路由
 
 固定路由按 `docs/fusion-route-design-2026-11-18.md` 实现，只在底层，没有设置页。它分九个开关，写在设置文件的 `fusion_gates` 里：`drive`、`brief`、`report`、`route`、`acceptance`、`inject`、`map`、`observer`、`v3`。默认全开；把某一项设为 `false`，行为回到这个关卡之前。每任务度量没有开关，始终记录，只计数，不用来调整行为。
