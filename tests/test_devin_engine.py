@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+from desktop.core.catalog import build_catalog
 from desktop.core.devin.account import DevinStatus, account_json, parse_status
 from desktop.core.devin.engine import DevinEngine, cwd_variants, saved_session
 from desktop.core.devin.errors import DevinNotFoundError, DevinProcessError, DevinRpcError, DevinSignedOutError, friendly_failure
@@ -135,6 +136,52 @@ def test_models_are_read_from_the_config_options():
     ]
 
 
+def test_default_thought_suffixes_are_not_part_of_display_names():
+    medium_high = ("medium", "high")
+    cases = [
+        ("swe-2-1-medium", "SWE-2.1 Medium", ("low", "medium", "high", "max"), "medium", "SWE-2.1"),
+        ("glm-5-2", "GLM-5.2 High", ("none", "high", "max"), "high", "GLM-5.2"),
+        ("swe-2-flash-medium", "SWE-2 Flash Medium", medium_high, "medium", "SWE-2 Flash"),
+        ("swe-2-high", "SWE-2", ("medium", "high", "max"), "high", "SWE-2"),
+        ("nondefault", "Nondefault High", medium_high, "medium", "Nondefault High"),
+        ("tiny-fast", "Tiny Fast", medium_high, "medium", "Tiny Fast"),
+        ("middle-medium", "The Medium Compute", medium_high, "medium", "The Medium Compute"),
+        ("highland", "Highland", medium_high, "medium", "Highland"),
+        ("incoherent-medium", "Incoherent Medium", ("low", "high"), "medium", "Incoherent Medium"),
+        ("silent-high", "Silent High", (), "", "Silent High"),
+        ("mistral-medium-high", "Mistral Medium", medium_high, "medium", "Mistral Medium"),
+        ("mistral-medium-medium", "Mistral Medium Medium", medium_high, "medium", "Mistral Medium"),
+        ("copied-medium", "Copied Medium", medium_high, "medium", "Copied"),
+    ]
+    entries = [(model_id, name, True) for model_id, name, _, _, _ in cases]
+    raw = model_entries([{"id": "model", "options": [{"value": "raw-medium"}]}])
+    assert raw == [("raw-medium", "raw-medium", True)]
+    entries += raw
+    levels = {model_id: (efforts, default) for model_id, _, efforts, default, _ in cases}
+    levels["raw-medium"] = (medium_high, "medium")
+    info = cli_info({"families": [
+        {"family_label": "Mistral Medium", "slug": "mistral-medium", "variants": [
+            {"model_uid": "mistral-medium-high", "label": "Mistral Medium High", "max_context_tokens": 100},
+            {"model_uid": "mistral-medium-medium", "label": "Mistral Medium Medium", "max_context_tokens": 100},
+        ]},
+        {"family_label": "Copied Medium", "slug": "copied-medium", "variants": [
+            {"model_uid": "copied-medium", "label": "Copied Medium", "max_context_tokens": 100},
+        ]},
+    ]})
+    assert known_about("mistral-medium-high", info).family_label == "Mistral Medium"
+    assert known_about("copied-medium", info).family_label == "", "a variant label copied into family_label is not family evidence"
+    models = build_models(entries, levels, info)
+    expected = [(model_id, display) for model_id, _, _, _, display in cases] + [("raw-medium", "raw-medium")]
+    assert [(m.id, m.display_name) for m in models] == expected
+    swe = models[0]
+    assert (swe.id, swe.display_name, swe.efforts, swe.default_effort) == ("swe-2-1-medium", "SWE-2.1", ("low", "medium", "high", "max"), "medium")
+    catalog = build_catalog(devin_models=models)
+    row = catalog.find("devin:swe-2-1-medium")
+    assert (row["label"], row["fusionBackend"]) == ("SWE-2.1", "devin")
+    target = catalog.target("devin:swe-2-1-medium")
+    assert (target.engine, target.model) == ("devin", "swe-2-1-medium")
+
+
 def test_failures_are_put_into_words_with_devins_name():
     assert "Devin" in friendly_failure(DevinNotFoundError()) and "登录" in friendly_failure(DevinSignedOutError())
     assert friendly_failure(DevinProcessError("x", exit_code=3)) == "Devin 进程异常退出（exit code 3）。"
@@ -227,7 +274,7 @@ def test_the_models_are_read_with_the_levels_each_one_offers(tmp_path):
         # the scratch session the list was read from is gone again, and was not shown as a conversation
         assert harness.state()["sessions"] == {}
         assert harness.requests("session/delete")
-        assert await harness.engine.list_models() is not models and harness.engine.model_info("glm-5-2").display_name == "GLM-5.2 High"
+        assert await harness.engine.list_models() is not models and harness.engine.model_info("glm-5-2").display_name == "GLM-5.2"
         assert len(harness.requests("session/new")) == 1  # (cached)
         await harness.engine.list_models(refresh=True)
         assert len(harness.requests("session/new")) == 2

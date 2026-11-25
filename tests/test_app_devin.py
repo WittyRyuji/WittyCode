@@ -74,6 +74,7 @@ def test_the_devin_models_are_in_the_catalog_under_their_own_prefix(tmp_path):
         swe = models["devin:swe-2-high"]
         assert (swe["label"], swe["efforts"], swe["defaultEffort"], swe["window"], swe["note"], swe["group"]) == (
             "SWE-2", ["medium", "high", "max"], "high", 262000, "Free", "Cognition")
+        assert models["devin:glm-5-2"]["label"] == "GLM-5.2"
         assert models["devin:glm-5-2"]["noImages"] is True and "noImages" not in swe
         assert models["devin:adaptive"]["efforts"] == []
         target = core.catalog.target("devin:claude-opus-5-5-medium")
