@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
+import subprocess
 import threading
 from pathlib import Path
 
@@ -12,12 +14,31 @@ from PySide6.QtCore import QRect, Qt
 
 from desktop.core.cache import Cache
 from desktop.core.session_state import SessionState
+from tests import e2e_support
 from tests.e2e_support import open_rig
 from tests.fake_responses import call, fail, say
 from tests.fakes import until
-from tests.ui_support import run
+from tests.ui_support import run, wait_for
 
 pytestmark = pytest.mark.ui
+
+FRONTEND = Path(__file__).resolve().parents[1] / "frontend"
+
+
+def build_page(tmp_path: Path) -> Path:
+    """Build this worktree's page into the test's disposable directory, never the shared app bundle."""
+    node = shutil.which("node")
+    assert node and (FRONTEND / "node_modules" / "vite").is_dir(), "install the pinned Node and frontend dependencies first"
+    env_dir, out_dir = tmp_path / "page-env", tmp_path / "page"
+    env_dir.mkdir()
+    subprocess.run(
+        [node, "--input-type=module", "-e", """
+          import { build } from 'vite';
+          await build({configLoader: 'runner', envDir: process.argv[1], build: {outDir: process.argv[2], emptyOutDir: false}});
+        """, str(env_dir), str(out_dir)],
+        cwd=FRONTEND, check=True, timeout=90,
+    )
+    return out_dir / "index.html"
 
 
 async def select_fusion(rig):
@@ -55,7 +76,84 @@ def test_factory_catalog_model_can_be_picked_for_each_seat(qapp, loop, tmp_path,
     run(loop, scenario())
 
 
-def test_configure_and_start_fusion_with_a_local_fake(qapp, loop, tmp_path):
+def test_fusion_settings_multi_pools_and_expert_editor_use_real_bridge(qapp, loop, tmp_path):
+    async def scenario():
+        rig = await open_rig(tmp_path)
+        try:
+            await select_fusion(rig)
+            await rig.wait_text(".settings-body h2", "Fusion")
+            sol, luna = "chatgpt:gpt-6.1-sol", "chatgpt:gpt-6-luna"
+            for role, name in (("main", "GPT-6.1-Sol"), ("worker", "GPT-6-Luna"), ("light", "GPT-6-Luna")):
+                row = f'.fusion-model-row[data-role="{role}"]'
+                await rig.click(row + " .fusion-model-picker .selectbox")
+                await rig.click_text(row + " .fusion-model-picker .menu-item", name)
+                await rig.wait_for(row + f'[data-model="{sol if role == "main" else luna}"]')
+
+            for role, model, expected in (
+                ("worker", "GPT-6.1-Sol", [luna, sol]),
+                ("light", "GPT-6.1-Sol", [luna, sol]),
+            ):
+                await rig.click(f'[data-pool="{role}"] .fusion-model-add .selectbox')
+                await rig.click_text(f'[data-pool="{role}"] .fusion-model-add .menu-item', model)
+                actual = (lambda role=role: rig.core.settings.fusion_workers if role == "worker" else rig.core.settings.fusion_lights)
+                await until(lambda actual=actual, expected=expected: actual() == expected)
+            await rig.wait_for(".fusion-model-row", 5)
+            assert rig.core.settings.fusion_light == luna  # the legacy scalar remains the first L3 model
+
+            async def enabled_button(label):
+                return await rig.js(f"[...document.querySelectorAll('.expert-catalog button')].some(e => e.textContent.includes({json.dumps(label)}) && !e.disabled)")
+
+            await rig.wait_text(".expert-catalog", "修订")
+            await wait_for(lambda: enabled_button("新建专家"), 10, "the enabled new-expert button after the initial catalog load")
+            await rig.click_text(".expert-catalog button", "新建专家")
+            await rig.wait_for('input[aria-label="专家稳定标识"]:enabled')
+            await rig.click('input[aria-label="专家稳定标识"]')
+            await rig.type("review-ui")
+            await rig.click('input[aria-label="专家显示名"]')
+            await rig.type("界面检查")
+            await rig.click('input[aria-label="专家 Tags"]')
+            await rig.type("security api")
+            await rig.js("(function(){var e=document.querySelector('textarea[aria-label=\"专家 Markdown 指令\"]'); e.focus(); e.setSelectionRange(e.value.length, e.value.length);})()")
+            await rig.type("只读检查界面证据。")
+            await wait_for(lambda: enabled_button("创建专家"), 10, "the enabled create button")
+            await rig.click_text(".expert-editor button", "创建专家")
+            await until(lambda: rig.core.expert_catalog().get("review-ui") is not None)
+            entry = rig.core.expert_catalog().get("review-ui")
+            assert (entry.version, entry.enabled, entry.tags) == (1, True, ("security", "api"))
+            await rig.wait_text(".expert-tag-chips", "security")
+            await rig.wait_text(".connection-result", "专家已创建")
+            await rig.wait_text(".expert-editor .pstate", "v1 · 启用")
+            await rig.wait_for('input[aria-label="专家显示名"]:enabled')
+
+            await rig.click('input[aria-label="专家显示名"]')
+            await rig.js("document.querySelector('input[aria-label=\"专家显示名\"]').select()")
+            await rig.type("界面复核")
+            assert await rig.js("document.querySelector('input[aria-label=\"专家显示名\"]').value") == "界面复核"
+            await wait_for(lambda: enabled_button("保存新版本"), 10, "the enabled save button with the edited name")
+            await rig.click_text(".expert-editor button", "保存新版本")
+            await until(lambda: rig.core.expert_catalog().get("review-ui").version == 2)
+            assert rig.core.expert_catalog().get("review-ui").name == "界面复核"
+            await rig.wait_text(".connection-result", "已保存版本 2")
+            await rig.wait_text(".expert-editor .pstate", "v2 · 启用")
+
+            await wait_for(lambda: enabled_button("停用"), 10, "the enabled disable button after the save finishes")
+            await rig.click_text(".expert-editor button", "停用")
+            await until(lambda: rig.core.expert_catalog().get("review-ui").version == 3)
+            assert not rig.core.expert_catalog().get("review-ui").enabled
+            await rig.wait_text(".connection-result", "专家已停用")
+            await rig.wait_text(".expert-editor .pstate", "v3 · 停用")
+            await wait_for(lambda: enabled_button("启用"), 10, "the enabled enable button after disabling finishes")
+
+            if evidence := os.environ.get("WITTYCODE_TEST_EVIDENCE"):
+                await rig.shot(".expert-editor", Path(evidence) / "fusion-expert-settings.png")
+            assert not rig.plan.requests and not rig.plan.fake.title_requests
+        finally:
+            await rig.finish()
+    run(loop, scenario())
+
+
+def test_configure_and_start_fusion_with_a_local_fake(qapp, loop, tmp_path, monkeypatch):
+    monkeypatch.setattr(e2e_support, "PAGE_FILE", build_page(tmp_path))
     async def scenario():
         rig = await open_rig(tmp_path)
         try:
@@ -85,10 +183,34 @@ def test_configure_and_start_fusion_with_a_local_fake(qapp, loop, tmp_path):
             assert "各模型思考等级" not in await rig.text(".settings-body")
             assert not await rig.exists('input[aria-label="专家调用次数"]')
             assert not await rig.exists('input[aria-label="Token 预算"]')
-            await rig.click('input[aria-label="成本与质量倾向"]')
-            await rig.press("End")
+            slider = 'input[aria-label="成本与质量倾向"]'
+            pref = json.loads(await rig.js("""JSON.stringify((() => {
+                const el = document.querySelector('input[aria-label="成本与质量倾向"]');
+                return { step: el.step, min: el.min, max: el.max, text: document.querySelector('.fusion-preference').innerText };
+            })())"""))
+            assert (pref["min"], pref["max"], pref["step"]) == ("0", "100", "1")
+            assert "0 · 成本优先" in pref["text"] and "100 · 质量优先" in pref["text"]
+            assert "×" not in pref["text"], "the retired cost/quality weights must not be shown as model-order semantics"
+            assert "参与派工与审核时的偏好判断" in await rig.text(".settings-body")
+            assert "不承诺价格、结果质量、费用上限或账单金额" in await rig.text(".settings-body")
+
+            await rig.click(slider)
+            await rig.press(Qt.Key.Key_Home)
+            await until(lambda: rig.core.settings.fusion_preference == 0)
+            assert await rig.js("document.querySelector('input[aria-label=\"成本与质量倾向\"]').getAttribute('aria-valuetext')") == "0：成本优先"
+            await rig.press(Qt.Key.Key_End)
             await until(lambda: rig.core.settings.fusion_preference == 100)
-            await rig.wait_text(".fusion-preference-weights", "质量 ×1.50")
+            assert await rig.js("document.querySelector('input[aria-label=\"成本与质量倾向\"]').getAttribute('aria-valuetext')") == "100：质量优先"
+
+            for expected in range(99, 70, -1):
+                await rig.press(Qt.Key.Key_Left)
+                await until(lambda expected=expected: rig.core.settings.fusion_preference == expected)
+            await rig.press(Qt.Key.Key_Right)
+            await until(lambda: rig.core.settings.fusion_preference == 72)
+            assert await rig.js("document.querySelector('input[aria-label=\"成本与质量倾向\"]').getAttribute('aria-valuetext')") == "72；0 为成本优先，100 为质量优先"
+            await rig.wait_text(".fusion-preference-weights", "当前 72")
+            await rig.press(Qt.Key.Key_End)
+            await until(lambda: rig.core.settings.fusion_preference == 100)
             assert rig.window.grab().save(str(tmp_path / "fusion-settings.png"))
             await rig.click('.settings-body button[aria-label="关闭"]')
             await select_fusion(rig)

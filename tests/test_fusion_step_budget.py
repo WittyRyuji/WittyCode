@@ -341,3 +341,47 @@ def test_the_band_setting_is_saved_and_rejected_atomically(tmp_path):
         assert (core.settings.fusion_steps_min, core.settings.fusion_steps_max_adaptive) == (90, True), "refused pairs change nothing"
         await core.shutdown()
     asyncio.run(go())
+
+
+# --------------------------------------------------------------------------- curve04 pure API (new dispatch)
+
+
+def test_curve04_anchor_ceilings_and_monotonicity():
+    assert step_budget.curve04_ceiling(10) == 50
+    assert step_budget.curve04_ceiling(35) == 90
+    assert step_budget.curve04_ceiling(100) == 150
+    ceilings = [step_budget.curve04_ceiling(m) for m in range(1, 201)]
+    assert all(first <= second for first, second in zip(ceilings, ceilings[1:])), "curve04 ceilings are monotone in m"
+
+
+def test_curve04_minimum_uses_the_existing_size_scale_and_normalized_difficulty():
+    assert step_budget.curve04_minimum(0, 0) == 16
+    assert step_budget.curve04_minimum(1, 0.5) == 25  # base 20 plus floor(20 * 0.5 / 2)
+    assert step_budget.curve04_minimum(99, 0) == 92, "S is clamped to the existing 0..19 scale"
+    assert step_budget.curve04_minimum(19, 1) == 138
+
+
+def test_curve04_manual_min_auto_max_uses_the_actual_minimum_and_defaults_to_m_not_max():
+    decision = step_budget.resolve_curve04(Side(False, 35), Side(True, 0), size=0, cap=1000)
+    assert (decision.m, decision.low, decision.high, decision.steps) == (35, 35, 90, 35)
+    assert decision.steps == decision.m < decision.high, "an omitted steps value starts at m, not the ceiling"
+    assert "manual min 35" in decision.source and "adaptive max 90" in decision.source
+
+
+def test_curve04_explicit_requests_clamp_inside_the_resolved_band():
+    band = lambda requested: step_budget.resolve_curve04(Side(False, 35), Side(True, 0), size=0, cap=1000,
+                                                         requested=requested)
+    assert band(8).steps == 35 and band(60).steps == 60 and band(200).steps == 90
+
+
+def test_curve04_upper_limits_win_even_below_the_floor():
+    decision = step_budget.resolve_curve04(Side(True, 0), Side(True, 0), size=0, cap=10)
+    assert (decision.m, decision.low, decision.high, decision.steps) == (16, 10, 10, 10)
+    assert "global cap 10" in decision.caps
+
+
+def test_curve04_manual_max_is_the_selected_upper_before_global_caps():
+    decision = step_budget.resolve_curve04(Side(False, 35), Side(False, 85), size=0, cap=1000)
+    assert (decision.low, decision.high, decision.steps) == (35, 85, 35)
+    decision = step_budget.resolve_curve04(Side(False, 35), Side(False, 85), size=0, cap=80)
+    assert (decision.low, decision.high, decision.steps) == (35, 80, 35)

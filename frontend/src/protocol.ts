@@ -55,6 +55,8 @@ export interface SettingsView {
   reconnectLimit?: number;
   fusionMain?: string;
   fusionWorkers?: string[];
+  /** L3 lightweight model pool; older senders only have the first one in `fusionLight`. */
+  fusionLights?: string[];
   fusionLight?: string;
   fusionReasoning?: Record<string, string>;
   fusionPreference?: number;
@@ -106,7 +108,7 @@ export interface SettingsView {
 }
 export type FollowUp = "queue" | "steer";
 export type Language = "auto" | "zh-CN" | "en";
-export type FusionSettingKey = "fusionMain" | "fusionWorkers" | "fusionLight" | "fusionReasoning" | "fusionPreference" | "fusionMaxSeconds" | "fusionSteps";
+export type FusionSettingKey = "fusionMain" | "fusionWorkers" | "fusionLights" | "fusionLight" | "fusionReasoning" | "fusionPreference" | "fusionMaxSeconds" | "fusionSteps";
 export type SettingKey = "theme" | "fontScale" | "followUp" | "maxOpen" | "maxSteps" | "reconnectInterval" | "reconnectLimit" | "sidebarWidth" | "conversationWidth" | "inspectorWidth" | "devinPath" | "memoryEnabled" | "memoryRecall" | "memoryCapture" | "memoryCurate" | "memoryEngines" | "compactAuto" | "compactAt" | "thinkChinese" | "answerLanguage" | "thinkingLanguage" | "numberedReply" | "soundEnabled" | SoundKey | FusionSettingKey;
 export type SoundKind = "question" | "complete" | "error";
 export type SoundKey = "soundQuestion" | "soundComplete" | "soundError";
@@ -349,6 +351,36 @@ export interface VideoState {
 }
 export type VideoUpdate = { token: string } & (VideoState & { released?: false } | { released: true });
 
+export interface ExpertSummary {
+  stableId: string;
+  name: string;
+  workType: string;
+  tags: string[];
+  enabled: boolean;
+  version: number;
+  mdPath: string;
+  contentHash: string;
+  bodyTokens: number;
+  role: string;
+  created: number;
+  updated: number;
+  builtin: boolean;
+}
+export interface ExpertCatalogView {
+  revision: number;
+  experts: ExpertSummary[];
+  workTypes: { id: string; label: string }[];
+}
+export interface ExpertDetail { expert: ExpertSummary; markdown: string }
+export interface ExpertDraft {
+  stableId?: string;
+  name: string;
+  workType: string;
+  tags: string;
+  enabled: boolean;
+  markdown: string;
+}
+
 export interface Calls {
   "connectors.list": { params: None; result: ConnectorView[] };
   "connectors.configure": { params: { provider: ConnectorId; config: Partial<ConnectorConfig> }; result: ConnectorView[] };
@@ -411,6 +443,12 @@ export interface Calls {
   "session.answerPermission": { params: { id: string; promptId: string; value: string; agentId?: string }; result: { ok: boolean } };
   "session.answerQuestion": { params: { id: string; promptId: string; answers: QuestionAnswer[] | null; agentId?: string }; result: { ok: boolean } };
   "session.approvePlan": { params: { id: string; planId: string }; result: { ok: boolean } };
+  "experts.list": { params: None; result: ExpertCatalogView };
+  "experts.get": { params: { stableId: string }; result: ExpertDetail };
+  "experts.create": { params: Required<ExpertDraft>; result: ExpertCatalogView };
+  "experts.update": { params: ExpertDraft & { stableId: string }; result: ExpertCatalogView };
+  "experts.setEnabled": { params: { stableId: string; enabled: boolean }; result: ExpertCatalogView };
+  "experts.delete": { params: { stableId: string }; result: ExpertCatalogView };
   "fusion.transferExpert": { params: { id: string; agentId: string; model: string; role: "worker" | "light" }; result: { ok: boolean; agentId: string } };
   "fusion.resumeExpert": { params: { id: string; agentId: string }; result: { ok: boolean } };
   "fusion.updateBudget": { params: { id: string; maxCalls: number; maxTokens: number; acceptUnknown: boolean }; result: { ok: boolean } };

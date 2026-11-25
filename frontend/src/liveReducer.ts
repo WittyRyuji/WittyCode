@@ -67,6 +67,7 @@ export interface LiveData {
   compactAt: number;
   fusionMain: string;
   fusionWorkers: string[];
+  fusionLights: string[];
   fusionLight: string;
   fusionReasoning: Record<string, string>;
   fusionPreference: number;
@@ -168,6 +169,7 @@ export function emptyLiveData(theme: ThemeChoice = "system", fontScale: FontScal
     compactAt: COMPACT_AT_DEFAULT,
     fusionMain: "",
     fusionWorkers: [],
+    fusionLights: [],
     fusionLight: "",
     fusionReasoning: {},
     fusionPreference: 50,
@@ -275,7 +277,8 @@ export function settingsFields(v: SettingsView): Partial<LiveData> {
     compactAt: v.compactAt ?? COMPACT_AT_DEFAULT,
     fusionMain: v.fusionMain ?? "",
     fusionWorkers: v.fusionWorkers ?? [],
-    fusionLight: v.fusionLight ?? "",
+    fusionLights: v.fusionLights ?? (v.fusionLight ? [v.fusionLight] : []),
+    fusionLight: (v.fusionLights ?? (v.fusionLight ? [v.fusionLight] : []))[0] ?? "",
     fusionReasoning: v.fusionReasoning ?? {},
     fusionPreference: v.fusionPreference ?? 50,
     fusionMaxCalls: v.fusionMaxCalls ?? 8,

@@ -77,9 +77,11 @@ class HarnessTools:
         self.tool_finished: Callable[[Call, Outcome, str], Awaitable[None]] | None = None
         self.plan_submitter: Callable[[str], None] | None = None
         self.fusion_runner: Callable[..., Awaitable[Outcome]] | None = None
+        self.unit_runner: Callable[..., Awaitable[Outcome]] | None = None
         self.fusion_brief_runner: Callable[..., Awaitable[Outcome]] | None = None
         self.identity_tools: frozenset[str] | None = None
         self.read_only_brief = False
+        self.frozen_paths: tuple[str, ...] | None = None
         self.record_reader: Callable[[str], Awaitable[Outcome]] | None = None
         self.report_submitter: Callable[[Mapping[str, Any]], Outcome] | None = None
         self.route_submitter: Callable[[Mapping[str, Any]], Awaitable[Outcome]] | None = None
@@ -116,13 +118,20 @@ class HarnessTools:
 
     # ------------------------------------------------------------------ loop.Tools
 
+    def _frozen_units(self) -> bool:
+        state = self.declare_state() if self.declare_state else None
+        return bool(self.unit_runner and state and (state.get('workplan') or {}).get('frozen'))
+
     def declarations(self) -> list[dict[str, Any]]:
         declared = [{"name": spec.name, "description": spec.description, "parameters": spec.parameters} for spec in self.registry.specs()]
         if self.asker is not None:
             declared.append(dict(asking.DECLARATION))
         if self.plan_submitter is not None:
             declared.append(dict(plan_approval.DECLARATION))
-        if self.fusion_brief_runner is not None:
+        if self._frozen_units():
+            from desktop.core.fusion.protocol import UNIT_BATCH, UNIT_DELEGATE
+            declared.extend((UNIT_DELEGATE, UNIT_BATCH))
+        elif self.fusion_brief_runner is not None:
             declared.extend((dict(fusion_tools.DELEGATE_DECLARATION), dict(fusion_tools.BRIEF_BATCH_DECLARATION)))
         elif self.fusion_runner is not None:
             declared.extend((dict(fusion_tools.DECLARATION), dict(fusion_tools.BATCH_DECLARATION)))
@@ -131,7 +140,8 @@ class HarnessTools:
         if self.report_submitter is not None:
             declared.append(dict(fusion_tools.REPORT_DECLARATION))
         if self.route_submitter is not None:
-            declared.append(dict(fusion_tools.ROUTE_DECLARATION))
+            from desktop.core.fusion.protocol import UNIT_ROUTE
+            declared.append(dict(UNIT_ROUTE if self._frozen_units() else fusion_tools.ROUTE_DECLARATION))
         if self.rating_submitter is not None:
             declared.append(dict(fusion_tools.RATE_DECLARATION))
         if self.map_chooser is not None:
@@ -197,6 +207,22 @@ class HarnessTools:
         reason = self.identity_refusal(call.name)
         if reason:
             return Verdict(DENY, reason)
+        if self.frozen_paths is not None:
+            spec = self.registry.get(call.name)
+            if spec is not None and spec.kind == 'edit':
+                raw = call.args.get('file_path')
+                if not isinstance(raw, str):
+                    return Verdict(DENY, 'An unscoped write is outside the frozen unit.')
+                try:
+                    root = self.context.project
+                    target = (root / raw).resolve()
+                    if not any(target.is_relative_to(root / path) for path in self.frozen_paths):
+                        return Verdict(DENY, 'Write outside frozen unit paths.')
+                except (OSError, ValueError, RuntimeError):
+                    return Verdict(DENY, 'Invalid frozen unit path.')
+            mcp = self._mcp.get(call.name)
+            if mcp and not (getattr(mcp[0], 'trusted_annotations', False) and mcp[1].read_only):
+                return Verdict(DENY, 'This server tool cannot establish the frozen write scope.')
         spec = self.registry.get(call.name) if self.read_only_brief else None
         if spec is not None and spec.kind == "exec":
             verdict = self._planned(spec, call)
@@ -449,6 +475,26 @@ class HarnessTools:
             return await self.record_reader(pointer)
         runner = self.fusion_brief_runner or self.fusion_runner
         structured = self.fusion_brief_runner is not None
+        if self._frozen_units() and call.name in (fusion_tools.NAME, fusion_tools.BATCH_NAME):
+            verdict = self.check(call)
+            if verdict.verdict != ALLOW:
+                return Outcome(verdict.reason, True)
+            tasks = call.args.get('tasks') if call.name == fusion_tools.BATCH_NAME else [call.args]
+            if (not isinstance(tasks, list) or not 1 <= len(tasks) <= fusion_tools.MAX_PARALLEL or any(
+                    not isinstance(t, Mapping) or set(t) - {'unit', 'resume'} or not isinstance(t.get('unit'), str)
+                    or type(t.get('resume', False)) is not bool for t in tasks)):
+                return Outcome('Use only a frozen unit id and optional resume flag.', True)
+            if len({t['unit'] for t in tasks}) != len(tasks):
+                return Outcome('A batch cannot run the same unit twice.', True)
+            pending = [asyncio.create_task(self.unit_runner(t['unit'], resume=t.get('resume', False), tool_call=call)) for t in tasks]
+            try:
+                results = await asyncio.gather(*pending)
+            finally:
+                for task in pending:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+            return Outcome('\n'.join(r.output for r in results), any(r.is_error for r in results))
         if call.name == fusion_tools.BATCH_NAME and self.check(call).verdict == ALLOW and runner is not None:
             values, problem = fusion_tools.parse_batch(call.args, structured=structured)
             if problem or values is None:

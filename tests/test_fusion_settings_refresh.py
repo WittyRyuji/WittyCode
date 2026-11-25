@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from copy import deepcopy
 from dataclasses import replace
 
@@ -9,6 +10,7 @@ import pytest
 
 from desktop.core.app_core import AppError
 from desktop.core.fusion import tools
+from desktop.core.settings import default_settings_path, load_settings, save_settings, settings_to_dict
 from tests.app_support import ready_core
 from tests.chatgpt_support import finish_turn
 from tests.fake_responses import call, say
@@ -428,3 +430,79 @@ def test_cross_engine_fusion_restore_checks_images_after_latest_preset_is_applie
 def test_resume_flag_requires_a_boolean():
     assert tools.parse(assignment(resume="true"))[0] is None
     assert tools.parse(assignment(resume=True))[0][-1] is True
+
+
+def test_light_pool_legacy_migration_and_settings_bridge_contract(tmp_path):
+    legacy = tmp_path / "settings.json"
+    legacy.write_text(json.dumps({"fusion_light": LUNA, "fusion_lights": [SOL, SOL]}), encoding="utf-8")
+    loaded = load_settings(legacy)
+    assert loaded.fusion_lights == [LUNA, SOL]
+    assert loaded.fusion_light == LUNA
+    save_settings(loaded, legacy)
+    written = json.loads(legacy.read_text(encoding="utf-8"))
+    assert written["fusion_lights"] == [LUNA, SOL] and written["fusion_light"] == LUNA
+    assert settings_to_dict(loaded)["fusion_light"] == LUNA
+
+    async def go():
+        core, _, _, _, _ = await ready_core(tmp_path)
+        try:
+            await core.call("settings.set", {"key": "fusionWorkers", "value": [SOL, LUNA, SOL]})
+            await core.call("settings.set", {"key": "fusionLights", "value": [LUNA, SOL, LUNA]})
+            assert core.settings.fusion_workers == [SOL, LUNA]
+            assert core.settings.fusion_lights == [LUNA, SOL]
+            assert core.settings.fusion_light == LUNA
+            view = core.settings_view()
+            assert view["fusionWorkers"] == [SOL, LUNA]
+            assert view["fusionLights"] == [LUNA, SOL]
+            assert view["fusionLight"] == LUNA
+            await core.call("settings.set", {"key": "fusionLight", "value": SOL})
+            assert core.settings.fusion_lights == [SOL] and core.settings.fusion_light == SOL
+        finally:
+            await core.shutdown()
+    asyncio.run(go())
+
+
+def test_expert_catalog_bridge_crud_uses_lazy_controlled_settings_root(tmp_path, monkeypatch):
+    monkeypatch.setenv("WITTYCODE_SETTINGS", str(tmp_path / "profile" / "settings.json"))
+    markdown = "---\ndescription: Checks security-sensitive changes.\ntools: read\n---\n检查认证、授权和密钥处理，只报告事实。"
+
+    async def go():
+        core, _, _, _, _ = await ready_core(tmp_path)
+        try:
+            root = default_settings_path().parent / "fusion-experts"
+            assert not root.exists()
+            initial = await core.call("experts.list")
+            catalog_root = str(core.expert_catalog()._root).removeprefix("\\\\?\\")
+            assert root.is_dir() and catalog_root == str(root.resolve())
+            assert initial["revision"] == 0
+            assert initial["experts"] and all(entry["builtin"] for entry in initial["experts"])
+            assert {item["id"] for item in initial["workTypes"]} == {"execute", "manage", "review", "research", "verify", "observe"}
+
+            created = await core.call("experts.create", {
+                "stableId": "review-security", "name": "安全检查", "workType": "review",
+                "markdown": markdown, "tags": "security api security", "enabled": True,
+            })
+            entry = next(item for item in created["experts"] if item["stableId"] == "review-security")
+            assert (entry["version"], entry["enabled"], entry["tags"], entry["builtin"]) == (1, True, ["security", "api"], False)
+            detail = await core.call("experts.get", {"stableId": "review-security"})
+            assert detail["markdown"] == markdown and detail["expert"]["contentHash"] == entry["contentHash"]
+
+            updated = await core.call("experts.update", {
+                "stableId": "review-security", "name": "安全复核", "workType": "verify",
+                "tags": "security verify", "markdown": markdown + "\n保留证据路径。",
+            })
+            entry = next(item for item in updated["experts"] if item["stableId"] == "review-security")
+            assert (entry["name"], entry["workType"], entry["version"], entry["tags"]) == ("安全复核", "verify", 2, ["security", "verify"])
+            disabled = await core.call("experts.setEnabled", {"stableId": "review-security", "enabled": False})
+            entry = next(item for item in disabled["experts"] if item["stableId"] == "review-security")
+            assert not entry["enabled"] and entry["version"] == 3
+            detail = await core.call("experts.get", {"stableId": "review-security"})
+            assert detail["expert"]["version"] == 3
+
+            removed = await core.call("experts.delete", {"stableId": "review-security"})
+            assert all(item["stableId"] != "review-security" for item in removed["experts"])
+            with pytest.raises(AppError, match="没有找到这个专家"):
+                await core.call("experts.get", {"stableId": "review-security"})
+        finally:
+            await core.shutdown()
+    asyncio.run(go())

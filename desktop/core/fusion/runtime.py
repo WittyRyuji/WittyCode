@@ -19,6 +19,8 @@ from typing import TYPE_CHECKING, Any
 from weakref import WeakValueDictionary
 
 from desktop.core.fusion import allocation, dispatch, gates, identity, inject, map as project_map, metrics, observer, review_policy, step_budget
+from desktop.core.fusion import model_selection, planning, profiles, verification_case
+from desktop.core.fusion.expert_catalog import ExpertCatalog, ExpertCatalogError
 from desktop.core.fusion.drive.fingerprint import Manifest, _GitError, _head, changed_since, fingerprint, workspace_kind
 from desktop.core.fusion.drive.retention import Retention
 from desktop.core.fusion.drive.store import Drive, DriveError, Record, SessionUsage
@@ -33,6 +35,7 @@ from desktop.core.harness import asking
 from desktop.core.harness import todo
 from desktop.core.harness.loop import Call, Outcome, clip_tokens
 from desktop.core.memory import recall
+from desktop.core.providers import ProviderError
 from desktop.core.session_state import SessionState
 from desktop.core.transcript import TextBlockView, Transcript
 from desktop.core.usage import Tokens
@@ -264,9 +267,13 @@ class AcceptanceVerdict:
     missing: tuple[str, ...]
     signals: tuple[str, ...]
     skip_reason: str = ""
+    unit_plan: bool = False
 
     def continuation(self) -> str:
         names = ", ".join(self.missing)
+        if self.unit_plan:
+            return ('Frozen unit checks are incomplete: ' + names + '. Use delegate_task by unit id. '
+                    'Inspect paused handoffs before resuming; do not retry stopped units or claim verification.')
         return (f"Fusion verification is incomplete. Missing checks: {names}. Delegate the missing checks, or use submit_route "
                 "with verification self_check and explain why nothing can be run. Do not report completion without verification.")
 
@@ -276,6 +283,7 @@ class RouteTurn:
     key: str = field(default_factory=lambda: uuid.uuid4().hex)
     route: Route | None = None
     from_plan: bool = False
+    unit_plan: str = ""
     workstreams: set[str] = field(default_factory=set)
     edits: int = 0
     """Edits the main agent made itself in this turn; a new route does not reset it."""
@@ -344,8 +352,12 @@ class MeasuredUsage:
     seen: bool = False
     unknown: bool = False
     first_input: int | None = None
+    calls: int = 0
+    summary_calls: int = 0
+    summary_unknown: bool = False
 
     def request(self, known: bool, first_input: int | None) -> None:
+        self.calls += 1
         if not self.seen:
             self.first_input = first_input
         self.seen = True
@@ -357,6 +369,17 @@ class MeasuredUsage:
         delta = after if self.before is None else after.since(self.before)
         return delta.total if delta is not None else None
 
+    def unit_meter(self, after: Tokens | None, started: bool) -> dict:
+        calls = self.calls + self.summary_calls
+        if not calls:
+            # A sent turn without its terminal observation may have spent tokens. A preflight refusal did not.
+            return {'calls': None if started else 0, 'usage': None if started else Tokens().to_json()}
+        delta = after if self.before is None else after.since(self.before) if after is not None else None
+        known = delta.to_json() if delta is not None else None
+        if self.unknown or self.summary_unknown:
+            return {'calls': calls, 'usage': None, 'knownUsage': known}
+        return {'calls': calls, 'usage': known}
+
 
 @dataclass(slots=True)
 class TaskMeasurement:
@@ -365,6 +388,7 @@ class TaskMeasurement:
     recorder: metrics.Recorder = field(default_factory=metrics.Recorder)
     experts: dict[str, MeasuredUsage] = field(default_factory=dict)
     drive_before: dict | None = None
+    planning_reply: tuple[str, dict] | None = None  # Only the last isolated tool-producing Main request.
 
 
 _MAP_LOCKS: WeakValueDictionary[Path, asyncio.Lock] = WeakValueDictionary()
@@ -383,6 +407,7 @@ class FusionRuntime:
             raise FusionError("The retained Fusion owner or usage checkpoint is invalid.")
         self.agents = {key: ExpertView(expert) for key, expert in registry.agents.items()}
         self._active: dict[str, tuple[ChatGPTController, Tokens | None]] = {}
+        self._inflight_units: set[tuple[str, str]] = set()
         self.report_runs: dict[str, ReportRun] = {}
         self.observer_runs: dict[str, ObservedRun] = {}
         self.route_turn: RouteTurn | None = None
@@ -415,6 +440,12 @@ class FusionRuntime:
             run = task.main if session == self.parent.session_id else task.experts.get(session)
             if run is not None:
                 run.request(known, first_input)
+
+    def metric_summary_request(self, session: str, known: bool) -> None:
+        run = self.measurement.experts.get(session) if self.measurement else None
+        if run is not None:
+            run.summary_calls += 1
+            run.summary_unknown |= not known
 
     def metric_compaction(self, session: str) -> None:
         task = self.measurement
@@ -455,8 +486,184 @@ class FusionRuntime:
             self.registry.record_task(task.recorder.finish())
             self.parent.saved.fusion = self.registry.to_json()
 
+    def metric_planning_reply(self, calls, mixed, usage):
+        task = self.measurement
+        if task is not None:
+            task.planning_reply = None
+            if len(calls) == 1 and calls[0] in ('submit_work_plan', 'submit_plan'):
+                task.planning_reply = (calls[0], {'calls': 1, 'usage': usage.tokens().to_json() if usage and not mixed else None})
+
+    def _take_planning_meter(self, name):
+        task = self.measurement
+        if task and task.planning_reply and task.planning_reply[0] == name:
+            _, meter = task.planning_reply
+            task.planning_reply = None
+            return meter
+        return {'calls': None, 'usage': None}  # Mixed tool batch or a native prompt without a per-response bill.
+
+    def metric_plan_proposal(self):
+        if plan := self.registry.plans.get(self._unit_key()):
+            plan.setdefault('planningUsage', {})['proposal'] = self._take_planning_meter('submit_plan')
+            self.parent.saved.fusion = self.registry.to_json()  # Persist with the existing proposal checkpoint.
+
     def metrics_summary(self) -> dict:
-        return metrics.summary(self.registry.task_metrics)
+        return {**metrics.summary(self.registry.task_metrics), 'frozen_units': metrics.frozen_summary(self.registry.plans)}
+
+    @property
+    def unit_enabled(self) -> bool:
+        """Admission for NEW plans. A bound plan always uses its persisted format, not this switch."""
+        return self.gate('unit_plan') and self.unit_tools_available
+
+    @property
+    def unit_tools_available(self) -> bool:
+        return self.gate('v3') and self.gate('inject') and self.acceptance_enabled()
+
+    @cached_property
+    def catalog(self) -> ExpertCatalog:
+        from desktop.core.settings import default_settings_path
+        return ExpertCatalog(default_settings_path().parent / 'fusion-experts')
+
+    def _actual_model(self, model: str) -> str:
+        """Local-only capability check. A page label/fallback model list is not proof of identity or access."""
+        manager = self.parent.manager
+        info = manager.model_info(native_model(model))
+        if info is None:
+            raise FusionError('model is not available from its configured backend')
+        if model.startswith('api:'):
+            spec = manager.api.spec(model) if manager.api else None
+            if (not spec or getattr(spec, 'id', None) != model or not isinstance(getattr(spec, 'native', None), str)
+                    or spec.native.startswith((*PREFIXES, 'custom:')) or type(getattr(spec, 'window', None)) is not int or spec.window < 1):
+                raise FusionError('API alias has no runnable provider model and context window')
+            from desktop.core.llm.backend import KIND_OF
+            if not spec.bedrock and (spec.kind not in KIND_OF or not spec.base_url):
+                raise FusionError('API protocol or endpoint unavailable')
+            if any({'model', 'tools', 'tool_choice'} & args.keys() for args in (spec.extra_args, *spec.reasoning_args.values())):
+                raise FusionError('API body overrides its native model or tool contract')
+            return model_selection.actual_model_id(model, spec.native)
+        backend, native = model.split(':', 1)
+        if backend == 'chatgpt':
+            account = manager.cached_account()
+            if (not manager.settings.chatgpt_enabled or account.get('auth') != 'signed-in' or not account.get('planEnabled')
+                    or info.id != native):
+                raise FusionError('ChatGPT plan or native model is unavailable')
+        elif backend == 'devin':
+            engine = manager.devin
+            account = engine.cached_account() if engine and manager.settings.devin_enabled else {}
+            if (account.get('cli') != 'found' or account.get('auth') != 'signed-in' or getattr(engine, '_closing', False)
+                    or self.registry.policy.max_tokens or info.id != native or native.casefold().startswith(('adaptive', 'fusion-'))):
+                raise FusionError('Devin guarded seat has no usable account, budget or fixed native model')
+        elif backend == 'factory':
+            from desktop.core.factory_guard import FactoryGuardUnavailable, _check_site
+            if native.startswith('custom:'):
+                # A guarded Factory seat uses a private home. Its catalog cannot inherit the
+                # user's customModels, even if the standalone CLI can resolve that alias.
+                raise FusionError('Factory custom alias is not available to the isolated guarded seat')
+            engine = manager.factory
+            binary = engine.binary() if engine and manager.settings.factory_enabled else None
+            if (not binary or Path(binary).suffix.lower() != '.exe' or Path(binary).resolve().is_relative_to(self.parent.project)
+                    or self.registry.policy.max_tokens or not os.environ.get('FACTORY_API_KEY')):
+                raise FusionError('Factory guarded seat, authentication or budget is unavailable')
+            try:
+                _check_site()  # No CLI, key lookup command, request, or project write during selection.
+            except FactoryGuardUnavailable as error:
+                raise FusionError('Factory machine guard unavailable') from error
+            if (engine.model_info(native) or {}).get('id') != native:
+                raise FusionError('Factory native model cannot be confirmed')
+        else:
+            raise FusionError('Unknown Fusion model backend')
+        return model_selection.actual_model_id(model)
+
+    def _resolve_units(self, data):
+        from desktop.core.settings import default_settings_path
+        units, requested = planning.unit_facts(data)
+        policy, root = self.registry.policy, default_settings_path().parent
+        pools, efforts, excluded = {}, {}, []
+        for seat, models in [('L1', (policy.main,)), ('L2', policy.workers), ('L3', policy.lights)]:
+            offers = pools[seat] = []
+            for page in models if units else ():
+                try:
+                    actual = self._actual_model(page)
+                    efforts[page, seat] = self.reasoning_for(page, allocation.SEAT_ROLE[seat])
+                    profile = profiles.load(root, page) or {}
+                    offers.append({'id': page, 'actual_model': actual, 'cost': profile.get('cost'), 'score': profile.get('score')})
+                except (ValueError, TypeError, AttributeError, ProviderError, OSError) as error:
+                    excluded.append({'seat': seat, 'model': page, 'reason': str(error) if isinstance(error, FusionError)
+                                     else type(error).__name__})
+        goal = self.parent.saved.goal.get('text') or self.parent._turn.user_block.text
+        try:
+            return verification_case.resolve(units, requested, policy=policy, settings=self.parent.manager.settings,
+                                             pools=pools, catalog=self.catalog, goal=goal, canonical=self.registry._scope,
+                                             effort=lambda m, s: efforts[m, s], excluded=excluded)
+        except ValueError as error:
+            if excluded:
+                hint = '; '.join(f"{x['seat']} {x['model']}: {x['reason']}" for x in excluded[:3])
+                raise FusionError(f'{error} Excluded: {hint}.') from error
+            raise
+
+    async def submit_units(self, data, receipt) -> Outcome:
+        try:
+            if set(data) == {'continue'}:
+                key = data['continue']
+                plan = self.registry.plans.get(key) if isinstance(key, str) else None
+                if not plan or not plan['activated'] or receipt.get('intent') != 'execute':
+                    raise FusionError('Only a previously activated plan may be explicitly continued.')
+            else:
+                key, plan = await asyncio.to_thread(self._resolve_units, data)
+            if len(self.registry.plans) >= 1024 and key not in self.registry.plans:
+                raise FusionError('This session has reached its frozen plan limit.')
+            detail = await asyncio.to_thread(self.parent._outputs.put, json.dumps(plan, ensure_ascii=False))
+            if receipt is not self.parent._declare_state() or receipt.get('workplan') or self.parent._fusion is not self:
+                raise FusionError('The planning turn changed or already has a frozen plan.')
+            if key not in self.registry.plans:
+                plan['planningUsage'] = {'facts': self._take_planning_meter('submit_work_plan')}
+                self.registry.plans[key] = plan
+                try:
+                    self._checkpoint()
+                except BaseException:
+                    del self.registry.plans[key]
+                    self.parent.saved.fusion = self.registry.to_json()
+                    raise
+            receipt['workplan'] = {'frozen': key, 'budget': plan['spec']['budget']}
+            return Outcome(verification_case.receipt(key, plan) + f'\nDetails: read_output({detail}).')
+        except (ValueError, ExpertCatalogError, OSError) as error:
+            return Outcome(f'Work plan refused: {error}', True)
+
+    def _unit_key(self) -> str:
+        declare = getattr(self.parent, '_declare_state', None)
+        receipt = declare() if declare else None
+        workplan = (receipt or {}).get('workplan') or {}
+        return workplan.get('frozen', '')
+
+    def pending_approved_units(self):
+        approved = self.parent.saved.plan
+        saved = self.parent.saved.origin.get('fusionWorkPlan') or {}
+        if approved.get('status') != 'approved' or saved.get('plan') != approved.get('id'):
+            return None
+        binding = saved.get('workplan') or {}
+        key = binding.get('frozen')
+        plan = self.registry.plans.get(key)
+        if plan and any(c['next'] not in ('done', 'stopped') and all(plan['cases'][dep]['next'] == 'done'
+                        for dep in plan['spec']['units'][name]['deps']) for name, c in plan['cases'].items()):
+            return binding  # A terminal plan must not capture every future execute declaration.
+        return None
+
+    def _unit_route(self, key) -> Route:
+        units = self.registry.plans[key]['spec']['units']
+        return Route('split' if len(units) > 1 else 'coder' if units else 'self', 'Frozen unit plan.',
+                     'runner_and_sampler' if any('review' in u['roster'] for u in units.values()) else 'runner' if units else 'self_check')
+
+    def _activate_units(self, key):
+        if key not in self.registry.plans or not self.unit_tools_available:
+            raise FusionError('The frozen plan or one of its execution gates is unavailable.')
+        plan = self.registry.plans[key]
+        if not plan['activated']:
+            plan['activated'] = True
+            try:
+                self._checkpoint()
+            except BaseException:
+                plan['activated'] = False
+                raise
+        return self._unit_route(key)
 
     def start_route_turn(self) -> None:
         self._drive_checked = False
@@ -471,6 +678,12 @@ class FusionRuntime:
 
     def route_guard(self, action: str, workstreams: tuple[str, ...]) -> str:
         turn = self.route_turn
+        if key := self._unit_key():
+            if not self.unit_tools_available or not turn or turn.unit_plan != key:
+                return 'Activate this frozen plan with submit_route({}) before execution.'
+            if action in ('edit', 'exec') and self.registry.plans[key]['spec']['units']:
+                return 'This plan assigns changes to the frozen unit author.'
+            return ''
         if not self.gate("route") or turn is not None and turn.from_plan:
             return ""
         route = turn.route if turn is not None else None
@@ -509,6 +722,8 @@ class FusionRuntime:
     async def retain_plan_route(self) -> None:
         turn = self.route_turn
         if turn is not None and turn.from_plan and turn.route is not None:
+            if (key := self._unit_key()) and self.parent._declare_state().get('approved'):
+                turn.route, turn.unit_plan = self._activate_units(key), key
             await self._capture_exemption_start(turn)  # The approved plan is the initial route; tools may write next.
             await self._retain_route(turn, turn.route)
 
@@ -538,6 +753,19 @@ class FusionRuntime:
         turn = self.route_turn
         if turn is None or self.parent._turn is None or not self.gate("route"):
             return Outcome("There is no active Fusion route turn.", True)
+        if key := self._unit_key():
+            if args:
+                return Outcome('The frozen plan supplies the whole route. Call submit_route({}).', True)
+            if ((self.parent._turn_mode or self.parent.mode) == 'spec' or self.parent._declare_state().get('intent') != 'execute'):
+                return Outcome('The frozen plan has no execution authority this turn.', True)
+            try:
+                turn.route, turn.unit_plan = self._activate_units(key), key
+            except FusionError as error:
+                return Outcome(str(error), True)
+            await self._retain_route(turn, turn.route)
+            if self.measurement:
+                self.measurement.recorder.route(turn.route.destination)
+            return Outcome(f'Frozen route active: {turn.route.destination}. Use delegate_task({{"unit":"id"}}).')
         route, problem = parse_route(args, self.registry.policy.preference)
         if route is None:
             return Outcome(problem, True)
@@ -642,6 +870,11 @@ class FusionRuntime:
         turn = self.route_turn
         if turn is None or turn.route is None or not self.acceptance_enabled():
             return None
+        if turn.unit_plan:
+            cases = self.registry.plans[turn.unit_plan]['cases']
+            checks = tuple(f"{name} v{c['revision']}" for name, c in cases.items() if c['next'] == 'done')
+            missing = tuple(f"{name}:{c['next']} {c['paused']}".strip() for name, c in cases.items() if c['next'] != 'done')
+            return AcceptanceVerdict(turn.route, turn.from_plan, checks, missing, (), unit_plan=True) if cases else None
         writes = [work for work in turn.delegations if work.paths]
         if not writes:
             return None
@@ -1013,6 +1246,66 @@ class FusionRuntime:
             return []
         return recall.render_notes(notes)[0]
 
+    def _read_bound_proof(self, proof, pointer):
+        from desktop.core.harness.tools import ToolError
+        # Reject a substituted pointer *before* touching the parent store. read() then verifies bytes on disk.
+        if pointer != 'o-' + verification_case.digest(proof):
+            raise FusionError('Frozen evidence binding is missing or invalid; inspect before resuming.')
+        try:
+            return self.parent._outputs.read(pointer)
+        except (OSError, ToolError) as error:
+            raise FusionError('Frozen evidence is unavailable or damaged; inspect before resuming.') from error
+
+    def _unit_pack(self, child, profile, brief, key, plan, case, stage, hooks):
+        from desktop.core.harness.prompt import load_agents
+        store = child._outputs
+        spec = plan['spec']
+        version = case['revision']
+
+        def ref(text):
+            return 'out:' + store.put(text)
+
+        def cited(text, limit, fallback):
+            pointer = ref(text)
+            inline = text if len(('ref=' + pointer + '\n' + text).encode()) <= limit else fallback
+            return inject.ReferencedText(inline, pointer)
+
+        def links(data, grant):
+            if not data:
+                return ()
+            pointer = store.put(json.dumps(data, ensure_ascii=False))
+            return (inject.AuthorizedLink('out', pointer, version, grant),)
+
+        b = brief.budget
+        mode = self.parent.autonomy + '/auto'
+        scope = ','.join(brief.paths) if not brief.read_only and brief.paths else 'none'
+        authority = f"{mode}; writes={scope}; {b['steps']}steps/{b['seconds']}s"
+        scope_ref = f"{mode}; writes=ref only; {b['steps']}steps/{b['seconds']}s"
+        context = [f.text for f in load_agents(self.parent.project).files]
+        if hooks.text:
+            context.append(hooks.text)
+        def project(proof, pointer):
+            return store.put(self._read_bound_proof(proof, pointer))
+
+        upstream, prior = verification_case.packet_records(key, plan, brief.workstream, stage, child.session_id, project)
+        task = (f"{stage} {brief.workstream} v{version}: {brief.goal}\n{brief.constraints}\n"
+                'Use read_output(reference="o-…") for out: references; read abbreviated scope/criteria before acting. '
+                'Finish with submit_report including actual evidence.')
+        if case['paused'] == 'missing evidence':
+            task = 'Supplement the missing evidence only; do not redo completed work.\n' + task
+        notes = []
+        if self.parent.manager.memory is not None:
+            for body in self._brief_memory(brief)[:3]:
+                note = cited(body, 180, 'Relevant indexed memory; expand if needed.')
+                if sum(len((n.text + n.ref).encode()) + 12 for n in [*notes, note]) > 240:
+                    break
+                notes.append(note)
+        return inject.build_first_pack(profile, expert_ref=ref(profile.instructions),
+                   goal=cited(spec['goal'], 512, 'Read cited goal.'), task=cited(task, 2048, 'Read cited unit task in full.'),
+                   authority=cited(authority, 128, scope_ref), acceptance=cited(brief.acceptance, 512, 'Read cited acceptance in full.'),
+                   rule_memory_links=links(context, 'rules'), upstream_links=links(upstream, 'upstream'),
+                   handoff_links=links(prior, 'handoff'), memory=notes)
+
     async def _expert_pack(self, profile: identity.Identity, brief: Brief, current: str,
                            own_brief: Record | None) -> inject.Pack:
         memory = (await asyncio.to_thread(self._brief_memory, brief)
@@ -1242,6 +1535,12 @@ class FusionRuntime:
     def instructions(self) -> str:
         policy = self.registry.policy
         allocation = f"\n\n{identity.ALLOCATION}" if self.gate("v3") else ""
+        declare = getattr(self.parent, '_declare_state', None)
+        declaration = declare() if declare else None
+        if self._unit_key() or (self.unit_enabled and not (declaration or {}).get('approved')):
+            return ('You are Main: understand the request, plan, delegate frozen units and verify the integrated result. '
+                    'For simple Main-only execution use the self route. For complex work declare and submit facts once. '
+                    'Use the harness receipt; do not choose models, recalculate budgets or write on behalf of unit authors.')
         if self.brief_enabled:
             return (self.identities.main + "\n\nUse the user's weights as a preference when deciding whether to delegate: "
                     f"cost x{1.5 - policy.preference / 100:.2f}, quality x{0.5 + policy.preference / 100:.2f} "
@@ -1347,8 +1646,10 @@ class FusionRuntime:
         return {key: value for key, value in policy.to_json().items() if key not in ("maxCalls", "maxTokens")}
 
     def _global_preset(self) -> dict[str, Any]:
+        from desktop.core.app_core import fusion_light_pool
         settings = self.parent.manager.settings
-        return {"main": settings.fusion_main, "workers": list(settings.fusion_workers), "light": settings.fusion_light,
+        lights = fusion_light_pool(settings)
+        return {"main": settings.fusion_main, "workers": list(settings.fusion_workers), "light": lights[0] if lights else "", "lights": lights,
                 "maxSeconds": settings.fusion_max_seconds, "maxSecondsAdaptive": settings.fusion_max_seconds_adaptive,
                 "preference": settings.fusion_preference,
                 "reasoning": dict(settings.fusion_reasoning)}
@@ -1366,7 +1667,7 @@ class FusionRuntime:
     def prepare_settings(self, policy: Policy) -> FusionRegistry:
         if self.parent.state is not SessionState.READY or self._active or self._delegations:
             raise FusionError("Wait for the current turn and experts before applying Fusion settings.")
-        for model, role in [(policy.main, "main"), *((model, "worker") for model in policy.workers), (policy.light, "light")]:
+        for model, role in [(policy.main, "main"), *((model, "worker") for model in policy.workers), *((model, "light") for model in policy.lights)]:
             info = self.parent.manager.model_info(native_model(model))
             if info is None:
                 raise FusionError("A configured Fusion model is unavailable; no fallback was selected.")
@@ -1380,7 +1681,8 @@ class FusionRuntime:
                            allocations={key: dict(record) for key, record in self.registry.allocations.items()},
                            task_metrics=list(self.registry.task_metrics), preset_snapshot=preset_snapshot)
         for expert in prepared.agents.values():
-            if expert.status != "retired" and not policy.allowed(expert.model, expert.role, expert.seat):
+            if expert.status != "retired" and not prepared.authorized(expert.model, expert.role, expert.seat, expert.identity,
+                                                                      expert.workstream, expert.plan, expert.stage):
                 # The next delegation selects the current seat/role model and carries over this expert's context.
                 expert.replaced_status, expert.status = expert.status, "retired"
         return prepared
@@ -1469,6 +1771,8 @@ class FusionRuntime:
         return True
 
     def _expert_effort(self, expert: Expert, profile: identity.Identity | None) -> str | None:
+        if getattr(expert, 'plan', ''):
+            return self.registry.binding(expert.plan, expert.workstream, expert.stage)['effort']
         if expert.seat:
             # The seat picks the reasoning level before the identity's own default.
             return self.reasoning_for(expert.model, allocation.SEAT_ROLE.get(expert.seat, expert.role))
@@ -1486,7 +1790,11 @@ class FusionRuntime:
         if profile is None and view.record.identity:
             # Opened for viewing (no delegation in hand): the saved identity still decides the tools, because a later
             # delegation reuses this open conversation.
-            profile = self.identities.get(view.record.identity)
+            if view.record.plan:
+                b = self.registry.binding(view.record.plan, view.record.workstream, view.record.stage)
+                profile = self._version_profile(b)
+            else:
+                profile = self.identities.get(view.record.identity)
             if profile is None:
                 raise FusionError("The expert's identity is no longer defined; it was not reopened without its limits.")
         reasoning = self._expert_effort(view.record, profile)
@@ -1694,6 +2002,117 @@ class FusionRuntime:
             budget["seconds"] = seconds_cap
         return replace(brief, budget=budget, budget_note=note)
 
+    def _version_profile(self, binding):
+        try:
+            resolved = self.catalog.resolve_version(binding['expert'], binding['version'])
+        except (ExpertCatalogError, ValueError) as error:
+            raise FusionError(str(error)) from error
+        if resolved.summary.content_hash != binding['hash'] or resolved.identity.role != binding['role']:
+            raise FusionError('Frozen identity version no longer agrees with its digest or permissions.')
+        return resolved.identity
+
+    async def _unit_detail(self, text):
+        from desktop.core.harness.tools import ToolError
+        try:
+            return await asyncio.to_thread(self.parent._outputs.put, text)
+        except (OSError, ToolError):
+            return ''  # A missing receipt is not a progress credential. Never manufacture a pointer.
+
+    async def _paused_unit(self, case, message):
+        handoff = case.get('handoff', {})
+        ref = await self._unit_detail(json.dumps(handoff, ensure_ascii=False)) if handoff else ''
+        return Outcome(f"{message} [{handoff.get('diagnostic', 'paused')}]" + (f' Details: read_output({ref}).' if ref else ''), True)
+
+    async def _progress_confirmed(self, key, name, case, stage):
+        h = case.get('handoff') or {}
+        if (h.get('category'), h.get('unit'), h.get('revision'), h.get('stage')) != ('soft_budget', name, case['revision'], stage):
+            return False
+        for p in h.get('progress', ()):
+            try:
+                proof = verification_case.progress_proof(key, name, case['revision'], stage, h['expert'], case['attempts'][stage], p)
+                await asyncio.to_thread(self._read_bound_proof, proof, p['result'])
+                return True
+            except (KeyError, ValueError, TypeError):
+                continue
+        return False
+
+    async def delegate_unit(self, name, *, resume=False, tool_call=None) -> Outcome:
+        key, turn = self._unit_key(), self.route_turn
+        if (not self.unit_tools_available or not key or not turn or turn.unit_plan != key or
+                (self.parent._declare_state() or {}).get('intent') != 'execute'):
+            return Outcome('Activate the frozen work plan in execution mode first.', True)
+        lock = (key, name)
+        if lock in self._inflight_units:
+            return Outcome('This unit is already running.', True)
+        self._inflight_units.add(lock)
+        try:
+            return await self._run_unit(key, turn, name, resume, tool_call)
+        finally:
+            self._inflight_units.discard(lock)
+
+    async def _run_unit(self, key, turn, name, resume, tool_call):
+        plan = self.registry.plans[key]
+        unit, case = plan['spec']['units'].get(name), plan['cases'].get(name)
+        if not unit:
+            return Outcome('Unknown unit in this frozen plan.', True)
+
+        async def stop(reason, *, binding_failed=False):
+            stage = case['next']
+            case.update(next='stopped', paused=reason)
+            case['handoff'] = verification_case.handoff(case, unit, stage, binding_failed=binding_failed)
+            self._checkpoint()
+            return await self._paused_unit(case, f'{name}: {reason}; frozen unit stopped.')
+
+        # One bounded supplement of the same report, never redo the author for missing evidence.
+        for attempt in range(2):
+            stage = case['next']
+            if stage == 'done':
+                return Outcome(f"{name} v{case['revision']}: done")
+            if stage == 'stopped' or case['paused'] and not resume:
+                return await self._paused_unit(case, f"{name}: {stage} {case['paused']}; " +
+                                               ('request a new plan.' if stage == 'stopped' else 'inspect before explicit resume.'))
+            if resume and not case['paused']:
+                return Outcome('Only an interrupted stage or repair can resume; use its normal frozen budget.', True)
+            if case['attempts'].get(stage, 0) >= 3 or case['spent'].get(stage, 0) >= unit['budget']['high']:
+                return await stop('hard limit')
+            b = unit['roster'][stage]
+            if (not self.registry.authorized(b['model'], b['role'], b['seat'], b['identity'], name, key, stage)
+                    or any(e.plan == key and e.workstream == name and e.stage == 'worker' and e.status == 'retired'
+                           for e in self.registry.agents.values())):
+                return await stop('frozen binding revoked; no replacement selected', binding_failed=True)
+            try:
+                if (not verification_case.independent(unit['roster']) or
+                        await asyncio.to_thread(self._actual_model, b['model']) != b['actual_model']):
+                    raise FusionError('Frozen native model or review independence changed; no fallback selected.')
+                profile = await asyncio.to_thread(self._version_profile, b)
+            except (ValueError, TypeError, AttributeError, ProviderError, OSError) as error:
+                return await stop(str(error) if isinstance(error, FusionError) else 'provider capability unavailable', binding_failed=True)
+            if self.route_turn is not turn or self._unit_key() != key or case['next'] != stage:
+                return Outcome('The frozen unit or its turn changed.', True)
+            budget = unit['budget']
+            soft_resume = resume and case['paused'].startswith('soft limit')
+            if soft_resume and not await self._progress_confirmed(key, name, case, stage):
+                return await stop('soft limit without verified progress')
+            steps = min(budget['high'] if soft_resume else budget['steps'], budget['high'] - case['spent'].get(stage, 0))
+            seconds_left = budget['seconds'] - sum(h['seconds'] for h in case.get('history', ()) if h['stage'] == stage)
+            if seconds_left < 1:
+                return await stop('hard time limit')
+            brief = Brief(name, profile.name, unit['task'], unit['basis'], unit['acceptance'],
+                          tuple(unit['paths']) if stage == 'worker' else (),
+                          {'steps': steps, 'seconds': min(int(seconds_left), self._seconds_cap)},
+                          read_only=case['paused'] == 'missing evidence' or stage == 'worker' and not unit['paths'],
+                          resume=resume, budget_note='frozen curve04')
+            check = CheckAttempt() if stage != 'worker' else None
+            previous_attempts = case['attempts'].get(stage, 0)
+            result = await self.delegate(name, b['model'], b['role'], brief.text(), brief.paths, resume,
+                                         brief=brief, profile=profile, tool_call=tool_call, check=check, plan_key=key, stage=stage)
+            if not (attempt == 0 and case['attempts'].get(stage, 0) > previous_attempts
+                    and case['paused'] == 'missing evidence' and case['next'] == stage
+                    and case['handoff']['confirmation'] == 'one_evidence_supplement'):
+                return result
+            resume = True
+        return result
+
     async def delegate_brief(self, brief: Brief, *, tool_call: Call | None = None) -> Outcome:
         if not self.brief_enabled:
             return Outcome("Structured Fusion delegation is unavailable.", True)
@@ -1727,7 +2146,7 @@ class FusionRuntime:
 
     async def delegate(self, scope: str, model: str, role: str, task: str, paths: tuple[str, ...] | None = None, resume: bool = False,
                        *, brief: Brief | None = None, profile: identity.Identity | None = None, tool_call: Call | None = None,
-                       check: CheckAttempt | None = None) -> Outcome:
+                       check: CheckAttempt | None = None, plan_key: str = '', stage: str = '') -> Outcome:
         from desktop.core.harness.outputs import hint
         from desktop.core.harness.tools import ToolError
         from desktop.core.harness.toolset import PLAN_REFUSAL
@@ -1748,7 +2167,15 @@ class FusionRuntime:
         if writes and (refusal := self.route_guard("delegate", (scope,))):
             return Outcome(refusal, True)
         seat, record = "", None
-        if self.gate("v3"):
+        case = unit = None
+        if self._unit_key() and plan_key != self._unit_key():
+            return Outcome('Delegate a frozen unit by id; a fresh brief cannot replace its binding.', True)
+        if plan_key:
+            plan_record = self.registry.plans[plan_key]
+            unit, case = plan_record['spec']['units'][scope], plan_record['cases'][scope]
+            binding = self.registry.binding(plan_key, scope, stage)
+            seat = binding['seat']
+        elif self.gate("v3"):
             policy = self.registry.policy
             if profile is not None and profile.name in ("Runner", "QualitySampler") and not writes:
                 # Current evidence seats fresh checks only; a resumed check keeps its seat even across a model change.
@@ -1786,7 +2213,8 @@ class FusionRuntime:
         defaulted_brief = brief if default_brief or ignored_budget else None
         brief_text = task
         if brief is not None:
-            brief = self._bounded_brief(brief, retry)
+            if not plan_key:
+                brief = self._bounded_brief(brief, retry)
             if retry and brief.budget["steps"] <= retry.steps and brief.budget["seconds"] <= retry.seconds:
                 return Outcome("Verification stopped: the applicable budget limit leaves no room for a larger retry.", True)
             brief_text = task = brief.text()
@@ -1824,18 +2252,32 @@ class FusionRuntime:
         calls = self.registry.calls
         saved_fusion = self.parent.saved.fusion
         workstream = record["workstream"] if record is not None else scope
+        before_case = None
         try:
             self.check_budget()
             expert = (self.registry.assign(scope, model, role, resume=resume, seat=seat) if paths is None else
                       self.registry.assign_workstream(workstream, paths, model, role, identity=profile.name if profile else "",
-                                                      reuse=profile.reuse if profile else True, resume=resume, seat=seat,
-                                                      recover=recovering))
+                                                      reuse=True if plan_key or not profile else profile.reuse, resume=resume, seat=seat,
+                                                      recover=recovering, plan=plan_key, stage=stage))
             transferred_new = bool(expert.transferred_from and expert.started_at == 0)
             self.registry.begin(expert.id, resume=resume or recovering is not None)
             expert.task = task
+            if case is not None:
+                before_case = dict(case)
+                if stage == 'worker' and (case['revision'] == 0 or case['paused'] == 'repair'):
+                    case.update(revision=case['revision'] + 1, receipts={})
+                expert.revision = case['revision']
+                case['attempts'] = {**case['attempts'], stage: case['attempts'].get(stage, 0) + 1}
+                case['reserved'] = brief.budget['steps']
+                case['reserved_seconds'] = brief.budget['seconds']
+                case['reserved_at'] = time.time()
+                case['reserved_expert'] = expert.id
             self._checkpoint()  # Reserve ownership durably before yielding to another delegation or starting a model.
         except Exception as error:
             self.registry.calls = calls
+            if before_case is not None:
+                case.clear()
+                case.update(before_case)
             self.parent.saved.fusion = saved_fusion
             for key in set(self.registry.agents) - known:
                 del self.registry.agents[key]
@@ -1874,7 +2316,9 @@ class FusionRuntime:
         accepted = False
         answer = evidence = budget_receipt = ""
         budget_limited = False
+        followup_steps = 0
         declined = False
+        progress = []  # Concrete successful edits/reads, not model claims, to justify crossing a soft step limit.
         write_paths = self.registry.write_paths(expert)
 
         def format_budget_receipt(steps: int, seconds: int) -> str:
@@ -1908,53 +2352,74 @@ class FusionRuntime:
             # Only an identity that can edit is narrowed by a read-only brief. A Runner or QualitySampler never edits, and
             # running the checks (not a read-only command) is its job: with a real model the main agent marked its
             # Runners read-only because they had no write paths, and they came back blocked.
-            child._fusion_read_only = bool(brief is not None and brief.read_only and profile is not None and "edit" in profile.tools)
+            child._fusion_read_only = bool(brief is not None and brief.read_only and profile is not None and
+                                           ("edit" in profile.tools or case is not None and case['paused'] == 'missing evidence'))
             child._fusion_step_limit = brief.budget.get("steps") if brief is not None else legacy_steps
             parent_tools = await self.parent._ensure_tools()
             child_tools = await child._ensure_tools()
             child_tools.permission_parent = parent_tools
+            if plan_key:
+                child_tools.frozen_paths = write_paths
             before = child.usage
             if measured is not None:
                 measured.before = before
             self._active[expert.id] = (child, before)
-            handoff = await self._handoff(expert, child)
-            current = self.parent._turn.user_block.text if self.parent._turn is not None and self.parent._turn.user_block is not None else ""
-            goal = self.parent.saved.goal.get("text", "")
-            plan = self.parent.saved.plan.get("text", "") if self.parent.saved.plan.get("status") == "approved" else ""
-            pack = None
-            if profile is not None and brief is not None and self.brief_enabled and self.gate("inject"):
-                pack = await self._expert_pack(profile, brief, current, brief_write.result() if brief_write else None)
+            if plan_key and expert.transferred_from:
+                raise FusionError('A frozen unit cannot import a transferred conversation.')
+            handoff = '' if plan_key else await self._handoff(expert, child)
+            if plan_key:
+                from desktop.core.hooks import PromptEvent
+                hooks = child.manager.hooks.prompt(PromptEvent(child.engine, child.project, brief.goal, internal=True))
+                extra = await child._connection_prompt(getattr(child.manager, 'connections', None), brief.text())
+                hooks = replace(hooks, text=hooks.text + extra)
+                if child.handoff is not None and not child.handoff.empty:
+                    raise FusionError('An unmeasured conversation handoff cannot be appended to the frozen packet.')
+                pack = await asyncio.to_thread(self._unit_pack, child, profile, brief, plan_key, plan_record, case, stage, hooks)
+                case['pack'] = {'tokens': pack.tokens, 'basis': pack.token_basis,
+                                'problems': [asdict(p) for p in pack.problems]}
+                if not pack.ok:
+                    raise FusionError('First packet refused: ' + json.dumps(case['pack']['problems']))
+                prompt = pack.text
+                if refusal := self._plan_budget_gate(prompt):
+                    raise FusionError(refusal)
+            else:
+                current = self.parent._turn.user_block.text if self.parent._turn is not None and self.parent._turn.user_block is not None else ""
+                goal = self.parent.saved.goal.get("text", "")
+                plan = self.parent.saved.plan.get("text", "") if self.parent.saved.plan.get("status") == "approved" else ""
+                pack = None
+                if profile is not None and brief is not None and self.brief_enabled and self.gate("inject"):
+                    pack = await self._expert_pack(profile, brief, current, brief_write.result() if brief_write else None)
+                    if reporting is not None:
+                        reporting.used.update(pack.used)
+                inherited = (f"\n\nCurrent user request:\n{current}" if current and pack is None else "")
+                inherited += (f"\n\nActive goal:\n{goal}" if isinstance(goal, str) and goal else "")
+                inherited += (f"\n\nPlan approved by the user for this conversation (later user directions may refine it):\n{plan}" if plan else "")
+                empty_paths = "none" if profile else "whole project (exclusive)"
+                prompt = (f"Your responsibility / deliverable: {expert.label}.\n"
+                          f"Declared write paths: {', '.join(write_paths) or empty_paths}.\n"
+                          "This work may span multiple files. Other experts may run concurrently; do not edit outside these "
+                          "write paths or undo their changes. Report a needed scope expansion to the main agent."
+                          + ("\n\n" + task if pack is None else "") + inherited + "\n\n"
+                          "Report what you changed, checks actually run, evidence and anything unfinished. "
+                          "Do not delegate further. The main agent will review your result." + handoff)
+                if pack is None and profile is not None and profile.instructions:
+                    prompt = profile.instructions + "\n\n" + prompt
+                if child._fusion_read_only:
+                    prompt = "This brief is read-only. Do not change anything.\n\n" + prompt
+                if pack is not None:
+                    prompt = pack.text + "\n\n" + prompt
                 if reporting is not None:
-                    reporting.used.update(pack.used)
-            inherited = (f"\n\nCurrent user request:\n{current}" if current and pack is None else "")
-            inherited += (f"\n\nActive goal:\n{goal}" if isinstance(goal, str) and goal else "")
-            inherited += (f"\n\nPlan approved by the user for this conversation (later user directions may refine it):\n{plan}" if plan else "")
-            empty_paths = "none" if profile else "whole project (exclusive)"
-            prompt = (f"Your responsibility / deliverable: {expert.label}.\n"
-                      f"Declared write paths: {', '.join(write_paths) or empty_paths}.\n"
-                      "This work may span multiple files. Other experts may run concurrently; do not edit outside these "
-                      "write paths or undo their changes. Report a needed scope expansion to the main agent."
-                      + ("\n\n" + task if pack is None else "") + inherited + "\n\n"
-                      "Report what you changed, checks actually run, evidence and anything unfinished. "
-                      "Do not delegate further. The main agent will review your result." + handoff)
-            if pack is None and profile is not None and profile.instructions:
-                prompt = profile.instructions + "\n\n" + prompt
-            if child._fusion_read_only:
-                prompt = "This brief is read-only. Do not change anything.\n\n" + prompt
-            if pack is not None:
-                prompt = pack.text + "\n\n" + prompt
-            if reporting is not None:
-                # With a real model every expert's first report was refused for a rating it did not know was due.
-                if check is not None:
-                    prompt += ("\n\nThis is an acceptance check. Submit the actual commands, outcomes or inspected evidence "
-                               "with submit_report. Plain text is not verification. ")
-                    if recovering is not None:
-                        prompt += ("Continue only this incomplete check. Use current evidence from your earlier attempt; "
-                                   "do not repeat completed checks, edit files or redo the author's work. ")
-                    prompt += reporting.guidance()
-                else:
-                    prompt += ("\n\nWhen you have a verdict, report it with submit_report; ending with a plain "
-                               "message is also fine. " + reporting.guidance())
+                    # With a real model every expert's first report was refused for a rating it did not know was due.
+                    if check is not None:
+                        prompt += ("\n\nThis is an acceptance check. Submit the actual commands, outcomes or inspected evidence "
+                                   "with submit_report. Plain text is not verification. ")
+                        if recovering is not None:
+                            prompt += ("Continue only this incomplete check. Use current evidence from your earlier attempt; "
+                                       "do not repeat completed checks, edit files or redo the author's work. ")
+                        prompt += reporting.guidance()
+                    else:
+                        prompt += ("\n\nWhen you have a verdict, report it with submit_report; ending with a plain "
+                                   "message is also fine. " + reporting.guidance())
             if self.gate("observer"):
                 budget = brief.budget if brief is not None else {key: value for key, value in (
                     ("steps", legacy_steps), ("seconds", plan_seconds)) if value is not None}
@@ -1966,6 +2431,21 @@ class FusionRuntime:
                 async def _tool_finished(call: Call, outcome: Outcome, kind: str) -> None:
                     nonlocal declined
                     declined |= outcome.cancelled
+                    if case is not None and not (outcome.cancelled or outcome.is_error) and len(progress) < 4:
+                        path = call.args.get('file_path')
+                        if isinstance(path, str) and (outcome.diffs or call.name == 'read_file'):
+                            with contextlib.suppress(FusionError, OSError):
+                                path = self.registry._scope(path)
+                                if any(path == p or path.startswith(p + '/') for p in unit['paths']):
+                                    fact_id = verification_case.digest([call.name, path, outcome.output])
+                                    previous = [p for h in case.get('history', ()) if h['revision'] == case['revision']
+                                                and h['stage'] == stage for p in h.get('progressIds', ())]
+                                    if fact_id not in previous and not any(p['id'] == fact_id for p in progress):
+                                        fact = {'id': fact_id, 'tool': call.name, 'path': path, 'observed': outcome.output[:512]}
+                                        proof = verification_case.progress_proof(plan_key, scope, case['revision'], stage,
+                                                                                expert.id, case['attempts'][stage], fact)
+                                        if ref := await self._unit_detail(verification_case.page(proof)):
+                                            progress.append({**fact, 'result': ref})
                     if reporting is not None:
                         reporting.track(call, outcome)
                     if observed is not None:
@@ -1978,7 +2458,8 @@ class FusionRuntime:
             if defaulted_brief is not None:
                 child._fusion_step_limit = steps
             budget_receipt = format_budget_receipt(steps, seconds)
-            if not child.send_prompt(prompt, packed_context=pack is not None):
+            if not child.send_prompt(prompt, packed_context=pack is not None,
+                                     **({'packed_hooks': replace(hooks, text='')} if plan_key else {})):
                 raise FusionError("The expert session is not ready.")
             started = True
             if observing and writes and route_turn is not None and record is not None and seat == "L3":
@@ -2039,6 +2520,7 @@ class FusionRuntime:
                 if clock() >= deadline:
                     raise TimeoutError
                 reporting.followed_up = True
+                followup_steps += end.steps
                 if limit is not None:
                     child._fusion_step_limit = limit - end.steps
                 if not child.send_prompt(reporting.follow_up()):
@@ -2139,16 +2621,70 @@ class FusionRuntime:
                                               tokens=measured.total(child.usage) if started and child is not None else 0,
                                               seconds=time.monotonic() - measured.started, first_request_tokens=measured.first_input)
                 # What a check found is in its report; the expert's own status only says whether it ran to the end.
-                if expert.identity == "Runner" and (structured_report is not None or check is not None and started):
+                if (stage == 'runner' if plan_key else expert.identity == 'Runner') and (structured_report is not None or check is not None and started):
                     measured_task.recorder.runner(accepted and structured_report is not None
                                                   and structured_report.status == "done" and expert.status == "done")
-                elif structured_report is not None and expert.identity == "QualitySampler":
+                elif structured_report is not None and (stage == 'review' if plan_key else expert.identity == 'QualitySampler'):
                     measured_task.recorder.sampler(accepted and structured_report.status != "done")
             if route_turn is not None and expert.finished_at is not None and expert.finished_at >= route_turn.latest_finished:
                 route_turn.latest_finished = expert.finished_at
                 route_turn.reroute_due = (expert.status in ("failed", "interrupted") or
                                           accepted and structured_report.status in ("blocked", "needs_context"))
             try:
+                if case is not None:
+                    end = child.last_turn_end if started and child is not None else None
+                    used_steps = followup_steps + end.steps if end is not None else case['reserved'] if started else 1
+                    reason = ('cancelled' if declined or outcome is None else f'Observer: {fact.kind}' if fact is not None and not budget_limited
+                              else 'time limit' if budget_limited and (end is None or end.reason != 'step_limit')
+                              else 'soft limit; inspect handoff' if budget_limited else check.reason if check and check.reason
+                              else (child.check_retry_reason or 'interrupted') if started and expert.status != 'done'
+                              else 'interrupted' if expert.status != 'done' or outcome.is_error else '')
+                    meter_kind = metrics.unit_attempt_kind(stage, case['paused'])
+                    meter = measured.unit_meter(child.usage if child is not None else None, started) if measured else None
+                    certificate = ''
+                    if (not reason and accepted and structured_report.evidence and (structured_report.status == 'done'
+                            or structured_report.status == 'concerns' and stage != 'worker')):
+                        proof = verification_case.stage_proof(plan_key, scope, case['revision'], stage, expert.id,
+                                                              structured_report.status, structured_report.summary, structured_report.evidence)
+                        certificate = await self._unit_detail(verification_case.page(proof))
+                        if not certificate:
+                            reason, accepted = 'missing evidence', False
+                    cause = verification_case.advance(case, unit, stage, structured_report, accepted=accepted,
+                                                      interrupted=bool(reason and reason != 'missing evidence'), reason=reason,
+                                                      steps=used_steps, expert=expert.id)
+                    if certificate:
+                        result_record = case['receipts'][stage] if structured_report.status == 'done' else case['finding']
+                        result_record['detail'] = certificate  # Install before a dependent dispatch can observe the cursor.
+                    case.pop('reserved', None)
+                    case.pop('reserved_expert', None)
+                    case.pop('reserved_at', None)
+                    case.pop('reserved_seconds', None)
+                    if case['next'] == stage and (reason == 'time limit' or reason.startswith('soft limit') and not progress):
+                        case.update(next='stopped', paused='hard time limit' if reason == 'time limit' else 'soft limit without verified progress')
+                    case.setdefault('history', []).append({
+                        'revision': expert.revision, 'stage': stage, 'expert': expert.id, 'model': expert.model,
+                        'expert_version': binding['version'], 'actual_model': binding['actual_model'], 'applied_budget': dict(brief.budget),
+                        'meterKind': meter_kind, 'meter': meter,
+                        'next': case['next'], 'reason': case['paused'], 'stop_reason': reason, 'steps': used_steps, 'tokens': partial_tokens(),
+                        'seconds': max(0, (expert.finished_at or time.time()) - expert.started_at),
+                        'pack': case.get('pack'), 'report': structured_report.status if accepted else None})
+                    history = case['history']
+                    history[-1]['progressIds'] = [p['id'] for p in progress]
+                    detail = await self._unit_detail(outcome.output) if outcome is not None else ''
+                    if case['paused']:
+                        automatic = not any(h['stage'] == stage and h['revision'] == case['revision'] and
+                                            h.get('handoff', {}).get('diagnostic') == 'U01' for h in history[:-1])
+                        case['handoff'] = verification_case.handoff(case, unit, stage, cause=cause, expert=expert.id,
+                            progress=progress, detail=detail, automatic=automatic and case['paused'] == 'missing evidence')
+                        history[-1]['handoff'] = case['handoff']
+                    self._checkpoint()
+                    if outcome is not None:
+                        message = f"{scope} v{case['revision']} {stage}: next={case['next']}; {case['paused'] or 'evidence recorded'}."
+                        if case['paused']:
+                            outcome.output = (await self._paused_unit(case, message)).output
+                        else:
+                            outcome.output = message + (f' Details: read_output({detail}).' if detail else '')
+                        outcome.is_error = bool(case['paused'])
                 if fact is not None:
                     await self._retain_observer_report(expert, write_paths, fact)
                 if started and observed is not None:

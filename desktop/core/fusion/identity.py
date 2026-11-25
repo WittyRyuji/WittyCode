@@ -1,7 +1,7 @@
 """Fusion identities and their local Markdown overrides."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
 
@@ -99,14 +99,19 @@ _TOOL_KINDS = frozenset(("read", "edit", "exec"))
 _MAX_BYTES = 64 * 1024
 
 
-def _front_matter(text: str) -> tuple[dict[str, str], str]:
+def split_front_matter(text: str, *, require_name: bool = True) -> tuple[dict[str, str], str]:
+    """Split the small line-oriented identity header from the Markdown body.
+
+    Catalog entries keep the display name outside the document, so they pass ``require_name=False``;
+    legacy override files keep the old requirement that the header itself names the identity.
+    """
     lines = text.splitlines(keepends=True)
     if not lines or lines[0].strip() != "---":
         raise ValueError("Expected opening front matter delimiter (---).")
     fields: dict[str, str] = {}
     for index, line in enumerate(lines[1:], 1):
         if line.strip() == "---":
-            if not fields.get("name"):
+            if require_name and not fields.get("name"):
                 raise ValueError("Front matter needs a name.")
             return fields, "".join(lines[index + 1:]).strip("\r\n")
         if not line.strip():
@@ -122,13 +127,21 @@ def _front_matter(text: str) -> tuple[dict[str, str], str]:
     raise ValueError("Expected closing front matter delimiter (---).")
 
 
+def _front_matter(text: str) -> tuple[dict[str, str], str]:
+    return split_front_matter(text)
+
+
+def _tools_field(value: str) -> frozenset[str]:
+    return frozenset(item.strip() for item in value.split(",")) if value else frozenset()
+
+
 def _identity(fields: dict[str, str], body: str, base: Identity | None = None) -> Identity:
     role = fields.get("role", base.role if base else "")
     if role != "worker" and role != "light":
         raise ValueError("role must be worker or light.")
     tools = base.tools if base else frozenset()
     if "tools" in fields:
-        requested = frozenset(item.strip() for item in fields["tools"].split(",")) if fields["tools"] else frozenset()
+        requested = _tools_field(fields["tools"])
         if not requested <= _TOOL_KINDS:
             raise ValueError("tools must be a comma-separated list of read, edit and/or exec.")
         tools = requested & base.tools if base else requested
@@ -149,6 +162,46 @@ def _identity(fields: dict[str, str], body: str, base: Identity | None = None) -
 
 
 _BUILTINS = Identities(tuple(_identity(*_front_matter(f"{text}\n{_EXPERT_BOUNDARY}")) for text in _BUILTIN_TEXT), DECOMPOSITION)
+_BUILTIN_MARKDOWN: dict[str, str] = {}
+for _text in _BUILTIN_TEXT:
+    _markdown = f"{_text}\n{_EXPERT_BOUNDARY}"
+    _BUILTIN_MARKDOWN[_front_matter(_markdown)[0]["name"]] = _markdown
+
+
+def builtin_markdown(name: str) -> str | None:
+    """The immutable built-in Markdown for ``name`` (case-insensitive), or ``None`` for a custom identity."""
+    key = name.casefold()
+    return next((text for identity, text in _BUILTIN_MARKDOWN.items() if identity.casefold() == key), None)
+
+
+def parse_controlled(markdown: str, *, name: str, ceiling: Identity) -> Identity:
+    """Parse catalog-controlled Markdown into the existing runtime identity shape.
+
+    The catalog's display ``name`` and permission ``ceiling`` are authoritative. A header may tighten tools,
+    reuse or the model-role ceiling, and may repeat the same name; attempts to exceed the ceiling or use a
+    conflicting name are rejected instead of silently widening the expert. Unknown header fields stay ignored,
+    as they are in legacy override files.
+    """
+    fields, body = split_front_matter(markdown, require_name=False)
+    declared = fields.get("name", "")
+    if declared and declared.casefold() != name.casefold():
+        raise ValueError("Front matter name must match the catalog entry name.")
+    fields["name"] = name
+    if "tools" in fields:
+        requested = _tools_field(fields["tools"])
+        if not requested <= _TOOL_KINDS:
+            raise ValueError("tools must be a comma-separated list of read, edit and/or exec.")
+        if not requested <= ceiling.tools:
+            raise ValueError("tools cannot exceed the controlled permission ceiling.")
+    if fields.get("role") == "worker" and ceiling.role == "light":
+        raise ValueError("role cannot exceed the controlled permission ceiling.")
+    if fields.get("reuse", "").casefold() == "true" and not ceiling.reuse:
+        raise ValueError("reuse cannot exceed the controlled permission ceiling.")
+    parsed = replace(_identity(fields, body, ceiling), name=name)
+    if not parsed.instructions.endswith(_EXPERT_BOUNDARY):
+        instructions = f"{parsed.instructions}\n{_EXPERT_BOUNDARY}" if parsed.instructions else _EXPERT_BOUNDARY
+        parsed = replace(parsed, instructions=instructions)
+    return parsed
 
 
 def load(folder: Path | None) -> Identities:

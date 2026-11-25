@@ -79,6 +79,7 @@ from desktop.core.settings import (
     DEVIN_PERMISSIONS,
     FOLLOW_UPS,
     FONT_SCALES,
+    FUSION_SEAT_MODEL_LIMIT,
     LANGUAGES,
     COMPACT_AT_RANGE,
     MAX_OPEN_SESSIONS_RANGE,
@@ -147,6 +148,43 @@ def engine_label(engine: str, model: Mapping[str, Any] | None) -> str:
 def row_id(engine: str, native: str) -> str:
     """The sidebar row id of a saved session: the engine's own id behind the engine's prefix."""
     return ROW_PREFIXES.get(engine, "") + native
+
+
+def fusion_light_pool(settings: AppSettings) -> list[str]:
+    """The canonical L3 pool, tolerating older in-memory settings that only know the scalar mirror."""
+    lights = list(dict.fromkeys(item for item in getattr(settings, "fusion_lights", []) if isinstance(item, str) and item.strip()))
+    legacy = getattr(settings, "fusion_light", "")
+    if not lights and isinstance(legacy, str) and legacy.strip():
+        lights = [legacy.strip()]
+    return lights[:FUSION_SEAT_MODEL_LIMIT]
+
+
+def fusion_policy_of(settings: AppSettings) -> Any:
+    """Build the session policy with the L3 pool when freeze's Policy knows it.
+
+    Wiring contract for the runtime freeze: ``Policy`` may accept ``lights=<tuple>``. Until that field exists, only the
+    first pool entry is handed through the legacy scalar ``light``; no construction error is hidden or depended on.
+    """
+    from desktop.core.fusion.registry import Policy
+
+    lights = tuple(fusion_light_pool(settings))
+    values = {
+        "main": settings.fusion_main,
+        "workers": tuple(settings.fusion_workers),
+        "light": lights[0] if lights else "",
+        "max_calls": 0,
+        "max_tokens": 0,
+        "max_seconds": settings.fusion_max_seconds,
+        "preference": settings.fusion_preference,
+        "reasoning": settings.fusion_reasoning,
+        "max_seconds_adaptive": settings.fusion_max_seconds_adaptive,
+    }
+    names = {field.name for field in dataclasses.fields(Policy)}
+    if "lights" in names:
+        values["lights"] = lights
+    return Policy(**{name: value for name, value in values.items() if name in names})
+
+
 WINDOW_WAIT_STEPS = 20
 WINDOW_WAIT_STEP = 0.05
 """How long (steps x seconds) an engine change waits for the new session to report its context window."""
@@ -466,6 +504,7 @@ class AppCore:
         self.offline = offline
         self.cache = cache if cache is not None else Cache(None)
         self._archive_meter: storage_meter.ArchiveMeter | None = None
+        self._expert_catalog: Any = None
         self._index: dict[str, Any] = {}
         self._index_handle: asyncio.TimerHandle | None = None
         self._hydrated = False
@@ -624,7 +663,8 @@ class AppCore:
             "reconnectLimit": self.settings.reconnect_limit,
             "fusionMain": self.settings.fusion_main,
             "fusionWorkers": list(self.settings.fusion_workers),
-            "fusionLight": self.settings.fusion_light,
+            "fusionLights": fusion_light_pool(self.settings),
+            "fusionLight": fusion_light_pool(self.settings)[0] if fusion_light_pool(self.settings) else "",
             "fusionReasoning": dict(self.settings.fusion_reasoning),
             "fusionPreference": self.settings.fusion_preference,
             "fusionMaxCalls": self.settings.fusion_max_calls,
@@ -1094,7 +1134,7 @@ class AppCore:
         if refresh_profiles:
             s = self.settings
             models = [m["id"] for m in self.catalog.models]
-            models.extend((s.default_model, s.fusion_main, s.fusion_light, *s.fusion_workers))
+            models.extend((s.default_model, s.fusion_main, *s.fusion_workers, *fusion_light_pool(s)))
             self._spawn(self._refresh_profiles(models), quiet=True)
 
     def _schedule_models(self, *, startup: bool = False, refresh_profiles: bool = False) -> None:
@@ -2074,11 +2114,9 @@ class AppCore:
         policy = None
         page_model = params.get("modelId") or (base or self.defaults())["model"]
         if fusion:
-            from desktop.core.fusion.registry import FusionError, Policy
+            from desktop.core.fusion.registry import FusionError
             try:
-                policy = Policy(self.settings.fusion_main, tuple(self.settings.fusion_workers), self.settings.fusion_light,
-                                0, 0, self.settings.fusion_max_seconds, self.settings.fusion_preference,
-                                self.settings.fusion_reasoning, self.settings.fusion_max_seconds_adaptive)
+                policy = fusion_policy_of(self.settings)
             except FusionError as error:
                 raise AppError("请先在设置中配置 Fusion 的主模型、工作模型和轻量模型。") from error
             page_model = policy.main
@@ -3712,7 +3750,7 @@ class AppCore:
         return restored
 
     def _fusion_selection(self, conv: Conversation) -> tuple[Any, Any, Any]:
-        from desktop.core.fusion.registry import FusionError, FusionRegistry, Policy
+        from desktop.core.fusion.registry import FusionError, FusionRegistry
         retained = self._retained_fusion(conv)
         restored = ({}, {})
         try:
@@ -3723,9 +3761,7 @@ class AppCore:
                 policy = registry.policy
                 restored = self._fusion_series(retained, registry.agents)
             else:
-                policy = Policy(self.settings.fusion_main, tuple(self.settings.fusion_workers), self.settings.fusion_light,
-                                0, 0, self.settings.fusion_max_seconds, self.settings.fusion_preference,
-                                self.settings.fusion_reasoning, self.settings.fusion_max_seconds_adaptive)
+                policy = fusion_policy_of(self.settings)
         except FusionError as error:
             raise AppError("Fusion 配置不可用；请检查设置或保留的专家配置，原会话未改变。") from error
         return policy, retained, restored
@@ -4325,6 +4361,137 @@ class AppCore:
         if self.memory is not None:
             self.emit("memory", await asyncio.to_thread(self.memory.state))
 
+    # ------------------------------------------------------------------ Fusion expert catalog
+
+    def expert_catalog(self) -> Any:
+        """The lazily opened controlled catalog shared by the settings UI and, once wired, the runtime freeze.
+
+        The root follows the actual settings file (tests point it at their own temporary profile); simply opening a
+        conversation or the application never creates or scans it.
+        """
+        if self._expert_catalog is None:
+            from desktop.core.fusion.expert_catalog import ExpertCatalog
+            self._expert_catalog = ExpertCatalog(default_settings_path().parent / "fusion-experts")
+        return self._expert_catalog
+
+    @staticmethod
+    def _expert_json(summary: Any) -> dict[str, Any]:
+        return {
+            "stableId": summary.stable_id,
+            "name": summary.name,
+            "workType": summary.work_type,
+            "tags": list(summary.tags),
+            "enabled": summary.enabled,
+            "version": summary.version,
+            "mdPath": summary.md_path,
+            "contentHash": summary.content_hash,
+            "bodyTokens": summary.body_tokens,
+            "role": summary.role,
+            "created": summary.created,
+            "updated": summary.updated,
+            "builtin": summary.builtin,
+        }
+
+    def _experts_view(self) -> dict[str, Any]:
+        from desktop.core.fusion.expert_catalog import WORK_TYPE_LABELS, WORK_TYPES
+        snapshot = self.expert_catalog().snapshot()
+        return {
+            "revision": snapshot.revision,
+            "experts": [self._expert_json(entry) for entry in snapshot.entries],
+            "workTypes": [{"id": work_type, "label": WORK_TYPE_LABELS[work_type]} for work_type in WORK_TYPES],
+        }
+
+    @staticmethod
+    def _expert_error(error: Exception) -> AppError:
+        from desktop.core.fusion.expert_catalog import ExpertStorageError, ProtectedExpertError, UnknownExpertError
+        if isinstance(error, ProtectedExpertError):
+            return AppError("内置专家身份是只读的，不能编辑、停用或删除。")
+        if isinstance(error, UnknownExpertError):
+            return AppError("没有找到这个专家，可能已经在别处被删除。")
+        if isinstance(error, ExpertStorageError):
+            return AppError("专家目录无法安全读写，本次更改没有保存。")
+        return AppError(f"专家设置不合法：{error}")
+
+    async def _experts_call(self, operation: Callable[[], Any]) -> dict[str, Any]:
+        from desktop.core.fusion.expert_catalog import ExpertCatalogError
+        try:
+            await asyncio.to_thread(operation)
+        except (ExpertCatalogError, ValueError) as error:
+            raise self._expert_error(error) from error
+        return await asyncio.to_thread(self._experts_view)
+
+    async def _m_experts_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        from desktop.core.fusion.expert_catalog import ExpertCatalogError
+        try:
+            return await asyncio.to_thread(self._experts_view)
+        except (ExpertCatalogError, ValueError) as error:
+            raise self._expert_error(error) from error
+
+    async def _m_experts_get(self, params: dict[str, Any]) -> dict[str, Any]:
+        stable_id = params.get("stableId")
+        if not isinstance(stable_id, str) or not stable_id.strip():
+            raise AppError("专家标识不合法。")
+
+        def read() -> dict[str, Any]:
+            summary = self.expert_catalog().get(stable_id)
+            if summary is None:
+                raise UnknownExpertError("No visible expert matches this stable id.")
+            resolved = self.expert_catalog().resolve_version(summary.stable_id, summary.version)
+            return {"expert": self._expert_json(resolved.summary), "markdown": resolved.markdown}
+
+        from desktop.core.fusion.expert_catalog import ExpertCatalogError, UnknownExpertError
+        try:
+            return await asyncio.to_thread(read)
+        except (ExpertCatalogError, ValueError) as error:
+            raise self._expert_error(error) from error
+
+    async def _m_experts_create(self, params: dict[str, Any]) -> dict[str, Any]:
+        required = ("stableId", "name", "workType", "markdown")
+        if any(not isinstance(params.get(key), str) for key in required) or not isinstance(params.get("enabled", True), bool):
+            raise AppError("专家设置不合法。")
+        tags = params.get("tags", "")
+        if not isinstance(tags, (str, list)) or (isinstance(tags, list) and not all(isinstance(item, str) for item in tags)):
+            raise AppError("专家标签不合法。")
+        return await self._experts_call(lambda: self.expert_catalog().create(
+            stable_id=params["stableId"], name=params["name"], work_type=params["workType"],
+            markdown=params["markdown"], tags=tags, enabled=params.get("enabled", True)))
+
+    async def _m_experts_update(self, params: dict[str, Any]) -> dict[str, Any]:
+        stable_id = params.get("stableId")
+        if not isinstance(stable_id, str) or not stable_id.strip():
+            raise AppError("专家标识不合法。")
+        allowed = {"stableId", "name", "workType", "tags", "enabled", "markdown"}
+        if set(params) - allowed:
+            raise AppError("专家设置不合法。")
+        edits: dict[str, Any] = {}
+        for key in ("name", "workType", "markdown"):
+            if key in params:
+                if not isinstance(params[key], str):
+                    raise AppError("专家设置不合法。")
+                edits[{"workType": "work_type"}.get(key, key)] = params[key]
+        if "tags" in params:
+            tags = params["tags"]
+            if not isinstance(tags, (str, list)) or (isinstance(tags, list) and not all(isinstance(item, str) for item in tags)):
+                raise AppError("专家标签不合法。")
+            edits["tags"] = tags
+        if "enabled" in params:
+            if not isinstance(params["enabled"], bool):
+                raise AppError("专家设置不合法。")
+            edits["enabled"] = params["enabled"]
+        return await self._experts_call(lambda: self.expert_catalog().update(stable_id, **edits))
+
+    async def _m_experts_setEnabled(self, params: dict[str, Any]) -> dict[str, Any]:
+        stable_id, enabled = params.get("stableId"), params.get("enabled")
+        if not isinstance(stable_id, str) or not stable_id.strip() or not isinstance(enabled, bool):
+            raise AppError("专家启停设置不合法。")
+        return await self._experts_call(lambda: self.expert_catalog().set_enabled(stable_id, enabled))
+
+    async def _m_experts_delete(self, params: dict[str, Any]) -> dict[str, Any]:
+        stable_id = params.get("stableId")
+        if not isinstance(stable_id, str) or not stable_id.strip():
+            raise AppError("专家标识不合法。")
+        return await self._experts_call(lambda: self.expert_catalog().delete(stable_id))
+
     # ------------------------------------------------------------------ application settings
 
     async def _m_settings_set(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -4356,10 +4523,19 @@ class AppCore:
             s.reconnect_interval = value
         elif key == "reconnectLimit" and _is_int(value) and RECONNECT_LIMIT_RANGE[0] <= value <= RECONNECT_LIMIT_RANGE[1]:
             s.reconnect_limit = value
-        elif key in ("fusionMain", "fusionLight") and isinstance(value, str) and len(value) <= 512 and (not value or value.startswith(PREFIXES)):
-            setattr(s, "fusion_main" if key == "fusionMain" else "fusion_light", value)
-        elif key == "fusionWorkers" and isinstance(value, list) and len(value) <= 1 and all(isinstance(item, str) and len(item) <= 512 and item.startswith(PREFIXES) for item in value):
-            s.fusion_workers = list(dict.fromkeys(value))
+        elif key == "fusionMain" and isinstance(value, str) and len(value) <= 512 and (not value or value.startswith(PREFIXES)):
+            s.fusion_main = value
+        elif key == "fusionLight" and isinstance(value, str) and len(value) <= 512 and (not value or value.startswith(PREFIXES)):
+            # Legacy single-choice bridge: it replaces the whole L3 pool, and the scalar mirror stays the first item.
+            s.fusion_lights = [value] if value else []
+            s.fusion_light = value
+        elif key in ("fusionWorkers", "fusionLights") and isinstance(value, list) and len(value) <= FUSION_SEAT_MODEL_LIMIT and all(isinstance(item, str) and len(item) <= 512 and item.startswith(PREFIXES) for item in value):
+            chosen = list(dict.fromkeys(value))
+            if key == "fusionWorkers":
+                s.fusion_workers = chosen
+            else:
+                s.fusion_lights = chosen
+                s.fusion_light = chosen[0] if chosen else ""
         elif key == "fusionReasoning":
             from desktop.core.fusion.reasoning import reasoning_map, reasoning_model
             try:

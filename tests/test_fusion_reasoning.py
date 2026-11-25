@@ -26,8 +26,8 @@ INVALID_MAPS = [None, [], "high", True, {MODEL: ""}, {MODEL: False}, {MODEL: {}}
                 {f"chatgpt:demo-{index}": "low" for index in range(257)}]
 
 
-def test_global_worker_setting_is_single_while_existing_session_pools_remain_readable(tmp_path):
-    assert settings_from_dict({"fusion_workers": [MODEL, OTHER_MODEL]}).fusion_workers == [MODEL]
+def test_global_and_saved_worker_pools_preserve_order_and_reject_oversized_updates(tmp_path):
+    assert settings_from_dict({"fusion_workers": [MODEL, OTHER_MODEL, MODEL]}).fusion_workers == [MODEL, OTHER_MODEL]
     assert settings_from_dict({"fusion_workers": []}).fusion_workers == []
     policy = Policy(MODEL, (MODEL, OTHER_MODEL), OTHER_MODEL, 0)
     assert Policy.from_json(policy.to_json()).workers == (MODEL, OTHER_MODEL)
@@ -35,12 +35,12 @@ def test_global_worker_setting_is_single_while_existing_session_pools_remain_rea
     async def go():
         core, _, _, _, _ = await ready_core(tmp_path)
         try:
-            for selected in ([MODEL], [MODEL], [OTHER_MODEL]):
+            for selected in ([MODEL], [OTHER_MODEL], [OTHER_MODEL, MODEL]):
                 await core.call("settings.set", {"key": "fusionWorkers", "value": selected})
                 assert core.settings.fusion_workers == selected
             with pytest.raises(AppError):
-                await core.call("settings.set", {"key": "fusionWorkers", "value": [MODEL, OTHER_MODEL]})
-            assert core.settings.fusion_workers == [OTHER_MODEL]
+                await core.call("settings.set", {"key": "fusionWorkers", "value": [f"chatgpt:demo-{n}" for n in range(33)]})
+            assert core.settings.fusion_workers == [OTHER_MODEL, MODEL]
         finally:
             await core.shutdown()
     asyncio.run(go())

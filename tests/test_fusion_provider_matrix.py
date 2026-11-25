@@ -13,6 +13,41 @@ from tests.fusion_backend_support import PROFILES, RUNNERS, api_call, configure,
 from tests.test_app_api import says
 
 
+MATRIX_GOAL = "Matrix resolver goal: confirm the worktree evidence."
+
+
+def _unit_facts():
+    return {"units": [{"id": "matrix", "task": "Confirm the worktree evidence without changing files.",
+                       "basis": "The project fixture contains evidence.txt with known contents.",
+                       "acceptance": "The evidence text is reported exactly.", "paths": [],
+                       "J": 4, "I": 4, "C": 4, "review_required": True}]}
+
+
+def _activity(tmp_path, plan, api):
+    devin_lines = sum(len(path.read_text(encoding="utf-8").splitlines())
+                      for path in (tmp_path / "guarded").rglob("received.jsonl"))
+    return len(plan.requests), len(api.posts), len(factory_turns(tmp_path)), devin_lines
+
+
+def _assert_unit_binding(key, frozen, models, worker_runner, light_runner, review_runner):
+    assert len(key) == 64 and not frozen["activated"]
+    unit = frozen["spec"]["units"]["matrix"]
+    assert frozen["spec"]["goal"] == MATRIX_GOAL
+    assert unit["facts"] == {"N": 50, "J": 4, "I": 4, "C": 4,
+                             "review_required": True, "risk": False, "force_lead": False}
+    assert unit["derived"]["worker_seat"] == "L2"
+    worker, runner, review = (unit["roster"][stage] for stage in ("worker", "runner", "review"))
+    assert (worker["seat"], worker["identity"], worker["expert"], worker["role"]) == ("L2", "Coder", "Coder", "worker")
+    assert (runner["seat"], runner["identity"], runner["expert"], runner["role"]) == ("L3", "Runner", "Runner", "light")
+    assert (review["identity"], review["expert"], review["role"]) == ("QualitySampler", "QualitySampler", "worker")
+    assert review["seat"] == ("L3" if review_runner == light_runner else "L1")
+    assert worker["model"] == models[worker_runner] and worker["actual_model"] == PROFILES[worker_runner][0]
+    assert runner["model"] == models[light_runner] and runner["actual_model"] == PROFILES[light_runner][0]
+    assert review["model"] == models[review_runner] and review["actual_model"] == PROFILES[review_runner][0]
+    assert review["actual_model"].casefold() != worker["actual_model"].casefold()
+    assert unit["author"]["actual_model"] == worker["actual_model"]
+
+
 @pytest.mark.parametrize("main_runner", RUNNERS)
 @pytest.mark.parametrize("worker_runner", RUNNERS)
 @pytest.mark.parametrize("light_runner", RUNNERS)
@@ -86,4 +121,17 @@ def test_fusion_provider_matrix(tmp_path, monkeypatch, main_runner, worker_runne
                 assert [r["params"]["value"] for r in requests if r.get("method") == "session/set_config_option"
                         and r["params"].get("configId") == "thought_level"] == [PROFILES["devin"][1]]
                 assert sum(r.get("method") == "session/prompt" for r in requests) == 1
+
+            before = _activity(tmp_path, plan, api)
+            main.saved.goal = {"text": MATRIX_GOAL}
+            reviewable = worker_runner != main_runner or worker_runner != light_runner
+            if reviewable:
+                key, frozen = main._fusion._resolve_units(_unit_facts())
+                expected_review = light_runner if light_runner != worker_runner else main_runner
+                _assert_unit_binding(key, frozen, models, worker_runner, light_runner, expected_review)
+                assert not main._fusion.registry.plans
+            else:
+                with pytest.raises(ValueError, match="no independent L1, L2 or L3 model"):
+                    main._fusion._resolve_units(_unit_facts())
+            assert _activity(tmp_path, plan, api) == before
     asyncio.run(scenario())

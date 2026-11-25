@@ -15,7 +15,7 @@ def test_fixture_disables_gates_by_default():
 @pytest.mark.fusion_gates
 def test_default_and_independent_gate_overrides():
     assert gates.DEFAULT is True
-    assert gates.GATES == ("drive", "brief", "report", "route", "acceptance", "inject", "map", "observer", "v3")
+    assert gates.GATES == ("drive", "brief", "report", "route", "acceptance", "inject", "map", "observer", "v3", "unit_plan")
     settings = AppSettings()
     assert not settings.fusion_gates
     assert all(gates.enabled(settings, name) for name in gates.GATES)

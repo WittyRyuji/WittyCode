@@ -61,7 +61,7 @@ from desktop.core.harness.prompt import build_instructions, changed_context, con
 from desktop.core.harness.store import FIRST_PROMPT, SavedSession, SavedTurn, diff_to_json, pair_in_place, paired, recover
 from desktop.core.harness.tools import ToolContext, ToolError
 from desktop.core.harness.toolset import HarnessTools
-from desktop.core.hooks import PromptEvent
+from desktop.core.hooks import PromptContext, PromptEvent
 from desktop.core.memory.launch import new_run
 from desktop.core.prompts import APPROVAL_OPTIONS, QuestionView
 from desktop.core.session_state import SESSION_STATE_LABELS, LiveSettings, SessionState, SteerOutcome
@@ -665,6 +665,7 @@ class ChatGPTController:
         self._tools.fusion_brief_runner = self._fusion.delegate_brief if self._fusion is not None and self._fusion.brief_enabled else None
         routing = self._fusion if self._fusion is not None and self._fusion.gate("route") else None
         self._tools.route_submitter = partial(self._submit_route, routing.submit_route) if routing is not None else None
+        self._tools.unit_runner = routing.delegate_unit if routing is not None and routing.unit_tools_available else None
         self._tools.route_guard = routing.route_guard if routing is not None else None
         self._tools.route_edit = routing.note_edit if routing is not None else None
         mapping = self._fusion if self._fusion is not None and self._fusion.map_enabled else None
@@ -693,6 +694,11 @@ class ChatGPTController:
                 return await task  # A parallel declare shares the spend instead of re-running it.
             except Exception as error:
                 return Outcome(f"Declare failed: {type(error).__name__}.", True)
+        if (intent == 'execute' and self._fusion is not None and self._fusion.unit_tools_available
+                and (binding := self._fusion.pending_approved_units())):
+            outcome = Outcome('Continue the approved frozen plan; activate it with submit_route({}). No units were reselected.')
+            self._declare_receipt = {'turn': self._turn, 'kind': kind, 'intent': intent, 'workplan': binding, 'outcome': outcome}
+            return outcome
         task = asyncio.ensure_future(self._route_topic(kind, intent, topic))
         self._declare_receipt = {"turn": self._turn, "task": task}
         try:
@@ -727,6 +733,9 @@ class ChatGPTController:
         from desktop.core.fusion import profiles
         from desktop.core.fusion.registry import FusionError
         from desktop.core.settings import default_settings_path
+        if self._fusion.unit_enabled:
+            from desktop.core.fusion.planning import UNIT_CONTRACT
+            return UNIT_CONTRACT
         policy = self._fusion.registry.policy
 
         def effort(model: str, role: str) -> str:
@@ -750,6 +759,8 @@ class ChatGPTController:
             return Outcome("submit_work_plan follows a plan or complex-execute declaration.", True)
         if isinstance(receipt.get("workplan"), Mapping):
             return Outcome("This turn already has a fixed work plan; it cannot be replaced.", True)
+        if self._fusion.unit_enabled or (set(data) == {'continue'} and self._fusion.unit_tools_available):
+            return await self._fusion.submit_units(data, receipt)
         try:
             workplan = planning.check(data)
         except ValueError as error:
@@ -763,7 +774,7 @@ class ChatGPTController:
         """A frozen route's items come from the turn's validated work plan, never re-scored by the model."""
         receipt = self._declare_state()
         workplan = receipt.get("workplan") if isinstance(receipt, dict) else None
-        if isinstance(workplan, dict):
+        if isinstance(workplan, dict) and 'frozen' not in workplan:
             items = [{"id": item["id"], "workstream": item["workstream"], "role": "worker",
                       "score": item["n"], "reason": item["evidence"], "paths": list(item["paths"]),
                       "deps": list(item["deps"]), "acceptance": item["acceptance"]}
@@ -908,6 +919,8 @@ class ChatGPTController:
         if self._proposed_plan:
             raise ValueError("This turn already submitted a plan.")
         self._proposed_plan = text
+        if self._fusion is not None:
+            self._fusion.metric_plan_proposal()
 
     def approve_plan(self, plan_id: str) -> bool:
         plan = self.saved.plan
@@ -963,7 +976,8 @@ class ChatGPTController:
         return None
 
     def send_prompt(self, text: str, attachments: Sequence[Attachment] = (), *, approved_plan: str = "",
-                    approved_workplan: Mapping[str, Any] | None = None, packed_context: bool = False) -> bool:
+                    approved_workplan: Mapping[str, Any] | None = None, packed_context: bool = False,
+                    packed_hooks: PromptContext | None = None) -> bool:
         text = text.strip()
         attachments = tuple(attachments)
         if attachments and not text:
@@ -984,7 +998,7 @@ class ChatGPTController:
                 raise
         # A Fusion pack already carries brief-based recall instead of the memory preface.
         preface = "" if packed_context else self.preface
-        context = self.manager.hooks.prompt(PromptEvent(self.engine, self.project, text, frozenset(self.recalled), first=bool(preface),
+        context = packed_hooks or self.manager.hooks.prompt(PromptEvent(self.engine, self.project, text, frozenset(self.recalled), first=bool(preface),
                                                         internal=self._fusion_parent is not None))
         sent, carried, outgoing = text, None, attachments
         handoff = self.handoff if self.handoff is not None and not self.handoff.empty else None
@@ -1030,7 +1044,7 @@ class ChatGPTController:
             self._fusion.start_route_turn()
         self._turn_done = asyncio.Event()
         self.transcript.set_working_state("thinking")
-        self._turn_task = self._spawn(self._run_turn(turn, sent, outgoing))
+        self._turn_task = self._spawn(self._run_turn(turn, sent, outgoing, **({'packed_connections': True} if packed_hooks else {})))
         self._notify("state")
         self._changed()
         return True
@@ -1103,7 +1117,17 @@ class ChatGPTController:
         except Exception as error:
             log.info("Could not save a Fusion title: %s", type(error).__name__)
 
-    async def _run_turn(self, turn: Turn, sent: str, attachments: Sequence[Attachment]) -> None:
+    async def _connection_prompt(self, connections, text: str) -> str:
+        if connections is None:
+            return ''
+        if not self._connection_started:
+            self._connection_context = await connections.hooks('SessionStart', self.project, {
+                'session_id': self.session_id, 'source': 'resume' if self.saved.items else 'startup'})
+            self._connection_started = True
+        extra = await connections.hooks('UserPromptSubmit', self.project, {'session_id': self.session_id, 'prompt': text})
+        return wrap_context(self._connection_context, extra)
+
+    async def _run_turn(self, turn: Turn, sent: str, attachments: Sequence[Attachment], *, packed_connections: bool = False) -> None:
         failure: BaseException | None = None
         end = None
         loop: AgentLoop | None = None
@@ -1118,12 +1142,8 @@ class ChatGPTController:
             # (read again every turn: a skill made during the conversation is there for the next message)
             found = await asyncio.to_thread(skills.discover, self.project)
             self._context.readable = skills.read_roots(found)
-            if tools.connections is not None:
-                if not self._connection_started:
-                    self._connection_context = await tools.connections.hooks("SessionStart", self.project, {"session_id": self.session_id, "source": "resume" if self.saved.items else "startup"})
-                    self._connection_started = True
-                extra = await tools.connections.hooks("UserPromptSubmit", self.project, {"session_id": self.session_id, "prompt": turn.user_block.text if turn.user_block else sent})
-                sent += wrap_context(self._connection_context, extra)
+            if not packed_connections:
+                sent += await self._connection_prompt(tools.connections, turn.user_block.text if turn.user_block else sent)
             item = user_item(sent, attachments)
             notes: list[str] = []
             sections: dict[str, str] = {}
@@ -1772,6 +1792,7 @@ class ChatGPTController:
         def requested(request: dict[str, Any], response: Finished | None, seconds: float, failed: bool) -> None:
             if self._turn is owner:
                 if fusion is not None:
+                    fusion.metric_summary_request(self.session_id, response is not None and response.usage is not None)
                     fusion.record_request(response, failed)
                 entry = self._trace.record(request, response, seconds, failed)
                 entry["kind"] = "summary"
@@ -2196,6 +2217,7 @@ class _Watch(Observer):
         self.owner = owner
         self.instructions = instructions
         """The turn's instructions: with the tool declarations, what every request holds besides the conversation."""
+        self._planning_outputs: tuple[list[str], bool] = ([], False)
         self._compacted_to = 0
         """The estimate right after the last compaction of this turn (or at the last one that could not help)."""
         self._staging = Staging() if candidate else None
@@ -2381,6 +2403,10 @@ class _Watch(Observer):
             fusion = self.ctl._fusion or getattr(self.ctl._fusion_parent, "_fusion", None)
             if fusion is not None:
                 usage = finished.usage if finished is not None else None
+                if self.ctl._fusion is not None:
+                    names, mixed = self._planning_outputs
+                    fusion.metric_planning_reply(names, mixed or failed, usage)
+                    self._planning_outputs = ([], False)
                 fusion.metric_request(self.ctl.session_id, usage is not None, usage.input_tokens if usage is not None else None)
                 fusion.record_request(finished, failed)
             self.ctl.saved.requests.append(self.ctl._trace.record(request, finished, seconds, failed))
@@ -2389,6 +2415,11 @@ class _Watch(Observer):
 
     def history_grew(self, items: Sequence[dict[str, Any]]) -> None:
         if self.current:
+            # The own-loop emits the current reply's items immediately before request_done. Never scan the archive
+            # or split a shared response bill according to text length. Retain names only, never request content.
+            if self.ctl._fusion is not None and any(i.get('type') == 'function_call' for i in items):
+                self._planning_outputs = ([i.get('name', '') for i in items if i.get('type') == 'function_call'],
+                                          any(i.get('type') not in ('function_call', 'reasoning') for i in items))
             if self._staging is not None and self._staging.staged():
                 # Still buffered as they are saved: marked now, unmarked the moment their text is published.
                 self._flagged.update(mark_candidates(items, self._staging))

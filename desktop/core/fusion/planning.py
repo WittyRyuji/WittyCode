@@ -218,6 +218,51 @@ def check(plan: object) -> dict[str, Any]:
     }
 
 
+UNIT_CONTRACT = (
+    'submit_work_plan(data={"units":[{"id":"a","task":"deliverable","J":5,"I":4,"C":2,'
+    '"basis":"observed facts","paths":["src"],"acceptance":"check"}]}) once. '
+    'J=judgment, I=importance, C=coordination (integers 0..10). Optional deps, expert or tags (author), '
+    'work_type (execute/manage/research/verify/review), review_required/risk/force_lead (hard signals). '
+    'Optional data.budget {tokens,turns,seconds} caps the whole Plan; Fusion computes unit steps. '
+    'Use [] for Main-only delivery. Do not select a model. After approval or submit_route({}), '
+    'delegate_task({"unit":"a"}) advances the frozen unit. Read the receipt for its next step.'
+)
+
+
+def unit_facts(data: Mapping[str, Any]) -> tuple[list[dict], dict]:
+    """Untrusted tool boundary. Never accept derived fields or a model-supplied roster."""
+    if set(data) - {"units", "budget"}:
+        raise ValueError("Submit only units and an optional budget, not selection results.")
+    raw = data.get("units")
+    if not isinstance(raw, list) or len(raw) > _MAX_ITEMS:
+        raise ValueError("Submit a short list of units with J/I/C facts.")
+    units = []
+    for item in raw:
+        if not isinstance(item, Mapping) or set(item) - {
+                "id", "task", "J", "I", "C", "basis", "acceptance", "paths", "deps", "expert", "tags", "work_type",
+                "risk", "review_required", "force_lead"}:
+            raise ValueError("Unknown unit field; supply facts, not a model, seat, budget or preference.")
+        facts = {key: item.get(key) for key in ("J", "I", "C")}
+        if any(type(v) is not int or not 0 <= v <= 10 for v in facts.values()):
+            raise ValueError("Each unit needs integer J, I and C in 0..10.")
+        signals = {key: item.get(key, False) for key in ("review_required", "risk", "force_lead")}
+        if any(type(v) is not bool for v in signals.values()):
+            raise ValueError("Hard review signals must be booleans.")
+        work_type = item.get('work_type', 'execute')
+        if work_type not in ('execute', 'manage', 'research', 'verify', 'review'):
+            raise ValueError('Unknown author work type (observe is reserved for the harness).')
+        units.append({"work_type": work_type, "id": _text(item.get("id"), "unit id", _MAX_ID),
+                      "task": _text(item.get("task"), "task", 2000), "basis": _text(item.get("basis"), "basis", 1000),
+                      "acceptance": _text(item.get("acceptance"), "acceptance", 2000), "paths": list(_paths(item.get("paths"))),
+                      "deps": list(_deps(item.get("deps"))), "expert": _text(item.get("expert", ""), "expert", 128, required=False),
+                      "tags": list(_lines(item.get("tags", []), "tags")), **facts, **signals})
+    if len({u['id'].casefold() for u in units}) != len(units):
+        raise ValueError("Each unit needs a unique id.")
+    if problem := check_deps(units):
+        raise ValueError(problem)
+    return units, _budget(data.get("budget", {}))
+
+
 def parse(text: object) -> tuple[dict[str, Any] | None, str]:
     """Decode and validate one planning JSON text for the calling side: ``(plan, "")`` on success,
     ``(None, reason)`` to hand back as the refusal."""

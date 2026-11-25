@@ -62,6 +62,8 @@ STEP_BUDGET_RANGE = (1, 1000)
 """Bounds of one delegation's step budget; the global per-turn cap still applies on top of it."""
 STEP_BUDGET_DEFAULT = (16, 32)
 """Remembered manual floor/ceiling before the user picks their own; both sides start adaptive."""
+FUSION_SEAT_MODEL_LIMIT = 32
+"""A guardrail for a settings file or bridge message, not a product target: real model menus are much smaller."""
 MAX_REMEMBERED_SESSIONS = 5000
 """Archived and renamed conversations kept in the settings file; a file with more is cut here."""
 MAX_SESSION_TITLE = 120
@@ -126,7 +128,10 @@ class AppSettings:
     """Automatic HTTP 502 retries in the own loop; zero disables them."""
     fusion_main: str = ""
     fusion_workers: list[str] = field(default_factory=list)
+    fusion_lights: list[str] = field(default_factory=list)
+    """L3 lightweight model pool, in the user's choice order."""
     fusion_light: str = ""
+    """Legacy scalar mirror of the first L3 model; kept written so an older build does not lose the setting."""
     fusion_reasoning: dict[str, str] = field(default_factory=dict)
     """Role:page-model-id -> effort for new Fusion sessions; legacy per-model keys remain readable."""
     fusion_preference: int = 50
@@ -386,6 +391,17 @@ def settings_from_dict(raw: object) -> AppSettings:
             return float(value)
         return getattr(defaults, name)
 
+    def model_pool(name: str) -> list[str]:
+        values = raw.get(name)
+        if not isinstance(values, list):
+            return []
+        return list(dict.fromkeys(item.strip() for item in values if isinstance(item, str) and item.strip()))[:FUSION_SEAT_MODEL_LIMIT]
+
+    # New files keep the first L3 model in the legacy scalar too. If the two disagree, the scalar goes first:
+    # that is the value an older build would have kept using, so loading must not drop it.
+    legacy_light = text("fusion_light")
+    fusion_lights = list(dict.fromkeys(([legacy_light] if legacy_light else []) + model_pool("fusion_lights")))[:FUSION_SEAT_MODEL_LIMIT]
+
     splitter = raw.get("splitter_sizes")
     if not (
         isinstance(splitter, list)
@@ -499,8 +515,9 @@ def settings_from_dict(raw: object) -> AppSettings:
         reconnect_interval=integer("reconnect_interval", RECONNECT_INTERVAL_RANGE),
         reconnect_limit=integer("reconnect_limit", RECONNECT_LIMIT_RANGE),
         fusion_main=text("fusion_main"),
-        fusion_workers=list(dict.fromkeys(item for item in raw.get("fusion_workers", []) if isinstance(item, str) and item.strip()))[:1] if isinstance(raw.get("fusion_workers"), list) else [],
-        fusion_light=text("fusion_light"),
+        fusion_workers=model_pool("fusion_workers"),
+        fusion_lights=fusion_lights,
+        fusion_light=fusion_lights[0] if fusion_lights else "",
         fusion_reasoning=fusion_reasoning,
         fusion_preference=raw.get("fusion_preference") if isinstance(raw.get("fusion_preference"), int) and not isinstance(raw.get("fusion_preference"), bool) and 0 <= raw["fusion_preference"] <= 100 else defaults.fusion_preference,
         fusion_max_calls=raw.get("fusion_max_calls") if isinstance(raw.get("fusion_max_calls"), int) and not isinstance(raw.get("fusion_max_calls"), bool) and 1 <= raw["fusion_max_calls"] <= 1000 else defaults.fusion_max_calls,
@@ -550,7 +567,13 @@ def settings_from_dict(raw: object) -> AppSettings:
 
 
 def settings_to_dict(settings: AppSettings) -> dict[str, Any]:
-    return {"version": SETTINGS_VERSION, **asdict(settings)}
+    data = {"version": SETTINGS_VERSION, **asdict(settings)}
+    lights = list(dict.fromkeys(item for item in data.get("fusion_lights", []) if isinstance(item, str) and item.strip()))
+    if not lights and isinstance(data.get("fusion_light"), str) and data["fusion_light"].strip():
+        lights = [data["fusion_light"].strip()]
+    data["fusion_lights"] = lights[:FUSION_SEAT_MODEL_LIMIT]
+    data["fusion_light"] = data["fusion_lights"][0] if data["fusion_lights"] else ""
+    return data
 
 
 def load_settings(path: Path | None = None) -> AppSettings:

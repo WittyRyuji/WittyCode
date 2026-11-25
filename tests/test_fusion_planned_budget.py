@@ -206,3 +206,33 @@ def test_token_gate_silent_without_a_numeric_plan_budget(tmp_path):
     for budget in (None, {"tokens": "adaptive", "turns": "adaptive", "seconds": "adaptive"}):
         rt = _runtime(tmp_path, plan_budget=budget)
         assert rt._plan_budget_gate("x" * 100000) == ""
+
+
+# --------------------------------------------------------------------------- curve04 plan upper limits
+
+
+@pytest.mark.parametrize(("manual_high", "global_cap", "plan", "expected"), [
+    (95, 100, 98, 95),   # the selected manual upper is not widened by global or plan numbers
+    (95, 80, 98, 80),    # the global cap tightens it
+    (95, 100, 70, 70),   # the plan cap tightens it
+    (95, 80, 70, 70),    # independent upper limits never stack into a larger allowance
+])
+def test_curve04_manual_global_and_plan_upper_limits_never_exceed_the_tightest(manual_high, global_cap, plan, expected):
+    decision = step_budget.resolve_curve04(step_budget.Side(False, 35), step_budget.Side(False, manual_high),
+                                           size=0, cap=global_cap, plan=plan)
+    assert (decision.m, decision.low, decision.high, decision.steps) == (35, 35, expected, 35)
+    assert decision.high <= manual_high and decision.high <= global_cap and decision.high <= plan
+
+
+def test_curve04_plan_upper_limit_wins_even_below_the_minimum():
+    decision = step_budget.resolve_curve04(step_budget.Side(True, 0), step_budget.Side(True, 0),
+                                           size=0, cap=1000, plan=10)
+    assert (decision.m, decision.low, decision.high, decision.steps) == (16, 10, 10, 10)
+    assert "plan cap 10" in decision.caps
+
+
+def test_curve04_plan_numbers_do_not_widen_the_adaptive_ceiling_or_change_the_default_start():
+    decision = step_budget.resolve_curve04(step_budget.Side(True, 0), step_budget.Side(True, 0),
+                                           size=0, cap=1000, plan=500)
+    assert (decision.low, decision.high, decision.steps) == (16, 69, 16)
+    assert decision.steps == decision.low < decision.high

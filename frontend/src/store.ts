@@ -336,6 +336,7 @@ function mockData(): LiveData {
     compactAt: COMPACT_AT_DEFAULT,
     fusionMain: "",
     fusionWorkers: [],
+    fusionLights: [],
     fusionLight: "",
     fusionReasoning: {},
     fusionPreference: 50,
@@ -879,6 +880,8 @@ export const useStore = create<Store>((set, get) => ({
       }
       return;
     }
+    if (key === "fusionLights" && Array.isArray(value)) return set({ fusionLights: value, fusionLight: value[0] ?? "" });
+    if (key === "fusionLight" && typeof value === "string") return set({ fusionLight: value, fusionLights: value ? [value] : [] });
     if (key !== "fusionSteps") return set({ [key]: value } as Partial<LiveData>);
     if (typeof value !== "object" || Array.isArray(value)) return;
     const { min, minAdaptive, max, maxAdaptive } = value;

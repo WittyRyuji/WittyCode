@@ -1,10 +1,33 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { fusionChoices, fusionDisabledReason } from "../src/components/fusionModels.ts";
 import { applyEvent, emptyLiveData } from "../src/liveReducer.ts";
 import { buildModelMenu } from "../src/components/modelMenu.ts";
 import { fusionEffort, withFusionEffort } from "../src/lib/fusionReasoning.ts";
 import { toolLabel } from "../src/lib/format.ts";
+
+const settingsSrc = readFileSync(new URL("../src/components/FusionSettings.tsx", import.meta.url), "utf8");
+function pure(name) {
+  const m = settingsSrc.match(new RegExp(`export function ${name}\\b[\\s\\S]*?\\n}`, "m"));
+  assert.ok(m, `FusionSettings.tsx does not export ${name}`);
+  let code = m[0].replace("export function", "function");
+  const brace = code.indexOf("{");
+  const sig = code.slice(0, brace).replace(/: [^,()]+(?=[,)])/g, "").replace(/(\))\s*:[\s\S]+$/, "$1");
+  return new Function(`${sig}${code.slice(brace)}; return ${name};`)();
+}
+const fusionPreferenceText = pure("fusionPreferenceText");
+
+test("the Fusion preference exposes every integer and truthful endpoint semantics", () => {
+  assert.equal(fusionPreferenceText(0), "0：成本优先");
+  assert.equal(fusionPreferenceText(100), "100：质量优先");
+  assert.equal(fusionPreferenceText(71), "71；0 为成本优先，100 为质量优先");
+  assert.match(settingsSrc, /step=\{1\}/, "keyboard steps must allow every integer, including 71 to 72");
+  assert.ok(!settingsSrc.includes("1.5 - draft"), "the UI must not repeat the retired cost-weight formula");
+  assert.ok(!settingsSrc.includes("0.5 + draft"), "the UI must not repeat the retired quality-weight formula");
+  assert.ok(settingsSrc.includes("不承诺价格、结果质量、费用上限或账单金额"));
+  assert.ok(settingsSrc.includes("<span>0 · 成本优先</span><span>100 · 质量优先</span>"));
+});
 
 test("the agent tool uses the same Sub-Agent name as the team inspector", () => {
   assert.equal(toolLabel("Task"), "Sub-Agent");
@@ -32,6 +55,20 @@ test("live settings hydrate and explicitly clear Fusion effort overrides, includ
   assert.deepEqual(updated.fusionReasoning, levels);
   assert.deepEqual(applyEvent(updated, "settings", { settings: { fusionReasoning: {} } }).patch.fusionReasoning, {});
   assert.deepEqual(applyEvent(updated, "settings", { settings: {} }).patch.fusionReasoning, {});
+});
+
+test("Fusion light pools hydrate canonical values and the legacy scalar fallback", () => {
+  const initial = emptyLiveData();
+  assert.deepEqual(initial.fusionLights, []);
+  const modern = applyEvent(initial, "settings", { settings: { fusionLights: ["chatgpt:visible", "new:guarded"], fusionLight: "chatgpt:visible" } }).patch;
+  assert.deepEqual(modern.fusionLights, ["chatgpt:visible", "new:guarded"]);
+  assert.equal(modern.fusionLight, "chatgpt:visible");
+  const legacy = applyEvent(initial, "settings", { settings: { fusionLight: "chatgpt:visible" } }).patch;
+  assert.deepEqual(legacy.fusionLights, ["chatgpt:visible"]);
+  assert.equal(legacy.fusionLight, "chatgpt:visible");
+  const cleared = applyEvent(initial, "settings", { settings: { fusionLights: [] } }).patch;
+  assert.deepEqual(cleared.fusionLights, []);
+  assert.equal(cleared.fusionLight, "");
 });
 
 test("timeout hydrates both fields, preserving explicit legacy seconds", () => {

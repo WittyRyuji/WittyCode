@@ -8,6 +8,7 @@ here are pure; ``desktop.core.fusion.runtime`` reads the settings.
 """
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -165,3 +166,114 @@ def planned_budget(raw: Mapping[str, Any] | None, band: Band, max_seconds: int) 
     if tokens_est is not None:
         parts.append(f"plan tokens ~{tokens_est} estimate")
     return PlannedBudget(steps, seconds_cap, tokens_est, "; ".join(parts) if parts else "plan budget adaptive")
+
+
+# --------------------------------------------------------------------------- curve04 (new dispatch, beside legacy V3)
+
+CURVE04_SIZE_MAX = 19
+"""The size score uses the existing bounded 0..19 scale."""
+
+
+@dataclass(frozen=True, slots=True)
+class Curve04Budget:
+    """One curve04 delegation decision.
+
+    ``m`` is the actual minimum before upper limits: the adaptive value, or the manual
+    minimum when that side is manual. ``low`` is that minimum after hard upper limits
+    (they win even when they fall below the floor), ``high`` the final ceiling, and
+    ``steps`` the value to use for the delegation. ``curve_ceiling`` is the unclamped
+    curve result for ``m``; ``caps`` names the upper limits that tightened it.
+    """
+    m: int
+    low: int
+    high: int
+    steps: int
+    curve_ceiling: int
+    source: str
+    caps: tuple[str, ...] = ()
+
+
+def curve04_value(m: float) -> float:
+    """The curve04 difficulty response ``f(m)`` used only to shape the ceiling ratio."""
+    return 10 - m / 5 if m <= 20 else 2 + 4 * math.exp(-(m - 20) / 20)
+
+
+def curve04_ratio(m: float) -> float:
+    """The clipped ratio ``R`` of curve04: 5 at m=10 or below, 1.5 at m=100 or above."""
+    low, high = curve04_value(10), curve04_value(100)
+    position = (curve04_value(m) - high) / (low - high)
+    return 1.5 + 3.5 * min(max(position, 0.0), 1.0)
+
+
+def curve04_ceiling(m: int | float) -> int:
+    """Round half up the curve04 ceiling for a positive minimum ``m``."""
+    try:
+        value = float(m)
+    except (TypeError, ValueError):
+        raise ValueError("curve04 m must be a positive finite number.") from None
+    if not math.isfinite(value) or value < 1:
+        raise ValueError("curve04 m must be a positive finite number.")
+    return math.floor(value * curve04_ratio(value) + 0.5)
+
+
+def _curve04_difficulty(difficulty: int | float) -> float:
+    try:
+        value = float(difficulty)
+    except (TypeError, ValueError):
+        raise ValueError("curve04 difficulty must be a number in 0..1.") from None
+    if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+        raise ValueError("curve04 difficulty must be a number in 0..1.")
+    return value
+
+
+def curve04_minimum(size: int, difficulty: int | float = 0.0) -> int:
+    """The adaptive minimum ``m = 16 + 4S + floor((16 + 4S)D/2)``.
+
+    ``S`` is clamped to the existing 0..19 task-size scale. ``D`` is the normalized
+    difficulty/rework factor in 0..1; callers using a 0..100 risk index must divide it
+    first rather than letting a percent silently become a fiftyfold allowance.
+    """
+    size = min(max(int(size), 0), CURVE04_SIZE_MAX)
+    base = 16 + 4 * size
+    return base + math.floor(base * _curve04_difficulty(difficulty) / 2)
+
+
+def effective_curve04_steps(requested: int | None, budget: Curve04Budget) -> int:
+    """Clamp an explicit request into the curve04 band; omitting it starts at ``m`` after caps."""
+    return budget.low if requested is None else min(max(requested, budget.low), budget.high)
+
+
+def resolve_curve04(low: Side, high: Side, size: int, cap: int, *, difficulty: int | float = 0.0,
+                    plan: int | None = None, requested: int | None = None) -> Curve04Budget:
+    """Resolve the new dispatch step budget without any model estimate in the calculation.
+
+    The adaptive minimum comes from ``curve04_minimum``. When the minimum is manual and
+    the maximum adaptive, the curve is applied to that actual manual minimum. A manual
+    maximum replaces the adaptive ceiling; the global and approved-plan upper limits then
+    tighten whichever ceiling was selected. Upper limits win even below the minimum, so
+    the returned decision never exceeds them. With no ``requested`` count the delegation
+    starts at the minimum rather than spending the whole ceiling.
+    """
+    adaptive_m = curve04_minimum(size, difficulty)
+    m = adaptive_m if low.adaptive else max(1, int(low.value))
+    curve_ceiling = curve04_ceiling(m)
+    selected_high = curve_ceiling if high.adaptive else max(1, int(high.value))
+    upper = [max(1, int(cap))]
+    cap_names = []
+    if upper[0] < selected_high:
+        cap_names.append(f"global cap {upper[0]}")
+    if type(plan) is int and plan > 0:
+        upper.append(plan)
+        if plan < min(selected_high, upper[0]):
+            cap_names.append(f"plan cap {plan}")
+    final_high = min(selected_high, *upper)
+    final_low = min(m, final_high)
+    kinds = ("adaptive" if low.adaptive else "manual", "adaptive" if high.adaptive else "manual")
+    source = f"curve04 {kinds[0]} min {m} + {kinds[1]} max {selected_high}"
+    if high.adaptive:
+        source += f" (curve ceiling {curve_ceiling})"
+    if cap_names:
+        source += "; " + "; ".join(cap_names)
+    steps = effective_curve04_steps(requested, Curve04Budget(m, final_low, final_high, final_low,
+                                                             curve_ceiling, source, tuple(cap_names)))
+    return Curve04Budget(m, final_low, final_high, steps, curve_ceiling, source, tuple(cap_names))

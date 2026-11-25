@@ -41,6 +41,15 @@ BRIEF_PARAMETERS: dict[str, Any] = {
     },
     "required": ["workstream", "identity", "goal", "constraints", "acceptance", "paths"],
 }
+UNIT_PARAMETERS = {"type": "object", "properties": {"unit": {"type": "string"},
+                   "resume": {"type": "boolean", "description": "Explicit continuation after inspecting the handoff."}},
+                   "required": ["unit"], "additionalProperties": False}
+UNIT_DELEGATE = {"name": "delegate_task", "description": "Run the next frozen stage of one unit.", "parameters": UNIT_PARAMETERS}
+UNIT_BATCH = {"name": "delegate_tasks", "description": "Advance independent frozen units.", "parameters": {
+    "type": "object", "properties": {"tasks": {"type": "array", "items": UNIT_PARAMETERS, "minItems": 1, "maxItems": 4}},
+    "required": ["tasks"], "additionalProperties": False}}
+UNIT_ROUTE = {"name": "submit_route", "description": "Activate the bound frozen plan; submit an empty object.",
+              "parameters": {"type": "object", "properties": {}, "additionalProperties": False}}
 REPORT_PARAMETERS: dict[str, Any] = {
     "type": "object",
     "properties": {
