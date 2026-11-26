@@ -21,6 +21,7 @@ import asyncio
 import hashlib
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import replace
 from typing import Any
 
 from desktop.core.fusion import debate_bridge
@@ -29,6 +30,7 @@ from desktop.core.harness import asking, outputs, plan_approval, recall_tool
 from desktop.core.harness.loop import ALLOW, ASK, DENY, Call, Outcome, Verdict
 from desktop.core.harness.mcp import McpClient, McpTool
 from desktop.core.harness.permissions import _rememberable_command, action_view, decide, remember_key
+from desktop.core.harness.shell import RUNNER_SHELL_DESCRIPTION, ShellStatus, ShellWatch
 from desktop.core.harness.tools import ToolContext, ToolError, ToolRegistry, ToolSpec
 from desktop.core.prompts import ActionView, QuestionView
 
@@ -95,6 +97,10 @@ class HarnessTools:
         self.route_edit: Callable[[], None] | None = None
         self.rating_submitter: Callable[[Mapping[str, Any]], Awaitable[Outcome]] | None = None
         self.strict_context = False
+        self.runner_shell = False  # Enabled only by the Fusion delegation that owns the hard deadline.
+        self.active_shell: ShellWatch | None = None
+        self.shell_progress: Callable[[Call, ShellStatus], None] | None = None
+        self.shell_health_check: Callable[[Call, ShellStatus], str | None] | None = None
         self.permission_parent: HarnessTools | None = None
         """Fusion experts use the main session's live level and grants, without sharing their own approvals back."""
         self.plan = False
@@ -124,6 +130,13 @@ class HarnessTools:
 
     def declarations(self) -> list[dict[str, Any]]:
         declared = [{"name": spec.name, "description": spec.description, "parameters": spec.parameters} for spec in self.registry.specs()]
+        if self.runner_shell:
+            for item in declared:
+                if item["name"] == "shell":
+                    schema = item["parameters"]
+                    item["parameters"] = {**schema, "properties": {k: v for k, v in schema["properties"].items() if k != "timeout"}}
+                    item["description"] = RUNNER_SHELL_DESCRIPTION
+                    break
         if self.asker is not None:
             declared.append(dict(asking.DECLARATION))
         if self.plan_submitter is not None:
@@ -564,7 +577,21 @@ class HarnessTools:
             return outcome
         spec = self.registry.get(call.name)
         if spec is not None:
-            result = await self.registry.run(call.name, call.args, self.context)
+            if call.name == "shell" and self.runner_shell:
+                def on_status(status: ShellStatus) -> str | None:
+                    if self.shell_progress is not None:
+                        self.shell_progress(call, status)
+                    return self.shell_health_check(call, status) if self.shell_health_check is not None else None
+
+                watch = self.active_shell = ShellWatch(on_status)
+                try:
+                    # Ignore a legacy/hallucinated timeout instead of bringing back a second timer.
+                    args = {k: v for k, v in call.args.items() if k != "timeout"}
+                    result = await self.registry.run(call.name, args, replace(self.context, shell_watch=watch))
+                finally:
+                    self.active_shell = None
+            else:
+                result = await self.registry.run(call.name, call.args, self.context)
             return Outcome(result.output, result.is_error, tuple(result.diffs), images=result.images)
         client, tool = self._mcp[call.name]
         result_ = await client.call(tool.name, call.args)

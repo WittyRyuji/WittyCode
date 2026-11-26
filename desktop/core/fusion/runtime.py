@@ -2430,6 +2430,7 @@ class FusionRuntime:
         self._delegations.add(running)
         self.parent._changed()
         child: ChatGPTController | None = None
+        child_tools = None
         observed: ObservedRun | None = None
         before: Tokens | None = None
         measured_task = self.measurement
@@ -2489,6 +2490,7 @@ class FusionRuntime:
             parent_tools = await self.parent._ensure_tools()
             child_tools = await child._ensure_tools()
             child_tools.permission_parent = parent_tools
+            child_tools.runner_shell = stage == 'runner' if plan_key else expert.identity == 'Runner'
             if plan_key:
                 child_tools.frozen_paths = write_paths
             before = child.usage
@@ -2713,6 +2715,7 @@ class FusionRuntime:
             raise
         except Exception as error:
             timed_out = started and isinstance(error, TimeoutError)
+            shell = child_tools.active_shell if timed_out and child_tools is not None else None
             if timed_out and child is not None:
                 budget_receipt = format_budget_receipt(child.turn_step_limit(), seconds)
             if child is not None and child.busy:
@@ -2733,11 +2736,21 @@ class FusionRuntime:
                 budget_stop = 'time limit'
             if check is not None and timed_out and child is not None and not child.busy and not (child._turn_task and not child._turn_task.done()):
                 check.reason = "timeout"
+            if shell is not None:
+                message = f"Runner reached its {seconds}-second round limit while running a command. {shell.cleanup_note()}"
+                if shell.partial_output:
+                    try:
+                        ref = await asyncio.to_thread(self.parent._outputs.put, shell.partial_output)
+                        message += f"\nPartial command output (not a completed check):\n{hint(ref)}"
+                    except (OSError, ToolError):
+                        message += " Partial command output could not be retained."
             outcome = Outcome(message, True)
             if observed is not None and timed_out and observed.report is None:
                 observed.report = observer.Report("timeout", "fact", _BUDGET_EXCEEDED.format(unit="time"))
             return outcome
         finally:
+            if child_tools is not None:
+                child_tools.runner_shell = False
             if check is not None and (declined or reporting is not None and reporting.accepted is not None
                                       and (reporting.accepted.status != "done" or reporting.accepted.evidence)):
                 check.reason = ""  # Never retry a denied action or rerun a check to replace its findings.

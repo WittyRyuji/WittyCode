@@ -59,6 +59,7 @@ from desktop.core.harness.permissions import LEVELS
 from desktop.core.harness.diagnostics import MAX_RECORDS, RequestTrace
 from desktop.core.harness.prompt import build_instructions, changed_context, context_refresh, context_update
 from desktop.core.harness.store import FIRST_PROMPT, SavedSession, SavedTurn, diff_to_json, pair_in_place, paired, recover
+from desktop.core.harness.shell import ShellStatus
 from desktop.core.harness.tools import ToolContext, ToolError
 from desktop.core.harness.toolset import HarnessTools
 from desktop.core.hooks import PromptContext, PromptEvent
@@ -645,6 +646,7 @@ class ChatGPTController:
             if self._mcp_task is not None and not self._mcp_task.done() and (not self._clients or any(not c.tools for c in self._clients)):
                 self.transcript.add_notice("部分 MCP 工具仍在启动；本次工具清单已固定。待服务器就绪后，重新打开会话可使用新工具。")
             self._tools = HarnessTools(self.manager.registry, self._context, self.autonomy, self._clients, asker=self._ask_questions)
+            self._tools.shell_progress = self._shell_progress
             self._tools.plan_submitter = self._submit_plan
             if self._fusion_identity is not None:
                 self._tools.identity_tools = self._fusion_identity.tools
@@ -677,6 +679,15 @@ class ChatGPTController:
         self._tools.declare_state = self._declare_state if debating is not None else None
         self._tools.work_plan_submitter = self._submit_work_plan if debating is not None else None
         return self._tools
+
+    def _shell_progress(self, call: Call, status: ShellStatus) -> None:
+        turn = self._turn
+        item = turn.tools.get(call.call_id) if turn is not None else None
+        if turn is None or item is None or item.terminal:
+            return
+        output = ("暂未收到输出" if status.output_idle is None else f"距最近输出约 {int(status.output_idle)} 秒")
+        self.transcript.tool_running(turn, item, f"命令仍在运行：已用 {int(status.elapsed)} 秒；{output}。")
+        self._changed()
 
     def _declare_state(self) -> dict[str, Any] | None:
         """The running turn's declaration receipt; a pending one has no ``intent`` yet and unlocks nothing."""

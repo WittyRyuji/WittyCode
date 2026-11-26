@@ -34,13 +34,15 @@ import asyncio
 import codecs
 import contextlib
 import fnmatch
+import logging
 import os
 import re
 import shutil
 import signal
 import sys
 import threading
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +50,7 @@ from desktop.core.harness.fs_tools import is_protected, is_within, resolve_path
 from desktop.core.harness.tools import ToolContext, ToolError, ToolRegistry, ToolResult, ToolSpec, passthrough_input
 from desktop.core.winproc import CREATE_NO_WINDOW
 
+log = logging.getLogger("desktop.harness.shell")
 IS_WINDOWS = sys.platform == "win32"
 
 DEFAULT_TIMEOUT = 120
@@ -56,6 +59,7 @@ MAX_COMMAND_CHARS = 30_000
 MAX_OUTPUT_CHARS = 30_000
 HEAD_BYTES = TAIL_BYTES = 64 * 1024
 POLL_SECONDS = 0.1
+HEARTBEAT_SECONDS = 60.0
 KILL_WAIT_SECONDS = 5.0
 DRAIN_SECONDS = 2.0
 COMMAND_ENV = "WITTYCODE_SHELL_COMMAND"
@@ -196,45 +200,72 @@ class _Capture:
         return f"{head[:half]}\n[... {omitted} characters omitted ...]\n{tail[-half:]}"
 
 
-async def _pump(stream: asyncio.StreamReader, capture: _Capture) -> None:
+@dataclass(frozen=True, slots=True)
+class ShellStatus:
+    """A snapshot while the foreground process is still running; no output is not a health verdict."""
+
+    elapsed: float
+    output_idle: float | None  # None when no output has been received at all.
+
+
+@dataclass(slots=True)
+class ShellWatch:
+    """Internal only. A callback may return a trusted health failure, never a verdict inferred from output silence."""
+
+    on_status: Callable[[ShellStatus], str | None]
+    failure: str = ""
+    tree_stopped: bool = False
+    partial_output: str = ""
+
+    def cleanup_note(self) -> str:
+        return ("Process-tree termination confirmed." if self.tree_stopped
+                else "Process-tree termination could not be confirmed.")
+
+
+async def _pump(stream: asyncio.StreamReader, capture: _Capture, on_output: Callable[[], None]) -> None:
     while True:
         chunk = await stream.read(65536)
         if not chunk:
             return
         capture.feed(chunk)
+        on_output()
 
 
 # --------------------------------------------------------------------------- process
 
 
-async def _kill_tree(process: asyncio.subprocess.Process) -> None:
-    """End the process and everything it started. ``taskkill /T`` walks the parent links, so it must run while the
-    shell is still alive."""
-    if process.returncode is None:
-        if IS_WINDOWS:
-            try:
-                killer = await asyncio.create_subprocess_exec(
-                    shutil.which("taskkill") or "taskkill",
-                    "/F",
-                    "/T",
-                    "/PID",
-                    str(process.pid),
-                    stdin=asyncio.subprocess.DEVNULL,
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.DEVNULL,
-                    creationflags=CREATE_NO_WINDOW,
-                )
-                await asyncio.wait_for(killer.wait(), KILL_WAIT_SECONDS)
-            except (OSError, asyncio.TimeoutError):
-                pass
-        else:
-            with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.killpg(process.pid, signal.SIGKILL)
-        with contextlib.suppress(ProcessLookupError):
-            process.kill()
+async def _kill_tree(process: asyncio.subprocess.Process) -> bool:
+    """End the process tree and report whether the OS accepted the tree kill (not just the fallback shell kill)."""
+    if process.returncode is not None:
+        return False
+    killed = False
+    if IS_WINDOWS:
+        # taskkill /T walks the parent links, so it must run while the shell is still alive.
+        try:
+            killer = await asyncio.create_subprocess_exec(
+                shutil.which("taskkill") or "taskkill",
+                "/F",
+                "/T",
+                "/PID",
+                str(process.pid),
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+                creationflags=CREATE_NO_WINDOW,
+            )
+            killed = await asyncio.wait_for(killer.wait(), KILL_WAIT_SECONDS) == 0
+        except (OSError, asyncio.TimeoutError):
+            pass
+    else:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(process.pid, signal.SIGKILL)
+            killed = True
+    with contextlib.suppress(ProcessLookupError):
+        process.kill()
+    return killed
 
 
-async def _reap(process: asyncio.subprocess.Process, waiter: asyncio.Future[Any], reader: asyncio.Future[Any]) -> None:
+async def _reap(process: asyncio.subprocess.Process, waiter: asyncio.Future[Any], reader: asyncio.Future[Any]) -> bool:
     with contextlib.suppress(asyncio.TimeoutError, OSError):
         await asyncio.wait_for(asyncio.shield(waiter), KILL_WAIT_SECONDS)
     # A program the shell left running may still hold the pipe open; what it printed so far is all there will be.
@@ -243,15 +274,16 @@ async def _reap(process: asyncio.subprocess.Process, waiter: asyncio.Future[Any]
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await task
+    return process.returncode is not None and not pending
 
 
 async def run_shell(
     command: str,
     cwd: Path,
-    timeout: float,
+    timeout: float | None,
     abort_event: threading.Event | None = None,
     blocked: tuple[str, ...] = (),
-    *, retain: bool = False,
+    *, retain: bool = False, watch: ShellWatch | None = None,
 ) -> tuple[str, int, bool, bool]:
     """Run ``command``; returns ``(output, exit_code, timed_out, aborted)``. ``exit_code`` is -1 when there is none."""
     if abort_event is not None and abort_event.is_set():
@@ -268,12 +300,21 @@ async def run_shell(
         **extra,
     )
     capture = _Capture(retain=retain)
+    clock = asyncio.get_running_loop().time
+    started = clock()
+    last_output: float | None = None
+
+    def on_output() -> None:
+        nonlocal last_output
+        last_output = clock()
+
     assert process.stdout is not None
-    reader = asyncio.ensure_future(_pump(process.stdout, capture))
+    reader = asyncio.ensure_future(_pump(process.stdout, capture, on_output))
     waiter = asyncio.ensure_future(process.wait())
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout
+    deadline = started + timeout if timeout is not None else float("inf")
+    next_status = started + HEARTBEAT_SECONDS if watch is not None else float("inf")
     timed_out = aborted = False
+    stop: asyncio.Task[None] | None = None
     try:
         while True:
             if capture.exceeded:
@@ -281,26 +322,43 @@ async def run_shell(
             if abort_event is not None and abort_event.is_set():
                 aborted = True
                 break
-            remaining = deadline - loop.time()
-            if remaining <= 0:
+            now = clock()
+            if now >= deadline:
                 timed_out = True
                 break
-            done, _ = await asyncio.wait({waiter}, timeout=min(POLL_SECONDS, remaining))
+            if watch is not None and now >= next_status:
+                next_status = now + HEARTBEAT_SECONDS
+                if process.returncode is None:
+                    status = ShellStatus(now - started, None if last_output is None else now - last_output)
+                    try:
+                        watch.failure = watch.on_status(status) or ""
+                    except Exception:
+                        log.exception("Local shell status callback failed")
+                    if watch.failure:
+                        break
+            done, _ = await asyncio.wait({waiter}, timeout=min(POLL_SECONDS, deadline - now, next_status - now))
             if done:
                 break
-        if timed_out or aborted or capture.exceeded:
-            await _kill_tree(process)
-        await _reap(process, waiter, reader)
+        if timed_out or aborted or capture.exceeded or (watch is not None and watch.failure):
+            stop = asyncio.create_task(_stop_process(process, waiter, reader, watch))
+            await asyncio.shield(stop)
+        else:
+            await _reap(process, waiter, reader)
     except asyncio.CancelledError:
-        await asyncio.shield(_cancel_cleanup(process, waiter, reader))
+        await asyncio.shield(stop or _stop_process(process, waiter, reader, watch))
+        if watch is not None:
+            watch.partial_output = capture.text()
         raise
     code = process.returncode if process.returncode is not None and not capture.exceeded else -1
     return capture.text(), code, timed_out, aborted
 
 
-async def _cancel_cleanup(process: asyncio.subprocess.Process, waiter: asyncio.Future[Any], reader: asyncio.Future[Any]) -> None:
-    await _kill_tree(process)
-    await _reap(process, waiter, reader)
+async def _stop_process(process: asyncio.subprocess.Process, waiter: asyncio.Future[Any], reader: asyncio.Future[Any],
+                        watch: ShellWatch | None) -> None:
+    killed = await _kill_tree(process)
+    reaped = await _reap(process, waiter, reader)
+    if watch is not None:
+        watch.tree_stopped = killed and reaped
 
 
 # --------------------------------------------------------------------------- protected paths in command text
@@ -566,18 +624,24 @@ async def shell(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
             f"Access denied: the argument {leads[0]!r} leads to {leads[1]}, a protected location "
             "(application settings or credentials)."
         )
-    timeout = args.get("timeout", DEFAULT_TIMEOUT)
+    watch = ctx.shell_watch
+    # Only Fusion's bounded Runner installs a watch through the Harness toolset. Its owner cancels the call at deadline.
+    timeout = args.get("timeout", DEFAULT_TIMEOUT) if watch is None else None
     try:
-        output, code, timed_out, aborted = await run_shell(command, cwd, timeout, ctx.abort, ctx.secret_env, retain=ctx.outputs is not None)
+        output, code, timed_out, aborted = await run_shell(command, cwd, timeout, ctx.abort, ctx.secret_env,
+                                                          retain=ctx.outputs is not None, watch=watch)
     except OSError as error:
         raise ToolError(f"Could not start the shell: {error}") from None
+    failure = watch.failure if watch is not None else ""
     lines = [output or "(no output)"]
     if timed_out:
         lines.append(f"Timed out after {timeout} s")
     if aborted:
         lines.append("Stopped by the user")
+    if watch is not None and failure:
+        lines.append(f"Stopped after a local health check failed: {failure} {watch.cleanup_note()}")
     lines.append(f"Exit code: {code}")
-    return ToolResult("\n".join(lines), is_error=bool(code) or timed_out or aborted)
+    return ToolResult("\n".join(lines), is_error=bool(code) or timed_out or aborted or bool(failure))
 
 
 _DIALECT = (
@@ -586,16 +650,19 @@ _DIALECT = (
     else "/bin/sh."
 )
 
+_DESCRIPTION = (
+    f"Run one command in {_DIALECT} Returns the combined stdout and stderr, then a final `Exit code: N` line. "
+    "Runs in `cwd` (default: the project folder). stdin is closed, so the command must not wait for input. "
+    "Long output is previewed; use read_output for the retained text. Output above 16 MiB stops the command and is marked partial. "
+)
+_GUIDANCE = ("Do not start servers or watchers that never exit. Prefer read_file, list_dir, glob, grep, create_file "
+             "and edit_file to shell equivalents.")
+RUNNER_SHELL_DESCRIPTION = _DESCRIPTION + "The Runner's overall deadline applies to this command. " + _GUIDANCE
+
 SHELL = ToolSpec(
     name="shell",
-    description=(
-        f"Run one command in {_DIALECT} Returns the combined stdout and stderr, then a final `Exit code: N` line. "
-        "Runs in `cwd` (default: the project folder). stdin is closed, so the command must not wait for input. "
-        "Long output is previewed; use read_output for the retained text. Output above 16 MiB stops the command and is marked partial. After `timeout` seconds (default "
-        f"{DEFAULT_TIMEOUT}, at most {MAX_TIMEOUT}) the command and every process it started are killed. Do not start "
-        "servers or watchers that never exit. Prefer read_file, list_dir, glob, grep, create_file and edit_file to shell "
-        "equivalents."
-    ),
+    description=(_DESCRIPTION + f"After `timeout` seconds (default {DEFAULT_TIMEOUT}, at most {MAX_TIMEOUT}) "
+                 "the command and every process it started are killed. " + _GUIDANCE),
     parameters={
         "type": "object",
         "properties": {
