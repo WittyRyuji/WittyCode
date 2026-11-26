@@ -82,19 +82,36 @@ def test_fusion_settings_multi_pools_and_expert_editor_use_real_bridge(qapp, loo
         try:
             await select_fusion(rig)
             await rig.wait_text(".settings-body h2", "Fusion")
+            await wait_for(lambda: rig.js(
+                "document.querySelector('.settings').getAnimations({subtree: true})"
+                ".every(a => a.playState !== 'running' && a.playState !== 'pending')"), 30, "settings animation")
+
+            async def choose(picker: str, name: str) -> None:
+                await rig.click(picker + " .selectbox")
+                menu_item = picker + " .menu-item"
+                ready = (
+                    "(function(){"
+                    f"const item=[...document.querySelectorAll({json.dumps(menu_item)})].find(e=>e.textContent.includes({json.dumps(name)}));"
+                    "const menu=item&&item.closest('.menu');"
+                    "const visible=e=>getComputedStyle(e).visibility==='visible'&&e.getBoundingClientRect().width>0&&e.getBoundingClientRect().height>0;"
+                    "return menu&&!item.disabled&&visible(menu)&&visible(item)"
+                    "&&menu.getAnimations({subtree:true}).every(a=>a.playState!=='running'&&a.playState!=='pending');"
+                    "})()"
+                )
+                await wait_for(lambda: rig.js(ready), 30, f"{name} menu item")
+                await rig.click_text(menu_item, name)
+
             sol, luna = "chatgpt:gpt-6.1-sol", "chatgpt:gpt-6-luna"
             for role, name in (("main", "GPT-6.1-Sol"), ("worker", "GPT-6-Luna"), ("light", "GPT-6-Luna")):
                 row = f'.fusion-model-row[data-role="{role}"]'
-                await rig.click(row + " .fusion-model-picker .selectbox")
-                await rig.click_text(row + " .fusion-model-picker .menu-item", name)
+                await choose(row + " .fusion-model-picker", name)
                 await rig.wait_for(row + f'[data-model="{sol if role == "main" else luna}"]')
 
             for role, model, expected in (
                 ("worker", "GPT-6.1-Sol", [luna, sol]),
                 ("light", "GPT-6.1-Sol", [luna, sol]),
             ):
-                await rig.click(f'[data-pool="{role}"] .fusion-model-add .selectbox')
-                await rig.click_text(f'[data-pool="{role}"] .fusion-model-add .menu-item', model)
+                await choose(f'[data-pool="{role}"] .fusion-model-add', model)
                 actual = (lambda role=role: rig.core.settings.fusion_workers if role == "worker" else rig.core.settings.fusion_lights)
                 await until(lambda actual=actual, expected=expected: actual() == expected)
             await rig.wait_for(".fusion-model-row", 5)

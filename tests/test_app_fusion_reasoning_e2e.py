@@ -85,12 +85,17 @@ def test_fusion_efforts_are_per_model_and_default_clears_only_that_model(qapp, l
             width = await rig.js("window.innerWidth")
             adds = json.loads(await rig.js(
                 "JSON.stringify([...document.querySelectorAll('.fusion-model-list')].map(list => {"
-                "const row = list.querySelector('.fusion-model-row').getBoundingClientRect(), "
-                "add = list.querySelector('.fusion-model-add .selectbox').getBoundingClientRect(); "
-                "return {pool: list.dataset.pool, rowRight: row.right, addRight: add.right, addWidth: add.width}; }))"))
+                "const effort = list.querySelector('.fusion-effort-picker .selectbox').getBoundingClientRect(), "
+                "add = list.querySelector('.fusion-model-add .selectbox').getBoundingClientRect(), "
+                "label = list.querySelector('.fusion-model-add .selectbox span'), labelStyle = getComputedStyle(label); "
+                "return {pool: list.dataset.pool, leftDelta: add.left - effort.left, rightDelta: add.right - effort.right, "
+                "labelHeight: label.getBoundingClientRect().height, labelLineHeight: parseFloat(labelStyle.lineHeight), "
+                "labelOverflowX: label.scrollWidth - label.clientWidth, labelOverflowY: label.scrollHeight - label.clientHeight}; }))"))
             assert len(bounds) == 3
             assert {item["pool"] for item in adds} == {"worker", "light"}
-            assert all(abs(item["addRight"] - item["rowRight"]) < 1 for item in adds)
+            assert all(abs(item["leftDelta"]) < 1 and abs(item["rightDelta"]) < 1 for item in adds), adds
+            assert all(item["labelHeight"] <= item["labelLineHeight"] + 1 for item in adds), adds
+            assert all(item["labelOverflowX"] <= 1 and item["labelOverflowY"] <= 1 for item in adds), adds
             assert all(abs(item["ctlRight"] - item["fieldRight"]) < 1 for item in bounds)
             first = bounds[0]
             for key in ("modelLeft", "modelRight", "effortLeft", "effortRight"):
