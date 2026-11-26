@@ -134,7 +134,7 @@ ROUTE_DECLARATION: dict[str, Any] = {
 }
 CHOOSE_MAP_DECLARATION: dict[str, Any] = {
     "name": "choose_map_location",
-    "description": "Optionally choose the project map location early. Otherwise the first writing delegation asks. Does not ask again once chosen.",
+    "description": "Explicitly choose where to keep the project map. Unconfigured maps stay local; delegations never ask for a location.",
     "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
 }
 UPDATE_MAP_DECLARATION: dict[str, Any] = {

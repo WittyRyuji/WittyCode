@@ -147,28 +147,22 @@ def test_shared_run_requires_sharing_and_matching_fingerprint(tmp_path, shared):
     asyncio.run(go())
 
 
-def test_map_entries_are_path_scoped_and_flag_stale_fingerprints(tmp_path):
+def test_delegation_excludes_map_before_fingerprinting_but_keeps_task_records(tmp_path, monkeypatch):
+    from desktop.core.fusion import runtime
+
     async def go():
         async with _fusion(tmp_path, active=_ACTIVE) as (main, fake):
             drive = main._fusion.drive
-            path = main.project / "inventory.txt"
-            path.write_text("one item", encoding="utf-8")
-            paths = (path.name,)
-            stamp = fingerprint(main.project, paths)
-            stale = drive.put("map", "old-map", "Old stock map. " + "Inventory references. " * 200,
-                              paths=paths, fingerprint=stamp)
-            path.write_text("two items", encoding="utf-8")
-            fresh = drive.put("map", "new-map", "Current stock map.", paths=paths, fingerprint=fingerprint(main.project, paths))
-            unrelated = drive.put("map", "other-map", "Unrelated map.", paths=("other.txt",), fingerprint=stamp)
-            task = drive.put("run", "stock-run", "Stock check.", paths=paths)
-            await _turn(main, fake, _delegate(), _rated_report(fresh, stale, task), say("Reviewed."))
+            stamps = []
+            monkeypatch.setattr(runtime, "fingerprint", lambda _project, paths: stamps.append(paths) or "unchanged")
+            matching = drive.put("map", "matches", "Current stock map.", paths=(".",), fingerprint="old")
+            unrelated = drive.put("map", "other-map", "Unrelated map.", paths=("other.txt",), fingerprint="old")
+            task = drive.put("run", "stock-run", "Stock check.", paths=("inventory.txt",))
+            await _turn(main, fake, _delegate(), _rated_report(task), say("Reviewed."))
             prompt = _prompt(fake.requests[1])
-            assert prompt.index("## Task\n") < prompt.index("## Map entries") < prompt.index(fresh.id)
-            assert prompt.index(stale.id) < prompt.index("## Task entries") < prompt.index(task.id)
-            assert fresh.summary + " (needs review" not in prompt
-            stale_entry = prompt.split(stale.id, 1)[1].split("## Task entries", 1)[0].strip()
-            assert stale_entry.endswith("(needs review: files changed since this was written)")
-            assert unrelated.id not in prompt
+            assert prompt.index("## Task\n") < prompt.index("## Task entries") < prompt.index(task.id)
+            assert "## Map entries" not in prompt and matching.id not in prompt and unrelated.id not in prompt
+            assert stamps and all(paths == ("inventory.txt",) for paths in stamps)  # the delegation brief/report only
     asyncio.run(go())
 
 

@@ -7,15 +7,20 @@ import os
 import re
 import stat
 import tempfile
+import threading
 import tomllib
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from fnmatch import fnmatchcase
 from pathlib import Path
+from weakref import WeakValueDictionary
 
 from desktop.core.harness.loop import clip_tokens
+from desktop.core.plugin_lock import lock_file
 
+from .drive.filter import scrub
 from .inject import ENTRY_TOKENS
 
 STATUSES = ("unverified", "verified", "review")
@@ -30,6 +35,8 @@ _SOURCE = frozenset(".py .pyi .js .jsx .ts .tsx .mjs .cjs .mts .cts .vue .svelte
                     ".java .kt .cs .rb .php .swift .scala .sh .ps1 .lua .ex .exs .erl .hs .dart .r .sql .html .css .scss".split())
 _SCAN_LIMIT = 2_000
 _DEF_LIMIT = 256 * 1024
+_FILE_LOCKS: WeakValueDictionary[str, threading.Lock] = WeakValueDictionary()
+_FILE_LOCKS_GUARD = threading.Lock()
 
 
 @dataclass(frozen=True, slots=True)
@@ -378,6 +385,28 @@ def read(project: Path, *, strict: bool = False) -> ProjectMap | None:
         return None
 
 
+@contextmanager
+def file_lock(target: Path) -> Iterator[None]:
+    """Hold the same map lock through one worker's transaction, including on Windows across profiles."""
+    sidecar = target.with_suffix(".lock")
+    with _FILE_LOCKS_GUARD:
+        local = _FILE_LOCKS.setdefault(os.path.normcase(str(sidecar.parent.resolve() / sidecar.name)), threading.Lock())
+    with local:
+        try:
+            info = sidecar.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            if _linked(info) or not stat.S_ISREG(info.st_mode):
+                raise OSError("The project map lock is not a regular file.")
+        with lock_file(target, busy_message="项目地图正在写入，稍后再试。"):
+            yield
+
+
+def portable_lock(project: Path):
+    return file_lock(project / _FILENAME)
+
+
 def _paths(paths: Sequence[str]) -> tuple[str, ...]:
     normalized = []
     for path in paths:
@@ -400,17 +429,29 @@ def entries_for(project_map: ProjectMap, paths: Sequence[str]) -> tuple[MapEntry
     ))
 
 
-def touch(project_map: ProjectMap, workstream: str, paths: Sequence[str]) -> tuple[ProjectMap, tuple[str, ...]]:
-    """Record a dispatch, adding safe paths to its workstream when no module overlaps."""
+def apply_result(current: ProjectMap, paths: Sequence[str], goal: str, summary: str) -> ProjectMap:
+    """Describe the finished scope without replacing descriptions for wider or unrelated modules."""
     wanted = _paths(paths)
-    involved = entries_for(project_map, wanted)
-    if involved or not wanted:
-        return project_map, tuple(entry.module for entry in involved)
-    for entry in project_map.entries:
-        if entry.module == workstream:
-            entries = tuple(replace(item, paths=item.paths + wanted) if item is entry else item for item in project_map.entries)
-            return replace(project_map, entries=entries), (workstream,)
-    return replace(project_map, entries=(*project_map.entries, MapEntry(workstream, wanted))), (workstream,)
+    if not wanted or "." in wanted:
+        return current
+    role_data, method_data = map(scrub, (goal, summary))
+    role, method = (clip_tokens(" ".join(data.text.split()), ENTRY_TOKENS) for data in (role_data, method_data))
+    if role_data.suspect or method_data.suspect or not method:
+        return current
+    scope = {os.path.normcase(path) for path in wanted}
+    entries = list(current.entries)
+    for i, entry in enumerate(entries):
+        if {os.path.normcase(path) for path in entry.paths} == scope:
+            entries[i] = replace(entry, role=role or entry.role, method=method)
+            return replace(current, entries=tuple(entries))
+    # Plan unit IDs and workstream names can repeat across plans. Key a new entry by its actual scope.
+    base = ", ".join(wanted)
+    module, suffix = base, 1
+    existing = {entry.module for entry in entries}
+    while module in existing:
+        suffix += 1
+        module = f"{base} ({suffix})"
+    return replace(current, entries=(*entries, MapEntry(module, wanted, role, method)))
 
 
 def update(project_map: ProjectMap, module: str, *, paths: Sequence[str] | None = None, role: str | None = None,

@@ -26,7 +26,7 @@ from desktop.core.devin.policy import CANCELLED
 from desktop.core.engine_errors import EngineRpcError
 from desktop.core.fusion.acp_server import (ADDRESS, AUTH, MCP_CALL, MCP_LIST, MCP_WRAPPERS, NATIVE_IO, PREFIX, SERVER,
                                             private_mcp_name, tool_label)
-from desktop.core.fusion.tools import CHOOSE_MAP, RATE_RECORDS, READ_RECORD, SUBMIT_REPORT, SUBMIT_ROUTE, UPDATE_MAP
+from desktop.core.fusion.tools import CHOOSE_MAP, RATE_RECORDS, READ_MAP, READ_RECORD, SUBMIT_REPORT, SUBMIT_ROUTE, UPDATE_MAP
 from desktop.core.harness.loop import AgentLoop, Call, TurnEnd
 from desktop.core.memory.launch import PACKAGE_ROOT, console_python
 
@@ -192,7 +192,7 @@ class AcpRun:
             content.extend({"type": "image", "data": image["data"], "mimeType": image["media_type"]}
                            for image in result.get("wc_images", ()))
             reply = {"content": content}
-            if (name in (READ_RECORD, SUBMIT_REPORT, SUBMIT_ROUTE, RATE_RECORDS, CHOOSE_MAP, UPDATE_MAP)
+            if (name in (READ_RECORD, SUBMIT_REPORT, SUBMIT_ROUTE, RATE_RECORDS, READ_MAP, CHOOSE_MAP, UPDATE_MAP)
                     and self.host.saved.tools.get(ident, {}).get("status") == "error"):
                 reply["isError"] = True
             self._replies[invocation] = (signature, reply)

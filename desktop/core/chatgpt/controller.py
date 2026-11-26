@@ -670,7 +670,9 @@ class ChatGPTController:
         self._tools.unit_runner = routing.delegate_unit if routing is not None and routing.unit_tools_available else None
         self._tools.route_guard = routing.route_guard if routing is not None else None
         self._tools.route_edit = routing.note_edit if routing is not None else None
-        mapping = self._fusion if self._fusion is not None and self._fusion.map_enabled else None
+        mapping = self._fusion if self._fusion is not None and self._fusion.map_available else None
+        self._tools.map_reader = mapping.read_project_map if mapping is not None else None
+        mapping = mapping if mapping is not None and mapping.map_enabled else None
         self._tools.map_chooser = mapping.choose_map_location if mapping is not None else None
         self._tools.map_updater = mapping.update_map_entry if mapping is not None else None
         self._tools.read_only_brief = self._fusion_read_only
@@ -1233,8 +1235,6 @@ class ChatGPTController:
             if self._fusion is not None:
                 await self._fusion.sample_metrics(turn, start=True)
                 await self._fusion.retain_plan_route()
-                if not plan:
-                    await self._fusion.prepare_map_choice()
             if tuple(notes) != self._prompt_notes:
                 self._prompt_notes = tuple(notes)
                 for note in notes:
@@ -1275,14 +1275,12 @@ class ChatGPTController:
             fusion = self._fusion
             verdict = fusion.acceptance_verdict() if fusion is not None and not plan else None
             unrated = fusion.unrated_records() if fusion is not None else ()
-            if fusion is not None and (verdict is not None or unrated or not plan and fusion.has_map_writes):
-                # Keep verification, ratings and map descriptions in the same continuation.
+            if fusion is not None and (verdict is not None or unrated):
+                # Keep verification and ratings in the same continuation.
                 continuation = verdict.continuation() if verdict is not None and verdict.missing else ''
                 asks = [continuation] if continuation else []
                 if unrated:
                     asks.append(fusion.rating_request(unrated))
-                if not plan and (map_request := await fusion.map_description_request()):
-                    asks.append(map_request)
                 if asks and end.reason == "done" and end.steps < self.turn_step_limit():
                     # With a real model the turn's last words became a note about these steps instead of the result.
                     held = loop.observer.hold_answer()
@@ -1304,8 +1302,6 @@ class ChatGPTController:
                     loop.observer.hold_answer()
                 if verdict is not None:
                     await fusion.retain_verdict(verdict)
-                if not plan:
-                    await fusion.finish_map_turn(verdict)
                 await fusion.settle_main_ratings()
             else:
                 # Nothing more owed: the turn settled on its own — the last words are the answer.

@@ -202,6 +202,10 @@ class Drive:
             raise DriveError("This session's storage path aliases another session.")
         self._initialize()
 
+    @property
+    def map_lock_target(self) -> Path:
+        return self._root / "project-map"
+
     def _initialize(self) -> None:
         deadline = time.monotonic() + _TIMEOUT
         last_lock = None
@@ -397,14 +401,17 @@ class Drive:
 
     def candidates(
         self, *, shared: bool, retention: Retention,
-        fingerprint: Callable[[tuple[str, ...]], str] | None = None,
+        fingerprint: Callable[[tuple[str, ...]], str] | None = None, include_map: bool = True,
     ) -> list[Candidate]:
-        """Return records eligible for injection, ordered by quality, temperature and recency."""
+        """Return retained records, excluding map rows before computing any workspace stamps if requested."""
         now = self._clock()
         with self._connect() as db, db:
             db.execute("BEGIN")
             period = self._period(db, now)
-            rows = db.execute(_SELECT + " WHERE status = 'active' AND kind <> 'trace' AND q >= 0").fetchall()
+            query = _SELECT + " WHERE status = 'active' AND kind <> 'trace' AND q >= 0"
+            if not include_map:
+                query += " AND kind <> 'map'"
+            rows = db.execute(query).fetchall()
         result = []
         for row in rows:
             record = _record(row)

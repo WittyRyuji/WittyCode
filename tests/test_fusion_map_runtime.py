@@ -1,20 +1,19 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import sys
+import threading
 
 import pytest
 
 from desktop.core.fusion import map as project_map
-from desktop.core.fusion.drive.fingerprint import fingerprint
 from desktop.core.transcript import NoticeBlock
 from tests.chatgpt_support import finish_turn
 from tests.fake_responses import call, say
 from tests.fakes import until
 from tests.test_fusion_identity_runtime import LEGACY, _brief, _fusion, _output, _turn
-from tests.test_fusion_inject_runtime import _prompt, _rated_report
-from tests.test_fusion_route_runtime import _report, _route
+from tests.test_fusion_inject_runtime import _prompt
+from tests.test_fusion_route_runtime import UNIT_GATES, _report, _route, _unit
 
 _ACTIVE = ("drive", "brief", "report", "inject", "map")
 pytestmark = pytest.mark.fusion_gates(*_ACTIVE)
@@ -65,17 +64,21 @@ def _update(module, *, call_id="update", **fields):
     return call("update_map_entry", {"module": module, **fields}, call_id=call_id)
 
 
-def test_draft_entries_are_stored_and_injected_into_overlapping_coder(tmp_path):
+def test_plan_reads_map_on_demand_but_worker_does_not_receive_it(tmp_path):
     async def go():
         async with _fusion(tmp_path, active=_ACTIVE) as (main, fake):
-            (main.project / "stock").mkdir()
-            (main.project / "stock" / "counts.py").write_text("COUNT = 1\n", encoding="utf-8")
-            await _choose_turn(main, fake, 1, _update("stock", role="Counts items.", method="Totals rows."))
-            record = _records(main)["map:stock"]
+            await _choose_turn(main, fake, 1, _update("stock", paths=["stock"], role="Counts items.", method="Totals rows."),
+                               _update("other", paths=["other"], call_id="other"))
+            before = _records(main)
+            main.mode = "spec"
+            await _turn(main, fake, call("read_project_map", {"paths": ["stock/counts.py"]}, call_id="map"), say("Planned."))
+            assert "Counts items." in _output(main, "map") and "other" not in _output(main, "map")
+            assert _records(main) == before
+            main.mode = "auto"
             first = len(fake.requests)
-            await _turn(main, fake, _delegate(paths=["stock/counts.py"]), _rated_report(record), say("Reviewed."))
+            await _turn(main, fake, _delegate(paths=["stock/counts.py"]), _report(), say("Reviewed."))
             prompt = _prompt(fake.requests[first + 1])
-            assert "## Map entries" in prompt and record.id in prompt and "Role: Counts items." in prompt
+            assert "## Map entries" not in prompt and "Counts items." not in prompt
             assert not (main.project / ".witty_map.md").exists()
     asyncio.run(go())
 
@@ -125,11 +128,10 @@ def test_existing_file_wins_then_updates_one_entry_and_imports_hand_edit(tmp_pat
             assert "Counts boxes." in stored["map:counts"].summary and stored["map:other"].id == before["map:other"].id
             edited = project_map.ProjectMap((project_map.MapEntry("counts", ("stock",), "Counts packages.", "Totals batches."),))
             project_map.write(main.project, edited)
-            first = len(fake.requests)
-            await _turn(main, fake, _delegate(paths=["stock/items.txt"]), say("Checked."), say("Reviewed."))
-            prompt = _prompt(fake.requests[first + 1])
-            assert "Counts packages." in prompt and "Counts boxes." not in prompt
-            assert set(_records(main)) == {"map:counts"} and project_map.read(main.project) == edited
+            await _turn(main, fake, call("read_project_map", {}, call_id="read_map"), say("Read."))
+            assert "Counts packages." in _output(main, "read_map") and "Counts boxes." not in _output(main, "read_map")
+            assert set(_records(main)) == {"map:counts", "map:other", "map:traits"}  # an explicit read does not sync writes
+            assert project_map.read(main.project) == edited
     asyncio.run(go())
 
 
@@ -183,56 +185,22 @@ def test_read_only_brief_with_paths_needs_no_route_or_map_choice(tmp_path, ident
 
 
 @pytest.mark.parametrize("structured", [True, False], ids=["structured", "legacy"])
-def test_first_write_delegation_chooses_map_in_the_same_call(tmp_path, structured):
+def test_first_write_delegation_does_not_ask_where_to_store_the_map(tmp_path, structured):
     async def go():
         gates = tuple(gate for gate in (*_ACTIVE, "route") if structured or gate != "brief")
         async with _fusion(tmp_path, active=gates) as (main, fake):
+            args = (_brief() if structured else
+                    {key: LEGACY[key] for key in ("model", "role", "task")} | {"scope": "inventory.txt"})
+            await _turn(main, fake, _route(), call("delegate_task", args, call_id="first"),
+                        _report(evidence=["Updated inventory.txt."]) if structured else say("First run done."), say("Reviewed."))
+            agent, = main.agents.values()
+            assert agent.record.status == "done" and not main.transcript.turns[-1].prompts
+            assert main._fusion.drive.meta("map_location") is None and not (main.project / ".witty_map.md").exists()
+            assert bool(_records(main)) == structured
             if structured:
-                args = _brief()
-                del args["budget"]
-            else:
-                args = {key: LEGACY[key] for key in ("model", "role", "task")} | {"scope": "inventory.txt"}
-            delegated = call("delegate_task", args, call_id="first")
-            fake.script(_route(), delegated, say("First run done."), say("Reviewed."))
-            assert main.send_prompt("Check the inventory.")
-            await until(lambda: main.transcript.pending_prompts())
-            prompt, = main.transcript.pending_prompts()
-            question, = prompt.questions
-            assert prompt.tool_call_id == "first" and len(question.options) == 2 and "项目地图" in question.question
-            assert not main.agents and main._fusion.drive.meta("map_location") is None
-            assert main.answer_question(prompt.id, None)
-            await finish_turn(main)
-            agent, = main.agents.values()
-            assert agent.record.status == "done" and "First run done." in _output(main, "first")
-            assert main._fusion.drive.meta("map_location") == "local"
-            assert len(main.transcript.turns[-1].prompts) == 1
-            assert not (main.project / ".witty_map.md").exists()
-
-            await _turn(main, fake, _route(), call("delegate_task", args, call_id="second"), say("Second run done."), say("Reviewed."))
-            assert not main.transcript.turns[-1].prompts
-            assert "Second run done." in _output(main, "second") and main._fusion.registry.calls == 2
-    asyncio.run(go())
-
-
-def test_default_budget_uses_the_cap_after_the_map_question(tmp_path):
-    async def go():
-        async with _fusion(tmp_path, active=(*_ACTIVE, "route"), max_seconds=12) as (main, fake):
-            settings = main.manager.settings
-            settings.max_steps = 100
-            args = _brief()
-            del args["budget"]
-            fake.script(_route(), call("delegate_task", args, call_id="delegate"), say("Done."), say("Reviewed."))
-            assert main.send_prompt("Check the inventory.")
-            await until(lambda: main.transcript.pending_prompts())
-            prompt, = main.transcript.pending_prompts()
-            assert prompt.tool_call_id == "delegate"
-            settings.max_steps = 7
-            assert main.answer_question(prompt.id, None)
-            await finish_turn(main)
-            agent, = main.agents.values()
-            assert agent.record.status == "done" and agent.controller.turn_step_limit() == 7
-            assert "Default budget: 7 steps, 12 seconds" in _output(main, "delegate")
-            assert "Budget: 7 steps, 12 seconds" in agent.record.task
+                # A silent local write never takes away the later explicit choice of a project file.
+                await _choose_turn(main, fake, 0)
+                assert project_map.read(main.project).entries[0].paths == ("inventory.txt",)
     asyncio.run(go())
 
 
@@ -246,59 +214,84 @@ def test_missing_route_still_refuses_without_asking_for_map_location(tmp_path):
     asyncio.run(go())
 
 
-def _status(main):
-    return json.loads(main._fusion.drive.meta("map_status"))
+def test_frozen_unit_writes_map_after_acceptance_using_author_receipt_not_runner_or_reviewer(tmp_path):
+    from tests.test_fusion_debate_runtime import _declare
 
-
-def _write_inventory():
-    return call("create_file", {"file_path": "inventory.txt", "content": "Two boxes."}, call_id="write")
-
-
-def test_new_workstream_starts_unverified_and_joins_missing_check_continuation(tmp_path):
     async def go():
-        async with _fusion(tmp_path, active=(*_ACTIVE, "route", "acceptance")) as (main, fake):
-            await _choose_turn(main, fake, 0)
+        async with _fusion(tmp_path, active=_ACTIVE) as (main, fake):
+            await _choose_turn(main, fake, 0, _update("stock", paths=["stock.txt"], role="Old role.", method="Old method."))
+            before = project_map.read(main.project)
+            main.manager.settings.fusion_gates.update(dict.fromkeys(UNIT_GATES, True))
+            main.mode = "spec"
+            await _turn(main, fake, _declare("simple", "plan"),
+                        call("submit_work_plan", {"data": {"units": [_unit()]}}, call_id="facts"),
+                        call("submit_plan", {"plan": "Repair stock count."}, call_id="plan"))
+            author = "Counts only available stock."
             first = len(fake.requests)
-            fake.script(_route(), _delegate(), [("hold", "new-map"), *_write_inventory()])
-            assert main.send_prompt("Count the inventory.")
+            fake.script(call("submit_route", {}, call_id="route"),
+                        call("delegate_task", {"unit": "stock"}, call_id="worker"),
+                        call("create_file", {"file_path": "stock.txt", "content": "4"}, call_id="write"),
+                        call("submit_report", {"status": "done", "summary": author, "evidence": ["Wrote stock.txt."]}),
+                        [("hold", "before-checks"), *call("delegate_task", {"unit": "stock"}, call_id="runner")],
+                        _report(evidence=["Count is four."]), call("delegate_task", {"unit": "stock"}, call_id="review"),
+                        _report(evidence=["Reviewed stock.txt."]), say("Verified."))
+            assert main.approve_plan(main.saved.plan["id"])
             try:
-                await until(lambda: len(fake.requests) == first + 3)
-                record = _records(main)["map:Inventory"]
-                assert record.paths == ("inventory.txt",) and _status(main) == {"Inventory": "unverified"}
-                assert f"ID: {record.id}" in _prompt(fake.requests[first + 2])
-                fake.script(_rated_report(record), say("Reviewed."), say("No check available."))
+                await until(lambda: len(fake.requests) >= first + 5)
+                assert "next=runner" in _output(main, "worker")
+                assert project_map.read(main.project) == before
+                assert "Old method." not in _prompt(fake.requests[first + 2])
             finally:
-                fake.release("new-map")
+                fake.release("before-checks")
             await finish_turn(main)
-            assert _status(main) == {"Inventory": "review"}
-            assert len(fake.requests) == first + 6
-            continuation = str(fake.requests[-1]["input"])
-            assert "Missing checks: runner." in continuation and "Missing checks: runner, sampler." not in continuation
-            assert "Describe the involved project map modules with update_map_entry: Inventory." in continuation
-            refreshed = _records(main)[record.key]
-            assert refreshed.id == record.id and refreshed.fingerprint != record.fingerprint
-            assert refreshed.fingerprint == fingerprint(main.project, record.paths)
+            assert "next=done" in _output(main, "review")
+            assert project_map.read(main.project).entries == (
+                project_map.MapEntry("stock", ("stock.txt",), "Repair the stock count.", author),)
+            assert "Describe the involved project map" not in str(fake.requests[-1]["input"])
+            assert len(fake.requests) == first + 9  # No extra model call to describe the map.
     asyncio.run(go())
 
 
-@pytest.mark.parametrize("acceptance", [True, False])
-def test_turn_refreshes_fingerprint_and_marks_only_involved_modules(tmp_path, acceptance):
+def test_two_writers_in_separate_profiles_serialize_the_portable_map(tmp_path, monkeypatch):
+    from copy import copy
+    from types import SimpleNamespace
+
     async def go():
-        gates = (*_ACTIVE, "route", "acceptance") if acceptance else _ACTIVE
-        async with _fusion(tmp_path, active=gates) as (main, fake):
-            await _choose_turn(main, fake, 1, _update("stock", paths=["inventory.txt"], role="Counts items.", method="Totals rows."),
-                               _update("other", paths=["other.txt"], call_id="other"))
-            before = _records(main)
-            route = [_route()] if acceptance else []
-            check = [_delegate("Runner", call_id="verify"), call("read_file", {"file_path": "inventory.txt"}),
-                     _report(evidence=["inventory.txt: Two boxes."])] if acceptance else []
-            await _turn(main, fake, *route, _delegate(), _write_inventory(), _rated_report(before["map:stock"]), *check, say("Reviewed."))
-            after = _records(main)
-            changed = after["map:stock"]
-            assert _status(main) == {"stock": "verified" if acceptance else "review", "other": "unverified"}
-            assert changed.fingerprint != before["map:stock"].fingerprint
-            assert changed.fingerprint == fingerprint(main.project, changed.paths)
-            assert changed.updated == before["map:stock"].updated and after["map:other"] == before["map:other"]
+        async with _fusion(tmp_path, active=_ACTIVE) as (main, fake):
+            await _choose_turn(main, fake, 0)
+            first = main._fusion
+            second = copy(first)
+            second.__dict__.pop("drive", None)
+            second.parent = SimpleNamespace(project=main.project, manager=SimpleNamespace(
+                root=tmp_path / "second-profile" / "chatgpt", settings=main.manager.settings))
+            assert second.drive.map_lock_target != first.drive.map_lock_target
+            await asyncio.to_thread(second._edit_map, lambda current: current, selection="project")
+            writing, attempted, finish = threading.Event(), threading.Event(), threading.Event()
+            write, file_lock = project_map.write, project_map.portable_lock
+
+            def hold(project, data):
+                if not writing.is_set():
+                    writing.set()
+                    assert finish.wait(15)
+                return write(project, data)
+
+            def track(project):
+                if writing.is_set():
+                    attempted.set()
+                return file_lock(project)
+
+            monkeypatch.setattr(project_map, "write", hold)
+            monkeypatch.setattr(project_map, "portable_lock", track)
+            tasks = [asyncio.create_task(first._map_delivery(("first.py",), "First job", "Writes the first result."))]
+            try:
+                await until(writing.is_set)
+                tasks.append(asyncio.create_task(second._map_delivery(("second.py",), "Second job", "Writes the second result.")))
+                await until(attempted.is_set)
+                assert not project_map.read(main.project).entries
+            finally:
+                finish.set()
+                await asyncio.gather(*tasks)
+            assert {entry.paths for entry in project_map.read(main.project).entries} == {("first.py",), ("second.py",)}
     asyncio.run(go())
 
 
@@ -309,21 +302,24 @@ def test_map_needs_both_gates(tmp_path, active):
             await _turn(main, fake, _delegate(), _report(), say("Reviewed."))
             assert len(main.agents) == 1 and "choose_map_location" not in _output(main, "delegate")
             names = {tool["name"] for tool in fake.requests[0]["tools"]}
-            assert names.isdisjoint({"choose_map_location", "update_map_entry"})
+            assert names.isdisjoint({"read_project_map", "choose_map_location", "update_map_entry"})
             assert not (main.project / ".witty_map.md").exists()
     asyncio.run(go())
 
 
-def test_project_file_write_failure_keeps_map_in_drive_and_notices_once(tmp_path):
+def test_portable_map_write_failure_does_not_lose_delivery_or_update_only_the_mirror(tmp_path, monkeypatch):
     async def go():
         async with _fusion(tmp_path, active=_ACTIVE) as (main, fake):
-            target = main.project / ".witty_map.md"
-            target.mkdir()
             await _choose_turn(main, fake, 0, _update("stock", paths=["inventory.txt"], role="Counts items.", method="Totals rows."))
-            record = _records(main)["map:stock"]
-            await _turn(main, fake, _delegate(), _rated_report(record), say("Reviewed."))
-            assert target.is_dir() and main._fusion.drive.meta("map_location") == "project"
-            assert _records(main)["map:stock"].id == record.id and next(iter(main.agents.values())).record.status == "done"
+            before, file = _records(main), project_map.read(main.project)
+
+            def unavailable(*args):
+                raise PermissionError("The test file is locked.")
+
+            monkeypatch.setattr(project_map, "write", unavailable)
+            await _turn(main, fake, _delegate(), _report(evidence=["Updated inventory.txt."]), say("Reviewed."))
+            assert _records(main) == before and project_map.read(main.project) == file
+            assert next(iter(main.agents.values())).record.status == "done"
             notices = [block.text for turn in main.transcript.turns for block in turn.blocks if isinstance(block, NoticeBlock)]
-            assert sum("Fusion Drive 暂不可用" in text for text in notices) == 1
+            assert sum("项目地图更新失败" in text for text in notices) == 1
     asyncio.run(go())

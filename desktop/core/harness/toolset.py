@@ -87,6 +87,7 @@ class HarnessTools:
         self.record_reader: Callable[[str], Awaitable[Outcome]] | None = None
         self.report_submitter: Callable[[Mapping[str, Any]], Outcome] | None = None
         self.route_submitter: Callable[[Mapping[str, Any]], Awaitable[Outcome]] | None = None
+        self.map_reader: Callable[[Mapping[str, Any]], Awaitable[Outcome]] | None = None
         self.map_chooser: Callable[[Call], Awaitable[Outcome]] | None = None
         self.map_updater: Callable[[Mapping[str, Any]], Awaitable[Outcome]] | None = None
         self.topic_declarer: Callable[[str, str, str, str], Awaitable[Outcome]] | None = None
@@ -157,6 +158,8 @@ class HarnessTools:
             declared.append(dict(UNIT_ROUTE if self._frozen_units() else fusion_tools.ROUTE_DECLARATION))
         if self.rating_submitter is not None:
             declared.append(dict(fusion_tools.RATE_DECLARATION))
+        if self.map_reader is not None:
+            declared.append(dict(fusion_tools.READ_MAP_DECLARATION))
         if self.map_chooser is not None:
             declared.append(dict(fusion_tools.CHOOSE_MAP_DECLARATION))
         if self.map_updater is not None:
@@ -210,6 +213,7 @@ class HarnessTools:
                 or (name == fusion_tools.SUBMIT_REPORT and self.report_submitter is not None)
                 or (name == fusion_tools.SUBMIT_ROUTE and self.route_submitter is not None)
                 or (name == fusion_tools.RATE_RECORDS and self.rating_submitter is not None)
+                or (name == fusion_tools.READ_MAP and self.map_reader is not None)
                 or (name == fusion_tools.CHOOSE_MAP and self.map_chooser is not None)
                 or (name == fusion_tools.UPDATE_MAP and self.map_updater is not None)
                 or (name == debate_bridge.DECLARE_TOPIC and self.topic_declarer is not None)
@@ -330,6 +334,8 @@ class HarnessTools:
                     else Verdict(DENY, recall_tool.UNAVAILABLE))
         if call.name == fusion_tools.READ_RECORD:
             return Verdict(ALLOW) if self.record_reader is not None else Verdict(DENY, "Fusion Drive is unavailable.")
+        if call.name == fusion_tools.READ_MAP:
+            return Verdict(ALLOW) if self.map_reader is not None else Verdict(DENY, "No active Fusion project map.")
         if call.name == fusion_tools.SUBMIT_REPORT:
             return Verdict(ALLOW) if self.report_submitter is not None else Verdict(DENY, "No active expert report.")
         if call.name == fusion_tools.RATE_RECORDS:  # (a judgement on retained data: nothing in the workspace changes)
@@ -458,6 +464,10 @@ class HarnessTools:
             if not isinstance(data, Mapping):
                 return Outcome("Provide the work plan as a `data` JSON object.", True)
             return await self.work_plan_submitter(data)
+        if call.name == fusion_tools.READ_MAP:
+            if self.map_reader is None:
+                return Outcome("No active Fusion project map.", True)
+            return await self.map_reader(call.args)
         if call.name == fusion_tools.CHOOSE_MAP:
             verdict = self.check(call)
             if verdict.verdict != ALLOW or self.map_chooser is None:
