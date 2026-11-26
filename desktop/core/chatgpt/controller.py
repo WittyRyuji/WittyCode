@@ -48,7 +48,7 @@ from desktop.core.engine_items import attachment_block
 from desktop.core.connections import ConnectionError as ExtensionError
 from desktop.core.context import ContextState, format_tokens
 from desktop.core.context_envelope import wrap as wrap_context
-from desktop.core.fusion import verification_case
+from desktop.core.fusion import recovery as fusion_recovery, verification_case
 from desktop.core.fusion.backends import GUARDED
 from desktop.core.fusion.candidate import MERGE_CLAUSE, Staging, mark_candidates, unflag
 from desktop.core.handoff import Handoff
@@ -194,7 +194,9 @@ class ChatGPTController:
     _session_lock: Any = None
     stop_hook_blocked: bool = False
     last_turn_end: TurnEnd | None = None
-    check_retry_reason: str = ""  # Current expert turn only; no parsing of localized error text.
+    check_retry_reason: str = ""
+    _recovery_delay: float | None = None
+    _recovery_timer: asyncio.TimerHandle | None = None  # Current expert turn only; no parsing of localized error text.
     _save_failed: bool = False
     _checkpoint_written: bool = False
     _first_prompt_retained: bool = False
@@ -525,6 +527,8 @@ class ChatGPTController:
                     raise FusionError("The Fusion mode or fixed main model does not match the saved session.")
                 runtime = FusionRuntime(self, registry)
                 self._fusion, self._paused_fusion = (runtime, None) if enabled else (None, runtime)
+                if enabled:
+                    await runtime.reconcile_checkpoints()
                 runtime._checkpoint()
             except FusionError as error:
                 raise ChatGPTError("Fusion 状态损坏或主模型不一致，已暂停恢复，原始存档未被覆盖。", code="fusion") from error
@@ -847,6 +851,9 @@ class ChatGPTController:
     async def close(self) -> None:
         if self._close_task is None:
             self._close_requested = True
+            if self._recovery_timer is not None:
+                self._recovery_timer.cancel()
+                self._recovery_timer = None
             self._close_task = asyncio.ensure_future(self._do_close())
         await asyncio.shield(self._close_task)
 
@@ -1058,6 +1065,7 @@ class ChatGPTController:
         self.stop_hook_blocked = False
         self.last_turn_end = None
         self.check_retry_reason = ""
+        self._recovery_delay = None
         self._turn_model, self._turn_reasoning, self._turn_mode = self.model, self.reasoning, self.mode
         self._turn_start = len(self.saved.items)  # setup failures never belong to the previous turn
         self.transcript.output_probe = self._output_so_far
@@ -1285,12 +1293,21 @@ class ChatGPTController:
             verdict = fusion.acceptance_verdict() if fusion is not None and not plan else None
             unrated = fusion.unrated_records() if fusion is not None else ()
             if fusion is not None and (verdict is not None or unrated):
-                # Keep verification and ratings in the same continuation.
-                continuation = verdict.continuation() if verdict is not None and verdict.missing else ''
-                asks = [continuation] if continuation else []
-                if unrated:
-                    asks.append(fusion.rating_request(unrated))
-                if asks and end.reason == "done" and end.steps < self.turn_step_limit():
+                # One diagnostic pass is always possible. Further passes require new retained facts.
+                seen = set()
+                while end.reason == 'done' and end.steps < self.turn_step_limit():
+                    continuation = verdict.continuation() if verdict is not None and verdict.missing else ''
+                    asks = [continuation] if continuation else []
+                    if unrated:
+                        asks.append(fusion.rating_request(unrated))
+                        unrated = ()
+                    if not asks:
+                        break
+                    _, bound = fusion.recovery_plan()
+                    stamp = fusion_recovery.progress_stamp(bound) if bound is not None and verdict and verdict.unit_plan else ''
+                    if stamp in seen:
+                        break
+                    seen.add(stamp)
                     # Actual user-facing progress is not hidden just because checks still have to run.
                     if verdict is not None and verdict.missing:
                         loop.observer.preserve_answer()
@@ -1346,6 +1363,8 @@ class ChatGPTController:
         if self._turn is not turn:
             return
         if failure is not None:
+            if loop is not None and loop.observer.defer_retry(failure) and hasattr(loop, 'completed_steps'):
+                self.last_turn_end = TurnEnd('retry_after', steps=loop.completed_steps)
             if loop is not None and self._fusion is not None and self._fusion.acceptance_verdict() is not None:
                 loop.observer.release_answer()
             self._turn_failed(turn, failure)
@@ -1481,6 +1500,10 @@ class ChatGPTController:
             self._notify("history")
 
     def _turn_failed(self, turn: Turn, error: BaseException) -> None:
+        if isinstance(error, ChatGPTError):
+            self._recovery_delay = error.retry_after
+            if self._fusion is not None and (key := self._fusion._unit_key()):
+                self._fusion.defer_external(key, None, self._recovery_delay)
         if self._fusion_parent is not None:
             if isinstance(error, TimeoutError):
                 self.check_retry_reason = "timeout"
@@ -1541,8 +1564,10 @@ class ChatGPTController:
         if not plan or not plan['cases']:
             return ''
         missing = [c for c in plan['cases'].values() if c['next'] != 'done']
-        waiting = any(verification_case.awaiting_user(c) for c in missing)
-        outcome = 'cancelled' if reason == 'cancelled' else 'waiting_user' if waiting else 'unverified' if missing else 'verified'
+        main = plan.get('mainRecovery', {})
+        waiting = any(verification_case.awaiting_user(c) for c in (*missing, main))
+        delayed = any(fusion_recovery.waiting(c) for c in (*missing, main))
+        outcome = 'cancelled' if reason == 'cancelled' else 'waiting_user' if waiting else 'unverified' if missing or delayed else 'verified'
         turn.fusion_outcome = record.fusion_outcome = outcome
         if outcome == 'cancelled':
             try:
@@ -1559,6 +1584,7 @@ class ChatGPTController:
                  'observer': 'Observer 暂停', 'done': '模型回合已结束，验收尚未通过'}.get(reason, '本轮未通过验收')
         action = ('已停止执行；尚未通过的验收不计为完成。' if outcome == 'cancelled' else
                   '请回答续作卡。已授权的其他工单不受此问题限制。' if waiting else
+                  '正在等待服务允许重试；到时从检查点继续，等待期间不发模型请求。' if delayed else
                   '将从已保存的检查点继续原任务，不重复未知副作用。' if record.fusion_recovery else
                   '保留检查点；需继续诊断未通过的检查，不能据此结案。')
         lines, _ = verification_case.result_lines(plan)
@@ -1581,12 +1607,28 @@ class ChatGPTController:
         last = self.saved.turns[-1] if self.saved.turns else None
         if plan is None or last is None or last.fusion_outcome == 'cancelled' or self.stop_hook_blocked:
             return
-        if not any(case['next'] != 'done' and not verification_case.awaiting_user(case)
-                   and not any(verification_case.awaiting_user(plan['cases'][dep]) for dep in plan['spec']['units'][name]['deps'])
-                   for name, case in plan['cases'].items()):
+        now = time.time()
+        try:
+            rt.wake_external(plan, now=now)
+        except ChatGPTError:
             return
-        signals = [(name, case, case['resumeSignal']) for name, case in plan['cases'].items() if case.get('resumeSignal')]
-        if not last.fusion_recovery and not signals:
+        owners = rt._permission_owners(plan)
+        deadlines = [owner['externalWait']['until'] for _, owner in owners if fusion_recovery.waiting(owner)]
+        if self._recovery_timer is not None:
+            self._recovery_timer.cancel()
+            self._recovery_timer = None
+        if deadlines:
+            self._recovery_timer = asyncio.get_running_loop().call_later(max(0, min(deadlines) - now), self._resume_fusion_checkpoint)
+        main = plan.get('mainRecovery', {})
+        if fusion_recovery.waiting(main) or verification_case.awaiting_user(main) and not fusion_recovery.runnable(plan):
+            return
+        signals = [(name, case, case['resumeSignal']) for name, case in owners if case.get('resumeSignal')]
+        ready = [(name, owner, owner['externalWait']) for name, owner in owners
+                 if (owner.get('externalWait') or {}).get('status') == 'ready']
+        runnable = fusion_recovery.runnable(plan)
+        if not runnable and not any(name is None for name, _, _ in (*signals, *ready)):
+            return
+        if not last.fusion_recovery and not signals and not ready:
             return
         details = []
         for name, case, signal in signals:
@@ -1595,26 +1637,44 @@ class ChatGPTController:
                 result = ('reported doing the requested operation; verify it before work' if signal['approved'] else
                           'cannot provide this prerequisite; choose an authorized alternative')
                 details.append(f"{name}: the user {result}. Prerequisite: {request['question']}. No new tool permission granted.")
+            elif signal.get('requestKind') == 'toolPermission':
+                action = case['permissions'][signal['id']]['display']
+                result = 'approved once' if signal['approved'] else 'declined; pursue a different authorized action'
+                details.append(f"{name or 'Main'}: {action['tool_name']} was {result}. Approval is scoped to the exact original input.")
             else:
                 result = 'approved the specified budget increase' if signal['approved'] else 'did not approve the increase; stay within authorization'
                 details.append(f'{name}: the user {result}.')
+        details.extend(f"{name or 'Main'}: service retry delay elapsed; recheck authorization and budget before continuing."
+                       for name, _, _ in ready)
         note = 'Resume the original task from the checkpoint. Do not replay tools with unknown effects.\n' + '\n'.join(details)
         note += '\nOriginal goal: ' + plan['spec']['goal']
         note += '\nUnit state:\n' + '\n'.join(verification_case.result_lines(plan)[0])
-        # Consume the restart reason before re-entering a model; no failure/step-limit loop across fresh turns.
+        # Keep a restart marker on the previous turn until a newer turn exists. A process failure after this
+        # checkpoint but before dispatch still recovers the task; no timer or user click must be repeated.
         prior = last.fusion_recovery
-        last.fusion_recovery = False
+        last.fusion_recovery = True
         for _, case, _ in signals:
             case.pop('resumeSignal')
+        for _, owner, wait in ready:
+            owner['externalWait'] = {**wait, 'status': 'released'}
         try:
             rt._checkpoint()
         except ChatGPTError:
             last.fusion_recovery = prior
             for _, case, signal in signals:
                 case['resumeSignal'] = signal
+            for _, owner, wait in ready:
+                owner['externalWait'] = wait
             return
-        self.send_prompt(note, approved_workplan={'frozen': key, 'budget': plan['spec']['budget']},
-                         approved_plan=plan['spec']['goal'] or 'Continue the previously approved scope.', recovery=True)
+        if not self.send_prompt(note, approved_workplan={'frozen': key, 'budget': plan['spec']['budget']},
+                                approved_plan=plan['spec']['goal'] or 'Continue the previously approved scope.', recovery=True):
+            last.fusion_recovery = prior
+            for _, case, signal in signals:
+                case['resumeSignal'] = signal
+            for _, owner, wait in ready:
+                owner['externalWait'] = wait
+            with contextlib.suppress(ChatGPTError):
+                rt._checkpoint()
 
     def _end_turn(self, turn: Turn) -> None:
         if self._turn is not turn:
@@ -1702,9 +1762,12 @@ class ChatGPTController:
             self._notify("steer")
 
     def cancel_waiting_fusion(self) -> bool:
-        if self._fusion is None or self.state is not SessionState.READY or not self._fusion.recovery_questions():
+        if self._fusion is None or self.state is not SessionState.READY:
             return False
-        key, _ = self._fusion.recovery_plan()
+        key, plan = self._fusion.recovery_plan()
+        if plan is None or not any(verification_case.awaiting_user(owner) or fusion_recovery.waiting(owner)
+                                   for _, owner in self._fusion._permission_owners(plan)):
+            return False
         if not self._fusion.cancel_recovery(key):
             return False
         record = self.saved.turns[-1]
@@ -1800,6 +1863,7 @@ class ChatGPTController:
         self.stop_hook_blocked = False
         self.last_turn_end = None
         self.check_retry_reason = ""
+        self._recovery_delay = None
         self._turn_model, self._turn_reasoning, self._turn_mode = self.model, self.reasoning, self.mode
         self._turn_start = len(self.saved.items)  # even setup failures belong to a new boundary, never the previous turn
         self.transcript.output_probe = self._output_so_far
@@ -2334,6 +2398,11 @@ class ChatGPTController:
             self._changed()
 
     def answer_permission(self, prompt_id: str, value: str) -> bool:
+        if self._fusion is not None and isinstance(prompt_id, str) and prompt_id.startswith('fusion-tool-'):
+            if not self._fusion.answer_tool_permission(prompt_id, value):
+                return False
+            self._schedule_fusion_recovery()
+            return True
         future = self._pending.get(prompt_id)
         if future is None or not self.transcript.answer_permission(prompt_id, value):
             return False
@@ -2515,7 +2584,13 @@ class _Watch(Observer):
         self.ctl._changed()
 
     async def ask(self, call: Call, verdict: Verdict) -> str:
-        return await self.ctl._ask(call) if self.current else "cancel"
+        if not self.current:
+            return 'cancel'
+        if self.tools.recovery_ask is not None:
+            answer = self.tools.recovery_ask(call, verdict)
+            if answer is not None:
+                return answer
+        return await self.ctl._ask(call)
 
     def call_running(self, call: Call) -> None:
         if not self.current:
@@ -2723,11 +2798,17 @@ class _Watch(Observer):
         self._compacted_to = compact.estimate_items(history) + fixed if done else estimate
         return done
 
+    def defer_retry(self, error: BaseException) -> bool:
+        return (self.current and isinstance(error, ChatGPTError) and error.retry_after is not None and
+                (self.tools.recovery_pause is not None or self.ctl._fusion is not None and bool(self.ctl._fusion._unit_key())))
+
     def finish_requested(self) -> str:
         if not self.current:
             return ""
         if self.ctl._turn_mode == PLAN and self.ctl._proposed_plan:
             return "plan"
+        if self.tools.recovery_pause is not None and self.tools.recovery_pause():
+            return 'permission'
         fusion = getattr(self.ctl._fusion_parent, "_fusion", None)
         observed = fusion.observer_runs.get(self.ctl.session_id) if fusion is not None else None
         if observed is not None and observed.report is not None:

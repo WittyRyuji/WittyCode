@@ -19,8 +19,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from weakref import WeakValueDictionary
 
+from desktop.core.chatgpt.errors import ChatGPTError
 from desktop.core.fusion import allocation, dispatch, gates, identity, inject, map as project_map, metrics, observer, review_policy, step_budget
-from desktop.core.fusion import model_selection, planning, profiles, verification_case
+from desktop.core.fusion import model_selection, planning, profiles, recovery, verification_case
 from desktop.core.fusion.expert_catalog import ExpertCatalog, ExpertCatalogError
 from desktop.core.fusion.drive.fingerprint import Manifest, _GitError, _head, changed_since, fingerprint, workspace_kind
 from desktop.core.fusion.drive.retention import Retention
@@ -603,7 +604,8 @@ class FusionRuntime:
                 except (ValueError, TypeError, AttributeError, ProviderError, OSError) as error:
                     excluded.append({'seat': seat, 'model': page, 'reason': str(error) if isinstance(error, FusionError)
                                      else type(error).__name__})
-        user = self.parent._turn.user_block
+        turn = self.parent._turn
+        user = turn.user_block if turn is not None else None
         goal = self.parent.saved.goal.get('text') or (user.text if user is not None else '')
         try:
             return verification_case.resolve(units, requested, policy=policy, settings=self.parent.manager.settings,
@@ -685,9 +687,17 @@ class FusionRuntime:
                 if record is not None:
                     record.fusion_plan = prior_key
                 raise
+        if self.parent._tools is not None:
+            tools = self.parent._tools
+            owner = plan.setdefault('mainRecovery', {})
+            self.bind_recovery_permissions(tools, key, 'Main', owner)
+            self.bind_main_journal(tools, owner)
         return self._unit_route(key)
 
     def start_route_turn(self) -> None:
+        if tools := self.parent._tools:
+            tools.recovery_ask = tools.recovery_guard = tools.recovery_pause = None
+            tools.tool_started = tools.tool_recorded = None
         self._drive_checked = False
         self._map_file_written = False
         self.route_turn = RouteTurn() if self.gate("route") else None
@@ -898,12 +908,8 @@ class FusionRuntime:
             missing = tuple(name for name, c in cases.items() if c['next'] != 'done')
             lines, actions = verification_case.result_lines(plan)
             show_result = missing or any(c.get('decisions') for c in cases.values())
-            waiting = {name for name, c in cases.items() if verification_case.awaiting_user(c)}
-            while True:
-                blocked = {name for name in missing if any(dep in waiting for dep in plan['spec']['units'][name]['deps'])}
-                if blocked <= waiting:
-                    break
-                waiting.update(blocked)
+            waiting = set(missing) - set(recovery.runnable(plan))
+            actions = tuple(action for action in actions if action.split(':', 1)[0] not in waiting)
             return AcceptanceVerdict(turn.route, turn.from_plan, checks, missing, (), unit_plan=True,
                                      unit_results=lines if show_result else (), unit_actions=actions,
                                      unit_waiting=tuple(name for name in missing if name in waiting)) if cases else None
@@ -2034,15 +2040,16 @@ class FusionRuntime:
         return False
 
     async def _unit_profile(self, key, unit, case, stage):
-        binding = unit['roster'][stage]
+        binding = self.registry.binding(key, unit['id'], stage)
         if (not self.registry.authorized(binding['model'], binding['role'], binding['seat'], binding['identity'],
                                          unit['id'], key, stage) or any(
-                e.plan == key and e.workstream == unit['id'] and e.status == 'retired'
-                and (e.stage == 'worker' or e.stage == stage and e.revision == case['revision'])
+                e.plan == key and e.workstream == unit['id'] and e.status == 'retired' and e.model == binding['model']
+                and e.stage == stage and (stage == 'worker' or e.revision == case['revision'])
                 for e in self.registry.agents.values())):
             raise FusionError('frozen binding revoked; no replacement selected')
         try:
-            if (not verification_case.independent(unit['roster']) or
+            roster = {s: self.registry.binding(key, unit['id'], s) for s in unit['roster']}
+            if (not verification_case.independent(roster) or
                     await asyncio.to_thread(self._actual_model, binding['model']) != binding['actual_model']):
                 raise FusionError('Frozen native model or review independence changed; no fallback selected.')
             return await asyncio.to_thread(self._version_profile, binding)
@@ -2163,10 +2170,207 @@ class FusionRuntime:
 
     def cancel_recovery(self, key):
         plan = self.registry.plans.get(key)
-        if not plan or plan.get('cancelled') or all(c['next'] == 'done' for c in plan['cases'].values()):
+        if not plan or plan.get('cancelled') or (all(c['next'] == 'done' for c in plan['cases'].values())
+                                                and not verification_case.awaiting_user(plan.get('mainRecovery', {}))
+                                                and not recovery.waiting(plan.get('mainRecovery', {}))):
             return False
         self._update_unit(plan, cancelled=True)
         return True
+
+    async def reconcile_checkpoints(self, *, unit_name=None):
+        """Only read local state and bind trusted results left by a stopped attempt."""
+        from desktop.core.harness.tools import ToolError
+
+        key, plan = self.recovery_plan()
+        if plan is None:
+            return
+        for name, case in plan['cases'].items():
+            if unit_name is not None and name != unit_name:
+                continue
+            if case['next'] not in verification_case.STAGES or case.get('reserved') or not case.get('history'):
+                continue
+            stage = case['next']
+            last = case['history'][-1]
+            journal = last.get('journal') or {}
+            if (journal.get('stage'), journal.get('revision')) != (stage, case['revision']):
+                continue
+            rows = {cid: dict(row) for cid, row in journal.get('calls', {}).items()}
+            unit = plan['spec']['units'][name]
+            for cid, row in rows.items():
+                before = row.get('before')
+                if row['status'] != 'started' or not before or row.get('observedAfter'):
+                    continue
+                now = await asyncio.to_thread(recovery.file_fact, self.parent.project, before['path'])
+                if now is not None:
+                    record = {'plan': key, 'unit': name, 'revision': case['revision'], 'stage': stage,
+                              'attempt': journal['attempt'], 'expert': journal['expert'], 'call': cid,
+                              'before': before, 'observedAfter': now, 'provesCompletion': False}
+                    if ref := await self._unit_detail(verification_case.page(record)):
+                        row.update(observedAfter=now, observation=ref)
+            h = case.get('handoff') or {}
+            updates = {}
+            if rows != journal.get('calls', {}):
+                observations = [row['observation'] for row in rows.values() if row.get('observation')]
+                revised = {**journal, 'calls': rows}
+                updates['handoff'] = {**h, 'evidencePending': True,
+                                      'evidenceRefs': list(dict.fromkeys([*h.get('evidenceRefs', ()), *observations]))}
+                updates['history'] = [*case['history'][:-1], {**last, 'journal': revised, 'handoff': updates['handoff']}]
+            # A positive report returned by submit_report is distinct from a model claiming it passed.
+            if last.get('reason') == 'interrupted; inspect before resuming' and not recovery.incomplete_evidence(journal):
+                agent = self.registry.agents.get(journal.get('expert'))
+                if agent and (agent.plan, agent.workstream, agent.stage, agent.revision) == (key, name, stage, case['revision']):
+                    for row in rows.values():
+                        ref = row.get('report')
+                        if row.get('tool') != 'submit_report' or row['status'] != 'done' or not ref:
+                            continue
+                        try:
+                            proof = json.loads(await asyncio.to_thread(self.parent._outputs.read, ref))
+                            expected = verification_case.stage_proof(key, name, case['revision'], stage, agent.id,
+                                                                      'done', proof['summary'], proof['evidence'])
+                            if (proof != expected or not isinstance(proof['summary'], str) or not isinstance(proof['evidence'], list)
+                                    or not proof['evidence'] or not all(isinstance(e, str) and e.strip() for e in proof['evidence'])):
+                                continue
+                            await asyncio.to_thread(self._read_bound_proof, expected, ref)
+                        except (KeyError, ValueError, TypeError, OSError, ToolError):
+                            continue
+                        receipt = {k: proof[k] for k in ('revision', 'expert', 'summary', 'evidence')}
+                        next_stage = 'runner' if stage == 'worker' else 'review' if stage == 'runner' and 'review' in unit['roster'] else 'done'
+                        # Keep the original reservation debit. Recovering evidence does not recover unknown usage.
+                        updates.update(receipts={**case['receipts'], stage: {**receipt, 'detail': ref}},
+                                       next=next_stage, paused='', budgetReview=None, handoff={})
+                        status = agent.status, agent.replaced_status
+                        if agent.status == 'retired':
+                            agent.replaced_status = 'done'
+                        else:
+                            agent.status = 'done'
+                        try:
+                            self._update_unit(case, **updates)
+                        except ChatGPTError:
+                            agent.status, agent.replaced_status = status
+                            self.parent.saved.fusion = self.registry.to_json()
+                        updates = {}
+                        break
+            if updates:
+                with contextlib.suppress(ChatGPTError):
+                    self._update_unit(case, **updates)
+
+    def defer_external(self, key, name: str | None, delay):
+        plan = self.registry.plans.get(key)
+        if self._closing or not plan or plan.get('cancelled'):
+            return False
+        owner = plan.setdefault('mainRecovery', {}) if name is None else plan['cases'][name]
+        record = recovery.wait_record(owner, delay)
+        if record is None:
+            return False
+        try:
+            self._update_unit(owner, externalWait=record)
+        except ChatGPTError:
+            return False
+        return True
+
+    def wake_external(self, plan, *, now):
+        updates = [(owner, owner['externalWait']) for _, owner in self._permission_owners(plan)
+                   if recovery.waiting(owner) and owner['externalWait']['until'] <= now]
+        for owner, wait in updates:
+            owner['externalWait'] = {**wait, 'status': 'ready'}
+        if updates:
+            try:
+                self._checkpoint()
+            except ChatGPTError:
+                for owner, wait in updates:
+                    owner['externalWait'] = wait
+                self.parent.saved.fusion = self.registry.to_json()
+                raise
+
+    def _permission_owners(self, plan):
+        return [(None, plan.get('mainRecovery', {})), *plan['cases'].items()]
+
+    def bind_main_journal(self, tools, owner):
+        effects = ('edit', 'exec', 'external')
+
+        def started(call, kind):
+            if kind not in effects:
+                return
+            rows = owner.get('journal', {})
+            if len(rows) >= 256:
+                raise FusionError('The recovery journal is full; inspect retained evidence before another side effect.')
+            intent = recovery.action_key(call)
+            if call.call_id in rows or any(r['intent'] == intent and r['status'] == 'started' for r in rows.values()):
+                raise FusionError('An identical Main side effect has no confirmed result. Inspect rather than replay it.')
+            self._update_unit(owner, journal={**rows, call.call_id: {'intent': intent, 'status': 'started', 'tool': call.name}})
+
+        async def recorded(call, outcome, kind):
+            rows = owner.get('journal', {})
+            if kind not in effects or call.call_id not in rows:
+                return
+            ref = outcome.reference or await self._unit_detail(outcome.output)
+            rows = owner['journal']  # Other work may have journaled results while the output was retained.
+            row = {**rows[call.call_id], 'status': 'cancelled' if outcome.cancelled else 'error' if outcome.is_error else 'done',
+                   'result': ref, 'outputPending': bool(outcome.output and not ref)}
+            self._update_unit(owner, journal={**rows, call.call_id: row})
+
+        tools.tool_started, tools.tool_recorded = started, recorded
+
+    def bind_recovery_permissions(self, tools, key, name, owner, *, worker=False):
+        def ask(call, verdict):
+            plan = self.registry.plans.get(key)
+            if not plan or plan.get('cancelled') or self._closing or self.parent._close_requested:
+                return 'cancel'
+            if row := recovery.authorization(owner, call):
+                if row['status'] == 'pending':
+                    return 'deferred'
+                return 'proceed_once' if row['status'] == 'approved' and row['version'] == recovery.owner_version(owner) else 'cancel'
+            records = owner.get('permissions', {})
+            if len(records) >= recovery.MAX_REQUESTS:
+                return 'cancel'
+            row = recovery.permission_request(key, name, owner, call, tools, verdict.reason)
+            if row is None:
+                return 'cancel'  # The input cannot be described safely in an authorization card.
+            self._update_unit(owner, permissions={**records, row['id']: row})
+            self.parent._changed()
+            return 'deferred'
+
+        def guard(call):
+            plan = self.registry.plans.get(key)
+            if not plan or plan.get('cancelled') or self._closing or self.parent._close_requested:
+                return 'The bound Fusion task is no longer active.'
+            if row := recovery.authorization(owner, call):
+                if (row['status'] != 'approved' or row['version'] != recovery.owner_version(owner) or
+                        self._closing or self.parent._close_requested):
+                    return 'The previous authorization is not available. Do not repeat this exact action.'
+                # This is the current Harness, not the rules from the earlier approval. DENY is never overridable.
+                from desktop.core.harness.loop import DENY
+                if tools.check(call).verdict == DENY:
+                    return 'Current policy no longer allows the action.'
+                if verification_case.digest(recovery.permission_scope(call, tools)) != row['scope']:
+                    return 'The current action target or preview differs from what the user approved.'
+                records = owner['permissions']
+                spent = {**row, 'status': 'consumed', 'executedCall': call.call_id}
+                self._update_unit(owner, permissions={**records, row['id']: spent})
+            return ''
+
+        tools.recovery_ask = ask
+        tools.recovery_guard = guard
+        tools.recovery_pause = (lambda: any(recovery.pending_permissions(owner))) if worker else None
+
+    def answer_tool_permission(self, prompt_id, value):
+        key, plan = self.recovery_plan()
+        if plan is None or self._closing or self.parent._close_requested or value not in ('proceed_once', 'cancel'):
+            return False
+        for name, owner in self._permission_owners(plan):
+            pending = owner.get('permissions', {})
+            row = pending.get(prompt_id)
+            if not row or row['status'] != 'pending':
+                continue
+            if ((key, name) in self._inflight_units or owner.get('next') in ('done', 'stopped') or
+                    row['version'] != recovery.owner_version(owner)):
+                return False
+            approved = value == 'proceed_once'
+            self._update_unit(owner, permissions={**pending, prompt_id: {**row, 'status': 'approved' if approved else 'declined'}},
+                              resumeSignal={'id': prompt_id, 'approved': approved, 'requestKind': 'toolPermission'})
+            self.parent._changed()
+            return True
+        return False
 
     def recovery_questions(self):
         from desktop.core.prompts import QuestionView
@@ -2175,7 +2379,8 @@ class FusionRuntime:
         _, plan = self.recovery_plan()
         if plan is None:
             return []
-        prompts = []
+        prompts = [recovery.permission_card(row) for _, owner in self._permission_owners(plan)
+                   for row in recovery.pending_permissions(owner)]
         for name, case in plan['cases'].items():
             for field in ('budgetRequest', 'recoveryRequest'):
                 request = case.get(field) or {}
@@ -2239,7 +2444,56 @@ class FusionRuntime:
                 return True
         return False
 
-    async def delegate_unit(self, name, *, resume=False, decision=None, tool_call=None, user_question=None) -> Outcome:
+    async def _replan_binding(self, key, unit, case, turn):
+        handoff = case.get('handoff') or {}
+        stage = handoff.get('stage')
+        if case['next'] != 'stopped' or handoff.get('diagnostic') != 'U07' or stage not in unit['roster']:
+            return Outcome('A scoped replan needs a failed pending binding (U07). Keep existing valid receipts.', True)
+        name = unit['id']
+        bound = self.registry.binding(key, name, stage)
+        try:
+            await asyncio.to_thread(self._version_profile, bound)
+        except FusionError:
+            return Outcome('The approved expert definition is unavailable. A new approved plan is required to change it.', True)
+        policy = self.registry.policy
+        pool = {'L1': (policy.main,), 'L2': policy.workers, 'L3': policy.lights}.get(bound['seat'], ())
+        roster = {s: self.registry.binding(key, name, s) for s in unit['roster']}
+        previous = case.get('rebindings', [])
+        used_models = {bound['model'], unit['roster'][stage]['model'], *(row['to']['model'] for row in previous if row['stage'] == stage)}
+        for model in pool:
+            if model in used_models:
+                continue
+            try:
+                actual = await asyncio.to_thread(self._actual_model, model)
+            except (ValueError, ProviderError, OSError):
+                continue
+            alternate = {**bound, 'model': model, 'actual_model': actual}
+            if not verification_case.independent({**roster, stage: alternate}):
+                continue
+            if (self.route_turn is not turn or self._unit_key() != key or self.registry.policy is not policy or
+                    self._closing or self.parent._close_requested or self.registry.plans[key].get('cancelled')):
+                return Outcome('The plan or policy changed; no replan was recorded.', True)
+            agents = [(e, e.status, e.replaced_status) for e in self.registry.agents.values()
+                      if (e.plan, e.workstream, e.stage) == (key, name, stage) and e.status != 'retired']
+            if any(status == 'running' for _, status, _ in agents):
+                return Outcome('Wait for the active expert to settle before reassignment.', True)
+            for e, status, _ in agents:
+                e.status, e.replaced_status = 'retired', status
+            repair = handoff.get('cause') == 'repair'
+            event = {'stage': stage, 'revision': case['revision'], 'from': bound, 'to': alternate}
+            try:
+                self._update_unit(case, rebindings=[*previous, event], next=stage,
+                                  paused='repair' if repair else 'binding replaced' if agents else '')
+            except BaseException:
+                for e, status, replaced in agents:
+                    e.status, e.replaced_status = status, replaced
+                self.parent.saved.fusion = self.registry.to_json()
+                raise
+            return Outcome(f'{name}: the same work, scope, expert version and seat were retained. No expert dispatched. '
+                           + ('Resume the pending stage after reviewing its handoff.' if case['paused'] else 'Dispatch the pending stage normally.'))
+        return Outcome('No independent fallback in the authorized seat. Choose an authorized alternative or obtain a revised plan; the task is not complete.', True)
+
+    async def delegate_unit(self, name, *, resume=False, decision=None, tool_call=None, user_question=None, replan=False) -> Outcome:
         key, turn = self._unit_key(), self.route_turn
         if (not self.unit_tools_available or not key or not turn or turn.unit_plan != key or
                 (self.parent._declare_state() or {}).get('intent') != 'execute'):
@@ -2256,10 +2510,14 @@ class FusionRuntime:
         if deps := [dep for dep in unit['deps'] if plan['cases'][dep]['next'] != 'done']:
             return Outcome(f"This unit waits on unverified dependencies: {', '.join(deps)}.", True)
         case = plan['cases'][name]
-        if any((case.get(field) or {}).get('status') == 'pending' for field in ('budgetRequest', 'recoveryRequest')):
+        if verification_case.awaiting_user(case):
             return Outcome('This unit waits for a specific user answer. Continue other authorized units.', True)
+        if recovery.waiting(case):
+            return Outcome('This unit has a scheduled retry; no work is charged while it waits. Continue independent work.', True)
         self._inflight_units.add(lock)
         try:
+            if replan:
+                return await self._replan_binding(key, unit, case, turn)
             if user_question is not None:
                 if case['next'] not in verification_case.STAGES:
                     return Outcome('This unit has no pending execution stage.', True)
@@ -2273,6 +2531,7 @@ class FusionRuntime:
                 return Outcome('The prerequisite was posted as a user question. It grants no tool permissions; continue authorized work.')
             if decision is not None:
                 return await self._decide_unit_budget(key, turn, unit, case, decision)
+            await self.reconcile_checkpoints(unit_name=name)
             return await self._run_unit(key, turn, name, resume, tool_call)
         finally:
             self._inflight_units.discard(lock)
@@ -2323,7 +2582,7 @@ class FusionRuntime:
                 self._checkpoint()
                 return await self._paused_unit(case, f'{name}: inspect budget before resuming.')
             hard, soft, _ = verification_case.remaining(case, unit, stage, **caps)
-            b = unit['roster'][stage]
+            b = self.registry.binding(key, name, stage)
             try:
                 profile = await self._unit_profile(key, unit, case, stage)
             except FusionError as error:
@@ -2674,18 +2933,26 @@ class FusionRuntime:
                                                        started=time.monotonic()))
                 self.observer_runs[expert.id] = observed
             if case is not None:
+                self.bind_recovery_permissions(child_tools, plan_key, scope, case, worker=True)
                 unknown_intents = {row.get('intent') for h in case.get('history', ())
                                    for row in h.get('journal', {}).get('calls', {}).values() if row['status'] == 'started'}
 
                 def _tool_started(call: Call, kind: str) -> None:
-                    if kind in ('edit', 'exec'):
+                    if kind in ('edit', 'exec', 'external'):
                         intent = verification_case.digest([call.name, call.args])
                         if intent in unknown_intents:
                             raise FusionError('An identical side effect has no confirmed result. Inspect existing facts instead of replaying it.')
                         if call.call_id in journal['calls']:
                             raise FusionError('This side-effect call has already been recorded; inspect its checkpoint.')
-                        journal['calls'][call.call_id] = {'tool': call.name, 'kind': kind, 'status': 'started',
-                                                          'intent': intent}
+                        row = {'tool': call.name, 'kind': kind, 'status': 'started', 'intent': intent}
+                        raw = call.args.get('file_path')
+                        if kind == 'edit' and isinstance(raw, str):
+                            # Do not read an outside or protected target just to construct a recovery record.
+                            with contextlib.suppress(ValueError, OSError):
+                                relative = self.registry._scope(raw)
+                                if any(self.registry._overlaps(root, relative) for root in write_paths):
+                                    row['before'] = recovery.file_fact(self.parent.project, relative)
+                        journal['calls'][call.call_id] = row
                         self._checkpoint()
 
                 async def _capture(call: Call, outcome: Outcome, kind: str) -> None:
@@ -2696,6 +2963,8 @@ class FusionRuntime:
                             return
                     row = {**journal['calls'].get(call.call_id, {}), 'tool': call.name, 'kind': kind,
                            'status': 'cancelled' if outcome.cancelled else 'error' if outcome.is_error else 'done'}
+                    if kind == 'exec' and re.search(r'\[\.\.\. \d+ characters omitted \.\.\.\]', outcome.output):
+                        row['truncated'] = True
                     if outcome.output or outcome.reference:
                         row['result'] = outcome.reference or await self._unit_detail(outcome.output)
                         if not row['result']:
@@ -2785,6 +3054,14 @@ class FusionRuntime:
                 needs_report = (finished and reporting is not None and reporting.attempted
                                 and reporting.accepted is None and not reporting.followed_up)
                 end, limit = child.last_turn_end, child._fusion_step_limit
+                if case is not None and (any(recovery.pending_permissions(case)) or
+                                         self.defer_external(plan_key, scope, child._recovery_delay)):
+                    budget_stop = 'waiting for tool authorization' if any(recovery.pending_permissions(case)) else 'scheduled retry'
+                    self._active.pop(expert.id, None)
+                    self.registry.finish(expert.id, status='interrupted', tokens=tokens)
+                    self._checkpoint()
+                    outcome = Outcome(f'The unit paused: {budget_stop}. Continue other authorized units.', True)
+                    return outcome
                 if end is not None and (end.reason == "step_limit" or (needs_report and limit is not None and end.steps >= limit)):
                     budget_receipt = format_budget_receipt(child.turn_step_limit(), seconds)
                     self._active.pop(expert.id, None)
@@ -2911,6 +3188,7 @@ class FusionRuntime:
             if child_tools is not None:
                 child_tools.runner_shell = False
                 child_tools.tool_started = child_tools.tool_recorded = child_tools.tool_finished = None
+                child_tools.recovery_ask = child_tools.recovery_guard = child_tools.recovery_pause = None
             if journal_writes:
                 # A deadline cancels the expert, not a completed tool's local evidence write.
                 finished, pending_writes = await asyncio.wait(journal_writes, timeout=5)
@@ -2960,6 +3238,8 @@ class FusionRuntime:
                               else budget_stop or (check.reason if check and check.reason else '')
                               or ((child.check_retry_reason or 'interrupted') if started and expert.status != 'done'
                                   else 'interrupted' if expert.status != 'done' or outcome.is_error else ''))
+                    if not reason and recovery.incomplete_evidence(journal):
+                        reason = 'evidence needs reconciliation'
                     meter_kind = metrics.unit_attempt_kind(stage, case['paused'])
                     meter = measured.unit_meter(child.usage if child is not None else None, started) if measured else None
                     certificate = ''
@@ -2967,7 +3247,8 @@ class FusionRuntime:
                             or structured_report.status == 'concerns' and stage != 'worker')):
                         proof = verification_case.stage_proof(plan_key, scope, case['revision'], stage, expert.id,
                                                               structured_report.status, structured_report.summary, structured_report.evidence)
-                        certificate = next((r['report'] for r in journal['calls'].values() if r.get('report')), '')
+                        pointer = 'o-' + verification_case.digest(proof)
+                        certificate = pointer if any(r.get('report') == pointer for r in journal['calls'].values()) else ''
                         certificate = certificate or await self._unit_detail(verification_case.page(proof))
                         if not certificate:
                             reason, accepted = 'missing evidence', False

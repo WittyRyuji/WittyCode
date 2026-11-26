@@ -386,11 +386,13 @@ class AgentLoop:
         step = steps_used
         recovered_empty = False
         # A callable lets the app apply a saved change to an already running turn, without interrupting a request or tool.
+        self.completed_steps = step
         while step < (self.max_steps() if callable(self.max_steps) else self.max_steps):
             step += 1
             self._deliver_steers(history)
             await self._prepare(history)
             calls, incomplete = await self._step(history)
+            self.completed_steps = step
             if not calls:
                 if self.observer.has_steer():
                     continue
@@ -443,6 +445,9 @@ class AgentLoop:
             try:
                 return await self._read(history, self._request(history))
             except Exception as error:  # (a stop is a CancelledError and passes)
+                defer_retry = getattr(self.observer, 'defer_retry', None)
+                if defer_retry is not None and defer_retry(error):
+                    raise  # Fusion persists this wait outside the active execution budget.
                 network = getattr(error, "code", None) in ("network", "stream", "stream_idle", "timeout")
                 if network and (self._events or self._acknowledged or getattr(error, "code", None) in ("stream", "stream_idle")) and self._continuations < self._max_continuations:
                     self._continuations += 1
@@ -731,6 +736,8 @@ class AgentLoop:
         if verdict.verdict == ASK:
             self.observer.working("waiting_for_tool_confirmation")
             answer = await self.observer.ask(call, verdict)
+            if answer == 'deferred':
+                return Outcome('Not executed. This exact action is waiting for a durable user decision. Continue other authorized work.', True)
             if answer not in ("proceed_once", "proceed_always"):
                 return Outcome(DECLINED, True, cancelled=True)
             if answer == "proceed_always":

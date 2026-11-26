@@ -70,3 +70,43 @@ def test_desktop_recovery_question_keeps_body_and_only_notifies_after_acceptance
             await rig.finish()
 
     run(loop, scenario())
+
+
+def test_desktop_tool_permission_shows_exact_diff_and_can_resume(qapp, loop, tmp_path):
+    async def scenario():
+        rig = await open_rig(tmp_path)
+        try:
+            settings = rig.core.settings
+            settings.fusion_gates = _gates(*UNIT_GATES)
+            settings.fusion_main, settings.fusion_workers, settings.fusion_light = MAIN, [WORKER], LIGHT
+            settings.fusion_preference = 25
+            result = await rig.core.call('session.new', {'projectId': str(rig.project), 'fusion': True, 'settings': {'autonomy': 'ask'}})
+            main = rig.core._by_cid[result['id']].controller
+            _manual_steps(main, 8, 8)
+            main.mode = 'spec'
+            rig.plan.script(_declare('simple', 'plan'), call('submit_work_plan', {'data': {'units': [_unit(review_required=False)]}}),
+                            call('submit_plan', {'plan': '核查库存。'}))
+            assert main.send_prompt('核查库存。')
+            await wait_for(lambda: not main.busy)
+            args = {'file_path': 'stock.txt', 'content': 'Inventory count: four'}
+            rig.plan.script(_run('author'), call('create_file', args), say('尚未写入，等待授权。'))
+            assert main.approve_plan(main.saved.plan['id'])
+            await rig.wait_text(TURN + ' .prompt.perm', 'Fusion 续作需要你授权')
+            await rig.wait_text(TURN + ' .prompt.perm', 'Inventory count: four')
+            await rig.wait_text(TURN + ' .turnfoot', '等待用户 · 未完成')
+            assert not (rig.project / 'stock.txt').exists()
+            assert '本会话内' not in await rig.text(TURN + ' .prompt.perm')
+            if evidence := os.environ.get('WITTYCODE_TEST_EVIDENCE'):
+                await rig.shot(TURN, Path(evidence) / 'fusion-tool-permission.png')
+
+            rig.plan.script(call('submit_route', {}), _run('author-resume', resume=True), call('create_file', args),
+                            _report(evidence=['Stock value ready.']), _run('runner'), _report(evidence=['Fixture passed.']),
+                            say('检查完成。'))
+            await rig.click_text(TURN + ' .prompt.perm button', '允许（仅此一次）')
+            await rig.wait_text(TURN + ' .text-block', '检查完成。')
+            assert (rig.project / 'stock.txt').read_text(encoding='utf-8') == args['content']
+            assert main.saved.turns[-1].fusion_outcome == 'verified'
+        finally:
+            await rig.finish()
+
+    run(loop, scenario())

@@ -1,17 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
+from dataclasses import replace
 
 import pytest
 
-from desktop.core.fusion import verification_case as ledger
+from desktop.core.chatgpt.controller import ChatGPTController
+from desktop.core.chatgpt.errors import ChatGPTError
+from desktop.core.fusion import recovery, verification_case as ledger
 from desktop.core.fusion.registry import FusionRegistry
+from desktop.core.harness.toolset import HarnessTools
 from desktop.core.viewmodel import turn_json
 from tests.chatgpt_support import finish_turn
 from tests.fake_responses import call, fail, say
 from tests.fakes import until
 from tests.test_fusion_adaptive_rounds import _approve, _decision, _plan, _reopen, _run
-from tests.test_fusion_identity_runtime import _fusion, _manual_steps
+from tests.test_fusion_identity_runtime import LIGHT, _fusion, _manual_steps, _output
 from tests.test_fusion_route_runtime import UNIT_GATES, _report, _unit
 
 
@@ -130,4 +135,195 @@ def test_abnormal_main_exit_has_body_and_local_receipt_after_reopen(tmp_path):
             assert main.saved.turns[-1].fusion_outcome == 'unverified'
             assert any('independent check still pending' in b.get('markdown', '')
                        for b in turn_json(main.transcript.turns[-1])['blocks'])
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize('value', ['proceed_once', 'cancel'])
+def test_exact_tool_permission_is_durable_and_one_shot(tmp_path, value):
+    async def go():
+        async with _fusion(tmp_path, active=UNIT_GATES) as (main, fake):
+            main.autonomy = 'ask'
+            _manual_steps(main, 8, 8)
+            key, plan = await _plan(main, fake, _unit(review_required=False))
+            path = main.project / 'stock.txt'
+            args = {'file_path': 'stock.txt', 'content': 'Four'}
+            fake.script(_run('author'), call('create_file', args, call_id='blocked-write'), say('Waiting for one permission.'))
+            _approve(main)
+            await finish_turn(main)
+            assert not path.exists() and not main._pending
+            prompt, = main.transcript.pending_prompts()
+            assert prompt.kind == 'permission' and prompt.actions[0].diffs
+            main = await _reopen(main)
+            case = main._fusion.registry.plans[key]['cases']['stock']
+            stored, = main.transcript.pending_prompts()
+            assert stored.id == prompt.id and stored.actions == prompt.actions
+            assert not main.answer_permission(prompt.id, 'proceed_always')
+            if value == 'proceed_once':
+                fake.script(call('submit_route', {}), _run('resume', resume=True), call('create_file', args, call_id='allowed-write'),
+                            _report(evidence=['File created.']), _run('runner'), _report(evidence=['Inventory verified.']), say('Done.'))
+            else:
+                fake.script(call('submit_route', {}), _run('resume', resume=True), call('create_file', args, call_id='denied-write'),
+                            _report('blocked', evidence=[]), say('No alternative.'), say('Unverified.'))
+            assert main.answer_permission(prompt.id, value)
+            assert not main.answer_permission(prompt.id, 'proceed_once')
+            await until(lambda: main.busy)
+            await finish_turn(main)
+            assert not main.transcript.pending_prompts()
+            if value == 'proceed_once':
+                assert path.read_text(encoding='utf-8') == 'Four'
+                assert case['permissions'][prompt.id]['status'] == 'consumed'
+                assert main.saved.turns[-1].fusion_outcome == 'verified'
+            else:
+                assert not path.exists() and case['permissions'][prompt.id]['status'] == 'declined'
+                assert main.saved.turns[-1].fusion_outcome == 'unverified'
+    asyncio.run(go())
+
+
+def test_partial_tool_approval_only_resumes_the_authorized_unit(tmp_path):
+    async def go():
+        async with _fusion(tmp_path, active=UNIT_GATES) as (main, fake):
+            main.autonomy = 'ask'
+            _manual_steps(main, 8, 8)
+            _, plan = await _plan(main, fake, _unit(review_required=False), _unit('notes', paths=['notes.txt'], review_required=False))
+            stock = {'file_path': 'stock.txt', 'content': 'Four'}
+            notes = {'file_path': 'notes.txt', 'content': 'Fixture notes'}
+            fake.script(_run('first-stock'), call('create_file', stock, call_id='stock-write'),
+                        _run('first-notes', 'notes'), call('create_file', notes, call_id='notes-write'), say('Two actions need approval.'))
+            _approve(main)
+            await finish_turn(main)
+            first, second = main.transcript.pending_prompts()
+            assert first.actions[0].path == 'stock.txt' and second.actions[0].path == 'notes.txt'
+            fake.script(call('submit_route', {}), _run('resume-stock', resume=True), call('create_file', stock, call_id='allowed'),
+                        _report(evidence=['Stock created.']), _run('stock-check'), _report(evidence=['Stock verified.']),
+                        say('Notes still need a decision.'))
+            assert main.answer_permission(first.id, 'proceed_once')
+            await until(lambda: main.busy)
+            await finish_turn(main)
+            assert plan['cases']['stock']['next'] == 'done'
+            assert plan['cases']['notes']['next'] == 'worker' and not (main.project / 'notes.txt').exists()
+            assert [prompt.id for prompt in main.transcript.pending_prompts()] == [second.id]
+            assert main.saved.turns[-1].fusion_outcome == 'waiting_user'
+    asyncio.run(go())
+
+
+def test_retry_after_waits_locally_then_resumes_without_user_input(tmp_path, monkeypatch):
+    async def go():
+        stream = ChatGPTController._stream_turn
+        rejected = False
+        async def rate_limit_once(ctl, request):
+            nonlocal rejected
+            if ctl._fusion_parent is not None and not rejected:
+                rejected = True
+                raise ChatGPTError('retry later', code='rate_limit', status=429, retry_after=1.1)
+            async for event in stream(ctl, request):
+                yield event
+        monkeypatch.setattr(ChatGPTController, '_stream_turn', rate_limit_once)
+        async with _fusion(tmp_path, active=UNIT_GATES) as (main, fake):
+            _manual_steps(main, 8, 8)
+            key, plan = await _plan(main, fake, _unit(review_required=False))
+            case = plan['cases']['stock']
+            fake.script(_run('first'), _run('early-retry', resume=True), say('The provider asked us to wait.'))
+            _approve(main)
+            await finish_turn(main)
+            assert case['externalWait']['status'] == 'waiting' and case['attempts'] == {'worker': 1}
+            assert 'scheduled retry' in _output(main, 'early-retry')
+            count = len(fake.requests)
+            main = await _reopen(main)
+            case = main._fusion.registry.plans[key]['cases']['stock']
+            assert case['externalWait']['status'] == 'waiting' and len(fake.requests) == count
+            fake.script(call('submit_route', {}), _run('resume', resume=True), _report(evidence=['Delivery ready.']),
+                        _run('runner'), _report(evidence=['Independent check passed.']), say('Done.'))
+            await until(lambda: main.busy)
+            await finish_turn(main)
+            assert case['externalWait']['status'] == 'released' and case['next'] == 'done'
+            assert len(fake.requests) == count + 6
+    asyncio.run(go())
+
+
+def test_wait_bounds_do_not_create_an_unlimited_model_poll():
+    owner = {'revision': 1, 'next': 'runner'}
+    for index in range(2):
+        owner['externalWait'] = recovery.wait_record(owner, 10, now=100 + index)
+        assert owner['externalWait']['until'] == 110 + index
+    assert recovery.wait_record(owner, 10, now=102) is None
+    assert recovery.wait_record({}, float('nan')) is None
+    assert recovery.wait_record({}, 3600) is None
+
+
+def test_replan_failed_runner_binding_retains_author_and_frozen_scope(tmp_path, monkeypatch):
+    async def go():
+        async with _fusion(tmp_path, active=UNIT_GATES) as (main, fake):
+            _manual_steps(main, 8, 8)
+            key, plan = await _plan(main, fake, _unit(review_required=False))
+            unit = plan['spec']['units']['stock']
+            case = plan['cases']['stock']
+            original = ledger.digest(plan['spec'])
+            rt = main._fusion
+            alternative = 'chatgpt:gpt-6.1-nano'
+            actual_model = rt._actual_model
+            monkeypatch.setattr(rt, '_actual_model', lambda model: ('gpt-6.1-nano' if model == alternative else actual_model(model)))
+            rt.registry.policy = replace(rt.registry.policy, light=alternative, lights=(alternative,))
+            fake.script(_run('author'), _report(evidence=['Delivery ready.']), _run('unavailable-runner'),
+                        _run('replan', replan=True), say('Replanned.'), say('Still waiting for independent check.'))
+            _approve(main)
+            await finish_turn(main)
+            assert 'same work' in _output(main, 'replan')
+            assert case['next'] == 'runner' and case['attempts'] == {'worker': 1}
+            assert rt.registry.binding(key, 'stock', 'runner')['model'] == alternative
+            assert ledger.digest(plan['spec']) == original and unit['roster']['runner']['model'] == LIGHT
+            restored = FusionRegistry.from_json(main.project, rt.registry.to_json())
+            assert restored.plans[key]['cases']['stock']['receipts'] == case['receipts']
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize('checkpoint_kind', ['unknown-write', 'accepted-report'])
+def test_local_crash_reconciliation_preserves_facts_without_replaying(tmp_path, monkeypatch, checkpoint_kind):
+    async def go():
+        async with _fusion(tmp_path, active=UNIT_GATES) as (main, fake):
+            _manual_steps(main, 5, 5)
+            key, _ = await _plan(main, fake, _unit(review_required=False))
+            rt = main._fusion
+            original_checkpoint = rt._checkpoint
+            raw = None
+            written = {'file_path': 'stock.txt', 'content': 'Four'}
+            original_run = HarnessTools._run
+
+            async def crash_after_write(tools, operation):
+                nonlocal raw
+                result = await original_run(tools, operation)
+                if checkpoint_kind == 'unknown-write' and operation.call_id == 'write':
+                    raw = deepcopy(main.saved.fusion)  # Intent persisted; the result did not return to Harness yet.
+                return result
+
+            def checkpoint():
+                nonlocal raw
+                original_checkpoint()
+                if checkpoint_kind == 'accepted-report':
+                    case = rt.registry.plans[key]['cases']['stock']
+                    if any(row.get('report') for row in case.get('journal', {}).get('calls', {}).values()):
+                        raw = deepcopy(main.saved.fusion)
+
+            monkeypatch.setattr(HarnessTools, '_run', crash_after_write)
+            monkeypatch.setattr(rt, '_checkpoint', checkpoint)
+            fake.script(_run('author'), call('create_file', written, call_id='write'), _report(evidence=['Ready.']),
+                        say('Delivered.'), say('Not yet checked.'))
+            _approve(main)
+            await finish_turn(main)
+            assert raw is not None
+            rt.registry = FusionRegistry.from_json(main.project, raw)
+            case = rt.registry.plans[key]['cases']['stock']
+            count = len(fake.requests)
+            await rt.reconcile_checkpoints()
+            await rt.reconcile_checkpoints()  # Idempotent, even at zero remaining work budget.
+            assert len(fake.requests) == count and case['spent']['worker'] == 5
+            if checkpoint_kind == 'unknown-write':
+                row = case['history'][-1]['journal']['calls']['write']
+                assert row['before']['fingerprint'] == 'absent' and row['status'] == 'started'
+                assert row['observation'] and row['observedAfter']['fingerprint'] != 'absent'
+                assert case['next'] == 'worker' and not case['receipts']
+                assert case['handoff']['evidencePending']
+            else:
+                assert case['next'] == 'runner' and case['receipts']['worker']['detail']
+                assert 'runner' not in case['receipts']
+            FusionRegistry.from_json(main.project, rt.registry.to_json())
     asyncio.run(go())

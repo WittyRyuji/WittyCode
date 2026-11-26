@@ -44,6 +44,7 @@ BRIEF_PARAMETERS: dict[str, Any] = {
 UNIT_PARAMETERS = {"type": "object", "properties": {"unit": {"type": "string"},
                    "resume": {"type": "boolean", "description": "Run a paused stage only after inspection and any required budget decision."},
                    "user_question": {"type": "string", "maxLength": 800, "description": "Only if the user must personally supply a prerequisite. Ask exactly what, why, and the alternative. This cannot grant tool permissions."},
+                   "replan": {"type": "boolean", "description": "After a binding failure (U07), select a valid same-seat fallback for the unverified stage. Does not dispatch or change approved scope."},
                    "budget_decision": {"type": "object", "properties": {
                        "review": {"type": "string", "description": "Pending review id, or current to reforecast a paused stage before its allowance is exhausted."},
                        "action": {"type": "string", "enum": ["continue", "pause", "stop"]},
@@ -59,9 +60,11 @@ UNIT_BATCH = {"name": "delegate_tasks", "description": "Advance or decide on ind
 
 
 def valid_unit_action(args):
-    if (not isinstance(args, Mapping) or set(args) - {'unit', 'resume', 'budget_decision', 'user_question'}
+    if (not isinstance(args, Mapping) or set(args) - {'unit', 'resume', 'budget_decision', 'user_question', 'replan'}
             or not isinstance(args.get('unit'), str) or type(args.get('resume', False)) is not bool):
         return False
+    if 'replan' in args:
+        return args['replan'] is True and set(args) == {'unit', 'replan'}
     if 'user_question' in args:
         q = args['user_question']
         return not (args.get('resume') or 'budget_decision' in args) and isinstance(q, str) and 1 <= len(q.strip()) <= 800

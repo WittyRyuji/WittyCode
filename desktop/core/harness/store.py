@@ -465,7 +465,7 @@ def recover(session: SavedSession) -> bool:
         turn.note = CUT_OFF_UNKNOWN.format(count=unknown) if unknown else CUT_OFF
         if turn.fusion_plan:
             turn.fusion_outcome = 'unverified'
-            turn.fusion_recovery = not turn.fusion_resumed
+            turn.fusion_recovery = True
             turn.note += '\nFusion：原任务尚未验收。已保留检查点；先核对未取得结果的动作，不自动重放。'
             for item in session.items[turn.start : end]:
                 if item.get('type') == 'message' and item.get('role') == 'assistant':

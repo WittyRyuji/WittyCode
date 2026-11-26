@@ -369,7 +369,7 @@ class Turn:
     fusion_dispatches: list[str] = field(default_factory=list)
     """Fusion's opening and confirmed starts are display metadata, not conversation text."""
     fusion_outcome: str = ''
-    recovery_prompts: list[QuestionPrompt] = field(default_factory=list)
+    recovery_prompts: list[Prompt] = field(default_factory=list)
     """Projection of durable Fusion requests, which are not expired with a model turn."""
 
     @property
@@ -433,7 +433,7 @@ class Transcript:
         recovery = self.turns[-1].recovery_prompts if self.turns else []
         return [prompt for _, prompt in self._prompts.values() if prompt.status is PromptStatus.PENDING] + recovery
 
-    def set_recovery_prompts(self, prompts: list[QuestionPrompt]) -> None:
+    def set_recovery_prompts(self, prompts: list[Prompt]) -> None:
         if not self.turns:
             return
         target = self.turns[-1]

@@ -432,11 +432,15 @@ def handoff(case, unit, stage, *, cause='', expert='', progress=(), detail='', a
 
 
 def restore(key, plan):
+    from desktop.core.fusion import recovery
+
     spec = plan['spec']
     if (spec['format'] != 1 or key != digest(spec) or set(plan['cases']) != set(spec['units'])
             or type(plan['activated']) is not bool):
         raise ValueError('Invalid frozen plan snapshot.')
+    recovery.validate_owner(key, 'Main', plan.get('mainRecovery', {}))
     for name, case in plan['cases'].items():
+        recovery.validate_owner(key, name, case)
         unit = spec['units'][name]
         if not independent(unit['roster']):
             raise ValueError('The stored review is not independent of its author.')
@@ -445,6 +449,20 @@ def restore(key, plan):
                 or any(type(n) is not int or n < 0 for counts in (case['spent'], case['attempts']) for n in counts.values())):
             raise ValueError('Invalid frozen unit cursor.')
         stages = [s for s in STAGES if s in unit['roster']]
+        roster = dict(unit['roster'])
+        seen = set()
+        for row in case.get('rebindings', ()):
+            stage, replacement = row['stage'], row['to']
+            old = roster[stage]
+            if (row['from'] != old or (stage, replacement['model']) in seen or set(old) != set(replacement)
+                    or type(row['revision']) is not int or not 0 <= row['revision'] <= case['revision']
+                    or any(replacement[k] != old[k] for k in old if k not in ('model', 'actual_model'))
+                    or not all(isinstance(replacement[k], str) and replacement[k] for k in ('model', 'actual_model'))):
+                raise ValueError('Invalid stage replan.')
+            seen.update(((stage, old['model']), (stage, replacement['model'])))
+            roster[stage] = replacement
+            if not independent(roster):
+                raise ValueError('A replanned check cannot reuse the author model.')
         if (set(case['receipts']) - set(stages) or not isinstance(case.get('history', []), list)
                 or any(not isinstance(h, dict) or h.get('stage') not in stages
                        or type(h.get('seconds')) not in (int, float) or not math.isfinite(h['seconds']) or h['seconds'] < 0
@@ -559,7 +577,10 @@ def advance(case, unit, stage, report, *, accepted, interrupted, reason, steps, 
 
 
 def awaiting_user(case):
-    return any((case.get(field) or {}).get('status') == 'pending' for field in ('budgetRequest', 'recoveryRequest'))
+    from desktop.core.fusion.recovery import pending_permissions
+
+    return (any((case.get(field) or {}).get('status') == 'pending' for field in ('budgetRequest', 'recoveryRequest'))
+            or any(pending_permissions(case)))
 
 
 def result_lines(plan):
@@ -583,6 +604,8 @@ def result_lines(plan):
             if case['paused'] in ('hard limit', 'hard time limit', 'repair limit'):
                 reason = '达到硬上限' + ('；有检查工单' if h.get('finding') else '')
             status = '已停止' if decision == 'stop' else f'已停止（{reason}）'
+            if h.get('diagnostic') == 'U07':
+                actions.append(f'{name}: use replan=true to inspect an authorized same-seat fallback')
         elif deps:
             status = '依赖阻塞，等待 ' + '、'.join(deps) + ' 验证通过'
         elif awaiting_user(case):

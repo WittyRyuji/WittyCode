@@ -11,11 +11,13 @@ const WHO = { devin: "Devin", chatgpt: "ChatGPT Plan", factory: "Factory" } as c
 
 export function PermissionCard({ sessionId, prompt }: { sessionId: string; prompt: PermissionPrompt }) {
   const answer = useStore((s) => s.answerPermission);
+  const stop = useStore((s) => s.stop);
+  const recovery = prompt.id.startsWith("fusion-tool-");
   return (
     <section className="prompt perm" role="alertdialog" aria-label="需要你的确认">
       <div className="phead">
         <AlertTriangle size={16} className="picon" />
-        需要你的确认
+        {recovery ? "Fusion 续作需要你授权" : "需要你的确认"}
       </div>
       {prompt.actions.map((a, i) => (
         <div key={i} className="action">
@@ -39,6 +41,7 @@ export function PermissionCard({ sessionId, prompt }: { sessionId: string; promp
             {o.label}
           </button>
         ))}
+        {recovery && <button type="button" className="btn" onClick={() => stop(sessionId)}>取消原任务</button>}
       </div>
     </section>
   );

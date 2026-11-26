@@ -158,7 +158,10 @@ class FusionRegistry:
 
     def binding(self, plan: str, unit: str, stage: str) -> dict:
         try:
-            return self.plans[plan]['spec']['units'][unit]['roster'][stage]
+            frozen = self.plans[plan]
+            original = frozen['spec']['units'][unit]['roster'][stage]
+            return next((row['to'] for row in reversed(frozen['cases'][unit].get('rebindings', ()))
+                         if row['stage'] == stage), original)
         except (KeyError, TypeError) as error:
             raise FusionError('Unknown frozen unit or stage.') from error
 
@@ -579,9 +582,15 @@ class FusionRegistry:
                 raise FusionError("The expert workstream is invalid.")
             identity = item.get("identity", "")
             if plan:
-                bound = result.binding(plan, workstream, stage)
-                expected = result.plans[plan]['spec']['units'][workstream]['paths'] if stage == 'worker' else []
-                if (identity != bound['identity'] or model != bound['model'] or item.get('paths') != expected
+                frozen = result.plans[plan]
+                unit = frozen['spec']['units'][workstream]
+                bound = unit['roster'][stage] if status == 'retired' else result.binding(plan, workstream, stage)
+                historical_models = {bound['model']}
+                if status == 'retired':
+                    historical_models.update(row['to']['model'] for row in frozen['cases'][workstream].get('rebindings', ())
+                                             if row['stage'] == stage)
+                expected = unit['paths'] if stage == 'worker' else []
+                if (identity != bound['identity'] or model not in historical_models or item.get('paths') != expected
                         or role != bound['role'] or seat != bound['seat']):
                     raise FusionError('A saved expert does not match its frozen binding.')
             elif identity != "" and (identity not in _IDENTITIES or not workstream):

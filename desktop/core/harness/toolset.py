@@ -76,6 +76,9 @@ class HarnessTools:
         self.clients = list(clients)
         self.connections = None
         self.asker = asker
+        self.recovery_ask: Callable[[Call, Verdict], str | None] | None = None
+        self.recovery_guard: Callable[[Call], str] | None = None
+        self.recovery_pause: Callable[[], bool] | None = None
         self.tool_started: Callable[[Call, str], None] | None = None
         self.tool_recorded: Callable[[Call, Outcome, str], Awaitable[None]] | None = None
         self.tool_finished: Callable[[Call, Outcome, str], Awaitable[None]] | None = None
@@ -427,8 +430,10 @@ class HarnessTools:
             return Outcome(f"Refused: {identity.reason}", True)
         if refusal := self._route_check(call):
             return Outcome(f"Refused: {refusal}", True)
+        if self.recovery_guard is not None and (refusal := self.recovery_guard(call)):
+            return Outcome(f'Refused: {refusal}', True)
         spec = self.registry.get(call.name)
-        kind = spec.kind if spec is not None else "read"
+        kind = spec.kind if spec is not None else 'external' if call.name in self._mcp else 'read'
         if self.tool_started is not None:
             self.tool_started(call, kind)
         if self.connections is not None:
@@ -436,7 +441,10 @@ class HarnessTools:
             try:
                 await self.connections.hooks("PreToolUse", self.context.project, {"tool_name": call.name, "tool_input": call.args})
             except ConnectionError as error:
-                return Outcome(str(error), True, cancelled=True)
+                outcome = Outcome(str(error), True, cancelled=True)
+                if self.tool_recorded is not None:
+                    await self.tool_recorded(call, outcome, kind)
+                return outcome
         outcome = await self._run(call)
         if self.tool_recorded is not None:
             await self.tool_recorded(call, outcome, kind)
@@ -513,12 +521,12 @@ class HarnessTools:
             tasks = call.args.get('tasks') if call.name == fusion_tools.BATCH_NAME else [call.args]
             if (not isinstance(tasks, list) or not 1 <= len(tasks) <= fusion_tools.MAX_PARALLEL
                     or not all(valid_unit_action(t) for t in tasks)):
-                return Outcome('Use only a frozen unit id with at most one of resume, budget_decision, or user_question.', True)
+                return Outcome('Use only a frozen unit id with at most one of resume, budget_decision, user_question, or replan.', True)
             if len({t['unit'] for t in tasks}) != len(tasks):
                 return Outcome('A batch cannot act on the same unit twice.', True)
             pending = [asyncio.create_task(self.unit_runner(t['unit'], resume=t.get('resume', False),
                                                            decision=t.get('budget_decision'), tool_call=call,
-                                                           **({'user_question': t['user_question']} if 'user_question' in t else {}))) for t in tasks]
+                                                           **{k: t[k] for k in ('user_question', 'replan') if k in t})) for t in tasks]
             try:
                 results = await asyncio.gather(*pending)
             finally:
