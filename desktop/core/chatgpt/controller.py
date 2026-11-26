@@ -683,7 +683,30 @@ class ChatGPTController:
         receipt = getattr(self, "_declare_receipt", None)
         return receipt if isinstance(receipt, dict) and receipt.get("turn") is self._turn else None
 
-    async def _declare_topic(self, kind: str, intent: str, topic: str) -> Outcome:
+    def _fusion_feedback_turn(self, turn: Turn | None) -> SavedTurn | None:
+        if (self._fusion is None or self._fusion_identity is not None or turn is None or turn is not self._turn
+                or not turn.running or not self.saved.turns):
+            return None
+        record = self.saved.turns[-1]
+        return record if record.start == self._turn_start and record.finished is None else None
+
+    def _fusion_opening(self, turn: Turn | None, text: str) -> None:
+        if text and (record := self._fusion_feedback_turn(turn)) is not None and not record.opening:
+            assert turn is not None
+            record.opening = text
+            self.transcript.set_turn_opening(turn, text)
+            self._save_soon()
+            self._changed()
+
+    def _fusion_expert_started(self, turn: Turn | None, label: str) -> None:
+        if (record := self._fusion_feedback_turn(turn)) is not None and label not in record.dispatches:
+            assert turn is not None
+            record.dispatches.append(label)
+            self.transcript.add_turn_dispatch(turn, label)
+            self._save_soon()
+            self._changed()
+
+    async def _declare_topic(self, kind: str, intent: str, topic: str, next_step: str = "") -> Outcome:
         """The main agent's one routing declaration per turn; a rename cannot reopen it this turn."""
         receipt = self._declare_state()
         if receipt is not None:
@@ -694,18 +717,21 @@ class ChatGPTController:
                 return await task  # A parallel declare shares the spend instead of re-running it.
             except Exception as error:
                 return Outcome(f"Declare failed: {type(error).__name__}.", True)
+        turn = self._turn
         if (intent == 'execute' and self._fusion is not None and self._fusion.unit_tools_available
                 and (binding := self._fusion.pending_approved_units())):
             outcome = Outcome('Continue the approved frozen plan; activate it with submit_route({}). No units were reselected.')
-            self._declare_receipt = {'turn': self._turn, 'kind': kind, 'intent': intent, 'workplan': binding, 'outcome': outcome}
+            self._declare_receipt = {'turn': turn, 'kind': kind, 'intent': intent, 'workplan': binding, 'outcome': outcome}
+            self._fusion_opening(turn, next_step)
             return outcome
         task = asyncio.ensure_future(self._route_topic(kind, intent, topic))
-        self._declare_receipt = {"turn": self._turn, "task": task}
+        self._declare_receipt = {"turn": turn, "task": task}
+        self._fusion_opening(turn, next_step)
         try:
             outcome = await task
         except Exception as error:
             outcome = Outcome(f"Declare failed: {type(error).__name__}.", True)
-        self._declare_receipt = {"turn": self._turn, "kind": kind, "intent": intent,
+        self._declare_receipt = {"turn": turn, "kind": kind, "intent": intent,
                                  "failed": outcome.is_error, "outcome": outcome}
         return outcome
 
@@ -716,7 +742,7 @@ class ChatGPTController:
         if self._fusion is None:
             return Outcome("Fusion mode is not active; answer directly.", True)
         if kind == "simple":
-            text = "Declared simple: answer directly. No debate and no expert is needed."
+            text = "Declared simple: no debate. Follow the declared intent; execution can still delegate to Coder."
         else:
             try:
                 result = await debate_bridge.discuss(self, topic)
@@ -1240,7 +1266,8 @@ class ChatGPTController:
             unrated = fusion.unrated_records() if fusion is not None else ()
             if fusion is not None and (verdict is not None or unrated or not plan and fusion.has_map_writes):
                 # Keep verification, ratings and map descriptions in the same continuation.
-                asks = [verdict.continuation()] if verdict is not None and verdict.missing else []
+                continuation = verdict.continuation() if verdict is not None and verdict.missing else ''
+                asks = [continuation] if continuation else []
                 if unrated:
                     asks.append(fusion.rating_request(unrated))
                 if not plan and (map_request := await fusion.map_description_request()):
@@ -1339,11 +1366,14 @@ class ChatGPTController:
             note = STOP_NOTES.get(end.detail, f"回答没有说完（{end.detail}）。")
         elif end.reason == "step_limit":
             note = f"这一轮用了 {end.steps} 步还没结束，先停在这里；可在设置 → 会话里调整「单轮步数上限」，或回复「继续」。"
-        if verdict is not None and verdict.missing:
-            # The unverified "done" hid every answer text; the verdict is the only conclusion this turn has —
-            # persist it like the stop notes so a reopened chat still shows it once.
-            unverified = "Fusion：本轮工作未验证；缺少检查：" + ", ".join(verdict.missing) + "。"
-            note = unverified + (" " + note if note else "")
+        if verdict is not None and (verdict.missing or verdict.unit_results):
+            # Persist the program verdict like other stop notes, so a reopened chat shows it once.
+            if verdict.unit_results:
+                heading = 'Fusion：本轮工作未验证。' if verdict.missing else 'Fusion：本轮工作已验证。'
+                result = '\n'.join((heading, *verdict.unit_results))
+            else:
+                result = 'Fusion：本轮工作未验证；缺少检查：' + ', '.join(verdict.missing) + '。'
+            note = result + ('\n' + note if note else '')
         if note:
             self.transcript.add_notice(note)
         self._release_steers()

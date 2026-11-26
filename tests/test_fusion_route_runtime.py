@@ -8,6 +8,7 @@ import pytest
 from desktop.core.fusion.acp import AcpRun
 from desktop.core.fusion.drive.retention import Retention
 from desktop.core.fusion.protocol import ROUTE_DECLARATION, route_refusal
+from desktop.core.viewmodel import turn_json
 from tests.app_support import ready_core
 from tests.chatgpt_support import finish_turn
 from tests.fake_responses import call, say, usage
@@ -33,6 +34,58 @@ def _edit(call_id="edit"):
 
 def _delegate(call_id="delegate", **kwargs):
     return call("delegate_task", _brief(**kwargs), call_id=call_id)
+
+
+@pytest.mark.parametrize("accepts_prompt", [True, False])
+def test_dispatch_feedback_requires_a_child_prompt_and_reopens_in_order(tmp_path, monkeypatch, accepts_prompt):
+    async def go():
+        async with _fusion(tmp_path, active=(*ROUTE_GATES, "v3")) as (main, fake):
+            expected_opening = "I’ll check the inventory totals."
+            expected_dispatch = "Coder-Inventory"
+            if not accepts_prompt:
+                send = type(main).send_prompt
+
+                def refuse_child(controller, *args, **kwargs):
+                    return False if controller is not main else send(controller, *args, **kwargs)
+
+                monkeypatch.setattr(type(main), "send_prompt", refuse_child)
+            declare = call("declare_topic", {"kind": "simple", "intent": "execute", "topic": "Check the stock",
+                                            "next_step": expected_opening})
+            research = dict(read_only=True, paths=[])
+            responses = [declare, _delegate("refused-write"), _delegate("research", **research)]
+            if accepts_prompt:
+                responses += [[("hold", "worker"), *_report()], _delegate("again", **research), _report()]
+            fake.script(*responses, say("Reviewed."))
+            assert main.send_prompt("Check the inventory.")
+            if accepts_prompt:
+                await until(lambda: len(fake.requests) == 4)
+                running = turn_json(main.transcript.turns[-1])
+                assert running["status"] == "running"
+                assert running["fusionFeedback"] == {"opening": expected_opening, "dispatches": [expected_dispatch]}
+                assert not any(b["kind"] == "text" for b in running["blocks"])
+                fake.release("worker")
+            await finish_turn(main)
+            assert "route" in _output(main, "refused-write")
+            assert ("[done]" if accepts_prompt else "not ready") in _output(main, "research")
+            assert len(fake.requests) == (7 if accepts_prompt else 4)
+            assert all('已交给' not in json.dumps(request, ensure_ascii=False) for request in fake.requests)
+            expected = {"opening": expected_opening, "dispatches": [expected_dispatch] if accepts_prompt else []}
+
+            def shown(controller):
+                turn = turn_json(controller.transcript.turns[-1])
+                blocks = turn["blocks"]
+                assert blocks[0]["kind"] == "user" and blocks[-1]["markdown"] == "Reviewed."
+                assert not any(b["kind"] == "notice" for b in blocks)
+                return turn["fusionFeedback"]
+
+            assert shown(main) == expected
+            await main.close()
+            reopened = await main.manager.open_saved(main.project, main.session_id)
+            try:
+                assert shown(reopened) == expected
+            finally:
+                await reopened.close()
+    asyncio.run(go())
 
 
 def test_route_blocks_writes_before_routing_but_not_reads_or_research(tmp_path):

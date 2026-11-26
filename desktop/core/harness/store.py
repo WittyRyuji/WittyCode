@@ -68,6 +68,9 @@ class SavedTurn:
     model: str = ""
     note: str = ""
     """What the page said about how the turn ended (``limit``, ``incomplete``, a turn ``recover`` found cut off)."""
+    opening: str = ""
+    dispatches: list[str] = field(default_factory=list)
+    """Fusion display only: opening line and the labels of experts actually sent work this turn."""
 
 
 @dataclass(slots=True)
@@ -149,6 +152,24 @@ def diff_from_json(raw: Any) -> FileDiff | None:
         return None
 
 
+def _turn_json(turn: SavedTurn) -> dict[str, Any]:
+    data = {"start": turn.start, "at": turn.at, "finished": turn.finished, "status": turn.status,
+            "error": turn.error, "model": turn.model, "note": turn.note}
+    if turn.opening:
+        data["opening"] = turn.opening
+    if turn.dispatches:
+        data["dispatches"] = turn.dispatches
+    return data
+
+
+def _turn_from(raw: Mapping[str, Any]) -> SavedTurn:
+    opening, dispatches = raw.get("opening"), raw.get("dispatches")
+    labels = (label for label in dispatches if isinstance(label, str) and label.strip()) if isinstance(dispatches, list) else ()
+    return SavedTurn(int(raw["start"]), float(raw["at"]), raw.get("finished"), str(raw.get("status") or "done"),
+                     str(raw.get("error") or ""), str(raw.get("model") or ""), str(raw.get("note") or ""),
+                     opening=opening if isinstance(opening, str) else "", dispatches=list(dict.fromkeys(labels)))
+
+
 def _session_json(session: SavedSession) -> dict[str, Any]:
     from desktop.core.harness.outputs import RETAIN_CHARS, hint
     from desktop.core.harness.loop import clip_output
@@ -178,7 +199,7 @@ def _session_json(session: SavedSession) -> dict[str, Any]:
         "mode": session.mode,
         "created_at": session.created_at,
         "modified_at": session.modified_at,
-        "turns": [{"start": t.start, "at": t.at, "finished": t.finished, "status": t.status, "error": t.error, "model": t.model, "note": t.note} for t in session.turns],
+        "turns": [_turn_json(t) for t in session.turns],
         "tools": session.tools,
         "usage": session.usage,
         "context_used": session.context_used,
@@ -237,11 +258,7 @@ def _session_from(raw: Any) -> SavedSession | None:
     if "fusion" in raw and (not isinstance(raw["fusion"], Mapping) or not raw["fusion"]):
         return None  # Never silently reopen a damaged Fusion session as an ordinary conversation.
     try:
-        turns = [
-            SavedTurn(int(t["start"]), float(t["at"]), t.get("finished"), str(t.get("status") or "done"), str(t.get("error") or ""), str(t.get("model") or ""), str(t.get("note") or ""))
-            for t in raw.get("turns") or ()
-            if isinstance(t, Mapping)
-        ]
+        turns = [_turn_from(t) for t in raw.get("turns") or () if isinstance(t, Mapping)]
         items = [item for item in raw.get("items") or () if isinstance(item, dict)]
         prune_tool_images(items)
         return SavedSession(

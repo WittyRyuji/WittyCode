@@ -121,27 +121,32 @@ def result_text(result: DebateResult) -> str:
 
 
 DECLARE_TOPIC = "declare_topic"
+_MAX_OPENING_CHARS = 240
 DECLARE_TOPIC_DECLARATION: dict[str, Any] = {
     "name": DECLARE_TOPIC,
     "description": (
-        "Declare what this user turn is before acting on it. kind: 'simple' for chat you can answer directly, "
+        "Declare what this user turn is before acting on it. kind: 'simple' when no debate is needed, "
         "'complex' for an open question that needs the read-only L1\u2013L2 debate the harness runs. intent: "
         "'discussion' when the user only wants an answer, 'plan' when they want a plan, 'execute' when they want the "
         "change carried out. A complex kind runs the debate once; its verdict comes back as this tool's result. "
         "plan/execute intents also return the team's model profile snapshot for planning. One declaration per turn: "
-        "renaming the topic does not reopen it."
+        "renaming the topic does not reopen it. For substantive work, use next_step to tell the user what you will do first."
     ),
     "parameters": {"type": "object", "properties": {
         "kind": {"type": "string", "enum": ["simple", "complex"], "description": "Whether this turn needs the debate."},
         "intent": {"type": "string", "enum": ["discussion", "plan", "execute"], "description": "What the user asked for."},
         "topic": {"type": "string", "description": "The question under discussion, in one line."},
+        "next_step": {"type": "string", "maxLength": _MAX_OPENING_CHARS, "description": "Optional one-line update in the reply "
+                      "language: what you will do next, not hidden reasoning, results or an announcement that experts started."},
     }, "required": ["kind", "intent", "topic"]},
 }
 DECLARE_TOPIC_GUIDANCE = (
-    "Before acting on a user turn, call declare_topic once: kind=simple for anything you can answer directly, "
+    "Answer plain chat directly, without an opening or declaration. Before follow-up work, use declare_topic once "
+    "and put one short, useful next step for the user in next_step (do not send a separate message). "
+    "Use kind=simple when no debate is needed, "
     "kind=complex for an open question that benefits from the read-only L1\u2013L2 debate; intent says whether the "
     "user wants a discussion, a plan or execution. The harness owns the debate's rounds and verdict — you only "
-    "declare. A simple kind needs no debate and no expert. A discussion intent ends in the answer: do not plan or "
+    "declare. Simple execution can still delegate to Coder. A discussion intent ends in the answer: do not plan or "
     "delegate. Plan/execute intents receive the team's model snapshot after any debate; in Plan mode you still "
     "finish by submitting the plan for the user's approval."
 )
@@ -162,14 +167,16 @@ SUBMIT_WORK_PLAN_DECLARATION: dict[str, Any] = {
 }
 
 
-def parse_topic(args: Mapping[str, Any]) -> tuple[tuple[str, str, str] | None, str]:
-    """Validate one ``declare_topic`` call into ``(kind, intent, topic)`` or a refusal message."""
+def parse_topic(args: Mapping[str, Any]) -> tuple[tuple[str, str, str, str] | None, str]:
+    """Validate the routing fields; ignore unusable display text rather than changing the route."""
     kind, intent, topic = args.get("kind"), args.get("intent"), args.get("topic")
     if kind not in ("simple", "complex") or intent not in ("discussion", "plan", "execute"):
         return None, "kind must be simple|complex and intent must be discussion|plan|execute."
     if not isinstance(topic, str) or not topic.strip() or len(topic) > 2000:
         return None, "Provide a non-empty topic of at most 2000 characters."
-    return (kind, intent, " ".join(topic.split())), ""
+    next_step = args.get("next_step")
+    next_step = " ".join(next_step.split()) if isinstance(next_step, str) and len(next_step) <= _MAX_OPENING_CHARS else ""
+    return (kind, intent, " ".join(topic.split()), next_step), ""
 
 
 async def discuss(controller: ChatGPTController, topic: str) -> DebateResult:

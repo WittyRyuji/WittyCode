@@ -14,8 +14,10 @@ import pytest
 
 from desktop.core.fusion.registry import Policy
 from desktop.core.settings import AppSettings
+from desktop.core.viewmodel import turn_json
 from tests.chatgpt_support import finish_turn, make_engine
 from tests.fake_responses import FakeResponses, call, calls, say
+from tests.fakes import until
 from tests.test_fusion_identity_runtime import (
     LEGACY, LIGHT, MAIN, WORKER, _fusion, _gates, _identity_folder, _output, _turn,
 )
@@ -40,8 +42,12 @@ async def _debating(tmp_path, *, preference=75, active=("v3",)):
             await engine.close_all()
 
 
-def _declare(kind="simple", intent="execute", topic="Do the chore.", call_id="declare"):
-    return call("declare_topic", {"kind": kind, "intent": intent, "topic": topic}, call_id=call_id)
+def _declare(kind="simple", intent="execute", topic="Do the chore.", call_id="declare", **extra):
+    return call("declare_topic", {"kind": kind, "intent": intent, "topic": topic, **extra}, call_id=call_id)
+
+
+def _opening(turn):
+    return turn_json(turn).get("fusionFeedback", {}).get("opening", "")
 
 
 def _plan(delivery="direct", items=None):
@@ -90,13 +96,16 @@ def test_a_discussion_declaration_cannot_execute(tmp_path):
 def test_one_declaration_per_turn_and_a_rename_cannot_reopen_it(tmp_path):
     async def go():
         async with _fusion(tmp_path, active=("v3",)) as (main, fake):
-            both = calls([("declare_topic", '{"kind": "complex", "intent": "discussion", "topic": "Should we shard?"}',
-                           "first", "i1"),
-                          ("declare_topic", '{"kind": "simple", "intent": "execute", "topic": "Should we shard, rephrased"}',
-                           "second", "i2")])
+            both = calls([("declare_topic", '{"kind": "complex", "intent": "discussion", "topic": "Should we shard?", '
+                                            '"next_step": "I will compare the trade-offs."}', "first", "i1"),
+                          ("declare_topic", '{"kind": "simple", "intent": "execute", "topic": "Should we shard, rephrased", '
+                                            '"next_step": "I will ship this now."}', "second", "i2")])
             await _turn(main, fake, both, call("delegate_task", LEGACY, call_id="work"), say("Done."))
             assert _output(main, "second") == _output(main, "first"), "the stored receipt answers the repeat declare"
             assert "declared a discussion" in _output(main, "work")
+            assert _opening(main.transcript.turns[-1]) == "I will compare the trade-offs."
+            await _turn(main, fake, _declare(next_step="I will check capacity.", call_id="next"), say("Done."))
+            assert _opening(main.transcript.turns[-1]) == "I will check capacity."
     asyncio.run(go())
 
 
@@ -127,11 +136,16 @@ def test_a_plan_declaration_allows_only_submit_plan_and_approval_executes(tmp_pa
 def test_a_complex_execute_declaration_runs_the_debate_once(tmp_path):
     async def go():
         async with _debating(tmp_path) as (main, fake):  # preference 75: default 2 rounds, cap 3
-            await _turn(main, fake,
-                        _declare("complex", "execute", "Shard the store?"),
-                        say("Sharding is premature."),
-                        say('{"conclusion": "Do not shard now.", "open_issue": ""}'),
-                        say("Decided."))
+            fake.script(_declare("complex", "execute", "Shard the store?", next_step="  I’ll compare\n the trade-offs.  "),
+                        [("hold", "debate"), *say("Sharding is premature.")],
+                        say('{"conclusion": "Do not shard now.", "open_issue": ""}'), say("Decided."))
+            assert main.send_prompt("Consider sharding the store.")
+            await until(lambda: len(fake.requests) == 2)
+            turn = main.transcript.turns[-1]
+            assert turn.running and _opening(turn) == "I’ll compare the trade-offs."
+            assert not any(b["kind"] == "text" for b in turn_json(turn)["blocks"])
+            fake.release("debate")
+            await finish_turn(main)
             declared = _output(main, "declare")
             assert "concluded" in declared and "Do not shard now." in declared
             assert "team model profiles" in declared
@@ -144,6 +158,30 @@ def test_a_plain_answer_needs_no_declaration(tmp_path):
         async with _fusion(tmp_path, active=("v3",)) as (main, fake):
             await _turn(main, fake, say("Just a chat answer."))
             assert len(fake.requests) == 1, "one model reply and no debate or expert call"
+            assert not _opening(main.transcript.turns[-1])
+            await _turn(main, fake, _declare("simple", "discussion"), say("Another answer."))
+            assert not _opening(main.transcript.turns[-1])
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("opening", [None, {"text": "Wrong type"}, "x" * 241, " \n "])
+def test_unusable_openings_do_not_change_the_declaration(tmp_path, opening):
+    async def go():
+        async with _fusion(tmp_path, active=("v3",)) as (main, fake):
+            await _turn(main, fake, _declare(next_step=opening), say("Done."))
+            assert "Declared simple" in _output(main, "declare")
+            assert not _opening(main.transcript.turns[-1])
+    asyncio.run(go())
+
+
+def test_read_only_work_can_have_an_opening_without_debate(tmp_path):
+    async def go():
+        async with _fusion(tmp_path, active=("v3",)) as (main, fake):
+            (main.project / "stock.txt").write_text("4 parts", encoding="utf-8")
+            await _turn(main, fake, _declare("simple", "discussion", "How many parts?", next_step="I’ll read the stock file."),
+                        call("read_file", {"file_path": "stock.txt"}, call_id="read"), say("4 parts."))
+            assert "4 parts" in _output(main, "read") and len(fake.requests) == 3
+            assert _opening(main.transcript.turns[-1]) == "I’ll read the stock file."
     asyncio.run(go())
 
 

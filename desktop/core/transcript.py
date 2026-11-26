@@ -364,6 +364,9 @@ class Turn:
     group_of: dict[str, ActivityBlock] = field(default_factory=dict, repr=False)
     plan: PlanSnapshot | None = None
     """Latest accepted plan in event order, independent of historical tool row positions; empty steps explicitly clear it."""
+    fusion_opening: str = ""
+    fusion_dispatches: list[str] = field(default_factory=list)
+    """Fusion's opening and confirmed starts are display metadata, not conversation text."""
 
     @property
     def running(self) -> bool:
@@ -767,6 +770,14 @@ class Transcript:
         self.turns.append(turn)
         self._touch(turn, block)
         return block
+
+    def set_turn_opening(self, turn: Turn, text: str) -> None:
+        turn.fusion_opening = text
+        self._touch(turn)
+
+    def add_turn_dispatch(self, turn: Turn, label: str) -> None:
+        turn.fusion_dispatches.append(label)
+        self._touch(turn)
 
     def add_notice(self, text: str) -> NoticeBlock:
         block = NoticeBlock(id=self.new_id("b"), text=text)

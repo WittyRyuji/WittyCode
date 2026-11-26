@@ -42,12 +42,35 @@ BRIEF_PARAMETERS: dict[str, Any] = {
     "required": ["workstream", "identity", "goal", "constraints", "acceptance", "paths"],
 }
 UNIT_PARAMETERS = {"type": "object", "properties": {"unit": {"type": "string"},
-                   "resume": {"type": "boolean", "description": "Explicit continuation after inspecting the handoff."}},
+                   "resume": {"type": "boolean", "description": "Run a paused stage only after inspection and any required budget decision."},
+                   "budget_decision": {"type": "object", "properties": {
+                       "review": {"type": "string", "description": "Current budget review id from the handoff."},
+                       "action": {"type": "string", "enum": ["continue", "pause", "stop"]},
+                       "evidence": {"type": "string", "description": "For continue: one new retained fact reference from this review."},
+                       "steps": {"type": "integer", "minimum": 1, "description": "Optional smaller Adaptive step allowance."},
+                       "seconds": {"type": "integer", "minimum": 1, "description": "Optional smaller Adaptive time allowance."}},
+                       "required": ["review", "action"], "additionalProperties": False}},
                    "required": ["unit"], "additionalProperties": False}
-UNIT_DELEGATE = {"name": "delegate_task", "description": "Run the next frozen stage of one unit.", "parameters": UNIT_PARAMETERS}
-UNIT_BATCH = {"name": "delegate_tasks", "description": "Advance independent frozen units.", "parameters": {
+UNIT_DELEGATE = {"name": "delegate_task", "description": "Run the next frozen stage or record a Main budget decision without running it.", "parameters": UNIT_PARAMETERS}
+UNIT_BATCH = {"name": "delegate_tasks", "description": "Advance or decide on independent frozen units.", "parameters": {
     "type": "object", "properties": {"tasks": {"type": "array", "items": UNIT_PARAMETERS, "minItems": 1, "maxItems": 4}},
     "required": ["tasks"], "additionalProperties": False}}
+
+
+def valid_unit_action(args):
+    if (not isinstance(args, Mapping) or set(args) - {'unit', 'resume', 'budget_decision'}
+            or not isinstance(args.get('unit'), str) or type(args.get('resume', False)) is not bool):
+        return False
+    if 'budget_decision' not in args:
+        return True
+    d = args['budget_decision']
+    if (args.get('resume') or not isinstance(d, Mapping) or not isinstance(d.get('review'), str)
+            or d.get('action') not in ('continue', 'pause', 'stop')):
+        return False
+    if d['action'] != 'continue':
+        return set(d) == {'review', 'action'}
+    return (not set(d) - {'review', 'action', 'evidence', 'steps', 'seconds'} and isinstance(d.get('evidence'), str)
+            and all(type(d[k]) is int and d[k] > 0 for k in ('steps', 'seconds') if k in d))
 UNIT_ROUTE = {"name": "submit_route", "description": "Activate the bound frozen plan; submit an empty object.",
               "parameters": {"type": "object", "properties": {}, "additionalProperties": False}}
 REPORT_PARAMETERS: dict[str, Any] = {

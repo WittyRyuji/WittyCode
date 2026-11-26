@@ -87,7 +87,7 @@ class HarnessTools:
         self.route_submitter: Callable[[Mapping[str, Any]], Awaitable[Outcome]] | None = None
         self.map_chooser: Callable[[Call], Awaitable[Outcome]] | None = None
         self.map_updater: Callable[[Mapping[str, Any]], Awaitable[Outcome]] | None = None
-        self.topic_declarer: Callable[[str, str, str], Awaitable[Outcome]] | None = None
+        self.topic_declarer: Callable[[str, str, str, str], Awaitable[Outcome]] | None = None
         self.declare_state: Callable[[], Mapping[str, Any] | None] | None = None
         """The main session's V3 turn declaration receipt (``intent``, ``failed``), or ``None`` while undeclared."""
         self.work_plan_submitter: Callable[[Mapping[str, Any]], Awaitable[Outcome]] | None = None
@@ -479,14 +479,15 @@ class HarnessTools:
             verdict = self.check(call)
             if verdict.verdict != ALLOW:
                 return Outcome(verdict.reason, True)
+            from desktop.core.fusion.protocol import valid_unit_action
             tasks = call.args.get('tasks') if call.name == fusion_tools.BATCH_NAME else [call.args]
-            if (not isinstance(tasks, list) or not 1 <= len(tasks) <= fusion_tools.MAX_PARALLEL or any(
-                    not isinstance(t, Mapping) or set(t) - {'unit', 'resume'} or not isinstance(t.get('unit'), str)
-                    or type(t.get('resume', False)) is not bool for t in tasks)):
-                return Outcome('Use only a frozen unit id and optional resume flag.', True)
+            if (not isinstance(tasks, list) or not 1 <= len(tasks) <= fusion_tools.MAX_PARALLEL
+                    or not all(valid_unit_action(t) for t in tasks)):
+                return Outcome('Use only a frozen unit id and an optional resume flag or a separate budget_decision.', True)
             if len({t['unit'] for t in tasks}) != len(tasks):
-                return Outcome('A batch cannot run the same unit twice.', True)
-            pending = [asyncio.create_task(self.unit_runner(t['unit'], resume=t.get('resume', False), tool_call=call)) for t in tasks]
+                return Outcome('A batch cannot act on the same unit twice.', True)
+            pending = [asyncio.create_task(self.unit_runner(t['unit'], resume=t.get('resume', False),
+                                                           decision=t.get('budget_decision'), tool_call=call)) for t in tasks]
             try:
                 results = await asyncio.gather(*pending)
             finally:
@@ -494,7 +495,21 @@ class HarnessTools:
                     if not task.done():
                         task.cancel()
                 await asyncio.gather(*pending, return_exceptions=True)
-            return Outcome('\n'.join(r.output for r in results), any(r.is_error for r in results))
+            if len(results) == 1:
+                return results[0]
+            output = '\n'.join(r.output for r in results)
+            reference = ''
+            if (store := self.context.outputs) is not None and any(r.reference for r in results):
+                # The turn logs one retained reference per tool outcome. Publish the batch's handoffs together.
+                def retain_batch():
+                    blocks = [r.output + ('\n' + store.read(r.reference) if r.reference else '') for r in results]
+                    return store.put('\n\n'.join(blocks))
+
+                try:
+                    reference = await asyncio.to_thread(retain_batch)
+                except (OSError, ToolError):
+                    pass
+            return Outcome(output, any(r.is_error for r in results), reference=reference)
         if call.name == fusion_tools.BATCH_NAME and self.check(call).verdict == ALLOW and runner is not None:
             values, problem = fusion_tools.parse_batch(call.args, structured=structured)
             if problem or values is None:

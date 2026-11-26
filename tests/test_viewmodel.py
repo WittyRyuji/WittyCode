@@ -35,6 +35,21 @@ def test_a_finished_turn_has_user_text_activity_and_a_summary():
     assert tool["meta"] == {"file_path": "README.md"}
 
 
+def test_fusion_feedback_is_separate_from_blocks_and_does_not_add_steps():
+    transcript = Transcript()
+    turn = transcript.start_turn("Check inventory.")
+    use_tool(transcript, "t1", "Read", file_path="inventory.txt")
+    before = turn_json(turn)
+    transcript.add_turn_dispatch(turn, "Runner-Inventory")
+    transcript.set_turn_opening(turn, "I’ll verify the count.")
+    say(transcript, "Verified.")
+    data = turn_json(turn)
+    assert [block["kind"] for block in data["blocks"]] == ["user", "activity", "text"]
+    assert "fusionFeedback" not in before and data["blocks"][:2] == before["blocks"]
+    assert data["fusionFeedback"] == {"opening": "I’ll verify the count.", "dispatches": ["Runner-Inventory"]}
+    assert data["steps"] == before["steps"] == 1
+
+
 def test_a_running_turn_streams_and_reports_progress_as_output():
     transcript = Transcript()
     transcript.start_turn("go")

@@ -87,6 +87,10 @@ def build_turn(transcript: Transcript, registry: ToolRegistry, saved: SavedSessi
         turn.user_block.handoff = handoff
     turn.finished_at = meta.finished or meta.at
     turn.model = meta.model or saved.model or None
+    if meta.opening:
+        transcript.set_turn_opening(turn, meta.opening)
+    for label in meta.dispatches:
+        transcript.add_turn_dispatch(turn, label)
     prefix = f"h{number}"
     for index, item in enumerate(items[1 if first is not None else 0 :]):
         kind = item.get("type")

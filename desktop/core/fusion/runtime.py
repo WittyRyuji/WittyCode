@@ -268,12 +268,18 @@ class AcceptanceVerdict:
     signals: tuple[str, ...]
     skip_reason: str = ""
     unit_plan: bool = False
+    unit_results: tuple[str, ...] = ()
+    unit_actions: tuple[str, ...] = ()
 
     def continuation(self) -> str:
         names = ", ".join(self.missing)
         if self.unit_plan:
-            return ('Frozen unit checks are incomplete: ' + names + '. Use delegate_task by unit id. '
-                    'Inspect paused handoffs before resuming; do not retry stopped units or claim verification.')
+            if not self.unit_actions:
+                return ''
+            return ('Frozen unit checks are incomplete. Actionable units only: ' + '; '.join(self.unit_actions)
+                    + '. Inspect handoffs before deciding or resuming. Do not dispatch blocked, stopped or paused-by-Main units. '
+                    'Do not claim verification until all required checks pass.')
+
         return (f"Fusion verification is incomplete. Missing checks: {names}. Delegate the missing checks, or use submit_route "
                 "with verification self_check and explain why nothing can be run. Do not report completion without verification.")
 
@@ -624,7 +630,7 @@ class FusionRuntime:
                     self.parent.saved.fusion = self.registry.to_json()
                     raise
             receipt['workplan'] = {'frozen': key, 'budget': plan['spec']['budget']}
-            return Outcome(verification_case.receipt(key, plan) + f'\nDetails: read_output({detail}).')
+            return Outcome(verification_case.receipt(key, plan) + f'\nDetails: read_output({detail}).', reference=detail)
         except (ValueError, ExpertCatalogError, OSError) as error:
             return Outcome(f'Work plan refused: {error}', True)
 
@@ -871,10 +877,14 @@ class FusionRuntime:
         if turn is None or turn.route is None or not self.acceptance_enabled():
             return None
         if turn.unit_plan:
-            cases = self.registry.plans[turn.unit_plan]['cases']
+            plan = self.registry.plans[turn.unit_plan]
+            cases = plan['cases']
             checks = tuple(f"{name} v{c['revision']}" for name, c in cases.items() if c['next'] == 'done')
-            missing = tuple(f"{name}:{c['next']} {c['paused']}".strip() for name, c in cases.items() if c['next'] != 'done')
-            return AcceptanceVerdict(turn.route, turn.from_plan, checks, missing, (), unit_plan=True) if cases else None
+            missing = tuple(name for name, c in cases.items() if c['next'] != 'done')
+            lines, actions = verification_case.result_lines(plan)
+            show_result = missing or any(c.get('decisions') for c in cases.values())
+            return AcceptanceVerdict(turn.route, turn.from_plan, checks, missing, (), unit_plan=True,
+                                     unit_results=lines if show_result else (), unit_actions=actions) if cases else None
         writes = [work for work in turn.delegations if work.paths]
         if not writes:
             return None
@@ -1293,6 +1303,10 @@ class FusionRuntime:
                 'Finish with submit_report including actual evidence.')
         if case['paused'] == 'missing evidence':
             task = 'Supplement the missing evidence only; do not redo completed work.\n' + task
+        elif case['paused'] == 'repair':
+            task = 'Repair the recorded finding in the current delivery; do not start over.\n' + task
+        elif case['paused']:
+            task = 'Inspect the handoff and current workspace; resume only the remaining work.\n' + task
         notes = []
         if self.parent.manager.memory is not None:
             for body in self._brief_memory(brief)[:3]:
@@ -2021,7 +2035,15 @@ class FusionRuntime:
     async def _paused_unit(self, case, message):
         handoff = case.get('handoff', {})
         ref = await self._unit_detail(json.dumps(handoff, ensure_ascii=False)) if handoff else ''
-        return Outcome(f"{message} [{handoff.get('diagnostic', 'paused')}]" + (f' Details: read_output({ref}).' if ref else ''), True)
+        output = f"{message} [{handoff.get('diagnostic', 'paused')}]" + (f' Details: read_output({ref}).' if ref else '')
+        if limits := handoff.get('limits'):
+            output += f' Used/limit: {verification_case.format_limits(limits)}.'
+        if review := case.get('budgetReview'):
+            facts = ', '.join(f"{f['kind']}={f['ref']}" for f in review['facts']) or 'none; no new budget can be granted'
+            output += (f"\nAdaptive budget review {review['id']} ({', '.join(review['thresholds'])}). "
+                       f"New retained facts: {facts}. Decide continue, pause or stop using budget_decision; "
+                       "a decision does not dispatch. The details contain exact attempt, round and cumulative usage.")
+        return Outcome(output, True, reference=ref)
 
     async def _progress_confirmed(self, key, name, case, stage):
         h = case.get('handoff') or {}
@@ -2036,7 +2058,96 @@ class FusionRuntime:
                 continue
         return False
 
-    async def delegate_unit(self, name, *, resume=False, tool_call=None) -> Outcome:
+    async def _unit_profile(self, key, unit, case, stage):
+        binding = unit['roster'][stage]
+        if (not self.registry.authorized(binding['model'], binding['role'], binding['seat'], binding['identity'],
+                                         unit['id'], key, stage) or any(
+                e.plan == key and e.workstream == unit['id'] and e.status == 'retired'
+                and (e.stage == 'worker' or e.stage == stage and e.revision == case['revision'])
+                for e in self.registry.agents.values())):
+            raise FusionError('frozen binding revoked; no replacement selected')
+        try:
+            if (not verification_case.independent(unit['roster']) or
+                    await asyncio.to_thread(self._actual_model, binding['model']) != binding['actual_model']):
+                raise FusionError('Frozen native model or review independence changed; no fallback selected.')
+            return await asyncio.to_thread(self._version_profile, binding)
+        except (ValueError, TypeError, AttributeError, ProviderError, OSError) as error:
+            if isinstance(error, FusionError):
+                raise
+            raise FusionError('provider capability unavailable') from error
+
+    async def _decide_unit_budget(self, key, turn, unit, case, decision):
+        review = case.get('budgetReview')
+        action = decision['action']
+        previous = case.get('decisions', [])
+        if (not review or decision['review'] != review['id'] or case['next'] != review['stage']
+                or any(d['review'] == review['id'] and d['action'] == action for d in previous)):
+            return Outcome('No matching pending budget review, or this decision was already recorded.', True)
+        event = {'review': review['id'], 'action': action, 'stage': review['stage'], 'revision': case['revision']}
+        updates = {}
+        if action == 'continue':
+            fact = next((f for f in review['facts'] if f['ref'] == decision['evidence']), None)
+            if not fact:
+                return Outcome('Continue requires a new retained finding or verified progress from this review.', True)
+            try:
+                if fact['kind'] == 'finding':
+                    f = case['finding']
+                    proof = verification_case.stage_proof(key, unit['id'], f['revision'], f['stage'], f['expert'],
+                                                         'concerns', f['summary'], f['evidence'])
+                else:
+                    proof = verification_case.progress_proof(key, unit['id'], fact['revision'], fact['stage'],
+                                                            fact['expert'], fact['attempt'], fact['progress'])
+                await asyncio.to_thread(self._read_bound_proof, proof, fact['ref'])
+                stage = case['next']
+                stages = unit['roster'] if case['paused'] == 'repair' else (stage,)
+                for required in stages:
+                    await self._unit_profile(key, unit, case, required)
+                if self.route_turn is not turn or self._unit_key() != key or self._closing or self.parent._close_requested:
+                    raise FusionError('The frozen turn changed or is closing.')
+                if self.registry.policy.max_calls and self.registry.calls >= self.registry.policy.max_calls:
+                    raise FusionError('The global Fusion call limit is exhausted.')
+                self.check_budget()
+                if refusal := self._plan_budget_gate(unit['task']):
+                    raise FusionError(refusal)
+                caps = dict(step_cap=self.parent.manager.settings.max_steps, seconds_cap=self._seconds_cap)
+                hard, _ = verification_case.reached_limits(case, unit, stages, **caps)
+                if hard:
+                    raise FusionError(f'A fixed or global budget limit is exhausted: {verification_case.format_limits(hard)}')
+                limits, _, _ = verification_case.remaining(case, unit, stage, **caps)
+                grant = {'start': len(case['history']), 'repairs': case['repairs']}
+                for dimension, limit in [('steps', 'high'), ('seconds', 'seconds')]:
+                    if unit['budget'].get('adaptive_' + dimension):
+                        maximum = min(unit['budget'][limit], int(limits[dimension]))
+                        value = decision.get(dimension, maximum)
+                        minimum = min(unit['budget']['low'], maximum) if dimension == 'steps' else 1
+                        if not minimum <= value <= maximum:
+                            raise FusionError(f'The new {dimension} allowance must be between {minimum} and {maximum}.')
+                        grant[dimension] = value
+                    elif dimension in decision:
+                        raise FusionError(f'The manual {dimension} limit cannot be changed.')
+                updates.update(grant=grant, budgetReview=None)
+                event.update(fact=fact['id'], evidence=fact['ref'], budget=grant)
+            except (KeyError, ValueError, TypeError) as error:
+                return Outcome(f'Budget decision refused: {error}.', True)
+        elif action == 'stop':
+            updates.update(next='stopped', paused='Main stopped', budgetReview=None,
+                           handoff={**case['handoff'], 'reason': 'Main stopped', 'budgetReview': None,
+                                    'confirmation': 'new_plan_required', 'recommendation': 'Main stopped this unit.'})
+        prior = dict(case)
+        case.update(updates, decisions=[*previous, event])
+        try:
+            self._checkpoint()
+        except BaseException:
+            case.clear()
+            case.update(prior)
+            self.parent.saved.fusion = self.registry.to_json()
+            raise
+        budgets = event.get('budget', {})
+        allowance = ', '.join(f'{budgets[k]} {k}' for k in ('steps', 'seconds') if k in budgets)
+        return Outcome(f"{unit['id']}: Main budget decision recorded: {action}. No expert dispatched."
+                       + (f' New round: {allowance}. Use a separate delegate_task with resume=true.' if allowance else ''))
+
+    async def delegate_unit(self, name, *, resume=False, decision=None, tool_call=None) -> Outcome:
         key, turn = self._unit_key(), self.route_turn
         if (not self.unit_tools_available or not key or not turn or turn.unit_plan != key or
                 (self.parent._declare_state() or {}).get('intent') != 'execute'):
@@ -2044,8 +2155,16 @@ class FusionRuntime:
         lock = (key, name)
         if lock in self._inflight_units:
             return Outcome('This unit is already running.', True)
+        plan = self.registry.plans[key]
+        unit = plan['spec']['units'].get(name)
+        if not unit:
+            return Outcome('Unknown unit in this frozen plan.', True)
+        if deps := [dep for dep in unit['deps'] if plan['cases'][dep]['next'] != 'done']:
+            return Outcome(f"This unit waits on unverified dependencies: {', '.join(deps)}.", True)
         self._inflight_units.add(lock)
         try:
+            if decision is not None:
+                return await self._decide_unit_budget(key, turn, unit, plan['cases'][name], decision)
             return await self._run_unit(key, turn, name, resume, tool_call)
         finally:
             self._inflight_units.discard(lock)
@@ -2056,10 +2175,12 @@ class FusionRuntime:
         if not unit:
             return Outcome('Unknown unit in this frozen plan.', True)
 
-        async def stop(reason, *, binding_failed=False):
+        async def stop(reason, *, binding_failed=False, limits=()):
             stage = case['next']
+            cause = case['paused'] or reason
             case.update(next='stopped', paused=reason)
-            case['handoff'] = verification_case.handoff(case, unit, stage, binding_failed=binding_failed)
+            case['handoff'] = verification_case.handoff(case, unit, stage, cause=cause, binding_failed=binding_failed,
+                                                       limits=limits)
             self._checkpoint()
             return await self._paused_unit(case, f'{name}: {reason}; frozen unit stopped.')
 
@@ -2068,38 +2189,46 @@ class FusionRuntime:
             stage = case['next']
             if stage == 'done':
                 return Outcome(f"{name} v{case['revision']}: done")
-            if stage == 'stopped' or case['paused'] and not resume:
+            if stage == 'stopped' or case.get('budgetReview') or case['paused'] and not resume:
                 return await self._paused_unit(case, f"{name}: {stage} {case['paused']}; " +
-                                               ('request a new plan.' if stage == 'stopped' else 'inspect before explicit resume.'))
+                                               ('frozen unit stopped.' if stage == 'stopped' else 'inspect before explicit resume.'))
             if resume and not case['paused']:
                 return Outcome('Only an interrupted stage or repair can resume; use its normal frozen budget.', True)
-            if case['attempts'].get(stage, 0) >= 3 or case['spent'].get(stage, 0) >= unit['budget']['high']:
-                return await stop('hard limit')
+            caps = dict(step_cap=self.parent.manager.settings.max_steps, seconds_cap=self._seconds_cap)
+            needed = unit['roster'] if case['paused'] == 'repair' else (stage,)
+            limits, round_limits = verification_case.reached_limits(case, unit, needed, **caps)
+            if limits:
+                return await stop(verification_case.hard_limit_reason(limits), limits=limits)
+            if round_limits:
+                # Normally settled at the end of the prior attempt. Recover an exhausted cursor
+                # without silently dispatching it or promoting an Adaptive threshold to a hard cap.
+                cause = case['paused'] or 'budget review'
+                case['paused'] = cause
+                previous = case.get('handoff', {})
+                limits = verification_case.settle_budget(key, case, unit, stage, cause, **caps)
+                case['handoff'] = verification_case.handoff(case, unit, previous.get('stage', stage),
+                    cause=cause, limits=limits or (), expert=previous.get('expert', ''), progress=previous.get('progress', ()))
+                self._checkpoint()
+                return await self._paused_unit(case, f'{name}: inspect budget before resuming.')
+            hard, soft, _ = verification_case.remaining(case, unit, stage, **caps)
             b = unit['roster'][stage]
-            if (not self.registry.authorized(b['model'], b['role'], b['seat'], b['identity'], name, key, stage)
-                    or any(e.plan == key and e.workstream == name and e.stage == 'worker' and e.status == 'retired'
-                           for e in self.registry.agents.values())):
-                return await stop('frozen binding revoked; no replacement selected', binding_failed=True)
             try:
-                if (not verification_case.independent(unit['roster']) or
-                        await asyncio.to_thread(self._actual_model, b['model']) != b['actual_model']):
-                    raise FusionError('Frozen native model or review independence changed; no fallback selected.')
-                profile = await asyncio.to_thread(self._version_profile, b)
-            except (ValueError, TypeError, AttributeError, ProviderError, OSError) as error:
-                return await stop(str(error) if isinstance(error, FusionError) else 'provider capability unavailable', binding_failed=True)
+                profile = await self._unit_profile(key, unit, case, stage)
+            except FusionError as error:
+                return await stop(str(error), binding_failed=True)
             if self.route_turn is not turn or self._unit_key() != key or case['next'] != stage:
                 return Outcome('The frozen unit or its turn changed.', True)
             budget = unit['budget']
-            soft_resume = resume and case['paused'].startswith('soft limit')
+            soft_resume = resume and case['paused'].startswith('soft limit') and not budget.get('adaptive_steps')
             if soft_resume and not await self._progress_confirmed(key, name, case, stage):
                 return await stop('soft limit without verified progress')
-            steps = min(budget['high'] if soft_resume else budget['steps'], budget['high'] - case['spent'].get(stage, 0))
-            seconds_left = budget['seconds'] - sum(h['seconds'] for h in case.get('history', ()) if h['stage'] == stage)
-            if seconds_left < 1:
-                return await stop('hard time limit')
+            grant = case.get('grant', {})
+            steps = min(grant.get('steps', budget['high'] if soft_resume else budget['steps']),
+                        hard['steps'], soft.get('steps', budget['high']))
+            seconds = int(min(hard['seconds'], soft.get('seconds', budget['seconds'])))
             brief = Brief(name, profile.name, unit['task'], unit['basis'], unit['acceptance'],
                           tuple(unit['paths']) if stage == 'worker' else (),
-                          {'steps': steps, 'seconds': min(int(seconds_left), self._seconds_cap)},
+                          {'steps': steps, 'seconds': seconds},
                           read_only=case['paused'] == 'missing evidence' or stage == 'worker' and not unit['paths'],
                           resume=resume, budget_note='frozen curve04')
             check = CheckAttempt() if stage != 'worker' else None
@@ -2160,6 +2289,7 @@ class FusionRuntime:
         if (self.parent._turn_mode or self.parent.mode) == "spec":
             return Outcome(PLAN_REFUSAL, True)
         route_turn = self.route_turn
+        parent_turn = self.parent._turn
         if recovering is not None and route_turn is not None and route_turn.last_write() >= recovering.started_at:
             # Its preserved tool results refer to an older delivery. Start the same check without that history.
             recovering, resume = None, False
@@ -2316,6 +2446,7 @@ class FusionRuntime:
         accepted = False
         answer = evidence = budget_receipt = ""
         budget_limited = False
+        budget_stop = ''
         followup_steps = 0
         declined = False
         progress = []  # Concrete successful edits/reads, not model claims, to justify crossing a soft step limit.
@@ -2437,10 +2568,15 @@ class FusionRuntime:
                             with contextlib.suppress(FusionError, OSError):
                                 path = self.registry._scope(path)
                                 if any(path == p or path.startswith(p + '/') for p in unit['paths']):
-                                    fact_id = verification_case.digest([call.name, path, outcome.output])
+                                    def file_fact():
+                                        with (self.registry.project / path).open('rb') as file:
+                                            data = file.read(1024 * 1024 + 1)
+                                        return verification_case.progress_id(path, data) if len(data) <= 1024 * 1024 else ''
+
+                                    fact_id = await asyncio.to_thread(file_fact)
                                     previous = [p for h in case.get('history', ()) if h['revision'] == case['revision']
                                                 and h['stage'] == stage for p in h.get('progressIds', ())]
-                                    if fact_id not in previous and not any(p['id'] == fact_id for p in progress):
+                                    if fact_id and fact_id not in previous and not any(p['id'] == fact_id for p in progress):
                                         fact = {'id': fact_id, 'tool': call.name, 'path': path, 'observed': outcome.output[:512]}
                                         proof = verification_case.progress_proof(plan_key, scope, case['revision'], stage,
                                                                                 expert.id, case['attempts'][stage], fact)
@@ -2462,6 +2598,7 @@ class FusionRuntime:
                                      **({'packed_hooks': replace(hooks, text='')} if plan_key else {})):
                 raise FusionError("The expert session is not ready.")
             started = True
+            self.parent._fusion_expert_started(parent_turn, expert.label)
             if observing and writes and route_turn is not None and record is not None and seat == "L3":
                 route_turn.frozen_l3_paths.update(record["paths"])
             if writes and self.map_enabled:
@@ -2495,7 +2632,7 @@ class FusionRuntime:
                     self.registry.finish(expert.id, status="interrupted", tokens=tokens)
                     self._checkpoint()
                     message = _BUDGET_EXCEEDED.format(unit="step")
-                    budget_limited = True
+                    budget_limited, budget_stop = True, 'soft limit; inspect handoff'
                     if check is not None:
                         # A report follow-up runs on the remaining steps, not a new per-attempt allocation.
                         check.reason, check.steps = "step limit", min(check.steps, self.parent.manager.settings.max_steps)
@@ -2592,6 +2729,8 @@ class FusionRuntime:
             message = (_BUDGET_EXCEEDED.format(unit="time") if brief is not None and timed_out
                        else f"The expert stopped without a confirmed result: {detail}. Check the workspace before retrying.")
             budget_limited = timed_out
+            if timed_out:
+                budget_stop = 'time limit'
             if check is not None and timed_out and child is not None and not child.busy and not (child._turn_task and not child._turn_task.done()):
                 check.reason = "timeout"
             outcome = Outcome(message, True)
@@ -2633,12 +2772,11 @@ class FusionRuntime:
             try:
                 if case is not None:
                     end = child.last_turn_end if started and child is not None else None
-                    used_steps = followup_steps + end.steps if end is not None else case['reserved'] if started else 1
-                    reason = ('cancelled' if declined or outcome is None else f'Observer: {fact.kind}' if fact is not None and not budget_limited
-                              else 'time limit' if budget_limited and (end is None or end.reason != 'step_limit')
-                              else 'soft limit; inspect handoff' if budget_limited else check.reason if check and check.reason
-                              else (child.check_retry_reason or 'interrupted') if started and expert.status != 'done'
-                              else 'interrupted' if expert.status != 'done' or outcome.is_error else '')
+                    used_steps = followup_steps + end.steps if end is not None else case['reserved'] if started else 0
+                    reason = ('cancelled' if declined or outcome is None else f'Observer: {fact.kind}' if fact is not None and not budget_stop
+                              else budget_stop or (check.reason if check and check.reason else '')
+                              or ((child.check_retry_reason or 'interrupted') if started and expert.status != 'done'
+                                  else 'interrupted' if expert.status != 'done' or outcome.is_error else ''))
                     meter_kind = metrics.unit_attempt_kind(stage, case['paused'])
                     meter = measured.unit_meter(child.usage if child is not None else None, started) if measured else None
                     certificate = ''
@@ -2649,39 +2787,48 @@ class FusionRuntime:
                         certificate = await self._unit_detail(verification_case.page(proof))
                         if not certificate:
                             reason, accepted = 'missing evidence', False
+                    detail = await self._unit_detail(outcome.output) if outcome is not None else ''
                     cause = verification_case.advance(case, unit, stage, structured_report, accepted=accepted,
                                                       interrupted=bool(reason and reason != 'missing evidence'), reason=reason,
                                                       steps=used_steps, expert=expert.id)
+                    facts = [{'kind': 'progress', 'id': p['id'], 'ref': p['result'], 'progress': p,
+                              'attempt': case['attempts'][stage], 'revision': expert.revision, 'stage': stage, 'expert': expert.id}
+                             for p in progress]
                     if certificate:
                         result_record = case['receipts'][stage] if structured_report.status == 'done' else case['finding']
-                        result_record['detail'] = certificate  # Install before a dependent dispatch can observe the cursor.
-                    case.pop('reserved', None)
-                    case.pop('reserved_expert', None)
-                    case.pop('reserved_at', None)
-                    case.pop('reserved_seconds', None)
-                    if case['next'] == stage and (reason == 'time limit' or reason.startswith('soft limit') and not progress):
-                        case.update(next='stopped', paused='hard time limit' if reason == 'time limit' else 'soft limit without verified progress')
-                    case.setdefault('history', []).append({
-                        'revision': expert.revision, 'stage': stage, 'expert': expert.id, 'model': expert.model,
-                        'expert_version': binding['version'], 'actual_model': binding['actual_model'], 'applied_budget': dict(brief.budget),
-                        'meterKind': meter_kind, 'meter': meter,
-                        'next': case['next'], 'reason': case['paused'], 'stop_reason': reason, 'steps': used_steps, 'tokens': partial_tokens(),
-                        'seconds': max(0, (expert.finished_at or time.time()) - expert.started_at),
-                        'pack': case.get('pack'), 'report': structured_report.status if accepted else None})
-                    history = case['history']
-                    history[-1]['progressIds'] = [p['id'] for p in progress]
-                    detail = await self._unit_detail(outcome.output) if outcome is not None else ''
+                        result_record['detail'] = certificate
+                        if structured_report.status == 'concerns':
+                            facts.append(verification_case.finding_fact(result_record))
+                    for field in ('reserved', 'reserved_expert', 'reserved_at', 'reserved_seconds'):
+                        case.pop(field, None)
+                    history = case.setdefault('history', [])
+                    row = {'revision': expert.revision, 'stage': stage, 'expert': expert.id, 'model': expert.model,
+                           'expert_version': binding['version'], 'actual_model': binding['actual_model'], 'applied_budget': dict(brief.budget),
+                           'meterKind': meter_kind, 'meter': meter, 'stop_reason': reason, 'steps': used_steps,
+                           'stepsReserved': started and end is None, 'tokens': partial_tokens(),
+                           'seconds': max(0, (expert.finished_at or time.time()) - expert.started_at),
+                           'pack': case.get('pack'), 'report': structured_report.status if accepted else None,
+                           'progressIds': [p['id'] for p in progress], 'facts': facts}
+                    history.append(row)
+                    limits = verification_case.settle_budget(plan_key, case, unit, stage, cause,
+                        step_cap=self.parent.manager.settings.max_steps, seconds_cap=self._seconds_cap)
+                    if (case['next'] == stage and not case.get('budgetReview') and not progress
+                            and reason.startswith('soft limit')):
+                        case.update(next='stopped', paused='soft limit without verified progress')
+                    row.update(next=case['next'], reason=case['paused'])
                     if case['paused']:
                         automatic = not any(h['stage'] == stage and h['revision'] == case['revision'] and
                                             h.get('handoff', {}).get('diagnostic') == 'U01' for h in history[:-1])
                         case['handoff'] = verification_case.handoff(case, unit, stage, cause=cause, expert=expert.id,
-                            progress=progress, detail=detail, automatic=automatic and case['paused'] == 'missing evidence')
+                            limits=limits or (), progress=progress, detail=detail,
+                            automatic=automatic and case['paused'] == 'missing evidence')
                         history[-1]['handoff'] = case['handoff']
                     self._checkpoint()
                     if outcome is not None:
                         message = f"{scope} v{case['revision']} {stage}: next={case['next']}; {case['paused'] or 'evidence recorded'}."
                         if case['paused']:
-                            outcome.output = (await self._paused_unit(case, message)).output
+                            handoff_result = await self._paused_unit(case, message)
+                            outcome.output, outcome.reference = handoff_result.output, handoff_result.reference
                         else:
                             outcome.output = message + (f' Details: read_output({detail}).' if detail else '')
                         outcome.is_error = bool(case['paused'])

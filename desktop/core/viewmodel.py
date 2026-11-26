@@ -246,6 +246,8 @@ def turn_json(turn: Turn, thumbnail: Thumbnailer | None = None) -> dict[str, Any
         "blocks": [block_json(block, thumbnail) for block in turn.blocks],
         "prompts": [prompt_json(prompt) for prompt in turn.prompts if prompt.status is PromptStatus.PENDING],
     }
+    if turn.fusion_opening or turn.fusion_dispatches:
+        out["fusionFeedback"] = {"opening": turn.fusion_opening, "dispatches": list(turn.fusion_dispatches)}
     if turn.plan is not None:
         out["plan"] = {"id": turn.plan.id, "steps": [{"text": step.text, "state": step.status} for step in turn.plan.steps]}
     if turn.duration is not None:

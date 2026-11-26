@@ -1,5 +1,5 @@
 import { AlertCircle, Check, ChevronRight, Minus, X } from "lucide-react";
-import type { ActivityBlock, ActivityEntry, ThinkingEntry, ToolItem } from "../../types";
+import type { ActivityBlock, ActivityEntry, ThinkingEntry, ToolItem, Turn } from "../../types";
 import { openKey, useStore } from "../../store";
 import { clip, formatDuration, groupStats, groupSummary, STATUS_LABELS, toolLabel } from "../../lib/format";
 import { Spinner } from "../ui";
@@ -125,6 +125,14 @@ function ThinkingRow({ entry, sessionId }: { entry: ThinkingEntry; sessionId: st
 
 function Entry({ e, sessionId }: { e: ActivityEntry; sessionId: string }) {
   return e.kind === "tool" ? <ToolRow item={e} sessionId={sessionId} /> : <ThinkingRow entry={e} sessionId={sessionId} />;
+}
+
+/** Keep one stable group for the Fusion main turn, even when text arrives between activity batches. */
+export function TurnActivity({ turn, sessionId }: { turn: Turn; sessionId: string }) {
+  const entries = turn.blocks.flatMap((block) => block.kind === "activity" ? block.entries : []);
+  if (!entries.length) return null;
+  return <ActivityView block={{ kind: "activity", id: `fusion:${turn.id}`, entries }}
+    turnRunning={turn.status === "running"} sessionId={sessionId} />;
 }
 
 /** One quiet row per run of tool calls; click it for the steps, click a step for its input and output. */

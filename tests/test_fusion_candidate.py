@@ -14,8 +14,9 @@ import pytest
 from desktop.core.fusion.candidate import CANDIDATE, Staging, mark_candidates, unflag
 from desktop.core.harness.history import message_text
 from desktop.core.transcript import TextBlockView, TurnStatus
+from desktop.core.viewmodel import turn_json
 from tests.chatgpt_support import finish_turn
-from tests.fake_responses import cut, fail, say
+from tests.fake_responses import call, cut, fail, say
 from tests.fakes import until
 from tests.test_fusion_identity_runtime import _fusion, _turn
 from tests.test_fusion_rating_runtime import _rate, _read, _record
@@ -31,23 +32,27 @@ def _texts(turn):
 def test_the_held_draft_never_reaches_the_page_and_one_merged_answer_publishes(tmp_path):
     draft = "Draft: the count was 41."
     merged = "Merged: kept the 41 count, now verified as 42."
+    opening = "I’ll check the previous count."
 
     async def go():
-        async with _fusion(tmp_path, active=GATES) as (main, fake):
+        async with _fusion(tmp_path, active=(*GATES, "v3")) as (main, fake):
             source = await _record(main)
             # The unread record owes a rating: the continuation request is held at the server so the in-between
             # state is observable while the merged answer is still pending.
-            fake.script(_read(source), say(draft, item_id="msg_1"),
+            declare = call("declare_topic", {"kind": "simple", "intent": "execute", "topic": "Check inventory",
+                                            "next_step": opening})
+            fake.script(declare, _read(source), say(draft, item_id="msg_1"),
                         [("hold", "gap"), *_rate(source, -1, "The count was wrong.")], say(merged, item_id="msg_1"))
             assert main.send_prompt("Check the inventory.")
-            await until(lambda: len(fake.requests) >= 3)
+            await until(lambda: len(fake.requests) >= 4)
             turn = main._turn
             assert turn is not None
+            assert turn_json(turn)["fusionFeedback"]["opening"] == opening
             assert not any(draft in text for text in _texts(turn))  # held back, not early-visible
             assert turn.tools  # tool progress stayed visible the whole time
             flagged = [item for item in main.saved.items if item.get(CANDIDATE)]
             assert len(flagged) == 1 and draft in message_text(flagged[0])
-            sent = json.dumps(fake.requests[2]["input"])
+            sent = json.dumps(fake.requests[3]["input"])
             assert draft in sent  # A reaches the model as material…
             assert "internal draft" in sent and "Rate the Fusion Drive records" in sent  # …with the merge instruction.
             assert CANDIDATE not in sent  # The private mark never leaves the app.
@@ -64,6 +69,7 @@ def test_the_held_draft_never_reaches_the_page_and_one_merged_answer_publishes(t
             reopened = await main.manager.open_saved(main.project, main.session_id)
             try:
                 assert _texts(reopened.transcript.turns[-1]) == [merged]  # a rebuilt history agrees
+                assert turn_json(reopened.transcript.turns[-1])["fusionFeedback"]["opening"] == opening
             finally:
                 await reopened.close()
     asyncio.run(go())

@@ -194,6 +194,8 @@ export interface Turn {
   status: TurnStatus;
   seconds?: number;
   steps?: number;
+  /** Display only: a declared next step and the experts that actually accepted work. */
+  fusionFeedback?: { opening: string; dispatches: string[] };
   /** Latest accepted snapshot in event order; absent on older cached history, empty steps explicitly clear it. */
   plan?: { id: string; steps: TodoEntry[] };
 }

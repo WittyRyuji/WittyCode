@@ -6,7 +6,7 @@ import { selectedChatText } from "../lib/copyChat";
 import { turnSummary } from "../lib/format";
 import { SUGGESTIONS } from "../lib/vocab";
 import { Markdown } from "./blocks/Markdown";
-import { ActivityView } from "./blocks/Activity";
+import { ActivityView, TurnActivity } from "./blocks/Activity";
 import { PermissionCard, QuestionCard } from "./blocks/Prompts";
 import { SentAttachments } from "./Attachments";
 import { TurnNav } from "./TurnNav";
@@ -130,14 +130,27 @@ function Footer({ turn, label }: { turn: Turn; label: string }) {
   return text ? <div className={`turnfoot ${turn.status}`}>{text}</div> : null;
 }
 
-export function TurnView({ turn, session, inlineMedia = false, onCopyMenu }: {
-  turn: Turn; session: Session; inlineMedia?: boolean; onCopyMenu?: OpenCopyMenu;
+export function TurnView({ turn, session, inlineMedia = false, fusionMain = false, onCopyMenu }: {
+  turn: Turn; session: Session; inlineMedia?: boolean; fusionMain?: boolean; onCopyMenu?: OpenCopyMenu;
 }) {
+  const feedback = turn.fusionFeedback;
+  const grouped = fusionMain || !!feedback;
+  const user = grouped && turn.blocks[0]?.kind === "user" ? turn.blocks[0] : undefined;
+  const renderBlock = (b: Block) => (
+    <BlockView key={b.id} block={b} turn={turn} sessionId={session.id} inlineMedia={inlineMedia} onCopyMenu={onCopyMenu} />
+  );
   return (
-    <section className="turn" data-turn-id={turn.id}>
-      {turn.blocks.map((b) => (
-        <BlockView key={b.id} block={b} turn={turn} sessionId={session.id} inlineMedia={inlineMedia} onCopyMenu={onCopyMenu} />
-      ))}
+    <section className={grouped ? "turn fusion-turn" : "turn"} data-turn-id={turn.id}>
+      {user && renderBlock(user)}
+      {grouped && <TurnActivity turn={turn} sessionId={session.id} />}
+      {feedback && (
+        <div className="block fusion-feedback">
+          {feedback.opening && <div className="fusion-opening selectable"
+            onContextMenuCapture={onCopyMenu && ((e) => onCopyMenu(e, feedback.opening))}>{feedback.opening}</div>}
+          {feedback.dispatches.length > 0 && <div className="fusion-dispatch" role="status">已交给 {feedback.dispatches.join("、")} 执行</div>}
+        </div>
+      )}
+      {turn.blocks.map((b) => b === user || grouped && b.kind === "activity" ? null : renderBlock(b))}
       {turn.prompts
         .filter((p) => p.status === "pending")
         .map((p) => (p.kind === "permission" ? <PermissionCard key={p.id} sessionId={session.id} prompt={p} /> : <QuestionCard key={p.id} sessionId={session.id} prompt={p} />))}
@@ -339,7 +352,7 @@ export function Transcript({ session, positions }: { session: Session; positions
           ) : (
             <>
               {session.turns.map((t) => (
-                <TurnView key={t.id} turn={t} session={session} inlineMedia={!!session.mark} onCopyMenu={openCopyMenu} />
+                <TurnView key={t.id} turn={t} session={session} inlineMedia={!!session.mark} fusionMain={session.fusion} onCopyMenu={openCopyMenu} />
               ))}
               {preparing && (
                 <section className="turn preparing-turn">

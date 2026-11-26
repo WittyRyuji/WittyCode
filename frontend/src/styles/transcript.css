@@ -236,6 +236,10 @@
 .etext { flex: 1; white-space: pre-wrap; word-break: break-word; }
 .block.error .btn { color: var(--fg); }
 .block.notice { margin: 8px 0; text-align: center; font-size: 12.5px; color: var(--muted); }
+.block.fusion-feedback { margin: 12px 0; overflow-wrap: anywhere; }
+.fusion-opening { font-size: var(--fs-body); line-height: 1.65; }
+.fusion-dispatch { margin-top: 4px; color: var(--muted); font-size: 12.5px; }
+.fusion-turn .block.notice { white-space: pre-line; }
 
 /* where the conversation changed engine: a rule with an inverted label, like the logo's name plate */
 .turn:has(> .block.engine-switch) { padding-top: 0; border-top: 0; }

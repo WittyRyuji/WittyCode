@@ -16,6 +16,10 @@ from desktop.core.fusion import model_selection, step_budget
 from desktop.core.fusion.expert_catalog import ExpertCatalogError
 
 STAGES = ('worker', 'runner', 'review')
+MAX_ATTEMPTS = 3
+MAX_REPAIRS = 2
+STAGE_LABELS = {'worker': '作者交付', 'runner': 'Runner 检查', 'review': 'QS 独立复核'}
+DECISION_LABELS = {'continue': '继续（已批准新一轮额度）', 'pause': '暂停', 'stop': '停止'}
 
 
 def _identity_keys(stable_id, name):
@@ -89,7 +93,13 @@ def resolve(units, requested, *, policy, settings, pools, catalog, goal, canonic
             seconds = min(seconds, requested['seconds'])
         resolved[item['id']] = {**item, 'paths': paths, 'roster': roster, 'facts': result['facts'], 'derived': result['derived'],
                                 'author': {'expert': author.stable_id, 'identity': author.name, 'actual_model': roster['worker']['actual_model']},
-                                'reasons': result['reasons'], 'budget': {**asdict(band), 'seconds': seconds},
+                                'reasons': result['reasons'], 'budget': {**asdict(band), 'seconds': seconds,
+                                    'adaptive_steps': settings.fusion_steps_max_adaptive,
+                                    'adaptive_seconds': policy.max_seconds_adaptive,
+                                    'hard_steps': min(settings.max_steps, requested['turns'])
+                                                  if type(requested['turns']) is int else settings.max_steps,
+                                    'hard_seconds': min(step_budget.MAX_SECONDS, requested['seconds'])
+                                                    if type(requested['seconds']) is int else step_budget.MAX_SECONDS},
                                 'resolver': result['version']}
     spec = {'format': 1, 'nonce': uuid.uuid4().hex, 'catalog': snapshot.revision, 'goal': goal,
             'budget': requested, 'units': resolved, 'excluded': list(excluded)}
@@ -108,6 +118,10 @@ def stage_proof(key, unit, revision, stage, expert, status, summary, evidence):
     # A report's attestations, never its draft, reasoning, notes, tool previews or arbitrary linked outputs.
     return {'plan': key, 'unit': unit, 'revision': revision, 'stage': stage, 'expert': expert,
             'status': status, 'summary': summary, 'evidence': list(evidence)}
+
+
+def progress_id(path, data):
+    return digest([path, hashlib.sha256(data).hexdigest()])
 
 
 def progress_proof(key, name, revision, stage, expert, attempt, progress):
@@ -162,9 +176,18 @@ def packet_records(key, plan, name, stage, recipient, project):
     # evidenceRefs in Main's diagnostic include raw outcomes and other stages. Do not forward that address book.
     prior['handoff'] = {k: h[k] for k in ('unit', 'stage', 'revision', 'diagnostic', 'completed', 'remaining',
                                          'inFlight', 'recommendation', 'confirmation', 'nextOwner', 'nextRevision')}
-    if not repair and h.get('progress'):
-        prior['progress'] = [project(progress_proof(key, name, version, stage, recipient, case['attempts'][stage] - 1, p),
-                                     p['result']) for p in h['progress']]
+    if not repair:
+        progress = {p['id']: (case['attempts'][stage] - 1, p) for p in h.get('progress', ())}
+        decisions = case.get('decisions', ())
+        if decisions and decisions[-1]['action'] == 'continue' and (review := h.get('budgetReview')):
+            event = decisions[-1]
+            for fact in review['facts']:
+                if (event['review'], event['fact'], stage, version, recipient) == (
+                        review['id'], fact['id'], fact['stage'], fact['revision'], fact['expert']) and fact['kind'] == 'progress':
+                    progress[fact['id']] = (fact['attempt'], fact['progress'])
+        if progress:
+            prior['progress'] = [project(progress_proof(key, name, version, stage, recipient, attempt, p), p['result'])
+                                 for attempt, p in progress.values()]
     return upstream, prior
 
 
@@ -172,7 +195,130 @@ def new_case():
     return {'next': 'worker', 'revision': 0, 'paused': '', 'receipts': {}, 'repairs': 0, 'spent': {}, 'attempts': {}}
 
 
-def handoff(case, unit, stage, *, cause='', expert='', progress=(), detail='', automatic=False, binding_failed=False):
+def adaptive(unit):
+    b = unit['budget']
+    return b.get('adaptive_steps', False) or b.get('adaptive_seconds', False)
+
+
+def usage(case, stage, start=0):
+    rows = [row for row in case.get('history', [])[start:] if row['stage'] == stage]
+    return {'steps': sum(row['steps'] for row in rows) if start else case['spent'].get(stage, 0),
+            'seconds': sum(row['seconds'] for row in rows),
+            'attempts': len(rows) if start else case['attempts'].get(stage, 0)}
+
+
+def hard_limits(unit, *, step_cap=None, seconds_cap=None):
+    b = unit['budget']
+    steps = b['hard_steps'] if b.get('adaptive_steps') else b['high']
+    seconds = b['hard_seconds'] if b.get('adaptive_seconds') else b['seconds']
+    return {'steps': min(steps, step_cap or steps), 'seconds': min(seconds, seconds_cap or seconds)}
+
+
+def remaining(case, unit, stage, **caps):
+    b, grant = unit['budget'], case.get('grant', {})
+    total, current = usage(case, stage), usage(case, stage, grant.get('start', 0))
+    hard = {d: limit - total[d] for d, limit in hard_limits(unit, **caps).items()}
+    soft = {d: grant.get(d, b[d]) - current[d] for d in ('steps', 'seconds') if b.get('adaptive_' + d)}
+    return hard, soft, current['attempts']
+
+
+def reached_limits(case, unit, stages, *, stage=None, cause='', **caps):
+    """Persist the counter that actually prevented another dispatch, not just its diagnostic code."""
+    hard, round_limits = [], []
+    b, grant = unit['budget'], case.get('grant', {})
+    is_adaptive = adaptive(unit)
+
+    def hit(target, dimension, used, limit, owner=None):
+        target.append({'dimension': dimension, 'used': used, 'limit': limit, 'stage': owner})
+
+    for owner in stages:
+        total, current = usage(case, owner), usage(case, owner, grant.get('start', 0))
+        for d, limit in hard_limits(unit, **caps).items():
+            if limit - total[d] < 1 or (owner == stage and d == 'seconds' and cause == 'time limit' and not b.get('adaptive_seconds')):
+                hit(hard, d, total[d], limit, owner)
+            elif b.get('adaptive_' + d):
+                allowance = grant.get(d, b[d])
+                if allowance - current[d] < 1:
+                    hit(round_limits, d, current[d], allowance, owner)
+                elif owner == stage and (d == 'seconds' and cause == 'time limit' or d == 'steps' and cause.startswith('soft limit')):
+                    last = case['history'][-1]
+                    hit(round_limits, d, last[d], last['applied_budget'][d], owner)
+        if current['attempts'] >= MAX_ATTEMPTS:
+            hit(round_limits if is_adaptive else hard, 'attempts', current['attempts'], MAX_ATTEMPTS, owner)
+    repairs = case['repairs'] - grant.get('repairs', 0)
+    if repairs > MAX_REPAIRS:
+        hit(round_limits if is_adaptive else hard, 'repairs', repairs, MAX_REPAIRS)
+    return hard, round_limits
+
+
+def hard_limit_reason(limits):
+    dimensions = {limit['dimension'] for limit in limits}
+    return 'hard limit' if dimensions & {'steps', 'attempts'} else 'hard time limit' if 'seconds' in dimensions else 'repair limit'
+
+
+LIMIT_LABELS = {'steps': '步数', 'seconds': '时间', 'attempts': '阶段尝试次数', 'repairs': '返修次数'}
+
+
+def format_limits(limits, *, chinese=False):
+    labels = LIMIT_LABELS if chinese else {}
+    stages = STAGE_LABELS if chinese else {}
+    parts = []
+    for hit in limits:
+        dimension, stage = hit['dimension'], hit['stage']
+        used = f"{hit['used']:.2f}".rstrip('0').rstrip('.') if dimension == 'seconds' else str(hit['used'])
+        counter = f"{labels.get(dimension, dimension)} {used}/{hit['limit']}"
+        if dimension == 'seconds':
+            counter += ' 秒' if chinese else 's'
+        parts.append((f'{stages.get(stage, stage)} ' if stage else '') + counter)
+    return ('、' if chinese else ', ').join(parts)
+
+
+def finding_fact(finding):
+    # A new revision, reporter, or rewritten summary does not make the same work order new.
+    evidence = sorted({' '.join(line.casefold().split()) for line in finding['evidence']})
+    return {'kind': 'finding', 'id': digest(evidence), 'ref': finding['detail'], 'stage': finding['stage'],
+            'revision': finding['revision'], 'expert': finding['expert']}
+
+
+def settle_budget(key, case, unit, stage, cause, *, step_cap=None, seconds_cap=None):
+    """Apply limits after recording an attempt. Never revoke a valid final receipt."""
+    next_stage = case['next']
+    if next_stage not in STAGES:
+        return
+    if cause == 'cancelled':
+        case.update(next='stopped', paused='cancelled')
+        return
+    if next_stage != stage and cause != 'repair':
+        return  # A successful intermediate stage advances normally; check the next one before dispatch.
+    # A repair needs a new author delivery and all independent checks again. Do not grant work
+    # which cannot reach verification under a fixed remaining limit.
+    needed = tuple(unit['roster']) if cause == 'repair' else (stage,)
+    hard, round_limits = reached_limits(case, unit, needed, stage=stage, cause=cause,
+                                        step_cap=step_cap, seconds_cap=seconds_cap)
+    if hard:
+        case.update(next='stopped', paused=hard_limit_reason(hard))
+        return hard
+    if round_limits:
+        history = case['history']
+        start = case.get('grant', {}).get('start', 0)
+        prior = {f['id'] for row in history[:start] for f in row.get('facts', ())}
+        used = {d.get('fact') for d in case.get('decisions', ())}
+        if cause == 'repair':
+            # Only a distinct current work order can authorize a new repair revision.
+            prior.update(f['id'] for row in history[start:-1] for f in row.get('facts', ()) if f['kind'] == 'finding')
+            candidates = [f for f in history[-1]['facts'] if f['kind'] == 'finding']
+        else:
+            candidates = [f for row in history[start:] for f in row.get('facts', ())
+                          if f['kind'] == 'progress' and f['stage'] == next_stage and f['revision'] == case['revision']]
+        facts = list({f['id']: f for f in candidates if f['id'] not in prior | used}.values())
+        case['budgetReview'] = {'id': digest([key, unit['id'], len(history), next_stage, case['revision']]),
+                                'stage': next_stage, 'thresholds': sorted({h['dimension'] for h in round_limits}),
+                                'facts': facts, 'limits': round_limits}
+    return round_limits
+
+
+def handoff(case, unit, stage, *, cause='', expert='', progress=(), detail='', automatic=False, binding_failed=False,
+            limits=()):
     """Summarize the actual cursor, not an expert's proposed diagnosis. No new model request."""
     next_stage, paused = case['next'], case['paused']
     cause = cause or paused
@@ -180,37 +326,57 @@ def handoff(case, unit, stage, *, cause='', expert='', progress=(), detail='', a
         code, kind, action = 'U07', 'binding', 'Request an explicitly revised plan; no alternate is frozen.'
     elif cause == 'cancelled':
         code, kind, action = 'U06', 'cancelled', 'Leave stopped work alone until Main inspects it.'
+    elif paused in ('hard time limit', 'hard limit', 'repair limit'):
+        code, kind, action = 'U05', 'hard_limit', 'Do not retry this dispatch.'
     elif cause == 'repair' or paused == 'repair':
         code, kind, action = 'U03', 'artifact_defect', 'Return the finding to the original author; recheck the new revision.'
     elif cause == 'missing evidence':
         code, kind, action = 'U01', 'missing_evidence', 'Supplement this stage only; do not redo the deliverable.'
-    elif paused in ('hard time limit', 'hard limit', 'repair limit') or cause == 'time limit':
-        code, kind, action = 'U05', 'hard_limit', 'Do not retry this dispatch.'
-    elif cause.startswith('soft limit'):
+    elif cause.startswith('soft limit') or cause == 'time limit':
         code, kind, action = 'U04', 'soft_budget', 'Inspect the retained progress before approving more steps.'
     elif cause.startswith('Observer:'):
         code, kind, action = 'U08', 'observer', 'Inspect the recorded finding before deciding whether to resume.'
     else:
         code, kind, action = 'U02', 'environment_or_context', 'Inspect the interruption or restore the prerequisite; do not repair the artifact.'
     terminal = next_stage == 'stopped'
-    remaining = [s for s in STAGES if s in unit['roster'] and s not in case['receipts']]
+    stages_left = [s for s in STAGES if s in unit['roster'] and s not in case['receipts']]
     if kind == 'artifact_defect':
-        remaining = [s for s in STAGES if s in unit['roster']]  # None of the old receipts certify a repair.
+        stages_left = [s for s in STAGES if s in unit['roster']]  # None of the old receipts certify a repair.
+    hard, soft, _ = remaining(case, unit, stage)
     refs = [r['detail'] for r in case['receipts'].values() if r.get('detail')]
     refs.extend(p['result'] for p in progress if p.get('result'))
     if detail:
         refs.append(detail)
+    finding = case.get('finding') if kind == 'artifact_defect' or cause == 'repair' else None
+    if finding and finding.get('detail'):
+        refs.append(finding['detail'])
+    review = case.get('budgetReview')
+    if review:
+        refs.extend(f['ref'] for f in review['facts'])
+    start = case.get('grant', {}).get('start', 0)
+    history = case.get('history', [])
+    last = history[-1] if history else {}
     return {'unit': unit['id'], 'revision': case['revision'], 'stage': stage, 'expert': expert,
             'diagnostic': code, 'category': kind, 'reason': paused, 'cause': cause,
             'completed': list(case['receipts']), 'evidenceRefs': list(dict.fromkeys(refs)), 'progress': list(progress),
             'inFlight': stage if cause in ('cancelled', 'interrupted', 'incomplete run', 'timeout', 'time limit',
                                            'process interrupted') or kind == 'observer' else None,
-            'remaining': remaining, 'stepsLeft': max(0, unit['budget']['high'] - case['spent'].get(stage, 0)),
-            'recommendation': 'Stop; request an explicit new plan revision to change this binding or budget.' if terminal else action,
-            'nextOwner': 'Main' if terminal else unit['roster'][next_stage]['expert'],
+            'remaining': stages_left, 'stepsLeft': max(0, min(hard['steps'], soft.get('steps', math.inf))),
+            'usage': {'lastAttempt': {k: last[k] for k in ('steps', 'seconds', 'tokens', 'applied_budget', 'stepsReserved') if k in last},
+                      'round': {s: usage(case, s, start) for s in unit['roster']},
+                      'total': {s: usage(case, s) for s in unit['roster']},
+                      'roundLimits': {d: case.get('grant', {}).get(d, unit['budget'][d])
+                                      for d in ('steps', 'seconds') if unit['budget'].get('adaptive_' + d)},
+                      'attemptLimit': MAX_ATTEMPTS, 'repairLimit': MAX_REPAIRS,
+                      'roundRepairs': case['repairs'] - case.get('grant', {}).get('repairs', 0), 'repairs': case['repairs']},
+            'finding': finding, 'budgetReview': review, 'limits': list(limits),
+            'recommendation': ('Stop; this frozen unit cannot run.' if terminal else
+                               'Main must explicitly continue, pause or stop; continue requires a new retained fact.' if review else action),
+            'nextOwner': 'Main' if terminal or review else unit['roster'][next_stage]['expert'],
             'nextExpert': None if terminal else expert if next_stage == stage else case['receipts'].get(next_stage, {}).get('expert'),
             'nextRevision': case['revision'] + int(not terminal and kind == 'artifact_defect'),
-            'confirmation': ('new_plan_required' if terminal else 'one_evidence_supplement' if automatic else 'explicit_resume')}
+            'confirmation': ('new_plan_required' if terminal else 'budget_decision' if review else
+                             'one_evidence_supplement' if automatic else 'explicit_resume')}
 
 
 def restore(key, plan):
@@ -242,6 +408,30 @@ def restore(key, plan):
             if any(s not in case['receipts'] or case['receipts'][s]['revision'] != case['revision']
                    or not case['receipts'][s]['evidence'] for s in needed):
                 raise ValueError('A frozen stage has no verified receipt for this revision.')
+        history = case.get('history', [])
+        decisions = case.get('decisions', [])
+        if (not isinstance(decisions, list) or any(not isinstance(d, dict) or d.get('action') not in DECISION_LABELS
+                or not isinstance(d.get('review'), str) or d.get('stage') not in stages
+                or type(d.get('revision')) is not int or not 0 <= d['revision'] <= case['revision'] for d in decisions)):
+            raise ValueError('Invalid frozen budget decisions.')
+        grants = [d for d in decisions if d['action'] == 'continue']
+        if grant := case.get('grant'):
+            allowed = {'steps': unit['budget']['high'], 'seconds': unit['budget']['seconds']}
+            if (not grants or grant != grants[-1].get('budget') or type(grant.get('start')) is not int
+                    or not 0 < grant['start'] <= len(history) or type(grant.get('repairs')) is not int
+                    or not 0 <= grant['repairs'] <= case['repairs']
+                    or any(type(grant.get(d)) is not int or not 1 <= grant[d] <= allowed[d]
+                           for d in allowed if unit['budget'].get('adaptive_' + d))):
+                raise ValueError('Invalid frozen budget grant.')
+        elif grants:
+            raise ValueError('Missing frozen budget grant.')
+        if review := case.get('budgetReview'):
+            if (not adaptive(unit) or 'reserved' in case or not case['paused'] or case['next'] not in stages
+                    or review.get('stage') != case['next']
+                    or review.get('id') != digest([key, name, len(history), case['next'], case['revision']])
+                    or not isinstance(review.get('facts'), list)
+                    or not review.get('thresholds') or set(review['thresholds']) - {'steps', 'seconds', 'attempts', 'repairs'}):
+                raise ValueError('Invalid pending frozen budget review.')
         if 'reserved' in case:
             # The process may have sent work before dying. Charge the reservation, never replay it.
             reserved = case.pop('reserved')
@@ -258,17 +448,16 @@ def restore(key, plan):
                 seconds = min(seconds, math.ceil(elapsed))
             case.setdefault('history', []).append({'revision': case['revision'], 'stage': stage, 'reason': case['paused'],
                                                    'seconds': seconds, 'steps': reserved, 'tokens': None})
-            if (case['spent'][stage] >= unit['budget']['high'] or case['attempts'][stage] >= 3
-                    or sum(h['seconds'] for h in case['history'] if h['stage'] == stage) >= unit['budget']['seconds']):
-                case['next'], case['paused'] = 'stopped', 'hard limit'
-            case['handoff'] = handoff(case, unit, stage, cause='process interrupted', expert=case.pop('reserved_expert', ''))
+            limits = settle_budget(key, case, unit, stage, 'process interrupted')
+            case['handoff'] = handoff(case, unit, stage, cause='process interrupted', limits=limits or (),
+                                      expert=case.pop('reserved_expert', ''))
             case['history'][-1]['handoff'] = case['handoff']
     return plan
 
 
 def advance(case, unit, stage, report, *, accepted, interrupted, reason, steps, expert):
     """Only the report for this unit/revision/stage advances it. Missing proof is not a repair."""
-    case['spent'][stage] = case['spent'].get(stage, 0) + max(1, steps)
+    case['spent'][stage] = case['spent'].get(stage, 0) + steps
     if not interrupted and accepted and report is not None and report.status in ('blocked', 'needs_context'):
         case['paused'] = report.status
     elif interrupted or not accepted or report is None or not report.evidence:
@@ -283,14 +472,62 @@ def advance(case, unit, stage, report, *, accepted, interrupted, reason, steps, 
         case['finding'] = {'revision': case['revision'], 'stage': stage, 'expert': expert,
                            'summary': report.summary, 'evidence': list(report.evidence)}
         case['next'], case['paused'] = 'worker', 'repair'  # Always the unit's original author and write scope.
-        if case['repairs'] > 2:
-            case['next'], case['paused'] = 'stopped', 'repair limit'
     else:
         case['paused'] = report.status
-    cause = case['paused']
-    if case['next'] == stage and (case['spent'][stage] >= unit['budget']['high'] or case['attempts'][stage] >= 3):
-        case['next'], case['paused'] = 'stopped', 'hard limit'
-    return cause  # An exhausted cap changes the disposition, not what interrupted this attempt.
+    return case['paused']  # A budget disposition must not overwrite the original diagnosis.
+
+
+def result_lines(plan):
+    """Stable user-facing result and only the actionable next states for Main."""
+    lines, actions = [], []
+    cases = plan['cases']
+    reasons = {'U01': '缺少验收证据', 'U02': '环境或上下文中断', 'U03': '检查发现交付缺陷',
+               'U04': '本轮额度用尽', 'U05': '达到硬上限', 'U06': '已取消或权限被拒',
+               'U07': '冻结绑定失效', 'U08': 'Observer 暂停'}
+    for name, case in cases.items():
+        stage = case['next']
+        deps = [dep for dep in plan['spec']['units'][name]['deps'] if cases[dep]['next'] != 'done']
+        decision = (case.get('decisions') or [{}])[-1].get('action')
+        saved_pause = False
+        h = case.get('handoff', {})
+        reason = reasons.get(h.get('diagnostic'), '待检查')
+        label = STAGE_LABELS.get(stage, '')
+        if stage == 'done':
+            status = '已验证'
+        elif stage == 'stopped':
+            if case['paused'] in ('hard limit', 'hard time limit', 'repair limit'):
+                reason = '达到硬上限' + ('；有检查工单' if h.get('finding') else '')
+            status = '已停止' if decision == 'stop' else f'已停止（{reason}）'
+        elif deps:
+            status = '依赖阻塞，等待 ' + '、'.join(deps) + ' 验证通过'
+        elif review := case.get('budgetReview'):
+            saved_pause = decision == 'pause' and case['decisions'][-1]['review'] == review['id']
+            limit = '、'.join(LIMIT_LABELS[d] for d in review['thresholds'])
+            status = f'本轮额度用尽（{limit}），' + ('Main 已决定暂停' if saved_pause else '待 Main 决策')
+            status += f'；下一阶段：{label}'
+            if h.get('finding'):
+                status += '；已有检查工单'
+            elif h.get('diagnostic') in ('U01', 'U02', 'U08'):
+                status += f'；{reason}'
+            if not review['facts']:
+                status += '；无新的可核查证据，不能续额'
+            if not saved_pause and review['facts']:
+                actions.append(f'{name}: inspect and decide Adaptive budget review {review["id"]}')
+        elif case['paused']:
+            status = f'已暂停（{reason}）；下一阶段：{label}'
+            if decision == 'continue' and (h.get('budgetReview') or {}).get('id') == case['decisions'][-1]['review']:
+                status = f'已续额，等待显式派工；下一阶段：{label}'
+            elif case['paused'] == 'repair':
+                actions.append(f'{name}: inspect the current finding before explicitly resuming its author')
+        else:
+            status = f'可派工；下一阶段：{label}'
+            actions.append(f'{name}: {stage} is ready')
+        if decision and not (case.get('budgetReview') and decision == 'pause' and saved_pause):
+            status += f'；Main 最近决策：{DECISION_LABELS[decision]}'
+        if (case['paused'] or stage == 'stopped') and (limits := h.get('limits')):
+            status += f'；已用/上限：{format_limits(limits, chinese=True)}'
+        lines.append(f'{name} v{case["revision"]}：{status}。')
+    return tuple(lines), tuple(actions)
 
 
 def receipt(key, plan):
