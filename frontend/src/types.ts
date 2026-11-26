@@ -180,6 +180,7 @@ export interface QuestionPrompt {
   status: PromptStatus;
   /** The actual asker at the time of the request; older cached cards may not have it. */
   who?: string;
+  optionsOnly?: boolean;
 }
 
 export type Prompt = PermissionPrompt | QuestionPrompt;
@@ -196,6 +197,8 @@ export interface Turn {
   steps?: number;
   /** Display only: a declared next step and the experts that actually accepted work. */
   fusionFeedback?: { opening: string; dispatches: string[] };
+  /** The verification outcome is independent of whether the engine can accept another prompt. */
+  fusionOutcome?: "continuing" | "waiting_user" | "unverified" | "verified" | "cancelled";
   /** Latest accepted snapshot in event order; absent on older cached history, empty steps explicitly clear it. */
   plan?: { id: string; steps: TodoEntry[] };
 }

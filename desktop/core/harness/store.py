@@ -71,6 +71,10 @@ class SavedTurn:
     opening: str = ""
     dispatches: list[str] = field(default_factory=list)
     """Fusion display only: opening line and the labels of experts actually sent work this turn."""
+    fusion_plan: str = ""
+    fusion_outcome: str = ""
+    fusion_recovery: bool = False
+    fusion_resumed: bool = False
 
 
 @dataclass(slots=True)
@@ -159,6 +163,14 @@ def _turn_json(turn: SavedTurn) -> dict[str, Any]:
         data["opening"] = turn.opening
     if turn.dispatches:
         data["dispatches"] = turn.dispatches
+    if turn.fusion_plan:
+        data["fusionPlan"] = turn.fusion_plan
+    if turn.fusion_outcome:
+        data["fusionOutcome"] = turn.fusion_outcome
+    if turn.fusion_recovery:
+        data["fusionRecovery"] = True
+    if turn.fusion_resumed:
+        data["fusionResumed"] = True
     return data
 
 
@@ -167,7 +179,9 @@ def _turn_from(raw: Mapping[str, Any]) -> SavedTurn:
     labels = (label for label in dispatches if isinstance(label, str) and label.strip()) if isinstance(dispatches, list) else ()
     return SavedTurn(int(raw["start"]), float(raw["at"]), raw.get("finished"), str(raw.get("status") or "done"),
                      str(raw.get("error") or ""), str(raw.get("model") or ""), str(raw.get("note") or ""),
-                     opening=opening if isinstance(opening, str) else "", dispatches=list(dict.fromkeys(labels)))
+                     opening=opening if isinstance(opening, str) else "", dispatches=list(dict.fromkeys(labels)),
+                     fusion_plan=str(raw.get('fusionPlan') or ''), fusion_outcome=str(raw.get('fusionOutcome') or ''),
+                     fusion_recovery=raw.get('fusionRecovery') is True, fusion_resumed=raw.get('fusionResumed') is True)
 
 
 def _session_json(session: SavedSession) -> dict[str, Any]:
@@ -449,6 +463,14 @@ def recover(session: SavedSession) -> bool:
         turn.status = "interrupted"
         turn.finished = max(turn.at, following.at if following is not None else session.modified_at)
         turn.note = CUT_OFF_UNKNOWN.format(count=unknown) if unknown else CUT_OFF
+        if turn.fusion_plan:
+            turn.fusion_outcome = 'unverified'
+            turn.fusion_recovery = not turn.fusion_resumed
+            turn.note += '\nFusion：原任务尚未验收。已保留检查点；先核对未取得结果的动作，不自动重放。'
+            for item in session.items[turn.start : end]:
+                if item.get('type') == 'message' and item.get('role') == 'assistant':
+                    from desktop.core.fusion.candidate import CANDIDATE
+                    item.pop(CANDIDATE, None)
         changed = True
     return changed
 

@@ -33,6 +33,7 @@ TURN_STATUS = {
     "failed": TurnStatus.FAILED,
 }
 TOOL_STATUS = {"done": ToolStatus.DONE, "error": ToolStatus.ERROR, "cancelled": ToolStatus.CANCELLED}
+FUSION_RESUMING = 'Fusion 正在从检查点继续原任务。'
 
 
 def user_parts(item: Mapping[str, Any]) -> tuple[str, list[Any], tuple[int, bool] | None]:
@@ -82,11 +83,15 @@ def _is_user(item: Mapping[str, Any]) -> bool:
 def build_turn(transcript: Transcript, registry: ToolRegistry, saved: SavedSession, number: int, meta: SavedTurn, items: Sequence[Mapping[str, Any]]) -> Turn:
     first = items[0] if items and _is_user(items[0]) else None
     text, attachments, handoff = user_parts(first) if first is not None else ("", [], None)
-    turn = transcript.new_history_turn(text if first is not None else None, started_at=meta.at, attachments=attachments)
+    turn = transcript.new_history_turn(text if first is not None and not meta.fusion_resumed else None,
+                                       started_at=meta.at, attachments=attachments)
+    if meta.fusion_resumed:
+        turn.blocks.append(NoticeBlock(id=transcript.new_id('b'), text=FUSION_RESUMING))
     if handoff is not None and turn.user_block is not None:
         turn.user_block.handoff = handoff
     turn.finished_at = meta.finished or meta.at
     turn.model = meta.model or saved.model or None
+    turn.fusion_outcome = meta.fusion_outcome
     if meta.opening:
         transcript.set_turn_opening(turn, meta.opening)
     for label in meta.dispatches:

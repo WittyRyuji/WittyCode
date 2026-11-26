@@ -92,7 +92,8 @@ def test_finding_requires_main_budget_then_original_author_and_fresh_checks(tmp_
             pause_note = main.saved.turns[-1].note
             assert 'stock v1：本轮额度用尽（步数），Main 已决定暂停' in pause_note
             assert 'notes v0：依赖阻塞，等待 stock 验证通过。' in pause_note
-            assert not main._fusion.acceptance_verdict().continuation()
+            assert 'Diagnose' in main._fusion.acceptance_verdict().continuation()
+            assert main.saved.turns[-1].fusion_outcome == 'unverified'
 
             main = await _reopen(main)
             case = main._fusion.registry.plans[key]['cases']['stock']
@@ -100,13 +101,13 @@ def test_finding_requires_main_budget_then_original_author_and_fresh_checks(tmp_
             bogus = main._outputs.put('Unrelated observation.')
             await _continue(main, fake, _decision('repeat-pause', review, 'pause'),
                             _decision('wrong-fact', review, 'continue', evidence=bogus),
-                            _decision('manual-seconds', review, 'continue', evidence=fact['ref'], seconds=10),
+                            _decision('oversized-seconds', review, 'continue', evidence=fact['ref'], seconds=86401),
                             _decision('too-large', review, 'continue', evidence=fact['ref'], steps=999),
                             _decision('approve-round', review, 'continue', evidence=fact['ref'], steps=4),
                             _decision('repeat-grant', review, 'continue', evidence=fact['ref']), say('Budget approved.'))
             assert all('already recorded' in _output(main, i) for i in ('repeat-pause', 'repeat-grant'))
             assert 'requires a new retained' in _output(main, 'wrong-fact')
-            assert 'manual seconds limit' in _output(main, 'manual-seconds') and 'between 1 and 5' in _output(main, 'too-large')
+            assert 'between 1 and 86400' in _output(main, 'oversized-seconds') and 'between 1 and 80' in _output(main, 'too-large')
             assert 'No expert dispatched' in _output(main, 'approve-round') and main._fusion.registry.calls == 2
             assert '已续额，等待显式派工' in main.saved.turns[-1].note
             assert [d['action'] for d in case['decisions']] == ['pause', 'continue']
@@ -157,7 +158,8 @@ def test_threshold_accepts_only_new_program_progress(tmp_path, mode):
                 await _continue(main, fake, _decision('deny', review, 'continue', evidence='none'),
                                 _decision('stop', review, 'stop'), _run('stopped', resume=True), say('Stopped.'))
                 assert 'requires a new retained' in _output(main, 'deny') and main._fusion.registry.calls == 2
-                assert 'stock v1：已停止；Main 最近决策：停止；已用/上限：Runner 检查 步数 1/1。' in main.saved.turns[-1].note
+                assert 'Only the user can cancel' in _output(main, 'stop')
+                assert case['next'] == 'runner' and main.saved.turns[-1].fusion_outcome == 'unverified'
                 return
             fact, = review['facts']
             assert fact['kind'] == 'progress' and 'Four' in main._outputs.read(fact['ref'])
@@ -198,13 +200,21 @@ def test_repeated_work_order_or_hard_cap_cannot_open_another_round(tmp_path, cap
             _approve(main)
             await finish_turn(main)
             if cap in ('global steps', 'plan steps', 'manual steps'):
-                assert case['next'] == 'stopped' and case['paused'] == 'hard limit' and not case.get('budgetReview')
+                assert case['next'] == 'worker' and case['paused'] == 'repair'
+                review = case['budgetReview']
                 h = case['handoff']
-                assert h['diagnostic'] == 'U05' and h['finding']['evidence'] == ['Count is three.']
+                assert h['finding']['evidence'] == ['Count is three.']
                 assert {'dimension': 'steps', 'used': 1, 'limit': 1, 'stage': 'worker'} in h['limits']
-                assert '[U05]' in _output(main, 'check') and 'worker steps 1/1' in _output(main, 'check')
-                assert '已用/上限：作者交付 步数 1/1' in main.saved.turns[-1].note
-                assert main._fusion.registry.calls == 2
+                await _continue(main, fake, _decision('renew', review, 'continue', evidence=review['facts'][0]['ref'], steps=2),
+                                say('Ready for the next stage.'), say('State retained.'))
+                assert main._fusion.registry.calls == 2  # Authorization never dispatches.
+                if cap == 'global steps':
+                    assert case['budgetTotals']['worker']['steps'] == 3
+                    assert not main.transcript.pending_prompts()
+                else:
+                    prompt, = main.transcript.pending_prompts()
+                    assert '1 → 3' in prompt.questions[0].question
+                    assert case['budgetRequest']['status'] == 'pending'
                 return
             review = case['budgetReview']
             fact, = review['facts']
@@ -260,18 +270,17 @@ def test_actual_timeout_respects_the_other_fixed_dimension(tmp_path, monkeypatch
             assert case['history'][0]['stop_reason'] == 'time limit'
             assert case['handoff']['usage']['lastAttempt']['applied_budget']['seconds'] == 1
             if not adaptive_time:
-                assert case['paused'] == 'hard time limit' and not case.get('budgetReview')
-                assert case['handoff']['diagnostic'] == 'U05' and rt.registry.calls == 1
+                assert case['paused'] == 'time limit' and 'seconds' in case['budgetReview']['thresholds']
+                assert case['next'] == 'worker' and rt.registry.calls == 1
                 return
             review = case['budgetReview']
             assert review['thresholds'] == ['seconds'] and case['handoff']['diagnostic'] == 'U04'
             ref = review['facts'][0]['ref']
             spent = case['spent']['worker']
-            await _continue(main, fake, _decision('manual-steps', review, 'continue', evidence=ref, steps=4),
-                            _decision('grant-time', review, 'continue', evidence=ref, seconds=1),
+            await _continue(main, fake, _decision('grant-time', review, 'continue', evidence=ref, seconds=1),
                             _run('same-author', resume=True), _report(evidence=['Count checked.']),
                             _run('verified'), _report(evidence=['Fixture passed.']), say('Verified.'))
-            assert 'manual steps limit' in _output(main, 'manual-steps')
+            assert 'No expert dispatched' in _output(main, 'grant-time') and not main.transcript.pending_prompts()
             assert case['next'] == 'done' and case['spent']['worker'] > spent
             assert case['history'][1]['applied_budget']['steps'] <= 10 - spent
             assert case['history'][0]['expert'] == case['receipts']['worker']['expert']

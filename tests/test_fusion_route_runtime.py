@@ -650,10 +650,14 @@ def test_frozen_limits_and_interruption_never_blindly_replay(tmp_path, mode, mon
                 if mode == 'disconnect':
                     assert handoff['diagnostic'] == 'U02' and handoff['inFlight'] == 'worker' and handoff['nextOwner'] == 'Coder'
                     assert case['next'] == 'worker' and 'explicit resume' in _output(main, 'blind')
+                elif mode == 'hard cap':
+                    assert case['next'] == 'worker' and case['budgetReview']['thresholds'] == ['steps']
+                    assert case['handoff']['confirmation'] == 'budget_decision'
+                    assert main.saved.turns[-1].fusion_outcome == 'unverified'
                 else:
                     assert case['handoff']['confirmation'] == 'new_plan_required' and case['handoff']['nextOwner'] == 'Main'
                     assert case['next'] == 'stopped'
-                    assert ('hard limit' if mode == 'hard cap' else 'verified progress') in case['paused']
+                    assert 'verified progress' in case['paused']
     asyncio.run(go())
 
 

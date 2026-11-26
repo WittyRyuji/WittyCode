@@ -76,6 +76,8 @@ class HarnessTools:
         self.clients = list(clients)
         self.connections = None
         self.asker = asker
+        self.tool_started: Callable[[Call, str], None] | None = None
+        self.tool_recorded: Callable[[Call, Outcome, str], Awaitable[None]] | None = None
         self.tool_finished: Callable[[Call, Outcome, str], Awaitable[None]] | None = None
         self.plan_submitter: Callable[[str], None] | None = None
         self.fusion_runner: Callable[..., Awaitable[Outcome]] | None = None
@@ -425,6 +427,10 @@ class HarnessTools:
             return Outcome(f"Refused: {identity.reason}", True)
         if refusal := self._route_check(call):
             return Outcome(f"Refused: {refusal}", True)
+        spec = self.registry.get(call.name)
+        kind = spec.kind if spec is not None else "read"
+        if self.tool_started is not None:
+            self.tool_started(call, kind)
         if self.connections is not None:
             from desktop.core.connections import ConnectionError
             try:
@@ -432,6 +438,8 @@ class HarnessTools:
             except ConnectionError as error:
                 return Outcome(str(error), True, cancelled=True)
         outcome = await self._run(call)
+        if self.tool_recorded is not None:
+            await self.tool_recorded(call, outcome, kind)
         if self.connections is not None:
             from desktop.core.connections import ConnectionError
             try:
@@ -443,8 +451,7 @@ class HarnessTools:
             if edited is not None and edited.kind == "edit":
                 self.route_edit()  # (the main agent's own edits are counted: more than a couple is a Coder's work)
         if self.tool_finished is not None:
-            spec = self.registry.get(call.name)
-            await self.tool_finished(call, outcome, spec.kind if spec is not None else "read")
+            await self.tool_finished(call, outcome, kind)
         return outcome
 
     async def _run(self, call: Call) -> Outcome:
@@ -506,11 +513,12 @@ class HarnessTools:
             tasks = call.args.get('tasks') if call.name == fusion_tools.BATCH_NAME else [call.args]
             if (not isinstance(tasks, list) or not 1 <= len(tasks) <= fusion_tools.MAX_PARALLEL
                     or not all(valid_unit_action(t) for t in tasks)):
-                return Outcome('Use only a frozen unit id and an optional resume flag or a separate budget_decision.', True)
+                return Outcome('Use only a frozen unit id with at most one of resume, budget_decision, or user_question.', True)
             if len({t['unit'] for t in tasks}) != len(tasks):
                 return Outcome('A batch cannot act on the same unit twice.', True)
             pending = [asyncio.create_task(self.unit_runner(t['unit'], resume=t.get('resume', False),
-                                                           decision=t.get('budget_decision'), tool_call=call)) for t in tasks]
+                                                           decision=t.get('budget_decision'), tool_call=call,
+                                                           **({'user_question': t['user_question']} if 'user_question' in t else {}))) for t in tasks]
             try:
                 results = await asyncio.gather(*pending)
             finally:

@@ -1568,7 +1568,7 @@ class AppCore:
             return
         turns = controller.transcript.turns
         turn = turns[-1] if turns else None
-        if turn is None or turn.status is not TurnStatus.DONE:
+        if turn is None or turn.status is not TurnStatus.DONE or getattr(turn, 'fusion_outcome', '') not in ('', 'verified'):
             return
         if previous_goal is not None:
             texts = [block.text for block in turn.blocks if block.kind == "text" and block.text]
@@ -2347,6 +2347,9 @@ class AppCore:
             conv.switch_task.cancel()
         elif conv.controller.busy:
             self._spawn(conv.controller.interrupt())
+        elif cancel := getattr(conv.controller, 'cancel_waiting_fusion', None):
+            if cancel() and conv.goal is not None:
+                self._stop_goal(conv, '目标已取消，未标记完成。')
 
     async def _m_session_reconnect(self, params: dict[str, Any]) -> None:
         conv = self._conversation(params["id"])
@@ -2469,7 +2472,10 @@ class AppCore:
         if getattr(controller, "stop_hook_blocked", False):
             self._stop_goal(conv, "目标先停下了：Stop Hook 未通过；模型回合已保留，但目标未标记完成。")
             return
-        if turn is None or turn.status is not TurnStatus.DONE:
+        fusion_outcome = getattr(turn, 'fusion_outcome', '')
+        if fusion_outcome in ('waiting_user', 'unverified'):
+            return  # Checkpoint recovery owns the next turn. An engine finish is not acceptance.
+        if turn is None or turn.status is not TurnStatus.DONE or fusion_outcome == 'cancelled':
             why = "这一轮出错了。" if turn is not None and turn.status is TurnStatus.FAILED else "这一轮被停止了。"
             self._stop_goal(conv, "目标先停下了：" + why)
             return

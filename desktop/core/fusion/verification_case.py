@@ -195,6 +195,11 @@ def new_case():
     return {'next': 'worker', 'revision': 0, 'paused': '', 'receipts': {}, 'repairs': 0, 'spent': {}, 'attempts': {}}
 
 
+def journal_facts(journal):
+    return [{'kind': 'progress', 'id': p['id'], 'ref': p['result'], 'progress': p,
+             **{k: journal[k] for k in ('attempt', 'revision', 'stage', 'expert')}} for p in journal.get('progress', ())]
+
+
 def adaptive(unit):
     b = unit['budget']
     return b.get('adaptive_steps', False) or b.get('adaptive_seconds', False)
@@ -207,19 +212,59 @@ def usage(case, stage, start=0):
             'attempts': len(rows) if start else case['attempts'].get(stage, 0)}
 
 
-def hard_limits(unit, *, step_cap=None, seconds_cap=None):
+DIMENSIONS = ('steps', 'seconds')
+PLAN_DIMENSIONS = {'steps': 'turns', 'seconds': 'seconds'}
+MAX_DIMENSION = {'steps': 2**53 - 1, 'seconds': step_budget.MAX_SECONDS}
+
+
+def budget_sources(unit, requested):
+    b = unit['budget']
+    return {d: 'fixed' if type(requested.get(PLAN_DIMENSIONS[d])) is int or not b.get('adaptive_' + d)
+            else 'adaptive' if requested.get(PLAN_DIMENSIONS[d]) == 'adaptive' else 'unknown' for d in DIMENSIONS}
+
+
+def hard_limits(unit, *, case=None, stage=None, step_cap=None, seconds_cap=None):
     b = unit['budget']
     steps = b['hard_steps'] if b.get('adaptive_steps') else b['high']
     seconds = b['hard_seconds'] if b.get('adaptive_seconds') else b['seconds']
-    return {'steps': min(steps, step_cap or steps), 'seconds': min(seconds, seconds_cap or seconds)}
+    limits = {'steps': min(steps, step_cap or steps), 'seconds': min(seconds, seconds_cap or seconds)}
+    # Per-attempt safeguards are applied again at dispatch. A recorded extension is an aggregate authorization.
+    if case is not None:
+        limits.update(case.get('budgetTotals', {}).get(stage, {}))
+    return limits
 
 
 def remaining(case, unit, stage, **caps):
     b, grant = unit['budget'], case.get('grant', {})
     total, current = usage(case, stage), usage(case, stage, grant.get('start', 0))
-    hard = {d: limit - total[d] for d, limit in hard_limits(unit, **caps).items()}
-    soft = {d: grant.get(d, b[d]) - current[d] for d in ('steps', 'seconds') if b.get('adaptive_' + d)}
+    hard = {d: limit - total[d] for d, limit in hard_limits(unit, case=case, stage=stage, **caps).items()}
+    soft = {d: (grant.get(d, b[d]) if grant.get('stage', stage) == stage else b[d]) - current[d]
+            for d in DIMENSIONS if b.get('adaptive_' + d) or d in grant}
     return hard, soft, current['attempts']
+
+
+def reforecast(case, unit, stage, requested, demand, *, step_cap, seconds_cap):
+    """Estimate and authorization are separate. Return a quote without changing any cursor or spending anything."""
+    band = unit['budget']
+    sources = budget_sources(unit, requested)
+    totals = hard_limits(unit, case=case, stage=stage, step_cap=step_cap, seconds_cap=seconds_cap)
+    used = usage(case, stage)
+    grant = {'start': len(case.get('history', ())), 'repairs': case['repairs'], 'stage': stage}
+    changes = {}
+    for d, initial, run_cap in [('steps', 'high', step_cap), ('seconds', 'seconds', step_budget.MAX_SECONDS)]:
+        left = max(0, math.floor(totals[d] - used[d]))
+        if sources[d] != 'adaptive' and d not in demand and left:
+            continue  # Keep the existing authorization for a fixed dimension that was not requested.
+        needed = demand.get(d, band[initial])
+        if not 1 <= needed <= run_cap:
+            raise ValueError(f'The new {d} allowance must be between 1 and {run_cap} for one run; split larger work.')
+        required = math.ceil(used[d] + needed)
+        if required > MAX_DIMENSION[d]:
+            raise ValueError(f'The absolute {d} limit cannot be raised; choose a compliant next action.')
+        if required > totals[d]:
+            changes[d] = {'old': totals[d], 'new': required, 'needed': needed, 'left': left, 'source': sources[d]}
+        grant[d] = needed
+    return grant, changes
 
 
 def reached_limits(case, unit, stages, *, stage=None, cause='', **caps):
@@ -233,11 +278,12 @@ def reached_limits(case, unit, stages, *, stage=None, cause='', **caps):
 
     for owner in stages:
         total, current = usage(case, owner), usage(case, owner, grant.get('start', 0))
-        for d, limit in hard_limits(unit, **caps).items():
-            if limit - total[d] < 1 or (owner == stage and d == 'seconds' and cause == 'time limit' and not b.get('adaptive_seconds')):
+        for d, limit in hard_limits(unit, case=case, stage=owner, **caps).items():
+            if limit - total[d] < 1 or (owner == stage and d == 'seconds' and cause == 'time limit' and
+                                       not b.get('adaptive_seconds') and d not in grant):
                 hit(hard, d, total[d], limit, owner)
-            elif b.get('adaptive_' + d):
-                allowance = grant.get(d, b[d])
+            elif b.get('adaptive_' + d) or d in grant:
+                allowance = grant.get(d, b[d]) if grant.get('stage', owner) == owner else b[d]
                 if allowance - current[d] < 1:
                     hit(round_limits, d, current[d], allowance, owner)
                 elif owner == stage and (d == 'seconds' and cause == 'time limit' or d == 'steps' and cause.startswith('soft limit')):
@@ -280,7 +326,7 @@ def finding_fact(finding):
             'revision': finding['revision'], 'expert': finding['expert']}
 
 
-def settle_budget(key, case, unit, stage, cause, *, step_cap=None, seconds_cap=None):
+def settle_budget(key, case, unit, stage, cause, *, step_cap=None, seconds_cap=None, estimate=()):
     """Apply limits after recording an attempt. Never revoke a valid final receipt."""
     next_stage = case['next']
     if next_stage not in STAGES:
@@ -290,31 +336,32 @@ def settle_budget(key, case, unit, stage, cause, *, step_cap=None, seconds_cap=N
         return
     if next_stage != stage and cause != 'repair':
         return  # A successful intermediate stage advances normally; check the next one before dispatch.
-    # A repair needs a new author delivery and all independent checks again. Do not grant work
-    # which cannot reach verification under a fixed remaining limit.
+    # Preserve the other exhausted stages in the handoff; each stage is still authorized separately.
     needed = tuple(unit['roster']) if cause == 'repair' else (stage,)
     hard, round_limits = reached_limits(case, unit, needed, stage=stage, cause=cause,
                                         step_cap=step_cap, seconds_cap=seconds_cap)
-    if hard:
+    if any(hit['dimension'] not in DIMENSIONS for hit in hard):
         case.update(next='stopped', paused=hard_limit_reason(hard))
         return hard
-    if round_limits:
-        history = case['history']
+    limits = [*hard, *round_limits]
+    if limits or estimate:
+        history = case.get('history', [])
         start = case.get('grant', {}).get('start', 0)
         prior = {f['id'] for row in history[:start] for f in row.get('facts', ())}
         used = {d.get('fact') for d in case.get('decisions', ())}
         if cause == 'repair':
             # Only a distinct current work order can authorize a new repair revision.
             prior.update(f['id'] for row in history[start:-1] for f in row.get('facts', ()) if f['kind'] == 'finding')
-            candidates = [f for f in history[-1]['facts'] if f['kind'] == 'finding']
+            candidates = [f for f in history[-1].get('facts', ()) if f['kind'] == 'finding'] if history else []
         else:
             candidates = [f for row in history[start:] for f in row.get('facts', ())
                           if f['kind'] == 'progress' and f['stage'] == next_stage and f['revision'] == case['revision']]
         facts = list({f['id']: f for f in candidates if f['id'] not in prior | used}.values())
+        case['paused'] = case['paused'] or 'budget review'
         case['budgetReview'] = {'id': digest([key, unit['id'], len(history), next_stage, case['revision']]),
-                                'stage': next_stage, 'thresholds': sorted({h['dimension'] for h in round_limits}),
-                                'facts': facts, 'limits': round_limits}
-    return round_limits
+                                'stage': next_stage, 'thresholds': sorted({h['dimension'] for h in limits} | set(estimate)),
+                                'facts': facts, 'limits': limits}
+    return limits
 
 
 def handoff(case, unit, stage, *, cause='', expert='', progress=(), detail='', automatic=False, binding_failed=False,
@@ -356,7 +403,12 @@ def handoff(case, unit, stage, *, cause='', expert='', progress=(), detail='', a
     start = case.get('grant', {}).get('start', 0)
     history = case.get('history', [])
     last = history[-1] if history else {}
+    journal = last.get('journal', {})
+    tool_records = list(journal.get('calls', {}).values())
+    refs.extend(row[k] for row in tool_records[-8:] for k in ('result', 'report') if row.get(k))
+    pending = journal.get('savePending') or any(row['status'] == 'started' or row.get('outputPending') for row in tool_records)
     return {'unit': unit['id'], 'revision': case['revision'], 'stage': stage, 'expert': expert,
+            'evidencePending': bool(pending),
             'diagnostic': code, 'category': kind, 'reason': paused, 'cause': cause,
             'completed': list(case['receipts']), 'evidenceRefs': list(dict.fromkeys(refs)), 'progress': list(progress),
             'inFlight': stage if cause in ('cancelled', 'interrupted', 'incomplete run', 'timeout', 'time limit',
@@ -415,42 +467,71 @@ def restore(key, plan):
                 or type(d.get('revision')) is not int or not 0 <= d['revision'] <= case['revision'] for d in decisions)):
             raise ValueError('Invalid frozen budget decisions.')
         grants = [d for d in decisions if d['action'] == 'continue']
+        totals = {}
+        for event in grants:
+            for d, quote in event.get('changes', {}).items():
+                if (d not in DIMENSIONS or type(quote.get('new')) is not int or not 1 <= quote['new'] <= MAX_DIMENSION[d]
+                        or quote.get('source') not in ('adaptive', 'fixed')
+                        or quote['source'] == 'fixed' and not event.get('userApproval')):
+                    raise ValueError('Invalid frozen budget extension.')
+                totals.setdefault(event['stage'], {})[d] = quote['new']
+            if 'changes' in event:
+                totals.setdefault(event['stage'], {})
+        if case.get('budgetTotals', {}) != totals:
+            raise ValueError('Budget totals have no matching authorization history.')
         if grant := case.get('grant'):
-            allowed = {'steps': unit['budget']['high'], 'seconds': unit['budget']['seconds']}
+            allowed = MAX_DIMENSION if 'stage' in grant else {'steps': unit['budget']['high'], 'seconds': unit['budget']['seconds']}
             if (not grants or grant != grants[-1].get('budget') or type(grant.get('start')) is not int
-                    or not 0 < grant['start'] <= len(history) or type(grant.get('repairs')) is not int
+                    or not 0 <= grant['start'] <= len(history) or type(grant.get('repairs')) is not int
+                    or grant.get('stage', grants[-1]['stage']) != grants[-1]['stage']
                     or not 0 <= grant['repairs'] <= case['repairs']
                     or any(type(grant.get(d)) is not int or not 1 <= grant[d] <= allowed[d]
-                           for d in allowed if unit['budget'].get('adaptive_' + d))):
+                           for d in allowed if d in grant or unit['budget'].get('adaptive_' + d))):
                 raise ValueError('Invalid frozen budget grant.')
         elif grants:
             raise ValueError('Missing frozen budget grant.')
         if review := case.get('budgetReview'):
-            if (not adaptive(unit) or 'reserved' in case or not case['paused'] or case['next'] not in stages
+            if ('reserved' in case or not case['paused'] or case['next'] not in stages
                     or review.get('stage') != case['next']
                     or review.get('id') != digest([key, name, len(history), case['next'], case['revision']])
                     or not isinstance(review.get('facts'), list)
                     or not review.get('thresholds') or set(review['thresholds']) - {'steps', 'seconds', 'attempts', 'repairs'}):
                 raise ValueError('Invalid pending frozen budget review.')
+        if request := case.get('budgetRequest'):
+            event = request.get('event') or {}
+            if (request['id'] != 'fusion-budget-' + digest([key, name, event]) or
+                    request.get('status') == 'pending' and (not review or event.get('review') != review['id'] or
+                    event.get('stage') != case['next'] or event.get('revision') != case['revision'])):
+                raise ValueError('Invalid frozen budget question.')
         if 'reserved' in case:
             # The process may have sent work before dying. Charge the reservation, never replay it.
             reserved = case.pop('reserved')
             stage = case['next']
-            if stage not in stages or type(reserved) is not int or not 0 < reserved <= unit['budget']['high']:
+            grant = case.get('grant', {})
+            if grant.get('stage', stage) != stage:
+                grant = {}
+            if stage not in stages or type(reserved) is not int or not 0 < reserved <= max(unit['budget']['high'], grant.get('steps', 0)):
                 raise ValueError('Invalid frozen stage reservation.')
             case['spent'][stage] = case['spent'].get(stage, 0) + reserved
             case['paused'] = 'interrupted; inspect before resuming'
             seconds = case.pop('reserved_seconds', 0)
-            if type(seconds) is not int or not 0 <= seconds <= unit['budget']['seconds']:
+            if type(seconds) is not int or not 0 <= seconds <= max(unit['budget']['seconds'], grant.get('seconds', 0)):
                 raise ValueError('Invalid frozen time reservation.')
             elapsed = time.time() - case.pop('reserved_at', 0)
             if math.isfinite(elapsed) and elapsed >= 0:
                 seconds = min(seconds, math.ceil(elapsed))
+            owner = case.pop('reserved_expert', '')
+            journal = case.pop('journal', {})
+            if journal and (journal.get('expert') != owner or journal.get('revision') != case['revision'] or
+                            journal.get('stage') != stage or journal.get('attempt') != case['attempts'].get(stage)):
+                raise ValueError('The saved tool checkpoints belong to a different attempt.')
+            facts = journal_facts(journal)
             case.setdefault('history', []).append({'revision': case['revision'], 'stage': stage, 'reason': case['paused'],
-                                                   'seconds': seconds, 'steps': reserved, 'tokens': None})
+                                                   'seconds': seconds, 'steps': reserved, 'stepsReserved': True, 'tokens': None,
+                                                   'journal': journal, 'facts': facts, 'progressIds': [f['id'] for f in facts]})
             limits = settle_budget(key, case, unit, stage, 'process interrupted')
             case['handoff'] = handoff(case, unit, stage, cause='process interrupted', limits=limits or (),
-                                      expert=case.pop('reserved_expert', ''))
+                                      progress=journal.get('progress', ()), expert=owner)
             case['history'][-1]['handoff'] = case['handoff']
     return plan
 
@@ -477,6 +558,10 @@ def advance(case, unit, stage, report, *, accepted, interrupted, reason, steps, 
     return case['paused']  # A budget disposition must not overwrite the original diagnosis.
 
 
+def awaiting_user(case):
+    return any((case.get(field) or {}).get('status') == 'pending' for field in ('budgetRequest', 'recoveryRequest'))
+
+
 def result_lines(plan):
     """Stable user-facing result and only the actionable next states for Main."""
     lines, actions = [], []
@@ -500,6 +585,8 @@ def result_lines(plan):
             status = '已停止' if decision == 'stop' else f'已停止（{reason}）'
         elif deps:
             status = '依赖阻塞，等待 ' + '、'.join(deps) + ' 验证通过'
+        elif awaiting_user(case):
+            status = f'等待用户回答续作问题；下一阶段：{label}'
         elif review := case.get('budgetReview'):
             saved_pause = decision == 'pause' and case['decisions'][-1]['review'] == review['id']
             limit = '、'.join(LIMIT_LABELS[d] for d in review['thresholds'])
@@ -510,9 +597,9 @@ def result_lines(plan):
             elif h.get('diagnostic') in ('U01', 'U02', 'U08'):
                 status += f'；{reason}'
             if not review['facts']:
-                status += '；无新的可核查证据，不能续额'
+                status += '；无新的可核查证据，不能续额' if adaptive(plan['spec']['units'][name]) else '；需诊断或复核固定额度'
             if not saved_pause and review['facts']:
-                actions.append(f'{name}: inspect and decide Adaptive budget review {review["id"]}')
+                actions.append(f'{name}: estimate remaining work and inspect budget review {review["id"]}')
         elif case['paused']:
             status = f'已暂停（{reason}）；下一阶段：{label}'
             if decision == 'continue' and (h.get('budgetReview') or {}).get('id') == case['decisions'][-1]['review']:
@@ -526,6 +613,8 @@ def result_lines(plan):
             status += f'；Main 最近决策：{DECISION_LABELS[decision]}'
         if (case['paused'] or stage == 'stopped') and (limits := h.get('limits')):
             status += f'；已用/上限：{format_limits(limits, chinese=True)}'
+        if h.get('evidencePending') and stage != 'done':
+            status += '；部分证据或工具结果待核对'
         lines.append(f'{name} v{case["revision"]}：{status}。')
     return tuple(lines), tuple(actions)
 

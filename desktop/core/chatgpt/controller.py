@@ -48,6 +48,7 @@ from desktop.core.engine_items import attachment_block
 from desktop.core.connections import ConnectionError as ExtensionError
 from desktop.core.context import ContextState, format_tokens
 from desktop.core.context_envelope import wrap as wrap_context
+from desktop.core.fusion import verification_case
 from desktop.core.fusion.backends import GUARDED
 from desktop.core.fusion.candidate import MERGE_CLAUSE, Staging, mark_candidates, unflag
 from desktop.core.handoff import Handoff
@@ -241,6 +242,7 @@ class ChatGPTController:
             self.manager._notify(self, kind)
 
     def _changed(self) -> None:
+        self.transcript.set_recovery_prompts(self._fusion.recovery_questions() if self._fusion is not None else [])
         self._notify("changed")
 
     def _spawn(self, coroutine: Any) -> asyncio.Task[Any]:
@@ -545,6 +547,7 @@ class ChatGPTController:
         self.refresh_context()
         self._notify("state")
         self._changed()
+        self._schedule_fusion_recovery()
 
     async def _start_servers(self) -> None:
         """Start independent servers concurrently; cached contracts are available before handshakes finish."""
@@ -1016,7 +1019,7 @@ class ChatGPTController:
 
     def send_prompt(self, text: str, attachments: Sequence[Attachment] = (), *, approved_plan: str = "",
                     approved_workplan: Mapping[str, Any] | None = None, packed_context: bool = False,
-                    packed_hooks: PromptContext | None = None) -> bool:
+                    packed_hooks: PromptContext | None = None, recovery: bool = False) -> bool:
         text = text.strip()
         attachments = tuple(attachments)
         if attachments and not text:
@@ -1058,13 +1061,16 @@ class ChatGPTController:
         self._turn_model, self._turn_reasoning, self._turn_mode = self.model, self.reasoning, self.mode
         self._turn_start = len(self.saved.items)  # setup failures never belong to the previous turn
         self.transcript.output_probe = self._output_so_far
-        turn = self.transcript.start_turn(text, attachments, handoff=carried)
+        turn = self.transcript.start_turn(saved_history.FUSION_RESUMING if recovery else text, attachments, handoff=carried,
+                                          system_notice=recovery)
         if context.notice:
             self.transcript.add_notice(context.notice)
         self._handoff_turn = turn if handoff is not None else None
         self._preface_turn = turn if self.preface else None
         self._recall_turn, self._recall_ids = turn, context.ids
         self._turn = turn
+        if recovery:
+            turn.fusion_outcome = 'continuing'
         if approved_plan:
             # The user's approval is this turn's execute declaration; the model cannot mint one itself. It carries
             # the work plan bound to the approved version — an older file or a reopened plan has none, so that
@@ -1225,7 +1231,10 @@ class ChatGPTController:
             self.saved.items.append(item)
             if model.startswith("factory:"):
                 self._unsent_prompt = turn.id  # May still be refused by the machine guard.
-            self.saved.turns.append(SavedTurn(self._turn_start, time.time(), None, "running", "", model))
+            recovering = turn.fusion_outcome == 'continuing' and self._fusion is not None
+            self.saved.turns.append(SavedTurn(self._turn_start, time.time(), None, "running", "", model,
+                                              fusion_plan=self._fusion._unit_key() if recovering else '',
+                                              fusion_resumed=recovering))
             if self.saved.plan.get("status") == "approved" and self.saved.plan.get("execution") == "starting":
                 self.saved.plan["execution"] = "started"
             self.saved.model, self.saved.reasoning, self.saved.autonomy = self.model, self.reasoning, self.autonomy
@@ -1282,8 +1291,12 @@ class ChatGPTController:
                 if unrated:
                     asks.append(fusion.rating_request(unrated))
                 if asks and end.reason == "done" and end.steps < self.turn_step_limit():
-                    # With a real model the turn's last words became a note about these steps instead of the result.
-                    held = loop.observer.hold_answer()
+                    # Actual user-facing progress is not hidden just because checks still have to run.
+                    if verdict is not None and verdict.missing:
+                        loop.observer.preserve_answer()
+                        held = False
+                    else:
+                        held = loop.observer.hold_answer()
                     continuation = "\n\n".join(asks) + (MERGE_CLAUSE if held else
                         " Then end with the answer to the user request, not with a report of these steps.")
                     loop.observer.history_grew([{"type": "message", "role": "developer", "content": [{"type": "input_text", "text": continuation}]}])
@@ -1295,11 +1308,7 @@ class ChatGPTController:
                     else:
                         end = await loop.run(history, steps_used=end.steps)
                     verdict = fusion.acceptance_verdict()
-                if verdict is None or not verdict.missing:
-                    loop.observer.release_answer()
-                else:
-                    # Still unverified: an unaccepted "done" is not the answer — bury it like a superseded draft.
-                    loop.observer.hold_answer()
+                loop.observer.release_answer()
                 if verdict is not None:
                     await fusion.retain_verdict(verdict)
                 await fusion.settle_main_ratings()
@@ -1319,9 +1328,14 @@ class ChatGPTController:
             if self._turn is turn:
                 if self._fusion is not None:
                     await self._fusion.sample_metrics(turn)
+                if loop is not None and self._fusion is not None and self._fusion.acceptance_verdict() is not None:
+                    loop.observer.release_answer()
+                note = self._fusion_turn_receipt(turn, 'interrupted' if self._close_requested else 'cancelled')
+                if note:
+                    self.transcript.add_notice(note)
                 self._release_steers()
                 self.transcript.abort_turn("本轮已停止。")
-                self._record_turn("interrupted")
+                self._record_turn("interrupted", note=note)
                 self._end_turn(turn)
             raise
         except Exception as error:  # the session must survive anything
@@ -1332,6 +1346,8 @@ class ChatGPTController:
         if self._turn is not turn:
             return
         if failure is not None:
+            if loop is not None and self._fusion is not None and self._fusion.acceptance_verdict() is not None:
+                loop.observer.release_answer()
             self._turn_failed(turn, failure)
             return
         assert end is not None
@@ -1373,19 +1389,27 @@ class ChatGPTController:
             note = STOP_NOTES.get(end.detail, f"回答没有说完（{end.detail}）。")
         elif end.reason == "step_limit":
             note = f"这一轮用了 {end.steps} 步还没结束，先停在这里；可在设置 → 会话里调整「单轮步数上限」，或回复「继续」。"
-        if verdict is not None and (verdict.missing or verdict.unit_results):
+        receipt_note = self._fusion_turn_receipt(turn, end.reason)
+        if receipt_note:
+            note = receipt_note + ('\n' + note if note and end.reason != 'step_limit' else '')
+        elif verdict is not None and (verdict.missing or verdict.unit_results):
             # Persist the program verdict like other stop notes, so a reopened chat shows it once.
             if verdict.unit_results:
                 heading = 'Fusion：本轮工作未验证。' if verdict.missing else 'Fusion：本轮工作已验证。'
                 result = '\n'.join((heading, *verdict.unit_results))
             else:
-                result = 'Fusion：本轮工作未验证；缺少检查：' + ', '.join(verdict.missing) + '。'
+                result = ('Fusion：本轮工作未验证；缺少检查：' + ', '.join(verdict.missing) +
+                          '。本轮已结束；须继续补齐检查后才能结案。')
+                turn.fusion_outcome = 'unverified'
+                if self.saved.turns:
+                    self.saved.turns[-1].fusion_outcome = turn.fusion_outcome
             note = result + ('\n' + note if note else '')
         if note:
             self.transcript.add_notice(note)
         self._release_steers()
-        self.transcript.finish_turn(turn, TurnStatus.DONE)
-        self._record_turn({"step_limit": "limit", "incomplete": "incomplete"}.get(end.reason, "done"), note=note)
+        pending = turn.fusion_outcome in ('waiting_user', 'unverified')
+        self.transcript.finish_turn(turn, TurnStatus.INTERRUPTED if pending else TurnStatus.DONE)
+        self._record_turn('interrupted' if pending else {"step_limit": "limit", "incomplete": "incomplete"}.get(end.reason, "done"), note=note)
         try:
             if self._pending_fusion_title is not None and self._fusion is not None and end.reason in ("done", "plan"):
                 self._keep_first_prompt()
@@ -1484,7 +1508,10 @@ class ChatGPTController:
             self._discard_first_prompt()
             acp["promptAttempted"] = False
         self._keep_first_prompt()  # an ACP dispatch may have reached the native agent even when it did not answer
-        if (not self._first_prompt_retained and (not self.running_model.startswith("factory:") or self._unsent_prompt == turn.id)
+        note = self._fusion_turn_receipt(turn, 'failed')
+        if note:
+            self.transcript.add_notice(note)
+        if (not note and not self._first_prompt_retained and (not self.running_model.startswith("factory:") or self._unsent_prompt == turn.id)
                 and len(self.saved.items) == self._turn_start + 1 and self.saved.turns
                 and self.saved.turns[-1].start == self._turn_start and self.saved.turns[-1].finished is None):
             # The message was rejected without output: the next try must not repeat it from history.
@@ -1493,15 +1520,101 @@ class ChatGPTController:
             if not self._checkpoint_written:
                 self.saved.prompt = {}
         else:
-            self._record_turn("failed", message)
+            self._record_turn("failed", message, note=note)
         self._release_steers()
         self.transcript.fail_turn(message)
         self._end_turn(turn)
+
+    def _fusion_turn_receipt(self, turn: Turn, reason: str) -> str:
+        rt = self._fusion
+        record = self.saved.turns[-1] if self.saved.turns else None
+        if rt is None or record is None or record.start != self._turn_start:
+            return ''
+        if not record.fusion_plan:
+            verdict = rt.acceptance_verdict() if reason in ('failed', 'cancelled', 'interrupted') else None
+            if verdict is not None and verdict.missing:
+                turn.fusion_outcome = record.fusion_outcome = 'cancelled' if reason == 'cancelled' else 'unverified'
+                return ('Fusion：本轮工作未验证。尚缺：' + '、'.join(verdict.missing) +
+                        '。本轮中断，已保留已知结果；须核对现有证据，不能据此结案。')
+            return ''
+        plan = rt.registry.plans.get(record.fusion_plan)
+        if not plan or not plan['cases']:
+            return ''
+        missing = [c for c in plan['cases'].values() if c['next'] != 'done']
+        waiting = any(verification_case.awaiting_user(c) for c in missing)
+        outcome = 'cancelled' if reason == 'cancelled' else 'waiting_user' if waiting else 'unverified' if missing else 'verified'
+        turn.fusion_outcome = record.fusion_outcome = outcome
+        if outcome == 'cancelled':
+            try:
+                rt.cancel_recovery(record.fusion_plan)
+            except ChatGPTError:
+                log.warning('Could not checkpoint the Fusion stop', exc_info=True)
+        record.fusion_recovery = (outcome == 'unverified' and not self.stop_hook_blocked and reason in ('step_limit', 'incomplete')
+                                  and not any(t.fusion_plan == record.fusion_plan and t.fusion_outcome == 'unverified'
+                                              for t in self.saved.turns[:-1]))
+        if outcome == 'verified':
+            lines, _ = verification_case.result_lines(plan)
+            return '\n'.join(('Fusion：本轮工作已验证。', *lines))
+        cause = {'cancelled': '收到停止指令', 'failed': '运行异常', 'step_limit': '本轮步数已用尽', 'incomplete': '模型未完成回答',
+                 'observer': 'Observer 暂停', 'done': '模型回合已结束，验收尚未通过'}.get(reason, '本轮未通过验收')
+        action = ('已停止执行；尚未通过的验收不计为完成。' if outcome == 'cancelled' else
+                  '请回答续作卡。已授权的其他工单不受此问题限制。' if waiting else
+                  '将从已保存的检查点继续原任务，不重复未知副作用。' if record.fusion_recovery else
+                  '保留检查点；需继续诊断未通过的检查，不能据此结案。')
+        lines, _ = verification_case.result_lines(plan)
+        return '\n'.join(('Fusion：本轮工作未验证。', *lines, f'本轮离开原因：{cause}。', action))
 
     def _record_turn(self, status: str, error: str = "", note: str = "") -> None:
         if self.saved.turns and self.saved.turns[-1].start == self._turn_start and self.saved.turns[-1].finished is None:
             record = self.saved.turns[-1]
             record.finished, record.status, record.error, record.note = time.time(), status, error, note
+
+    def _schedule_fusion_recovery(self) -> None:
+        if self._fusion is not None and self.state is SessionState.READY and not self._close_requested:
+            asyncio.get_running_loop().call_soon(self._resume_fusion_checkpoint)
+
+    def _resume_fusion_checkpoint(self) -> None:
+        if self.state is not SessionState.READY or self._close_requested or self.mode == PLAN or self._fusion is None:
+            return
+        rt = self._fusion
+        key, plan = rt.recovery_plan()
+        last = self.saved.turns[-1] if self.saved.turns else None
+        if plan is None or last is None or last.fusion_outcome == 'cancelled' or self.stop_hook_blocked:
+            return
+        if not any(case['next'] != 'done' and not verification_case.awaiting_user(case)
+                   and not any(verification_case.awaiting_user(plan['cases'][dep]) for dep in plan['spec']['units'][name]['deps'])
+                   for name, case in plan['cases'].items()):
+            return
+        signals = [(name, case, case['resumeSignal']) for name, case in plan['cases'].items() if case.get('resumeSignal')]
+        if not last.fusion_recovery and not signals:
+            return
+        details = []
+        for name, case, signal in signals:
+            if signal.get('requestKind') == 'recoveryRequest':
+                request = case['recoveryRequest']
+                result = ('reported doing the requested operation; verify it before work' if signal['approved'] else
+                          'cannot provide this prerequisite; choose an authorized alternative')
+                details.append(f"{name}: the user {result}. Prerequisite: {request['question']}. No new tool permission granted.")
+            else:
+                result = 'approved the specified budget increase' if signal['approved'] else 'did not approve the increase; stay within authorization'
+                details.append(f'{name}: the user {result}.')
+        note = 'Resume the original task from the checkpoint. Do not replay tools with unknown effects.\n' + '\n'.join(details)
+        note += '\nOriginal goal: ' + plan['spec']['goal']
+        note += '\nUnit state:\n' + '\n'.join(verification_case.result_lines(plan)[0])
+        # Consume the restart reason before re-entering a model; no failure/step-limit loop across fresh turns.
+        prior = last.fusion_recovery
+        last.fusion_recovery = False
+        for _, case, _ in signals:
+            case.pop('resumeSignal')
+        try:
+            rt._checkpoint()
+        except ChatGPTError:
+            last.fusion_recovery = prior
+            for _, case, signal in signals:
+                case['resumeSignal'] = signal
+            return
+        self.send_prompt(note, approved_workplan={'frozen': key, 'budget': plan['spec']['budget']},
+                         approved_plan=plan['spec']['goal'] or 'Continue the previously approved scope.', recovery=True)
 
     def _end_turn(self, turn: Turn) -> None:
         if self._turn is not turn:
@@ -1546,6 +1659,7 @@ class ChatGPTController:
             self._acp.arm_idle()
         self._notify("state")
         self._changed()
+        self._schedule_fusion_recovery()
 
     # ------------------------------------------------------------------ steering and stopping
 
@@ -1587,6 +1701,23 @@ class ChatGPTController:
             self._steers.clear()
             self._notify("steer")
 
+    def cancel_waiting_fusion(self) -> bool:
+        if self._fusion is None or self.state is not SessionState.READY or not self._fusion.recovery_questions():
+            return False
+        key, _ = self._fusion.recovery_plan()
+        if not self._fusion.cancel_recovery(key):
+            return False
+        record = self.saved.turns[-1]
+        turn = self.transcript.turns[-1]
+        message = 'Fusion：已取消原任务；未完成的验收不计为通过。'
+        record.fusion_outcome = turn.fusion_outcome = 'cancelled'
+        record.fusion_recovery = False
+        record.note += '\n' + message
+        self.transcript.add_notice(message)
+        self._save_now()
+        self._changed()
+        return True
+
     async def interrupt(self) -> None:
         turn, task = self._turn, self._turn_task
         if self.state is not SessionState.RUNNING or turn is None:
@@ -1605,9 +1736,12 @@ class ChatGPTController:
                 await asyncio.wait_for(done.wait(), INTERRUPT_GRACE_SECONDS)
         if self._turn is turn and turn.status is TurnStatus.RUNNING:
             log.warning("the turn did not end within %.0f s of the stop request", INTERRUPT_GRACE_SECONDS)
+            note = self._fusion_turn_receipt(turn, 'interrupted' if self._close_requested else 'cancelled')
+            if note:
+                self.transcript.add_notice(note)
             self._release_steers()  # (the loop never took them: back to the user, not into the next turn)
             self.transcript.abort_turn("停止超时：这里先停止显示。")
-            self._record_turn("interrupted")
+            self._record_turn("interrupted", note=note)
             # The loop of this turn is still winding down but no longer owns the conversation (``_Watch`` drops what it
             # reports). Its calls get their outputs here: the next turn must not send a history with a call that has none.
             pair_in_place(self.saved, INTERRUPTED)
@@ -2210,6 +2344,11 @@ class ChatGPTController:
     def answer_question(self, prompt_id: str, answers: Sequence[str | Sequence[str]] | None) -> bool:
         """Answer (or, with ``None``, skip) the question the model asked with ``ask_user``; each answer is a string or a list of
         strings."""
+        if self._fusion is not None and isinstance(prompt_id, str) and prompt_id.startswith('fusion-'):
+            if not self._fusion.answer_recovery(prompt_id, answers):
+                return False
+            self._schedule_fusion_recovery()
+            return True
         future = self._pending.get(prompt_id)
         if future is None:
             return False
@@ -2261,6 +2400,7 @@ class _Watch(Observer):
         """A Fusion main turn's answer text stays buffered until the step's fate is known (fusion.candidate)."""
         self._flagged: dict[str, dict[str, Any]] = {}
         """Log items marked ``CANDIDATE`` while still buffered, by staged id — the mark comes off at publication."""
+        self._answer_pass = 0
 
     @property
     def current(self) -> bool:
@@ -2291,9 +2431,9 @@ class _Watch(Observer):
                 continue  # Without the turn it never renders; keep the mark so the reopened view agrees.
             published.append(item_id)
             if done:
-                self.ctl.transcript.end_text(turn, item_id, 0, text)
+                self.ctl.transcript.end_text(turn, self._text_key(item_id), 0, text)
             else:
-                self.ctl.transcript.append_text(turn, item_id, 0, text)
+                self.ctl.transcript.append_text(turn, self._text_key(item_id), 0, text)
         if turn is not None:
             self.ctl._changed()
             if unflag(self._flagged, published):
@@ -2314,10 +2454,17 @@ class _Watch(Observer):
     def release_answer(self) -> None:
         self._release_staged()
 
+    def preserve_answer(self) -> None:
+        self._release_staged()
+        self._answer_pass += 1  # Native providers may recycle the same message id on continuation.
+
+    def _text_key(self, item_id: str) -> str:
+        return f'fusion-{self._answer_pass}:{item_id}' if self._answer_pass else item_id
+
     def text_delta(self, item_id: str, text: str) -> None:
         if self._turn is not None:
             if self._staging is None or not self._staging.delta(item_id, text):
-                self.ctl.transcript.append_text(self._turn, item_id, 0, text)
+                self.ctl.transcript.append_text(self._turn, self._text_key(item_id), 0, text)
                 self.ctl._changed()
             if text.strip():
                 self.ctl._model_progress()
@@ -2325,7 +2472,7 @@ class _Watch(Observer):
     def text_done(self, item_id: str, text: str) -> None:
         if self._turn is not None:
             if self._staging is None or not self._staging.done(item_id, text):
-                self.ctl.transcript.end_text(self._turn, item_id, 0, text)
+                self.ctl.transcript.end_text(self._turn, self._text_key(item_id), 0, text)
                 self.ctl._changed()
             if text.strip():
                 self.ctl._model_progress()
@@ -2430,10 +2577,12 @@ class _Watch(Observer):
         if self.current:
             if self._staging is not None:
                 if failed:
-                    # A failed request's buffered words are superseded by the retry or buried with the turn:
-                    # never the answer — their marks stay, the ids are forgotten.
-                    self._staging.drop()
-                    self._flagged.clear()
+                    fusion_main = self.ctl._fusion
+                    if fusion_main is not None and (fusion_main._unit_key() or fusion_main.acceptance_verdict() is not None):
+                        self.preserve_answer()  # The request failed, but the received body belongs to this recovery.
+                    else:
+                        self._staging.drop()
+                        self._flagged.clear()
                 elif self._staging.calls:
                     # A request that made calls ends a step that continues: its text is progress, show it.
                     self._release_staged()

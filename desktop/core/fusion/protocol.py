@@ -43,12 +43,13 @@ BRIEF_PARAMETERS: dict[str, Any] = {
 }
 UNIT_PARAMETERS = {"type": "object", "properties": {"unit": {"type": "string"},
                    "resume": {"type": "boolean", "description": "Run a paused stage only after inspection and any required budget decision."},
+                   "user_question": {"type": "string", "maxLength": 800, "description": "Only if the user must personally supply a prerequisite. Ask exactly what, why, and the alternative. This cannot grant tool permissions."},
                    "budget_decision": {"type": "object", "properties": {
-                       "review": {"type": "string", "description": "Current budget review id from the handoff."},
+                       "review": {"type": "string", "description": "Pending review id, or current to reforecast a paused stage before its allowance is exhausted."},
                        "action": {"type": "string", "enum": ["continue", "pause", "stop"]},
-                       "evidence": {"type": "string", "description": "For continue: one new retained fact reference from this review."},
-                       "steps": {"type": "integer", "minimum": 1, "description": "Optional smaller Adaptive step allowance."},
-                       "seconds": {"type": "integer", "minimum": 1, "description": "Optional smaller Adaptive time allowance."}},
+                       "evidence": {"type": "string", "description": "New retained finding or progress for automatic Adaptive renewal. Fixed increases require user approval."},
+                       "steps": {"type": "integer", "minimum": 1, "description": "Estimated steps still needed for the next run, not the remaining allowance."},
+                       "seconds": {"type": "integer", "minimum": 1, "description": "Estimated seconds still needed for the next run."}},
                        "required": ["review", "action"], "additionalProperties": False}},
                    "required": ["unit"], "additionalProperties": False}
 UNIT_DELEGATE = {"name": "delegate_task", "description": "Run the next frozen stage or record a Main budget decision without running it.", "parameters": UNIT_PARAMETERS}
@@ -58,9 +59,12 @@ UNIT_BATCH = {"name": "delegate_tasks", "description": "Advance or decide on ind
 
 
 def valid_unit_action(args):
-    if (not isinstance(args, Mapping) or set(args) - {'unit', 'resume', 'budget_decision'}
+    if (not isinstance(args, Mapping) or set(args) - {'unit', 'resume', 'budget_decision', 'user_question'}
             or not isinstance(args.get('unit'), str) or type(args.get('resume', False)) is not bool):
         return False
+    if 'user_question' in args:
+        q = args['user_question']
+        return not (args.get('resume') or 'budget_decision' in args) and isinstance(q, str) and 1 <= len(q.strip()) <= 800
     if 'budget_decision' not in args:
         return True
     d = args['budget_decision']
@@ -69,8 +73,8 @@ def valid_unit_action(args):
         return False
     if d['action'] != 'continue':
         return set(d) == {'review', 'action'}
-    return (not set(d) - {'review', 'action', 'evidence', 'steps', 'seconds'} and isinstance(d.get('evidence'), str)
-            and all(type(d[k]) is int and d[k] > 0 for k in ('steps', 'seconds') if k in d))
+    return (not set(d) - {'review', 'action', 'evidence', 'steps', 'seconds'} and isinstance(d.get('evidence', ''), str)
+            and all(type(d[k]) is int and 0 < d[k] < 2**53 for k in ('steps', 'seconds') if k in d))
 UNIT_ROUTE = {"name": "submit_route", "description": "Activate the bound frozen plan; submit an empty object.",
               "parameters": {"type": "object", "properties": {}, "additionalProperties": False}}
 REPORT_PARAMETERS: dict[str, Any] = {

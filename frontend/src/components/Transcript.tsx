@@ -125,7 +125,10 @@ function Footer({ turn, label }: { turn: Turn; label: string }) {
     );
   }
   const base = turn.seconds !== undefined || turn.steps ? turnSummary(turn.seconds, turn.steps) : "";
-  const prefix = turn.status === "interrupted" ? "已停止" : turn.status === "failed" ? "本轮失败" : "";
+  const prefix = turn.fusionOutcome === "waiting_user" ? "等待用户 · 未完成"
+    : turn.fusionOutcome === "unverified" ? "验收未完成"
+    : turn.fusionOutcome === "cancelled" ? "已取消 · 未完成"
+    : turn.status === "interrupted" ? "已停止" : turn.status === "failed" ? "本轮失败" : "";
   const text = [prefix, base].filter(Boolean).join(" · ");
   return text ? <div className={`turnfoot ${turn.status}`}>{text}</div> : null;
 }

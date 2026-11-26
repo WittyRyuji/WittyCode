@@ -46,6 +46,7 @@ export function PermissionCard({ sessionId, prompt }: { sessionId: string; promp
 
 export function QuestionCard({ sessionId, prompt }: { sessionId: string; prompt: QuestionPrompt }) {
   const answer = useStore((s) => s.answerQuestion);
+  const stop = useStore((s) => s.stop);
   const who = useStore((s) => {
     if (prompt.who) return prompt.who;
     const session = s.sessions[sessionId];
@@ -87,7 +88,7 @@ export function QuestionCard({ sessionId, prompt }: { sessionId: string; prompt:
     <section className="prompt ask" aria-label={`${who} 的提问`}>
       <div className="phead">
         <HelpCircle size={16} className="picon" />
-        {who} 想先问你几个问题
+        {prompt.optionsOnly ? `${who} 续作需要你确认` : `${who} 想先问你几个问题`}
       </div>
       {prompt.questions.map((q, i) => (
         <div key={i} className={`q${tried && missing(i) ? " missing" : ""}`}>
@@ -104,10 +105,12 @@ export function QuestionCard({ sessionId, prompt }: { sessionId: string; prompt:
               </label>
             );
           })}
-          <label className="opt other">
-            <span className="otherlabel">其他：</span>
-            <input type="text" className="otherinput selectable" placeholder="自己写一个答案" value={other[i] ?? ""} onChange={(e) => setOther((o) => ({ ...o, [i]: e.target.value }))} onKeyDown={otherKey} />
-          </label>
+          {!prompt.optionsOnly && (
+            <label className="opt other">
+              <span className="otherlabel">其他：</span>
+              <input type="text" className="otherinput selectable" placeholder="自己写一个答案" value={other[i] ?? ""} onChange={(e) => setOther((o) => ({ ...o, [i]: e.target.value }))} onKeyDown={otherKey} />
+            </label>
+          )}
           {tried && missing(i) && <div className="qerr">请回答这个问题。</div>}
         </div>
       ))}
@@ -115,9 +118,11 @@ export function QuestionCard({ sessionId, prompt }: { sessionId: string; prompt:
         <button type="button" className="btn primary" onClick={submit}>
           提交回答
         </button>
-        <button type="button" className="btn" onClick={() => answer(sessionId, prompt.id, null)}>
-          跳过
-        </button>
+        {prompt.optionsOnly ? (
+          <button type="button" className="btn" onClick={() => stop(sessionId)}>取消原任务</button>
+        ) : (
+          <button type="button" className="btn" onClick={() => answer(sessionId, prompt.id, null)}>跳过</button>
+        )}
       </div>
     </section>
   );

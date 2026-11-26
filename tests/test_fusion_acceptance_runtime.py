@@ -61,15 +61,17 @@ def test_missing_runner_continues_once_within_the_same_user_turn(tmp_path, verif
             assert len(_notices(main)) == (0 if verify else 1)
             assert ("本轮工作未验证" in main.saved.turns[-1].note) is (not verify)
             if not verify:
-                # Every completion text stayed hidden; the persisted note rebuilds the conclusion on reopen.
-                assert not [b.text for b in main.transcript.turns[-1].blocks if isinstance(b, TextBlockView)]
+                # The answer is not the program verdict; both are visible and survive reopening.
+                assert main.transcript.turns[-1].fusion_outcome == 'unverified'
+                assert [b.text for b in main.transcript.turns[-1].blocks if isinstance(b, TextBlockView)] == ['First answer.', 'Final answer.']
                 await main.close()
                 reopened = await main.manager.open_saved(main.project, main.session_id)
                 try:
                     rebuilt = reopened.transcript.turns[-1]
                     unverified = [b for b in rebuilt.blocks if isinstance(b, NoticeBlock) and "本轮工作未验证" in b.text]
                     assert len(unverified) == 1
-                    assert not [b.text for b in rebuilt.blocks if isinstance(b, TextBlockView)]
+                    assert [b.text for b in rebuilt.blocks if isinstance(b, TextBlockView)] == ['First answer.', 'Final answer.']
+                    assert rebuilt.fusion_outcome == 'unverified'
                 finally:
                     await reopened.close()
     asyncio.run(go())
@@ -479,11 +481,11 @@ def test_devin_main_uses_a_second_acp_prompt_in_the_same_turn(tmp_path, monkeypa
             assert len(main.saved.turns) == 1 and len(invocations) == 2
             assert invocations[0][0] is invocations[1][0] and invocations[0][1] == invocations[1][1]
             assert "Missing checks: runner" in invocations[1][2] and _verdict(main)["status"] == "unverified"
-            # Still unverified: neither the held draft nor the unaccepted final report publishes as the answer.
             answers = [item for item in main.saved.items if item.get("type") == "message" and item.get("role") == "assistant"]
-            assert [bool(item.get("wc_candidate")) for item in answers] == [True, True]
-            assert [b.text for b in main.transcript.turns[-1].blocks if isinstance(b, TextBlockView)] == []
-            assert "internal draft" in invocations[1][2]
+            assert len(answers) == 2 and not any(item.get('wc_candidate') for item in answers)
+            assert main.transcript.turns[-1].fusion_outcome == 'unverified'
+            assert len([b.text for b in main.transcript.turns[-1].blocks if isinstance(b, TextBlockView)]) == 2
+            assert "internal draft" not in invocations[1][2]
         finally:
             await core.shutdown()
     asyncio.run(go())
