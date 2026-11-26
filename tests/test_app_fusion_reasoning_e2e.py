@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 
 import pytest
 from PySide6.QtCore import Qt
@@ -36,8 +37,17 @@ def test_fusion_efforts_are_per_model_and_default_clears_only_that_model(qapp, l
                 await rig.core.call("settings.set", {"key": key, "value": value})
             await rig.core.call("models.setVisible", {"ids": [reasoner], "visible": False})
             await rig.press(",", Qt.KeyboardModifier.ControlModifier)
+            await rig.wait_for(".settings")
+            await wait_for(lambda: rig.js(
+                "document.querySelector('.settings').getAnimations({subtree: true})"
+                ".every(a => a.playState !== 'running' && a.playState !== 'pending')"), 30, "settings animation")
+            normal_width = await rig.js("document.querySelector('.settings').getBoundingClientRect().width")
+            viewport_width = await rig.js("window.innerWidth")
+            assert abs(normal_width - min(1280, viewport_width * 0.96)) <= 1
             await rig.click_text(".snav", "Fusion")
             await rig.wait_for(".fusion-model-row", 3)
+            fusion_width = await rig.js("document.querySelector('.settings').getBoundingClientRect().width")
+            assert abs(fusion_width - normal_width) <= 1
             assert not await rig.exists(".fusion-reasoning")
             assert "各模型思考等级" not in await rig.text(".settings-body")
             reasoner_selector = f'.fusion-model-row[data-model="{reasoner}"] .fusion-effort-picker .selectbox'
@@ -45,6 +55,9 @@ def test_fusion_efforts_are_per_model_and_default_clears_only_that_model(qapp, l
             await rig.wait_text(reasoner_selector, "Off")
             assert await rig.js(f'document.querySelector({json.dumps(plain_selector)}).disabled')
             assert await rig.text(plain_selector) == "不支持"
+            evidence_dir = os.environ.get("WITTYCODE_TEST_EVIDENCE")
+            shot = Path(evidence_dir or tmp_path) / f"fusion-model-efforts-{size[0]}.png"
+            await rig.shot(".fusion-seats", shot)
             await rig.click(reasoner_selector)
             assert "Max" in await rig.texts(".menu-item .menu-label")
             await wait_for(lambda: rig.js("[...document.querySelectorAll('.settings, .menu')].every(e => e.getAnimations({subtree: true}).length === 0)"))
@@ -59,9 +72,10 @@ def test_fusion_efforts_are_per_model_and_default_clears_only_that_model(qapp, l
                 "const row = e.getBoundingClientRect(), boxes = [...e.querySelectorAll('.selectbox')], "
                 "modelBox = boxes[0].getBoundingClientRect(), effortBox = boxes[1].getBoundingClientRect(), "
                 "label = boxes[0].querySelector('span'), labelBox = label.getBoundingClientRect(), "
-                "remove = e.querySelector('.fusion-model-remove'), ctl = e.closest('.field-ctl').getBoundingClientRect(); "
+                "remove = e.querySelector('.fusion-model-remove'), ctl = e.closest('.field-ctl').getBoundingClientRect(), "
+                "field = e.closest('.field').getBoundingClientRect(); "
                 "return {role: e.dataset.role, modelId: e.dataset.model, count: boxes.length, left: row.left, right: row.right, "
-                "ctlRight: ctl.right, modelLeft: modelBox.left, modelRight: modelBox.right, effortLeft: effortBox.left, "
+                "ctlRight: ctl.right, fieldRight: field.right, modelLeft: modelBox.left, modelRight: modelBox.right, modelWidth: modelBox.width, effortLeft: effortBox.left, "
                 "effortRight: effortBox.right, modelTop: modelBox.top, modelBottom: modelBox.bottom, effortTop: effortBox.top, "
                 "effortBottom: effortBox.bottom, modelHeight: modelBox.height, effortHeight: effortBox.height, "
                 "labelOverflowX: label.scrollWidth - label.clientWidth, labelOverflowY: label.scrollHeight - label.clientHeight, "
@@ -69,7 +83,15 @@ def test_fusion_efforts_are_per_model_and_default_clears_only_that_model(qapp, l
                 "text: remove.textContent.trim(), label: remove.getAttribute('aria-label') || '', title: remove.getAttribute('title') || '', "
                 "type: remove.type, width: remove.getBoundingClientRect().width, height: remove.getBoundingClientRect().height} : null}; }))"))
             width = await rig.js("window.innerWidth")
+            adds = json.loads(await rig.js(
+                "JSON.stringify([...document.querySelectorAll('.fusion-model-list')].map(list => {"
+                "const row = list.querySelector('.fusion-model-row').getBoundingClientRect(), "
+                "add = list.querySelector('.fusion-model-add .selectbox').getBoundingClientRect(); "
+                "return {pool: list.dataset.pool, rowRight: row.right, addRight: add.right, addWidth: add.width}; }))"))
             assert len(bounds) == 3
+            assert {item["pool"] for item in adds} == {"worker", "light"}
+            assert all(abs(item["addRight"] - item["rowRight"]) < 1 for item in adds)
+            assert all(abs(item["ctlRight"] - item["fieldRight"]) < 1 for item in bounds)
             first = bounds[0]
             for key in ("modelLeft", "modelRight", "effortLeft", "effortRight"):
                 assert all(abs(item[key] - first[key]) < 1 for item in bounds), key
@@ -79,6 +101,7 @@ def test_fusion_efforts_are_per_model_and_default_clears_only_that_model(qapp, l
                        and abs(item["modelTop"] - item["effortTop"]) < 1
                        and abs(item["modelBottom"] - item["effortBottom"]) < 1
                        and abs(item["modelHeight"] - item["effortHeight"]) < 1 for item in bounds)
+            assert all(item["modelWidth"] <= 205 for item in bounds)
             assert all(item["labelOverflowX"] <= 1 and item["labelOverflowY"] <= 1
                        and item["labelWhiteSpace"] != "nowrap" for item in bounds)
             long_row = next(item for item in bounds if item["modelId"] == reasoner)
@@ -96,9 +119,11 @@ def test_fusion_efforts_are_per_model_and_default_clears_only_that_model(qapp, l
             assert "轻量模型 1" in light_remove["label"] and short_name in light_remove["label"]
             assert light_remove["label"] == light_remove["title"]
             (tmp_path / "fusion-inline-bounds.json").write_text(json.dumps(bounds, indent=2), encoding="utf-8")
-            evidence_dir = os.environ.get("WITTYCODE_TEST_EVIDENCE")
-            shot = os.path.join(evidence_dir or str(tmp_path), f"fusion-model-efforts-{size[0]}.png")
-            assert rig.window.grab().save(shot)
+            await rig.click('.fusion-model-list[data-pool="worker"] .fusion-model-add .selectbox')
+            assert "GPT-6-Luna" in await rig.texts(".menu-item .menu-label")
+            assert await rig.text(".settings-body > header h2") == "Fusion"
+            await rig.click(".settings-body > header h2")
+            await rig.wait_for(".menu-item", 0)
             await rig.click('.fusion-model-row[data-role="worker"] .fusion-model-remove')
             await until(lambda: rig.core.settings.fusion_workers == [])
             assert rig.core.settings.fusion_lights == [plain]
@@ -107,6 +132,12 @@ def test_fusion_efforts_are_per_model_and_default_clears_only_that_model(qapp, l
             assert await rig.count('.fusion-model-row[data-role="worker"][data-model=""] .selectbox') == 2
             assert await rig.count('.fusion-model-row[data-role="worker"][data-model=""] .fusion-model-remove') == 0
             assert await rig.count('.fusion-model-row[data-role="light"]') == 1
+            await rig.click_text(".snav", "账号与模型")
+            await rig.wait_text(".prov .btn", "编辑")
+            await rig.click_text(".prov .btn", "编辑")
+            await rig.wait_for(".pe")
+            api_width = await rig.js("document.querySelector('.settings').getBoundingClientRect().width")
+            assert abs(api_width - fusion_width) <= 1
             assert not rig.plan.requests
         finally:
             await rig.finish()
