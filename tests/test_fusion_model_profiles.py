@@ -33,6 +33,8 @@ LEADERBOARD = """<table><thead>
 <tr><td>Mini (Chat)</td><td>20</td><td>$0.05</td><td>1.1</td></tr>
 <tr><td>Grok Demo Xhigh</td><td>42</td><td>–</td><td>3.0</td></tr>
 <tr><td>Unscored Max</td><td>–</td><td>$1.05</td><td>3.0</td></tr>
+<tr><td>DeepSeek V4.1 Flash 1017 Max</td><td>32</td><td>$0.60</td><td>8.0</td></tr>
+<tr><td>DeepSeek V4 Flash Vision Max</td><td>40</td><td>$0.90</td><td>9.0</td></tr>
 <tr><td>—</td><td>—</td><td>—</td><td>—</td></tr>
 </tbody></table>"""
 SOL = "chatgpt:gpt-6.1-sol"
@@ -213,6 +215,13 @@ def test_benchmark_parser_and_reference_selection():
     assert aa_catalog.offer(rows, "chatgpt:unscored") == {"score": None, "cost": 1.05}
 
 
+def test_deepseek_flash_uses_only_the_v41_flash_1017_reference():
+    rows = aa_catalog.parse(LEADERBOARD)
+    assert aa_catalog.offer(rows, "deepseek-flash") == {"score": 32, "cost": 0.60}
+    absent = [row for row in rows if row.name != "deepseekv41flash1017"]
+    assert aa_catalog.offer(absent, "deepseek-flash") is None
+
+
 def test_parser_finds_columns_by_header_and_keeps_ambiguous_cost_unknown():
     shifted = """<table><tr><th>#</th><th>Model</th><th>Cost per TaskUSD</th><th>Intelligence Index</th></tr>
     <tr><td>1</td><td>Solo High</td><td>$0.50</td><td>33</td></tr></table>"""
@@ -302,15 +311,16 @@ def test_startup_upgrades_old_estimates_and_uses_api_native_id_without_editing_p
         provider_config = root / "models.json"
         provider_config.write_text('{"customModels": []}\n', encoding="utf-8")
         before = provider_config.read_bytes()
-        providers = SimpleNamespace(list=lambda: [], api_models=lambda: [SimpleNamespace(id=custom, native="gpt-6.1-sol")])
+        providers = SimpleNamespace(list=lambda: [], api_models=lambda: [SimpleNamespace(id=custom, native="deepseek-flash")])
         # Only the profile lookup needs the provider for this test; the engine does not need an actual connection.
         settings = AppSettings(default_model=custom, fusion_main=SOL)
         core, _, _, _, _ = make_core(tmp_path, projects=False, plan=False, providers=providers, settings=settings)
         core._profiles_source = aa_catalog.source(loader=lambda: LEADERBOARD)
+        deepseek = {"score": 32, "cost": 0.60}
         try:
             await core.call("app.init")
-            await until(lambda: catalog_at(root).get(custom) == MEASURED)
-            assert catalog_at(root) == {custom: MEASURED, SOL: MEASURED, unlisted: UNKNOWN}
+            await until(lambda: catalog_at(root).get(custom) == deepseek)
+            assert catalog_at(root) == {custom: deepseek, SOL: MEASURED, unlisted: UNKNOWN}
             assert provider_config.read_bytes() == before
         finally:
             await core.shutdown()

@@ -176,7 +176,9 @@ def parse(html: str) -> list[Entry]:
 def offer(entries: list[Entry], model: str) -> dict[str, float | None] | None:
     """Choose a Max measurement, or the best scored row when there is no measured Max."""
     native = native_id(model)
-    want = _norm(native)
+    # The API's stable ID has a versioned benchmark name, not a different request ID.
+    reference_name = "DeepSeek V4.1 Flash 1017" if native.casefold() == "deepseek-flash" else native
+    want = _norm(reference_name)
     candidates = [entry for entry in entries if entry.name == want]
     if not candidates and model.startswith("devin:"):
         # Devin sometimes puts its default effort in the native model ID (e.g. swe-2-1-medium).
