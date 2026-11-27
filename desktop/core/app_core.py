@@ -1913,34 +1913,51 @@ class AppCore:
         if conv.cache_dirty:
             self._mark_cache_dirty(conv)  # (it only schedules the write once the session is idle)
         self._flush_agent(conv)
-        self._settle_inflight(conv)
+        self._settle_inflight(conv, failed=self._failed_queue_turn(conv))
 
-    def _settle_inflight(self, conv: Conversation) -> None:
-        """A message with attachments whose turn failed goes back into the composer: retrying is one Enter away."""
+    @staticmethod
+    def _failed_queue_turn(conv: Conversation) -> Turn | None:
+        controller = conv.controller
+        turns = controller.transcript.turns
+        if (conv.ran and controller.state is SessionState.READY and turns
+                and turns[-1].status is TurnStatus.FAILED):
+            return turns[-1]
+        return None
+
+    def _take_inflight(self, conv: Conversation, finished: Turn | None) -> tuple[str, Sequence[Attachment]] | None:
         pending = conv.inflight
         if pending is None:
-            return
+            return None
         turn, text, attachments = pending
-        if turn.running:
-            return
+        if turn.running or (finished is not None and turn is not finished):
+            return None
         conv.inflight = None
         submitted = getattr(conv.controller, "prompt_submitted", None)
         if submitted is not None and submitted(turn):
-            return  # an error stopping an accepted native turn is not a failed delivery
+            return None  # an error stopping an accepted native turn is not a failed delivery
         if getattr(conv.controller, "_unsent_prompt", None) == turn.id:
             conv.unsent_turns.add(turn.id)
         if turn.id not in conv.unsent_turns and (not attachments or turn.status is not TurnStatus.FAILED):
+            return None
+        return text, attachments
+
+    def _settle_inflight(self, conv: Conversation, *, failed: Turn | None = None) -> None:
+        # Both the page flush and the queue callback may run first. Consume both sources before emitting a
+        # single restore: the page prepends each event, so two separate events cannot express this order.
+        pending = self._take_inflight(conv, failed)
+        queued = self._take_queue(conv) if failed is not None and conv.queue else []
+        items = ([pending] if pending is not None else []) + queued
+        if not items:
             return
-        if not attachments:
-            self._restore(conv, [(text, ())], "这条消息没有发出，已放回输入框，可以重试。")
-            return
-        # All of them go back, whatever was put into the composer meanwhile: the notice promises a retry that is one
-        # Enter away, so no attachment may stay behind. When the lot is more than a message usually holds the user is
-        # told by how much; the send asks them (``_m_session_send``) rather than refusing or dropping one.
-        conv.drafts = [*attachments, *conv.drafts]
-        over = overage([*self._carried_attachments(conv), *conv.drafts])
-        self.emit("restore", {"id": conv.cid, "text": text, "attachments": [self._attachment_view(a) for a in conv.drafts]})
-        self.say(RETRY_NOTICE if not over.over else f"{RETRY_OVER_NOTICE}加上输入框里原有的附件，{over.describe()}，重试时会让你确认。")
+        notice = ("上一轮没有成功：排队的消息没有发出，已放回输入框。" if queued else
+                  "这条消息没有发出，已放回输入框，可以重试。" if not pending[1] else "")
+        self._restore(conv, items, notice)
+        if any(attached for _, attached in items):
+            over = overage([*self._carried_attachments(conv), *conv.drafts])
+            if over.over:
+                self.say(f"{RETRY_OVER_NOTICE}加上输入框里原有的附件，{over.describe()}，重试时会让你确认。")
+            elif pending is not None and pending[1] and not queued:
+                self.say(RETRY_NOTICE)
 
     def _attachment_view(self, attachment: Attachment) -> dict[str, Any]:
         return attachment_json(attachment, self._thumb)
@@ -2941,12 +2958,16 @@ class AppCore:
         conv.dirty = True
         self._schedule_flush()
 
-    def _unqueue_all(self, conv: Conversation, notice: str = "") -> None:
-        """The queued messages go back into the composer (withdrawn, or the session never got ready / could not go on)."""
+    @staticmethod
+    def _take_queue(conv: Conversation) -> list[tuple[str, Sequence[Attachment]]]:
         items, conv.queue = [(m.text, m.attachments) for m in conv.queue], []
         if conv.queue_task is not None and conv.queue_task is not asyncio.current_task():
             conv.queue_task.cancel()
-        if items:
+        return items
+
+    def _unqueue_all(self, conv: Conversation, notice: str = "") -> None:
+        """The queued messages go back into the composer (withdrawn, or the session never got ready / could not go on)."""
+        if items := self._take_queue(conv):
             self._restore(conv, items, notice)
 
     def _return_steers(self, conv: Conversation) -> None:
@@ -2960,6 +2981,9 @@ class AppCore:
         """Send the next queued message, if the session can take one now."""
         controller = conv.controller
         if conv.switch_task is not None or conv.switching or not conv.queue or controller.state is not SessionState.READY or conv.cid not in self._by_cid:
+            return
+        if failed := self._failed_queue_turn(conv):
+            self._settle_inflight(conv, failed=failed)
             return
         plan = getattr(getattr(controller, "saved", None), "plan", {})
         if isinstance(plan, dict) and plan.get("status") == "pending":
@@ -3034,16 +3058,14 @@ class AppCore:
             conv.ran = True
         elif state is SessionState.READY:
             previous_goal = conv.goal
-            turns = controller.transcript.turns
-            failed = conv.ran and bool(turns) and turns[-1].status is TurnStatus.FAILED
+            failed = self._failed_queue_turn(conv)
             ended = conv.ran
             if conv.ran:
                 self._curate(conv)
             conv.ran = False
-            if conv.queue and failed:
-                # A turn that failed would most likely fail the next one the same way; nothing is sent behind its back.
-                self._unqueue_all(conv, "上一轮没有成功：排队的消息没有发出，已放回输入框。")
-            elif conv.queue:
+            if failed is not None:
+                self._settle_inflight(conv, failed=failed)
+            if conv.queue:
                 self._pump(conv)
             elif ended:
                 self._advance_goal(conv)

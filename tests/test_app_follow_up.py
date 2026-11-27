@@ -154,23 +154,45 @@ def test_stopping_a_turn_still_sends_what_was_queued_behind_it(tmp_path):
     run(scenario())
 
 
-def test_a_failed_turn_does_not_send_what_was_queued_it_comes_back_to_the_composer(tmp_path):
+@pytest.mark.parametrize("first_callback", ["flush", "follow"])
+@pytest.mark.parametrize("delivery", ["undelivered", "accepted", "has_history"])
+def test_a_failed_turn_does_not_send_what_was_queued_it_comes_back_to_the_composer(tmp_path, monkeypatch, first_callback, delivery):
     async def scenario():
         core, plan, events, _, _ = await ready_core(tmp_path)
-        plan.script([("hold", "t1"), *fail("invalid_request_error", "the model said no")])
         cid = await new_session(core, events, tmp_path / "proj")
-        await core.call("session.send", {"id": cid, "text": "first"})
-        await until(lambda: len(plan.requests) == 1)
-        await core.call("session.send", {"id": cid, "text": "second"})
-        await core.call("session.send", {"id": cid, "text": "third"})
-        events.clear()
-        plan.release("t1")
-        await until(lambda: events.of("restore"), timeout=5)
-        assert events.last("restore")["text"] == "second\n\nthird", "in the order they were typed"
-        assert any("上一轮没有成功" in n["text"] for n in events.of("notice"))
-        assert len(plan.requests) == 1, "nothing was sent behind its back"
-        await until(lambda: queued_texts(events, cid) == [])
-        await core.shutdown()
+        conv = core._by_cid[cid]
+        try:
+            if delivery == "has_history":
+                plan.script(say("Setup answer."))
+                await core.call("session.send", {"id": cid, "text": "Setup"})
+                await until(lambda: conv.in_history and not conv.ran and conv.controller.state is SessionState.READY)
+            count = len(plan.requests) + 1
+            plan.script([("hold", "t1"), *fail("invalid_request_error", "the model said no")])
+            await core.call("session.send", {"id": cid, "text": "first"})
+            await until(lambda: len(plan.requests) == count)
+            if delivery == "accepted":
+                turn = conv.controller.transcript.turns[-1]
+                monkeypatch.setattr(conv.controller, "prompt_submitted", lambda candidate: candidate is turn, raising=False)
+            await core.call("session.send", {"id": cid, "text": "second"})
+            await core.call("session.send", {"id": cid, "text": "third"})
+            await until(lambda: queued_texts(events, cid) == ["second", "third"])
+            events.clear()
+            flush, follow = core._flush, core._follow_queue
+            with monkeypatch.context() as delayed:
+                delayed.setattr(core, "_flush", lambda _conv: None)
+                delayed.setattr(core, "_follow_queue", lambda _conv: None)
+                plan.release("t1")
+                await until(lambda: conv.controller.state is SessionState.READY)
+                for callback in ((flush, follow) if first_callback == "flush" else (follow, flush)):
+                    callback(conv)
+            core._flush(conv)  # publish the final queue, regardless of which callback settled it
+            expected = "first\n\nsecond\n\nthird" if delivery == "undelivered" else "second\n\nthird"
+            assert [e["text"] for e in events.of("restore")] == [expected]
+            assert any("上一轮没有成功" in n["text"] for n in events.of("notice"))
+            assert not conv.queue and queued_texts(events, cid) == []
+            assert len(plan.requests) == count, "nothing was sent behind its back"
+        finally:
+            await core.shutdown()
 
     run(scenario())
 

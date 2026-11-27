@@ -23,7 +23,7 @@ from tests.app_support import without_numbered_reply
 from tests.devin_support import make_engine as make_devin
 from tests.e2e_support import open_rig
 from tests.fake_devin import is_title_prompt
-from tests.fake_responses import call, http_error, say, usage
+from tests.fake_responses import call, fail, http_error, say, usage
 from tests.fakes import until
 from tests.support import tiny_png
 from tests.ui_support import release, run, wait_for
@@ -785,6 +785,51 @@ def test_while_a_turn_runs_enter_queues_the_message_and_ctrl_enter_gives_it_to_t
         model.go()
         await rig.wait_text(".statusbar .st-left", "就绪")
         await finish(rig, model)
+
+    run(loop, scenario())
+
+
+def test_a_failed_first_send_restores_queue_before_the_current_draft(qapp, loop, tmp_path):
+    async def scenario():
+        rig = await open_rig(tmp_path)
+        model = await new_conversation(rig)
+        model.next(fail("invalid_request_error", "test failure"))
+        model.next(say("Retried."))
+        messages = ["First: inspect repository", "Second: run lint", "Third: run tests", "Fourth: keep this draft"]
+        names = [f"message-{n}.txt" for n in range(1, 5)]
+        try:
+            for i, (text, name) in enumerate(zip(messages, names)):
+                note = tmp_path / name
+                note.write_text(f"Attachment {i + 1}", encoding="utf-8")
+                await rig.drop_files([note])
+                await rig.wait_for(".att-row .att", 1)
+                await rig.focus_composer()
+                await rig.type(text)
+                if i < 3:
+                    await rig.press("Enter")
+                    if i == 0:
+                        await model.asked()
+                        await rig.wait_for(".send.stop")
+                    else:
+                        await rig.wait_for(".qs-row", i)
+            model.go()
+            joined = "\n\n".join(messages)
+
+            async def restored():
+                return await rig.js("document.querySelector('.input').value") == joined
+
+            await wait_for(restored, 10, "draft in original message order")
+            await rig.wait_for(".qs-row", 0)
+            assert await rig.texts(".att-row .fname") == names
+            assert model.prompts == messages[:1], "a failed turn must not send queued messages"
+            if evidence := os.environ.get("WITTYCODE_TEST_EVIDENCE"):
+                await rig.shot(".composer", Path(evidence) / "ordered-retry-draft.png")
+            await rig.focus_composer()
+            await rig.press("Enter")
+            await model.asked(2)
+            assert model.prompts == [messages[0], joined]
+        finally:
+            await finish(rig, model)
 
     run(loop, scenario())
 
