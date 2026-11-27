@@ -120,6 +120,14 @@ def user_item(text: str, attachments: Sequence[Attachment] = ()) -> dict[str, An
     return {"type": "message", "role": "user", "content": content + images}
 
 
+@dataclass
+class _ResumeBatch:
+    text: str
+    pending: list[fusion_recovery.ResumeTarget]
+    waiting: list[fusion_recovery.ResumeTarget] = field(default_factory=list)
+    active: fusion_recovery.ResumeTarget | None = None
+
+
 @dataclass(eq=False)
 class ChatGPTController:
     """Owns one conversation: its transcript, the running turn and the pending approvals."""
@@ -199,6 +207,7 @@ class ChatGPTController:
     _recovery_timer: asyncio.TimerHandle | None = None  # Current expert turn only; no parsing of localized error text.
     _fusion_resume_question: tuple[str, str, tuple[fusion_recovery.ResumeTarget, ...]] | None = None
     _fusion_resume_focus: fusion_recovery.ResumeTarget | None = None
+    _fusion_resume_batch: _ResumeBatch | None = None
     _save_failed: bool = False
     _checkpoint_written: bool = False
     _first_prompt_retained: bool = False
@@ -250,6 +259,8 @@ class ChatGPTController:
         if self._fusion_resume_question is not None:
             ident, _, targets = self._fusion_resume_question
             question = '请选择要继续的原任务。选择只确认任务，不增加授权。' if targets else '找不到可可靠接回的原任务。请取消并说明要继续哪项工作。'
+            if len(targets) > 1:
+                question += ' 全部续作会逐项推进，等待授权的任务仍需确认。'
             options = self._resume_options(targets)
             prompts.append(QuestionPrompt(ident, ident, (QuestionView(0, '继续原任务', question, options, False),),
                                           who='Fusion', options_only=True))
@@ -363,6 +374,8 @@ class ChatGPTController:
             (self._fusion, self._paused_fusion, self.requested_model, self.transcript.model, self.reasoning,
              self.saved.model, self.saved.reasoning, self.saved.fusion, self.saved.origin, self.saved.prompt) = before
             raise
+        if active is None:
+            self._fusion_resume_batch = None
         if self._tools is not None:
             self._tools.fusion_runner = active.delegate if active is not None else None
         self.refresh_context()
@@ -1049,11 +1062,34 @@ class ChatGPTController:
 
     @property
     def fusion_resume_waiting(self) -> bool:
-        return self._fusion_resume_question is not None or self._fusion_resume_focus is not None
+        return (self._fusion_resume_question is not None or self._fusion_resume_focus is not None
+                or self._fusion_resume_batch is not None and self.state is SessionState.READY)
 
     @staticmethod
     def _resume_options(targets: tuple[fusion_recovery.ResumeTarget, ...]) -> tuple[str, ...]:
-        return tuple(f'{n}. {target.label}' for n, target in enumerate(targets, 1))
+        options = tuple(f'{n}. {target.label}' for n, target in enumerate(targets, 1))
+        return (*options, '全部续作') if len(targets) > 1 else options
+
+    def _focus_fusion_resume(self, target: fusion_recovery.ResumeTarget) -> None:
+        focus = {'task': target.task, 'plan': target.plan, 'after': self.saved.turns[-1].start}
+        before = self.saved.origin.get(fusion_recovery.RESUME_FOCUS)
+        self.saved.origin[fusion_recovery.RESUME_FOCUS] = focus
+        try:
+            self._save_now(required=True)
+        except ChatGPTError:
+            if before is None:
+                self.saved.origin.pop(fusion_recovery.RESUME_FOCUS, None)
+            else:
+                self.saved.origin[fusion_recovery.RESUME_FOCUS] = before
+            raise
+        self._fusion_resume_focus = target
+        self._fusion_resume_question = None
+        self.transcript.add_notice('Fusion：已找到原任务，仍在等待原工单的授权或可用条件。')
+        self._changed()
+
+    def _current_resume_target(self, target: fusion_recovery.ResumeTarget) -> fusion_recovery.ResumeTarget | None:
+        _, candidates = fusion_recovery.resume_targets(self.saved, self._fusion.registry.plans, selected_task=target.task)
+        return next((t for t in candidates if (t.task, t.kind, t.plan) == (target.task, target.kind, target.plan)), None)
 
     def _resume_notice(self, target: fusion_recovery.ResumeTarget, details: Sequence[str] = ()) -> str:
         note = 'Continue the original task from its checkpoint. Do not replay tools with unknown effects.'
@@ -1087,14 +1123,21 @@ class ChatGPTController:
                 self.saved.plan = previous
                 raise
         rt = self._fusion
+        if self._fusion_resume_batch is not None and not recovery and resume_target is None:
+            if not attachments and fusion_recovery.resume_text(text):
+                return True  # the same explicit request is already pending
+            self._fusion_resume_batch = None  # a new user turn supersedes the pending selection
         if (rt is not None and self._fusion_parent is None and self.mode != PLAN and not approved_plan and not recovery
                 and (rt.registry.plans or rt.gate('v3') and rt.gate('inject'))
                 and not attachments and not (self.handoff and not self.handoff.empty) and self.saved.turns
                 and (resume_target is not None or fusion_recovery.resume_text(text))):
-            direct, candidates = fusion_recovery.resume_targets(self.saved, rt.registry.plans)
-            if resume_target is not None and resume_target not in candidates:
-                return False
-            resume_target = resume_target or direct
+            if resume_target is not None:
+                resume_target = self._current_resume_target(resume_target)
+                if resume_target is None:
+                    return False
+                candidates = ()
+            else:
+                resume_target, candidates = fusion_recovery.resume_targets(self.saved, rt.registry.plans)
             if resume_target is None:
                 if self._fusion_resume_question is None:
                     self._fusion_resume_question = ('fusion-resume-' + uuid.uuid4().hex, text, candidates)
@@ -1109,21 +1152,7 @@ class ChatGPTController:
                     self._changed()
                     return True
                 if not fusion_recovery.can_start_manual(plan):
-                    focus = {'task': resume_target.task, 'plan': resume_target.plan, 'after': self.saved.turns[-1].start}
-                    before = self.saved.origin.get(fusion_recovery.RESUME_FOCUS)
-                    self.saved.origin[fusion_recovery.RESUME_FOCUS] = focus
-                    try:
-                        self._save_now(required=True)
-                    except ChatGPTError:
-                        if before is None:
-                            self.saved.origin.pop(fusion_recovery.RESUME_FOCUS, None)
-                        else:
-                            self.saved.origin[fusion_recovery.RESUME_FOCUS] = before
-                        raise
-                    self._fusion_resume_focus = resume_target
-                    self._fusion_resume_question = None
-                    self.transcript.add_notice('Fusion：已找到原任务，仍在等待原工单的授权或可用条件。')
-                    self._changed()
+                    self._focus_fusion_resume(resume_target)
                     self._schedule_fusion_recovery()
                     return True
         self._fusion_resume_question = None
@@ -1695,7 +1724,60 @@ class ChatGPTController:
 
     def _schedule_fusion_recovery(self) -> None:
         if self._fusion is not None and self.state is SessionState.READY and not self._close_requested:
-            asyncio.get_running_loop().call_soon(self._resume_fusion_checkpoint)
+            asyncio.get_running_loop().call_soon(self._service_fusion_recovery)
+
+    def _service_fusion_recovery(self) -> None:
+        batch, rt = self._fusion_resume_batch, self._fusion
+        if batch is None:
+            self._resume_fusion_checkpoint()
+            return
+        if rt is None or self.state is not SessionState.READY or self._close_requested:
+            return
+        if self.mode == PLAN or self.stop_hook_blocked:
+            self._fusion_resume_batch = None
+            self.transcript.add_notice('Fusion：已停止启动其余续作，原任务仍保留。')
+            self._changed()
+            return
+        if batch.active is not None:
+            # Give the current task its existing automatic recovery opportunity before starting another one.
+            self._resume_fusion_checkpoint()
+            if self.state is not SessionState.READY or self._fusion_resume_focus is not None:
+                return
+            plan = rt.registry.plans.get(batch.active.plan)
+            if plan is not None and not plan.get('cancelled') and any(
+                verification_case.awaiting_user(owner) or fusion_recovery.waiting(owner)
+                for _, owner in rt._permission_owners(plan)
+            ):
+                batch.waiting.append(batch.active)
+            batch.active = None
+        try:
+            while batch.pending:
+                target = self._current_resume_target(batch.pending.pop(0))
+                if target is None:
+                    continue  # no longer an eligible original task
+                if target.plan and not rt.unit_tools_available:
+                    self.transcript.add_notice(f'Fusion：{target.label} 的冻结工单当前不可用，未改走旧式派工。')
+                    continue
+                if target.plan and not fusion_recovery.can_start_manual(rt.registry.plans[target.plan]):
+                    batch.waiting.append(target)
+                    continue
+                if self.send_prompt(batch.text, resume_target=target):
+                    batch.active = target
+                    return
+                break
+            else:
+                while batch.waiting:
+                    target = self._current_resume_target(batch.waiting.pop(0))
+                    if target is None or not rt.unit_tools_available:
+                        continue
+                    batch.active = target
+                    self._focus_fusion_resume(target)
+                    self._resume_fusion_checkpoint()
+                    return
+        except ChatGPTError:
+            self.transcript.add_notice('Fusion：续作未能启动，已保留原任务。')
+        self._fusion_resume_batch = None
+        self._changed()
 
     def _resume_fusion_checkpoint(self) -> None:
         if (self.state is not SessionState.READY or self._close_requested or self.mode == PLAN or self._fusion is None
@@ -1875,10 +1957,14 @@ class ChatGPTController:
             self._fusion_resume_question = None
             self._changed()
             return True
+        batch = self._fusion_resume_batch
+        self._fusion_resume_batch = None
         key, plan = self._fusion.recovery_plan()
         if plan is None or not any(verification_case.awaiting_user(owner) or fusion_recovery.waiting(owner)
                                    for _, owner in self._fusion._permission_owners(plan)):
-            return False
+            if batch is not None:
+                self._changed()
+            return batch is not None
         if not self._fusion.cancel_recovery(key):
             return False
         record = self.saved.turns[-1]
@@ -1899,6 +1985,7 @@ class ChatGPTController:
         turn, task = self._turn, self._turn_task
         if self.state is not SessionState.RUNNING or turn is None:
             return
+        self._fusion_resume_batch = None
         self.transcript.mark_stopping()
         self._cancel_fusion_title()
         self._changed()
@@ -2541,6 +2628,12 @@ class ChatGPTController:
             if len(answers) != 1 or answers[0] not in options:
                 return False
             self._fusion_resume_question = None
+            if answers[0] == '全部续作':
+                self._fusion_resume_focus = None
+                self._fusion_resume_batch = _ResumeBatch(text, list(targets))
+                self._changed()
+                self._schedule_fusion_recovery()
+                return True
             if not self.send_prompt(text, resume_target=targets[options.index(answers[0])]):
                 self._changed()
                 return False

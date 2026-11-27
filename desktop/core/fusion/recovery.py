@@ -97,7 +97,7 @@ def _legacy_target(saved: SavedSession, start: int, end: int) -> tuple[str, str]
     return kind, active
 
 
-def resume_targets(saved: SavedSession, plans: dict) -> tuple[ResumeTarget | None, tuple[ResumeTarget, ...]]:
+def resume_targets(saved: SavedSession, plans: dict, *, selected_task: str = '') -> tuple[ResumeTarget | None, tuple[ResumeTarget, ...]]:
     from desktop.core.chatgpt.history import user_parts
 
     # Existing checkpoint metadata wins. Reconstruct only from a bounded suffix of this already-loaded session.
@@ -133,7 +133,8 @@ def resume_targets(saved: SavedSession, plans: dict) -> tuple[ResumeTarget | Non
             if not plan or not resumable_plan(plan):
                 continue
             text = plan['spec']['goal'] or text
-        elif kind != 'simple' or key or not latest and turn.status not in ('interrupted', 'incomplete', 'failed', 'limit'):
+        elif (kind != 'simple' or key or not latest and task != selected_task
+              and turn.status not in ('interrupted', 'incomplete', 'failed', 'limit')):
             continue
         elif turn.fusion_resume_source:
             # A second manual resume has the same task id, but its user text is only "continue".

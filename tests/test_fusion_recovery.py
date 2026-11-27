@@ -131,6 +131,52 @@ def test_manual_resume_does_not_bypass_missing_or_waiting_authority(tmp_path, st
     asyncio.run(go())
 
 
+@pytest.mark.parametrize('stop', [False, True])
+def test_resume_all_respects_waiting_authority_and_user_stop(tmp_path, stop):
+    async def go():
+        async with _fusion(tmp_path, active=UNIT_GATES) as (main, fake):
+            for name in ('stock', 'orders'):
+                fake.script(_declare('complex', 'execute', call_id=f'plan-{name}'),
+                            call('submit_work_plan', {'data': {'units': [_unit(name, paths=[name + '.txt'], review_required=False)]}}),
+                            call('submit_route', {}), say('Pending.'), say('Still pending.'))
+                assert main.send_prompt(f'Check {name}.')
+                await finish_turn(main)
+            plans = {name: p for p in main._fusion.registry.plans.values() for name in p['cases']}
+            orders, stock = (plans[name]['cases'][name] for name in ('orders', 'stock'))
+            count = len(fake.requests)
+            if stop:
+                fake.script([('hold', 'stop-all'), *say('Stopped.')])
+            else:
+                orders['recoveryRequest'] = {'id': 'fusion-prerequisite-orders', 'status': 'pending',
+                                             'question': 'Confirm the fixture.', 'revision': 0, 'stage': 'worker'}
+                main._fusion._checkpoint()
+                fake.script(_run('stock-author'), _report(evidence=['Stock ready.']), _run('stock-runner'),
+                            _report(evidence=['Stock verified.']), say('Stock done.'))
+            try:
+                assert main.send_prompt('继续')
+                card, = [p for p in main.transcript.pending_prompts() if p.id.startswith('fusion-resume-')]
+                assert main.answer_question(card.id, ['全部续作'])
+                assert not main.answer_question(card.id, ['全部续作'])
+                if stop:
+                    await until(lambda: len(fake.requests) == count + 1)
+                    await main.interrupt()
+                    await asyncio.sleep(0)  # let the READY callbacks run
+                    assert not main.busy and len(fake.requests) == count + 1 and not stock['attempts']
+                    return
+                await until(lambda: stock['next'] == 'done' and not main.busy and
+                            any(p.id == 'fusion-prerequisite-orders' for p in main.transcript.pending_prompts()))
+                assert not orders['attempts']
+                assert not main.answer_question('fusion-prerequisite-orders', ['全部续作'])
+                fake.script(_run('orders-author', 'orders'), _report(evidence=['Orders ready.']), _run('orders-runner', 'orders'),
+                            _report(evidence=['Orders verified.']), say('Orders done.'))
+                assert main.answer_question('fusion-prerequisite-orders', ['已完成必要操作'])
+                await until(lambda: orders['next'] == 'done' and not main.busy)
+                assert orders['attempts'] == stock['attempts'] == {'worker': 1, 'runner': 1}
+            finally:
+                fake.release('stop-all')
+    asyncio.run(go())
+
+
 def test_adaptive_quote_adds_only_shortfall_without_resetting_accounting():
     unit = {'budget': {'steps': 50, 'high': 50, 'hard_steps': 50, 'seconds': 60, 'hard_seconds': 60,
                        'adaptive_steps': True, 'adaptive_seconds': False}}

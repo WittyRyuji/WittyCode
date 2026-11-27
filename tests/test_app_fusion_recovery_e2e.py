@@ -18,7 +18,8 @@ pytestmark = pytest.mark.ui
 TURN = '.transcript > .turn:last-child'
 
 
-def test_desktop_resume_selects_the_original_task_before_requesting_a_model(qapp, loop, tmp_path):
+@pytest.mark.parametrize('resume_all', [False, True])
+def test_desktop_resume_selects_the_original_task_before_requesting_a_model(qapp, loop, tmp_path, resume_all):
     async def scenario():
         rig = await open_rig(tmp_path)
         try:
@@ -45,19 +46,27 @@ def test_desktop_resume_selects_the_original_task_before_requesting_a_model(qapp
             await rig.wait_text(TURN + ' .prompt.ask', '取消续作')
             assert '取消原任务' not in await rig.text(TURN + ' .prompt.ask')
             assert len(rig.plan.requests) == before and conv.inflight is None and not main.busy
-            if evidence := os.environ.get('WITTYCODE_TEST_EVIDENCE'):
-                await rig.shot(TURN + ' .prompt.ask', Path(evidence) / 'fusion-resume-target.png')
+            await rig.wait_text(TURN + ' .prompt.ask', '全部续作')
+            if resume_all and (evidence := os.environ.get('WITTYCODE_TEST_EVIDENCE')):
+                await rig.shot(TURN + ' .prompt.ask', Path(evidence) / 'fusion-resume-all.png')
             await rig.click_text(TURN + ' .prompt.ask button', '取消续作')
             await rig.wait_for(TURN + ' .prompt.ask', 0)
             assert len(rig.plan.requests) == before and not any(p.get('cancelled') for p in main._fusion.registry.plans.values())
             await rig.send('继续')
             await rig.wait_text(TURN + ' .prompt.ask', '请选择要继续的原任务')
+            if resume_all:
+                rig.plan.script(_run('chosen-orders', 'orders'), _report(evidence=['Orders ready.']),
+                                _run('checked-orders', 'orders'), _report(evidence=['Orders verified.']), say('订单已通过。'))
             rig.plan.script(_run('chosen'), _report(evidence=['Stock ready.']), _run('checked'),
                             _report(evidence=['Stock verified.']), say('原工单已通过。'))
-            await rig.click_text(TURN + ' .prompt.ask label', '核对库存')
+            await rig.click_text(TURN + ' .prompt.ask label', '全部续作' if resume_all else '核对库存')
             await rig.click_text(TURN + ' .prompt.ask button', '提交回答')
             await rig.wait_text(TURN + ' .text-block', '原工单已通过。')
             assert main.saved.turns[-1].fusion_plan == key and main.saved.turns[-1].fusion_resume_source == 'manual'
+            if resume_all:
+                orders_key, = [k for k, p in main._fusion.registry.plans.items() if 'orders' in p['cases']]
+                assert main.saved.turns[-2].fusion_plan == orders_key
+                assert main._fusion.registry.plans[orders_key]['cases']['orders']['next'] == 'done'
             await rig.wait_text(TURN + ' > .user', '继续')
         finally:
             await rig.finish()
