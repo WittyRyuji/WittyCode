@@ -26,11 +26,11 @@ export function Stack({ label, hint, children, error }: { label: string; hint?: 
   );
 }
 
-export function Seg<T extends string>({ value, options, onChange }: { value: T; options: { id: T; label: string }[]; onChange: (v: T) => void }) {
+export function Seg<T extends string>({ value, options, onChange, disabled }: { value: T; options: { id: T; label: string }[]; onChange: (v: T) => void; disabled?: boolean }) {
   return (
     <div className="segc" role="group">
       {options.map((o) => (
-        <button key={o.id} type="button" className={value === o.id ? "on" : ""} aria-pressed={value === o.id} onClick={() => onChange(o.id)}>
+        <button key={o.id} type="button" className={value === o.id ? "on" : ""} aria-pressed={value === o.id} disabled={disabled} onClick={() => onChange(o.id)}>
           {o.label}
         </button>
       ))}

@@ -7,7 +7,7 @@
 .connection-tabs button[aria-selected="true"] { color: var(--fg); border-bottom-color: var(--fg); }
 .connection-tabs .num { font-size: 10.5px; color: var(--muted); }
 .connection-import { margin-bottom: 14px; align-items: stretch; }
-.connection-import .textin, .factory-program .textin, .factory-card .textin { flex: 1; min-width: 0; }
+.connection-import .textin { flex: 1; min-width: 0; }
 .connection-import .btn { flex: none; }
 .connection-row { display: flex; align-items: center; gap: 12px; padding: 11px 0; border-bottom: 1px solid var(--line); }
 .connection-info { flex: 1; min-width: 0; font-size: 12.5px; }
@@ -25,7 +25,6 @@
 .connection-issues { margin: 12px 0; padding: 8px 12px; border: 1px solid var(--line); color: var(--muted); font-size: 12px; }
 .connection-issues > summary { cursor: pointer; color: var(--fg-2); }
 .connection-issue { display: flex; flex-direction: column; gap: 3px; border-top: 1px solid var(--line); padding-top: 8px; overflow-wrap: anywhere; }
-.factory-card .row-btns, .factory-program .row-btns { display: flex; gap: 8px; }
 .switch:disabled { opacity: 0.45; cursor: default; }
 .connector-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 14px; align-items: start; }
 .connector-card { min-width: 0; padding: 16px; border: 1px solid var(--line-strong); border-radius: 4px; background: var(--soft); }

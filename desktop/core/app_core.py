@@ -4886,8 +4886,9 @@ class AppCore:
         return {**account, "path": self.settings.factory_path}
 
     async def _m_factory_configure(self, params: dict[str, Any]) -> dict[str, Any]:
-        path, enabled = params.get("path"), params.get("enabled")
-        if not isinstance(path, str) or not isinstance(enabled, bool):
+        path = params.get("path", self.settings.factory_path)
+        enabled = params.get("enabled", self.settings.factory_enabled)
+        if not ({"path", "enabled"} & params.keys()) or not isinstance(path, str) or not isinstance(enabled, bool):
             raise AppError("Factory 路径或启用状态不合法。")
         self.settings.factory_path, self.settings.factory_enabled = path.strip(), enabled
         self._save()

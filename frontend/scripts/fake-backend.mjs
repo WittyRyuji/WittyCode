@@ -1086,7 +1086,7 @@ function fakeBackend(config) {
     },
     "connections.test": () => ({ ok: true, text: "连接成功 · 1 个工具", tools: ["echo"] }),
     "factory.account": () => clone(S.factory),
-    "factory.configure": (p) => (S.factory = { ...S.factory, path: p.path, enabled: p.enabled }),
+    "factory.configure": (p) => (S.factory = { ...S.factory, ...p }),
     "devin.account": () => S.devin,
     "devin.login": async () => {
       await sleep(200);

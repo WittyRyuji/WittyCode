@@ -1512,11 +1512,75 @@ def test_the_devin_program_path_is_set_from_the_settings(qapp, loop, tmp_path):
             await rig.click_text(".snav", "外部程序")
             await rig.wait_text(".settings-body", "Devin 命令行")
             assert rig.core.settings.devin_path == ""
-            buttons = await rig.texts(".settings-body .segc button")
-            assert buttons == ["自动检测", "指定路径"], "only Devin has a path: the own loop needs no program"
-            await rig.click(".settings-body .segc button", 1)
+            buttons = await rig.texts(".devin-program .segc button")
+            assert buttons == ["自动检测", "指定路径"]
+            await rig.click(".devin-program .segc button", 1)
             await wait_for(lambda: rig.core.settings.devin_path != "", 10, "the path to reach the settings")
             assert rig.core.settings.devin_path.endswith("fake_devin.py"), "the program in use becomes the path to use"
+        finally:
+            await rig.finish()
+
+    run(loop, scenario())
+
+
+def test_factory_program_path_matches_devin_and_is_separate_from_models(qapp, loop, tmp_path):
+    from desktop.core.factory import FactoryEngine
+
+    async def scenario():
+        detected = r"C:\Demo\Factory\resources\bin\droid.exe"
+        manual = tmp_path / "droid.exe"
+        manual.touch()
+        engine = FactoryEngine(None, tmp_path / "factory", locate=lambda _: detected)
+
+        async def list_models():
+            return [{"id": "demo-model", "displayName": "Factory Demo"}] if engine.binary() else []
+
+        engine.list_models = list_models
+        rig = await open_rig(tmp_path, factory_engine=engine)
+        try:
+            await wait_for(lambda: rig.core._models_loaded, 10, "the initial model catalog")
+            rig.core.emit("accounts", {"devin": {"cli": "found", "cliPath": r"C:\Demo\Devin\bin\devin.exe", "auth": "signed-out", "enabled": False}})
+            await rig.press(",", Qt.KeyboardModifier.ControlModifier)
+            await rig.wait_for(".settings")
+            await rig.click_text(".snav", "外部程序")
+            await rig.wait_text(".factory-program .pathbox", detected)
+            await rig.wait_text(".devin-program .pathbox", "devin.exe")
+            assert await rig.texts(".program-path .field-label") == ["Factory 命令行", "Devin 命令行"]
+            assert await rig.texts(".program-path .segc button") == ["自动检测", "指定路径"] * 2
+            assert not await rig.exists(".programs .switch, .programs .mvis, .programs input")
+            if evidence := os.environ.get("WITTYCODE_TEST_EVIDENCE"):
+                await rig.shot(".programs", Path(evidence) / "external-programs.png")
+
+            await rig.click_text(".factory-program .segc button", "指定路径")
+            field = '.factory-program input'
+            await rig.wait_for(f"{field}:not([readonly])")
+            assert await rig.js(f"document.querySelector('{field}').value") == detected
+            await rig.click(field)
+            await rig.press("A", Qt.KeyboardModifier.ControlModifier)
+            await rig.type(str(manual))
+            await rig.press("Enter")
+            await rig.wait_text(".factory-program .pathbox", str(manual))
+            assert rig.core.settings.factory_enabled
+
+            await rig.click_text(".snav", "账号与模型")
+            toggle = '.factory-card button[role="switch"][aria-label="启用 Factory CLI"]'
+            await rig.wait_for(f"{toggle}:not(:disabled)")
+            assert not await rig.exists(".factory-card input")
+            assert await rig.exists(".factory-card .mvis")
+            await rig.click(toggle)
+            await rig.wait_for(f'{toggle}[aria-checked="false"]')
+            assert rig.core.settings.factory_path == str(manual)
+
+            await rig.click_text(".snav", "外部程序")
+            await rig.wait_text(".factory-program .pathbox", str(manual))
+            await rig.click(field)
+            await rig.press("A", Qt.KeyboardModifier.ControlModifier)
+            await rig.type("discarded.exe")
+            await rig.click_text(".factory-program .segc button", "自动检测")
+            await rig.wait_text(".factory-program .pathbox", detected)
+            assert not await rig.exists(field)
+            assert rig.core.settings.factory_path == ""
+            assert not rig.core.settings.factory_enabled
         finally:
             await rig.finish()
 
@@ -1541,15 +1605,12 @@ def test_factory_redetect_puts_newly_discovered_models_in_the_menu(qapp, loop, t
             assert rig.core.catalog.find("factory:demo-model") is None
             await rig.press(",", Qt.KeyboardModifier.ControlModifier)
             await rig.wait_for(".settings")
-            await rig.click_text(".snav", "外部程序")
-            await rig.wait_text(".factory-program .pstate", "尚未检测到 droid")
+            await rig.click_text(".snav", "账号与模型")
+            await rig.wait_text(".factory-card .pstate", "尚未检测到 droid")
             detected = binary
-            await rig.click_text(".factory-program button", "重新检测")
-            await rig.wait_text(".factory-program .pstate", "已检测到 CLI")
-            assert await rig.js("document.querySelector('#factory-path').placeholder") == binary
+            await rig.click_text(".factory-card button", "重新检测")
+            await rig.wait_text(".factory-card .pstate", "已检测到 CLI")
             assert rig.core.settings.factory_path == ""
-            if evidence := os.environ.get("WITTYCODE_TEST_EVIDENCE"):
-                await rig.shot(".factory-program", Path(evidence) / "factory-redetect.png")
             await rig.press("Escape")
             await rig.wait_for(".settings", 0)
             await wait_for(lambda: rig.core.catalog.find("factory:demo-model"), 10, "the refreshed Factory models")

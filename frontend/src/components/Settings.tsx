@@ -6,8 +6,10 @@ import { aboutContact, PROJECT_GITHUB_URL } from "../lib/about";
 import { MODES, effortLabel, permissionsFor, reasoningChoices } from "../lib/vocab";
 import { engineOfSource, findModel } from "../lib/models";
 import { LIVE } from "../mode";
+import { liveCall } from "../liveBridge";
+import { messageOf } from "../lib/errors";
 import type { FontScale, ThemeChoice } from "../types";
-import type { FollowUp } from "../protocol";
+import type { FactoryState, FollowUp } from "../protocol";
 import { LogoVertical } from "./Brand";
 import { COMPACT_AT_MAX, COMPACT_AT_MIN } from "../liveReducer";
 import { Field, Select, Seg, Switch } from "./formkit";
@@ -15,7 +17,6 @@ import { buildModelMenu } from "./modelMenu";
 import { MemoryPage } from "./MemoryPage";
 import { ConnectionsPage } from "./ConnectionsPage";
 import { CustomizationPage } from "./CustomizationPage";
-import { FactorySettings } from "./FactorySettings";
 import { StepLimitSetting } from "./StepLimitSetting";
 import { ReconnectSettings } from "./ReconnectSettings";
 import { SoundSettings } from "./SoundSettings";
@@ -182,20 +183,26 @@ function SessionsPage() {
 
 /** A program WittyCode starts: found automatically, or a path the user gives. The typed path is saved when the field
  *  is left (or on Enter), not on every key: changing it makes Python look for the program again. */
-function ProgramPath({ label, autoHint, found, path, onPath, browse }: { label: string; autoHint: string; found: string; path: string; onPath: (p: string) => void; browse?: () => void }) {
+function ProgramPath({ label, autoHint, found, path, onPath, browse, pending, redetect }: { label: string; autoHint: string; found: string; path: string; onPath: (p: string) => void; browse?: () => void; pending?: boolean; redetect?: () => void }) {
   const [custom, setCustom] = useState(path !== "");
   const [draft, setDraft] = useState(path);
   useEffect(() => setDraft(path), [path]);
   const auto = path === "" && !custom;
-  const commit = (value: string) => value.trim() !== path && onPath(value.trim());
+  const commit = (value: string) => !pending && value.trim() !== path && onPath(value.trim());
   return (
     <>
       <Field label={label} hint={auto ? autoHint : "使用你指定的文件。"}>
         <Seg
           value={auto ? "auto" : "custom"}
+          disabled={pending}
           onChange={(v) => {
+            if (v === (auto ? "auto" : "custom")) {
+              if (v === "auto") redetect?.();
+              return;
+            }
             setCustom(v === "custom");
-            onPath(v === "auto" ? "" : found);
+            if (v === "custom") setDraft(found);
+            if (v === "auto" || found !== path) onPath(v === "auto" ? "" : found);
           }}
           options={[
             { id: "auto", label: "自动检测" },
@@ -203,15 +210,20 @@ function ProgramPath({ label, autoHint, found, path, onPath, browse }: { label: 
           ]}
         />
       </Field>
-      <div className="pathbox selectable">{(auto ? found : path) || "（没有找到）"}</div>
+      <div className="pathbox selectable">{pending ? "（正在检测…）" : (auto ? found : path) || "（没有找到）"}</div>
       {!auto && (
         <div className="row-btns">
           <input
             className="textin selectable"
             value={draft}
+            readOnly={pending}
             onChange={(e) => setDraft(e.target.value)}
-            onBlur={(e) => commit(e.currentTarget.value)}
-            onKeyDown={(e) => e.key === "Enter" && commit(e.currentTarget.value)}
+            onBlur={(e) => {
+              // Switching modes takes precedence over saving the draft on blur.
+              const card = e.currentTarget.closest(".program-path");
+              if (e.relatedTarget !== card?.querySelector(".segc button:first-child")) commit(e.currentTarget.value);
+            }}
+            onKeyDown={(e) => e.key === "Enter" && !e.nativeEvent.isComposing && commit(e.currentTarget.value)}
             aria-label={`${label} 路径`}
           />
           {browse && (
@@ -225,13 +237,35 @@ function ProgramPath({ label, autoHint, found, path, onPath, browse }: { label: 
   );
 }
 
+function FactoryProgramPath() {
+  const [state, setState] = useState<Pick<FactoryState, "path" | "cliPath">>({ path: "", cliPath: "" });
+  const [pending, setPending] = useState(LIVE);
+  const say = useStore((s) => s.say);
+  const update = async (path?: string, refresh = false) => {
+    setPending(true);
+    try {
+      const value = LIVE
+        ? path === undefined ? await liveCall("factory.account", { refresh }) : await liveCall("factory.configure", { path })
+        : { ...state, path: path ?? state.path };
+      setState(value);
+    } catch (e) { say(messageOf(e)); }
+    finally { setPending(false); }
+  };
+  useEffect(() => { void update(); }, []);
+  return (
+    <section className="pcard program-path factory-program">
+      <ProgramPath label="Factory 命令行" autoHint="自动检测：在 PATH 和 Factory 桌面版等安装位置里找 droid。" found={state.cliPath} path={state.path} pending={pending} onPath={(path) => void update(path)} redetect={() => void update(undefined, true)} />
+    </section>
+  );
+}
+
 function ProgramsPage() {
   const s = useStore();
   return (
     <div className="programs">
-      <p className="page-note">WittyCode 自己的代理循环（ChatGPT Plan、API Provider）不需要任何别的程序。Devin 和 Factory CLI 都是可选连接；在这里指定程序，再按需启用。</p>
-      <FactorySettings program />
-      <section className="pcard program-path">
+      <p className="page-note">WittyCode 自己的代理循环（ChatGPT Plan、API Provider）不需要任何别的程序。Devin 和 Factory CLI 都是可选连接；在这里设置它们的程序路径。</p>
+      <FactoryProgramPath />
+      <section className="pcard program-path devin-program">
         <ProgramPath label="Devin 命令行" autoHint="自动检测：在 PATH 和 Devin 桌面版的安装目录里找 devin。" found={s.devin.cliPath ?? ""} path={s.devinPath} onPath={s.setDevinPath} />
       </section>
       <p className="page-note">改了路径后，已经打开的会话继续用旧进程；新开的会话才用新路径。</p>

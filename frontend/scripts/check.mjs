@@ -304,8 +304,8 @@ await page.click(".settings-body .field .switch", 0);
 ok("with the compaction switched off the percent is not offered, only the session limit", await page.eval("document.querySelector('.settings-body .field .switch').getAttribute('aria-checked') === 'false' && [...document.querySelectorAll('.stepper span')].map(e => e.textContent).join() === '5'"));
 await page.click(".settings-body .field .switch", 0);
 await clickText(".snav", "外部程序");
-ok("the 外部程序 page has only the Devin CLI, found automatically", await page.eval("[...document.querySelectorAll('.settings-body .field-label')].map(e => e.textContent).join() === 'Devin 命令行' && [...document.querySelectorAll('.settings-body .pathbox')].some(p => p.textContent.toLowerCase().endsWith('devin.exe'))"));
-await page.click(".settings-body .segc button", 1);
+ok("the 外部程序 page shows the automatically detected Devin path", await page.eval("document.querySelector('.devin-program .pathbox').textContent.toLowerCase().endsWith('devin.exe')"));
+await page.click(".devin-program .segc button", 1);
 const devinPath = 'input[aria-label="Devin 命令行 路径"]';
 await page.waitFor(`!!document.querySelector('${devinPath}')`, 2000);
 await page.click(devinPath);
@@ -670,8 +670,8 @@ ok("a ChatGPT Plan session whose account signed out says it is not signed in", a
 await page.close();
 
 page = await openPage(`${index}?scene=done&settings=programs&theme=light&review=0`);
-ok("the 外部程序 page holds the Devin program path", await page.eval("document.querySelector('.settings-body').textContent.includes('Devin 命令行')"));
-ok("external program cards and their title/input edges align without inherited page-header padding", await page.eval("(() => { const f = document.querySelector('.factory-program'), d = document.querySelector('.program-path'); const fr = f.getBoundingClientRect(), dr = d.getBoundingClientRect(); const title = f.querySelector('h4').getBoundingClientRect(), input = f.querySelector('input').getBoundingClientRect(), label = d.querySelector('.field-label').getBoundingClientRect(), path = d.querySelector('.pathbox').getBoundingClientRect(); return Math.abs(fr.left-dr.left)<1 && Math.abs(fr.width-dr.width)<1 && Math.abs(title.left-input.left)<1 && Math.abs(title.left-label.left)<1 && Math.abs(label.left-path.left)<1 && Math.abs(dr.top-fr.bottom-14)<1 && getComputedStyle(f.querySelector('header')).paddingLeft==='0px'; })()"));
+ok("the 外部程序 page holds only the Factory and Devin program paths", await page.eval("[...document.querySelectorAll('.program-path .field-label')].map(e => e.textContent).join() === 'Factory 命令行,Devin 命令行' && !document.querySelector('.programs :is(.switch, .mvis)')"));
+ok("external program cards align along their card, title, mode switch and path edges", await page.eval("(() => { const f = document.querySelector('.factory-program'), d = document.querySelector('.devin-program'); const fr = f.getBoundingClientRect(), dr = d.getBoundingClientRect(); return Math.abs(fr.left-dr.left)<1 && Math.abs(fr.width-dr.width)<1 && Math.abs(dr.top-fr.bottom-14)<1 && ['.field-label', '.segc', '.pathbox'].every(sel => { const a = f.querySelector(sel).getBoundingClientRect(), b = d.querySelector(sel).getBoundingClientRect(); return Math.abs(a.left-b.left)<1 && Math.abs(a.top-fr.top-(b.top-dr.top))<1; }); })()"));
 await page.close();
 
 // accounts and models: which models the conversation's model menu offers

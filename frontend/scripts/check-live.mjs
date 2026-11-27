@@ -694,8 +694,8 @@ await waitCalls("settings.set", 7);
 ok("the session limit too", isDeepStrictEqual(await lastCall("settings.set"), { key: "maxOpen", value: 5 }));
 await page.waitFor("document.querySelectorAll('.stepper span')[1].textContent === '5'", 2000);
 await clickText(".snav", "外部程序");
-ok("the 外部程序 page has only the Devin CLI, and no 浏览… (there is no such call)", await js("[...document.querySelectorAll('.settings-body .field-label')].map(e => e.textContent).join() === 'Devin 命令行' && ![...document.querySelectorAll('.settings-body .btn')].some(b => b.textContent.includes('浏览'))"));
-await page.click(".settings-body .segc button", 1); // Devin 命令行: 指定路径 starts from the one that was found
+ok("the 外部程序 page has CLI paths only, without model controls", await js("[...document.querySelectorAll('.program-path .field-label')].map(e => e.textContent).join() === 'Factory 命令行,Devin 命令行' && !document.querySelector('.programs :is(.switch, .mvis, .btn)')"));
+await page.click(".devin-program .segc button", 1); // Devin 命令行: 指定路径 starts from the one that was found
 await waitCalls("settings.set", 8);
 const devinInput = 'input[aria-label="Devin 命令行 路径"]';
 await page.waitFor(`document.querySelector('${devinInput}')?.value.endsWith('devin.exe')`, 2000);

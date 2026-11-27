@@ -91,14 +91,11 @@ for (const live of [false, true]) for (const theme of ["light", "dark"]) {
     assert(await page.eval("[...document.querySelectorAll('.connection-toolbar, .connection-import, .connection-row')].every(e => e.scrollWidth <= e.clientWidth + 1)"));
     await page.shot(resolve(`shots/connections-${live ? "live" : "design"}-${theme}.png`));
     await clickText(".snav", "账号与模型");
-    await page.waitFor("!!document.querySelector('.factory-card') && !document.querySelector('#factory-path').disabled", 3000);
-    assert(await page.eval("document.querySelector('.factory-card').textContent.includes('Factory CLI（可选）') && document.querySelector('.factory-card').textContent.includes('不依赖 Factory SDK')"));
-    await fill("#factory-path", "droid.exe");
-    await clickText(".factory-card .btn", "保存路径");
-    await page.waitFor("!document.querySelector('.factory-card .btn').disabled", 3000);
+    await page.waitFor("document.querySelector('.factory-card .switch')?.disabled === false", 3000);
+    assert(await page.eval("document.querySelector('.factory-card').textContent.includes('Factory CLI（可选）') && document.querySelector('.factory-card').textContent.includes('不依赖 Factory SDK') && !document.querySelector('.factory-card input')"));
     await page.click('.factory-card .switch[aria-label="启用 Factory CLI"]');
     await page.waitFor("document.querySelector('.factory-card .switch').getAttribute('aria-checked') === 'true'", 3000);
-    if (live) assert.deepEqual(await page.eval("__fake.callsOf('factory.configure').at(-1)"), { path: "droid.exe", enabled: true });
+    if (live) assert.deepEqual(await page.eval("__fake.callsOf('factory.configure').at(-1)"), { enabled: true });
     assert.equal(page.consoleErrors().length, 0);
     assert.equal(page.cspViolations().length, 0);
     console.log(`PASS Connections and optional Factory UI: ${live ? "real QWebChannel" : "design"}, ${theme}, consent, edit, MCP test and switches`);
