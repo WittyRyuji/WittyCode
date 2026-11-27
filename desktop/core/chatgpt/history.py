@@ -85,7 +85,7 @@ def build_turn(transcript: Transcript, registry: ToolRegistry, saved: SavedSessi
     text, attachments, handoff = user_parts(first) if first is not None else ("", [], None)
     turn = transcript.new_history_turn(text if first is not None and not meta.fusion_resumed else None,
                                        started_at=meta.at, attachments=attachments)
-    if meta.fusion_resumed:
+    if meta.fusion_resumed or meta.fusion_resume_source == 'manual':
         turn.blocks.append(NoticeBlock(id=transcript.new_id('b'), text=FUSION_RESUMING))
     if handoff is not None and turn.user_block is not None:
         turn.user_block.handoff = handoff

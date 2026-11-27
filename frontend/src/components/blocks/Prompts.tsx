@@ -61,6 +61,7 @@ export function QuestionCard({ sessionId, prompt }: { sessionId: string; prompt:
   const [picked, setPicked] = useState<Record<number, string[]>>({});
   const [other, setOther] = useState<Record<number, string>>({});
   const [tried, setTried] = useState(false);
+  const choosingTask = prompt.optionsOnly && prompt.id.startsWith("fusion-resume-");
 
   const value = (i: number) => [...(picked[i] ?? []), ...(other[i]?.trim() ? [other[i]!.trim()] : [])];
   const missing = (i: number) => value(i).length === 0;
@@ -118,13 +119,13 @@ export function QuestionCard({ sessionId, prompt }: { sessionId: string; prompt:
         </div>
       ))}
       <div className="pbtns">
-        <button type="button" className="btn primary" onClick={submit}>
-          提交回答
-        </button>
-        {prompt.optionsOnly ? (
+        {(!choosingTask || prompt.questions.some((q) => q.options.length > 0)) && (
+          <button type="button" className="btn primary" onClick={submit}>提交回答</button>
+        )}
+        {prompt.optionsOnly && !choosingTask ? (
           <button type="button" className="btn" onClick={() => stop(sessionId)}>取消原任务</button>
         ) : (
-          <button type="button" className="btn" onClick={() => answer(sessionId, prompt.id, null)}>跳过</button>
+          <button type="button" className="btn" onClick={() => answer(sessionId, prompt.id, null)}>{choosingTask ? "取消续作" : "跳过"}</button>
         )}
       </div>
     </section>

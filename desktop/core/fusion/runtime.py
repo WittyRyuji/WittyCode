@@ -673,6 +673,8 @@ class FusionRuntime:
         if key not in self.registry.plans or not self.unit_tools_available:
             raise FusionError('The frozen plan or one of its execution gates is unavailable.')
         plan = self.registry.plans[key]
+        if plan.get('cancelled'):
+            raise FusionError('The frozen plan was cancelled.')
         record = self.parent.saved.turns[-1] if self.parent.saved.turns else None
         prior_key = record.fusion_plan if record is not None else ''
         if not plan['activated'] or record is not None and prior_key != key:
@@ -701,7 +703,8 @@ class FusionRuntime:
         self._drive_checked = False
         self._map_file_written = False
         self.route_turn = RouteTurn() if self.gate("route") else None
-        if self.route_turn is not None and self.parent.saved.plan.get("status") == "approved":
+        receipt = self.parent._declare_state() or {}
+        if self.route_turn is not None and not receipt.get('resume_source') and self.parent.saved.plan.get("status") == "approved":
             self.route_turn.route = Route("split", "Taken from the approved plan.", "runner")
             self.route_turn.from_plan = True
             if self.measurement is not None:
@@ -752,8 +755,18 @@ class FusionRuntime:
 
     async def retain_plan_route(self) -> None:
         turn = self.route_turn
-        if turn is not None and turn.from_plan and turn.route is not None:
-            if (key := self._unit_key()) and self.parent._declare_state().get('approved'):
+        if turn is None:
+            return
+        receipt = self.parent._declare_state() or {}
+        key = self._unit_key()
+        if key and receipt.get('resume_source'):
+            turn.route, turn.unit_plan = self._activate_units(key), key
+            await self.reconcile_checkpoints()
+            if self.measurement is not None:
+                self.measurement.recorder.route(turn.route.destination)
+            await self._retain_route(turn, turn.route)
+        elif turn.from_plan and turn.route is not None:
+            if key and receipt.get('approved'):
                 turn.route, turn.unit_plan = self._activate_units(key), key
             await self._capture_exemption_start(turn)  # The approved plan is the initial route; tools may write next.
             await self._retain_route(turn, turn.route)
@@ -2076,7 +2089,10 @@ class FusionRuntime:
         if (not review or decision['review'] not in (review['id'], 'current' if action == 'continue' else None)
                 or case['next'] != review['stage']
                 or any(d['review'] == review['id'] and d['action'] == action for d in previous)):
-            return Outcome('No matching pending budget review, or this decision was already recorded.', True)
+            message = 'No matching pending budget review, or this decision was already recorded.'
+            if review is None and case['next'] in verification_case.STAGES and not case['paused']:
+                message += ' This stage is available: dispatch with only the frozen unit id, without budget_decision.'
+            return Outcome(message, True)
         event = {'review': review['id'], 'action': action, 'stage': review['stage'], 'revision': case['revision']}
         updates = {}
         if action == 'continue':
@@ -2161,10 +2177,12 @@ class FusionRuntime:
             **totals, stage: {**totals.get(stage, {}), **{d: quote['new'] for d, quote in event['changes'].items()}}}}
 
     def recovery_plan(self):
-        """Use the bound plan, never an unrelated unfinished plan in the same session."""
-        binding = self.pending_approved_units() or {}
+        """Use the active or explicitly selected task before consulting a legacy approval."""
         last = self.parent.saved.turns[-1] if self.parent.saved.turns else None
-        key = self._unit_key() or binding.get('frozen') or (last.fusion_plan if last else '')
+        focus = getattr(self.parent, '_fusion_resume_focus', None)
+        key = self._unit_key() or (focus.plan if focus else '') or (last.fusion_plan if last else '')
+        if not key and (last is None or not last.fusion_task) and not self.parent._declare_state():
+            key = (self.pending_approved_units() or {}).get('frozen')
         plan = self.registry.plans.get(key)
         return (key, plan) if plan and plan['activated'] and not plan.get('cancelled') and self.unit_tools_available else ('', None)
 

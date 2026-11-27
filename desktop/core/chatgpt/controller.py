@@ -68,7 +68,7 @@ from desktop.core.memory.launch import new_run
 from desktop.core.prompts import APPROVAL_OPTIONS, QuestionView
 from desktop.core.session_state import SESSION_STATE_LABELS, LiveSettings, SessionState, SteerOutcome
 from desktop.core.toolinfo import working_label as label_for_working_state
-from desktop.core.transcript import PromptStatus, ToolStatus, Transcript, Turn, TurnStatus, UserBlock
+from desktop.core.transcript import PromptStatus, QuestionPrompt, ToolStatus, Transcript, Turn, TurnStatus, UserBlock
 from desktop.core.usage import Tokens
 
 if TYPE_CHECKING:
@@ -197,6 +197,8 @@ class ChatGPTController:
     check_retry_reason: str = ""
     _recovery_delay: float | None = None
     _recovery_timer: asyncio.TimerHandle | None = None  # Current expert turn only; no parsing of localized error text.
+    _fusion_resume_question: tuple[str, str, tuple[fusion_recovery.ResumeTarget, ...]] | None = None
+    _fusion_resume_focus: fusion_recovery.ResumeTarget | None = None
     _save_failed: bool = False
     _checkpoint_written: bool = False
     _first_prompt_retained: bool = False
@@ -244,7 +246,14 @@ class ChatGPTController:
             self.manager._notify(self, kind)
 
     def _changed(self) -> None:
-        self.transcript.set_recovery_prompts(self._fusion.recovery_questions() if self._fusion is not None else [])
+        prompts = self._fusion.recovery_questions() if self._fusion is not None else []
+        if self._fusion_resume_question is not None:
+            ident, _, targets = self._fusion_resume_question
+            question = '请选择要继续的原任务。选择只确认任务，不增加授权。' if targets else '找不到可可靠接回的原任务。请取消并说明要继续哪项工作。'
+            options = self._resume_options(targets)
+            prompts.append(QuestionPrompt(ident, ident, (QuestionView(0, '继续原任务', question, options, False),),
+                                          who='Fusion', options_only=True))
+        self.transcript.set_recovery_prompts(prompts)
         self._notify("changed")
 
     def _spawn(self, coroutine: Any) -> asyncio.Task[Any]:
@@ -528,6 +537,7 @@ class ChatGPTController:
                 runtime = FusionRuntime(self, registry)
                 self._fusion, self._paused_fusion = (runtime, None) if enabled else (None, runtime)
                 if enabled:
+                    self._fusion_resume_focus = fusion_recovery.restored_focus(saved, registry.plans)
                     await runtime.reconcile_checkpoints()
                 runtime._checkpoint()
             except FusionError as error:
@@ -741,9 +751,9 @@ class ChatGPTController:
         if (intent == 'execute' and self._fusion is not None and self._fusion.unit_tools_available
                 and (binding := self._fusion.pending_approved_units())):
             outcome = Outcome('Continue the approved frozen plan; activate it with submit_route({}). No units were reselected.')
-            self._declare_receipt = {'turn': turn, 'kind': kind, 'intent': intent, 'workplan': binding, 'outcome': outcome}
+            self._declare_receipt = {'turn': turn, 'kind': 'complex', 'intent': intent, 'workplan': binding, 'outcome': outcome}
             self._fusion_opening(turn, next_step)
-            return outcome
+            return self._record_fusion_declaration(self._declare_receipt)
         task = asyncio.ensure_future(self._route_topic(kind, intent, topic))
         self._declare_receipt = {"turn": turn, "task": task}
         self._fusion_opening(turn, next_step)
@@ -753,7 +763,20 @@ class ChatGPTController:
             outcome = Outcome(f"Declare failed: {type(error).__name__}.", True)
         self._declare_receipt = {"turn": turn, "kind": kind, "intent": intent,
                                  "failed": outcome.is_error, "outcome": outcome}
-        return outcome
+        return self._record_fusion_declaration(self._declare_receipt)
+
+    def _record_fusion_declaration(self, receipt: dict) -> Outcome:
+        record = self.saved.turns[-1] if self.saved.turns else None
+        if (receipt['intent'] == 'execute' and not receipt['outcome'].is_error and record is not None
+                and record.start == self._turn_start and record.finished is None):
+            record.fusion_task = record.fusion_task or uuid.uuid4().hex
+            record.fusion_kind = receipt['kind']
+            try:
+                self._save_now(required=True)
+            except ChatGPTError:
+                record.fusion_task = record.fusion_kind = ''
+                receipt.update(failed=True, outcome=Outcome('Could not save the Fusion task before dispatch.', True))
+        return receipt['outcome']
 
     async def _route_topic(self, kind: str, intent: str, topic: str) -> Outcome:
         from desktop.core.fusion import debate_bridge
@@ -1024,9 +1047,27 @@ class ChatGPTController:
                 return f"ChatGPT 只能读 PDF 里的文字，「{item.name}」里没有提取到文字：请换成图片或文本文件再发送。"
         return None
 
+    @property
+    def fusion_resume_waiting(self) -> bool:
+        return self._fusion_resume_question is not None or self._fusion_resume_focus is not None
+
+    @staticmethod
+    def _resume_options(targets: tuple[fusion_recovery.ResumeTarget, ...]) -> tuple[str, ...]:
+        return tuple(f'{n}. {target.label}' for n, target in enumerate(targets, 1))
+
+    def _resume_notice(self, target: fusion_recovery.ResumeTarget, details: Sequence[str] = ()) -> str:
+        note = 'Continue the original task from its checkpoint. Do not replay tools with unknown effects.'
+        if details:
+            note += '\n' + '\n'.join(details)
+        if target.plan:
+            plan = self._fusion.registry.plans[target.plan]
+            return note + '\nOriginal goal: ' + plan['spec']['goal'] + '\nUnit state:\n' + '\n'.join(verification_case.result_lines(plan)[0])
+        return note + '\nOriginal task: ' + target.label
+
     def send_prompt(self, text: str, attachments: Sequence[Attachment] = (), *, approved_plan: str = "",
                     approved_workplan: Mapping[str, Any] | None = None, packed_context: bool = False,
-                    packed_hooks: PromptContext | None = None, recovery: bool = False) -> bool:
+                    packed_hooks: PromptContext | None = None, recovery: bool = False,
+                    resume_target: fusion_recovery.ResumeTarget | None = None) -> bool:
         text = text.strip()
         attachments = tuple(attachments)
         if attachments and not text:
@@ -1045,6 +1086,48 @@ class ChatGPTController:
             except BaseException:
                 self.saved.plan = previous
                 raise
+        rt = self._fusion
+        if (rt is not None and self._fusion_parent is None and self.mode != PLAN and not approved_plan and not recovery
+                and (rt.registry.plans or rt.gate('v3') and rt.gate('inject'))
+                and not attachments and not (self.handoff and not self.handoff.empty) and self.saved.turns
+                and (resume_target is not None or fusion_recovery.resume_text(text))):
+            direct, candidates = fusion_recovery.resume_targets(self.saved, rt.registry.plans)
+            if resume_target is not None and resume_target not in candidates:
+                return False
+            resume_target = resume_target or direct
+            if resume_target is None:
+                if self._fusion_resume_question is None:
+                    self._fusion_resume_question = ('fusion-resume-' + uuid.uuid4().hex, text, candidates)
+                self._changed()
+                return True
+            if resume_target.plan:
+                plan = rt.registry.plans[resume_target.plan]
+                if not rt.unit_tools_available:
+                    self.transcript.add_notice('原冻结工单当前不可用；没有改走旧式派工。')
+                    if self._fusion_resume_question is None:
+                        self._fusion_resume_question = ('fusion-resume-' + uuid.uuid4().hex, text, ())
+                    self._changed()
+                    return True
+                if not fusion_recovery.can_start_manual(plan):
+                    focus = {'task': resume_target.task, 'plan': resume_target.plan, 'after': self.saved.turns[-1].start}
+                    before = self.saved.origin.get(fusion_recovery.RESUME_FOCUS)
+                    self.saved.origin[fusion_recovery.RESUME_FOCUS] = focus
+                    try:
+                        self._save_now(required=True)
+                    except ChatGPTError:
+                        if before is None:
+                            self.saved.origin.pop(fusion_recovery.RESUME_FOCUS, None)
+                        else:
+                            self.saved.origin[fusion_recovery.RESUME_FOCUS] = before
+                        raise
+                    self._fusion_resume_focus = resume_target
+                    self._fusion_resume_question = None
+                    self.transcript.add_notice('Fusion：已找到原任务，仍在等待原工单的授权或可用条件。')
+                    self._changed()
+                    self._schedule_fusion_recovery()
+                    return True
+        self._fusion_resume_question = None
+        self._fusion_resume_focus = None
         # A Fusion pack already carries brief-based recall instead of the memory preface.
         preface = "" if packed_context else self.preface
         context = packed_hooks or self.manager.hooks.prompt(PromptEvent(self.engine, self.project, text, frozenset(self.recalled), first=bool(preface),
@@ -1056,7 +1139,8 @@ class ChatGPTController:
             carried = (handoff.carried, handoff.truncated) if handoff.carried else None
             outgoing = tuple(handoff.attachments) + attachments
         approval = "The user explicitly approved this plan for execution:\n\n" + approved_plan if approved_plan else ""
-        sent += wrap_context(preface, context.text, approval)  # (after the message: see core/context_envelope)
+        resume_context = self._resume_notice(resume_target) if resume_target is not None and not recovery else ""
+        sent += wrap_context(preface, context.text, approval, resume_context)  # (after the message: see core/context_envelope)
         self._proposed_plan = ""
         self._pending_fusion_title = None
         self._first_prompt_retained = False
@@ -1077,9 +1161,17 @@ class ChatGPTController:
         self._preface_turn = turn if self.preface else None
         self._recall_turn, self._recall_ids = turn, context.ids
         self._turn = turn
-        if recovery:
+        if recovery or resume_target is not None and resume_target.plan:
             turn.fusion_outcome = 'continuing'
-        if approved_plan:
+        if resume_target is not None:
+            workplan = {'frozen': resume_target.plan, 'budget': rt.registry.plans[resume_target.plan]['spec']['budget']} if resume_target.plan else None
+            self._declare_receipt = {'turn': turn, 'kind': resume_target.kind, 'intent': 'execute',
+                                     'task_id': resume_target.task, 'resume_source': 'automatic' if recovery else 'manual',
+                                     'workplan': workplan,
+                                     'outcome': Outcome(f'Continue the original {resume_target.kind} task; the declaration is already bound.')}
+            if not recovery:
+                self.transcript.add_notice(saved_history.FUSION_RESUMING)
+        elif approved_plan:
             # The user's approval is this turn's execute declaration; the model cannot mint one itself. It carries
             # the work plan bound to the approved version — an older file or a reopened plan has none, so that
             # approval may answer in this turn but never executes.
@@ -1239,10 +1331,14 @@ class ChatGPTController:
             self.saved.items.append(item)
             if model.startswith("factory:"):
                 self._unsent_prompt = turn.id  # May still be refused by the machine guard.
-            recovering = turn.fusion_outcome == 'continuing' and self._fusion is not None
+            declaration = self._declare_state() or {}
+            kind = declaration.get('kind', '') if declaration.get('intent') == 'execute' else ''
+            source = declaration.get('resume_source', '')
             self.saved.turns.append(SavedTurn(self._turn_start, time.time(), None, "running", "", model,
-                                              fusion_plan=self._fusion._unit_key() if recovering else '',
-                                              fusion_resumed=recovering))
+                                              fusion_plan=self._fusion._unit_key() if source else '',
+                                              fusion_resumed=source == 'automatic',
+                                              fusion_task=(declaration.get('task_id') or uuid.uuid4().hex) if kind else '',
+                                              fusion_kind=kind, fusion_resume_source=source))
             if self.saved.plan.get("status") == "approved" and self.saved.plan.get("execution") == "starting":
                 self.saved.plan["execution"] = "started"
             self.saved.model, self.saved.reasoning, self.saved.autonomy = self.model, self.reasoning, self.autonomy
@@ -1554,6 +1650,8 @@ class ChatGPTController:
         if rt is None or record is None or record.start != self._turn_start:
             return ''
         if not record.fusion_plan:
+            if reason == 'cancelled' and record.fusion_task:
+                turn.fusion_outcome = record.fusion_outcome = 'cancelled'
             verdict = rt.acceptance_verdict() if reason in ('failed', 'cancelled', 'interrupted') else None
             if verdict is not None and verdict.missing:
                 turn.fusion_outcome = record.fusion_outcome = 'cancelled' if reason == 'cancelled' else 'unverified'
@@ -1600,12 +1698,13 @@ class ChatGPTController:
             asyncio.get_running_loop().call_soon(self._resume_fusion_checkpoint)
 
     def _resume_fusion_checkpoint(self) -> None:
-        if self.state is not SessionState.READY or self._close_requested or self.mode == PLAN or self._fusion is None:
+        if (self.state is not SessionState.READY or self._close_requested or self.mode == PLAN or self._fusion is None
+                or self._fusion_resume_question is not None):
             return
         rt = self._fusion
         key, plan = rt.recovery_plan()
         last = self.saved.turns[-1] if self.saved.turns else None
-        if plan is None or last is None or last.fusion_outcome == 'cancelled' or self.stop_hook_blocked:
+        if plan is None or last is None or (last.fusion_plan == key and last.fusion_outcome == 'cancelled') or self.stop_hook_blocked:
             return
         now = time.time()
         try:
@@ -1628,7 +1727,9 @@ class ChatGPTController:
         runnable = fusion_recovery.runnable(plan)
         if not runnable and not any(name is None for name, _, _ in (*signals, *ready)):
             return
-        if not last.fusion_recovery and not signals and not ready:
+        focus_row = self.saved.origin.get(fusion_recovery.RESUME_FOCUS) if self._fusion_resume_focus else None
+        armed = bool(focus_row and focus_row.get('armed'))
+        if not armed and not (last.fusion_plan == key and last.fusion_recovery) and not signals and not ready:
             return
         details = []
         for name, case, signal in signals:
@@ -1646,13 +1747,16 @@ class ChatGPTController:
                 details.append(f'{name}: the user {result}.')
         details.extend(f"{name or 'Main'}: service retry delay elapsed; recheck authorization and budget before continuing."
                        for name, _, _ in ready)
-        note = 'Resume the original task from the checkpoint. Do not replay tools with unknown effects.\n' + '\n'.join(details)
-        note += '\nOriginal goal: ' + plan['spec']['goal']
-        note += '\nUnit state:\n' + '\n'.join(verification_case.result_lines(plan)[0])
+        original = next((record for record in reversed(self.saved.turns) if record.fusion_plan == key), last)
+        target = self._fusion_resume_focus or fusion_recovery.ResumeTarget(fusion_recovery.task_id(original), 'complex', key)
+        note = self._resume_notice(target, details)
         # Keep a restart marker on the previous turn until a newer turn exists. A process failure after this
         # checkpoint but before dispatch still recovers the task; no timer or user click must be repeated.
         prior = last.fusion_recovery
-        last.fusion_recovery = True
+        if focus_row:
+            self.saved.origin[fusion_recovery.RESUME_FOCUS] = {**focus_row, 'armed': True}
+        else:
+            last.fusion_recovery = True
         for _, case, _ in signals:
             case.pop('resumeSignal')
         for _, owner, wait in ready:
@@ -1661,14 +1765,17 @@ class ChatGPTController:
             rt._checkpoint()
         except ChatGPTError:
             last.fusion_recovery = prior
+            if focus_row:
+                self.saved.origin[fusion_recovery.RESUME_FOCUS] = focus_row
             for _, case, signal in signals:
                 case['resumeSignal'] = signal
             for _, owner, wait in ready:
                 owner['externalWait'] = wait
             return
-        if not self.send_prompt(note, approved_workplan={'frozen': key, 'budget': plan['spec']['budget']},
-                                approved_plan=plan['spec']['goal'] or 'Continue the previously approved scope.', recovery=True):
+        if not self.send_prompt(note, recovery=True, resume_target=target):
             last.fusion_recovery = prior
+            if focus_row:
+                self.saved.origin[fusion_recovery.RESUME_FOCUS] = focus_row
             for _, case, signal in signals:
                 case['resumeSignal'] = signal
             for _, owner, wait in ready:
@@ -1764,6 +1871,10 @@ class ChatGPTController:
     def cancel_waiting_fusion(self) -> bool:
         if self._fusion is None or self.state is not SessionState.READY:
             return False
+        if self._fusion_resume_question is not None:
+            self._fusion_resume_question = None
+            self._changed()
+            return True
         key, plan = self._fusion.recovery_plan()
         if plan is None or not any(verification_case.awaiting_user(owner) or fusion_recovery.waiting(owner)
                                    for _, owner in self._fusion._permission_owners(plan)):
@@ -1773,9 +1884,12 @@ class ChatGPTController:
         record = self.saved.turns[-1]
         turn = self.transcript.turns[-1]
         message = 'Fusion：已取消原任务；未完成的验收不计为通过。'
-        record.fusion_outcome = turn.fusion_outcome = 'cancelled'
-        record.fusion_recovery = False
-        record.note += '\n' + message
+        if record.fusion_plan == key:
+            record.fusion_outcome = turn.fusion_outcome = 'cancelled'
+            record.fusion_recovery = False
+            record.note += '\n' + message
+        self._fusion_resume_focus = None
+        self.saved.origin.pop(fusion_recovery.RESUME_FOCUS, None)
         self.transcript.add_notice(message)
         self._save_now()
         self._changed()
@@ -2413,6 +2527,24 @@ class ChatGPTController:
     def answer_question(self, prompt_id: str, answers: Sequence[str | Sequence[str]] | None) -> bool:
         """Answer (or, with ``None``, skip) the question the model asked with ``ask_user``; each answer is a string or a list of
         strings."""
+        if isinstance(prompt_id, str) and prompt_id.startswith('fusion-resume-'):
+            question = self._fusion_resume_question
+            if (question is None or question[0] != prompt_id or self._fusion is None
+                    or self.state is not SessionState.READY or self.mode == PLAN or self._close_requested):
+                return False
+            _, text, targets = question
+            options = self._resume_options(targets)
+            if answers is None:
+                self._fusion_resume_question = None
+                self._changed()
+                return True
+            if len(answers) != 1 or answers[0] not in options:
+                return False
+            self._fusion_resume_question = None
+            if not self.send_prompt(text, resume_target=targets[options.index(answers[0])]):
+                self._changed()
+                return False
+            return True
         if self._fusion is not None and isinstance(prompt_id, str) and prompt_id.startswith('fusion-'):
             if not self._fusion.answer_recovery(prompt_id, answers):
                 return False

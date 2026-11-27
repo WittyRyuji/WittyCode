@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from tests.e2e_support import open_rig
-from tests.fake_responses import call, say
+from tests.fake_responses import call, fail, say
 from tests.test_fusion_adaptive_rounds import _decision, _run
 from tests.test_fusion_debate_runtime import _declare
 from tests.test_fusion_identity_runtime import LIGHT, MAIN, WORKER, _gates, _manual_steps
@@ -16,6 +16,81 @@ from tests.ui_support import run, wait_for
 
 pytestmark = pytest.mark.ui
 TURN = '.transcript > .turn:last-child'
+
+
+def test_desktop_resume_selects_the_original_task_before_requesting_a_model(qapp, loop, tmp_path):
+    async def scenario():
+        rig = await open_rig(tmp_path)
+        try:
+            settings = rig.core.settings
+            settings.fusion_gates = _gates(*UNIT_GATES)
+            settings.fusion_main, settings.fusion_workers, settings.fusion_light = MAIN, [WORKER], LIGHT
+            settings.fusion_preference = 25
+            result = await rig.core.call('session.new', {'projectId': str(rig.project), 'fusion': True, 'autonomy': 'full'})
+            conv = rig.core._by_cid[result['id']]
+            main = conv.controller
+            await wait_for(lambda: not main.busy)
+            for name, goal in [('stock', '核对库存'), ('orders', '核对订单')]:
+                unit = _unit(name, paths=[name + '.txt'], review_required=False)
+                rig.plan.script(_declare('complex', 'execute', call_id=f'declare-{name}'),
+                                call('submit_work_plan', {'data': {'units': [unit]}}), call('submit_route', {}),
+                                say('工作尚未完成。'), say('等待下一步。'))
+                assert main.send_prompt(goal)
+                await rig.wait_text(TURN + ' .text-block', '等待下一步。')
+                await wait_for(lambda: not main.busy)
+            key, = [k for k, p in main._fusion.registry.plans.items() if 'stock' in p['cases']]
+            before = len(rig.plan.requests)
+            await rig.send('继续')
+            await rig.wait_text(TURN + ' .prompt.ask', '请选择要继续的原任务')
+            await rig.wait_text(TURN + ' .prompt.ask', '取消续作')
+            assert '取消原任务' not in await rig.text(TURN + ' .prompt.ask')
+            assert len(rig.plan.requests) == before and conv.inflight is None and not main.busy
+            if evidence := os.environ.get('WITTYCODE_TEST_EVIDENCE'):
+                await rig.shot(TURN + ' .prompt.ask', Path(evidence) / 'fusion-resume-target.png')
+            await rig.click_text(TURN + ' .prompt.ask button', '取消续作')
+            await rig.wait_for(TURN + ' .prompt.ask', 0)
+            assert len(rig.plan.requests) == before and not any(p.get('cancelled') for p in main._fusion.registry.plans.values())
+            await rig.send('继续')
+            await rig.wait_text(TURN + ' .prompt.ask', '请选择要继续的原任务')
+            rig.plan.script(_run('chosen'), _report(evidence=['Stock ready.']), _run('checked'),
+                            _report(evidence=['Stock verified.']), say('原工单已通过。'))
+            await rig.click_text(TURN + ' .prompt.ask label', '核对库存')
+            await rig.click_text(TURN + ' .prompt.ask button', '提交回答')
+            await rig.wait_text(TURN + ' .text-block', '原工单已通过。')
+            assert main.saved.turns[-1].fusion_plan == key and main.saved.turns[-1].fusion_resume_source == 'manual'
+            await rig.wait_text(TURN + ' > .user', '继续')
+        finally:
+            await rig.finish()
+
+    run(loop, scenario())
+
+
+def test_returning_a_queued_resume_does_not_continue_a_fusion_task(qapp, loop, tmp_path):
+    async def scenario():
+        rig = await open_rig(tmp_path)
+        try:
+            settings = rig.core.settings
+            settings.fusion_gates = _gates(*UNIT_GATES)
+            settings.fusion_main, settings.fusion_workers, settings.fusion_light = MAIN, [WORKER], LIGHT
+            settings.fusion_preference = 25
+            result = await rig.core.call('session.new', {'projectId': str(rig.project), 'fusion': True})
+            main = rig.core._by_cid[result['id']].controller
+            await wait_for(lambda: not main.busy)
+            rig.plan.script([('hold', 'first-failure'), *fail('invalid_request_error', 'test failure')])
+            assert main.send_prompt('Check the inventory.')
+            await wait_for(lambda: bool(rig.plan.requests))
+            await rig.send('继续')
+            await rig.wait_for('.qs-row', 1)
+            before = len(rig.plan.requests)
+            rig.plan.release('first-failure')
+            await rig.wait_for('.qs-row', 0)
+            assert await rig.js("document.querySelector('.input').value") == '继续'
+            assert not main.fusion_resume_waiting and len(rig.plan.requests) == before
+        finally:
+            rig.plan.release('first-failure')
+            await rig.finish()
+
+    run(loop, scenario())
 
 
 def test_desktop_recovery_question_keeps_body_and_only_notifies_after_acceptance(qapp, loop, tmp_path, monkeypatch):

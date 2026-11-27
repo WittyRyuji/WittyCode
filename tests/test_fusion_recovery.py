@@ -16,8 +16,119 @@ from tests.chatgpt_support import finish_turn
 from tests.fake_responses import call, fail, say
 from tests.fakes import until
 from tests.test_fusion_adaptive_rounds import _approve, _decision, _plan, _reopen, _run
-from tests.test_fusion_identity_runtime import LIGHT, _fusion, _manual_steps, _output
+from tests.test_fusion_debate_runtime import _declare
+from tests.test_fusion_identity_runtime import LIGHT, _fusion, _manual_steps, _output, _turn
 from tests.test_fusion_route_runtime import UNIT_GATES, _report, _unit
+
+
+@pytest.mark.parametrize('legacy', [False, True])
+def test_manual_resume_keeps_the_complex_task_even_after_a_misrouted_follow_up(tmp_path, legacy):
+    async def go():
+        async with _fusion(tmp_path, active=UNIT_GATES) as (main, fake):
+            units = [_unit(name, paths=[name + '.txt'], review_required=False) for name in ('collect', 'native', 'matrix')]
+            wrong = _run('bad-decision', 'collect', budget_decision={'review': 'not-a-review', 'action': 'continue'})
+            await _turn(main, fake, _declare('complex', 'execute', call_id='original-declare'),
+                        call('submit_work_plan', {'data': {'units': units}}, call_id='original-plan'),
+                        call('submit_route', {}, call_id='original-route'), wrong, say('Still pending.'), say('Not finished.'))
+            key, plan = next(iter(main._fusion.registry.plans.items()))
+            assert plan['activated'] and all(not c['attempts'] for c in plan['cases'].values())
+            assert 'pending budget review' in _output(main, 'bad-decision')
+            original = main.saved.turns[-1]
+            if legacy:
+                original.fusion_plan = ''
+                await _turn(main, fake, _declare('simple', 'execute', call_id='wrong-declare'), say('Wrong path.'))
+                mistaken = main.saved.turns[-1]
+                main.saved.items[mistaken.start]['content'][0]['text'] = '继续，上次没返回。'
+                for record in (original, mistaken):
+                    record.fusion_task = record.fusion_kind = record.fusion_resume_source = ''
+                main._save_now(required=True)
+            main = await _reopen(main)
+            fake.script(_declare('simple', 'execute', call_id='try-reclassify'), _run('author', 'collect'),
+                        _report(evidence=['Collection rebuilt.']), _run('runner', 'collect'),
+                        _report(evidence=['Collection verified.']), say('Other work pending.'), say('Still pending.'))
+            assert main.send_prompt('继续，上次没返回。')
+            assert not main.send_prompt('继续'), 'a double send must not launch a second turn'
+            await finish_turn(main)
+            record = main.saved.turns[-1]
+            assert record.fusion_plan == key and record.fusion_kind == 'complex'
+            assert main._fusion.registry.plans[key]['cases']['collect']['next'] == 'done'
+            assert main._fusion.registry.plans[key]['cases']['native']['attempts'] == {}
+            assert 'continue' in _output(main, 'try-reclassify').lower()
+            main = await _reopen(main)
+            turn = main.transcript.turns[-1]
+            assert turn.user_block.text == '继续，上次没返回。'
+            assert main.saved.turns[-1].fusion_plan == key
+            case = main._fusion.registry.plans[key]['cases']['collect']
+            attempts = dict(case['attempts'])
+            fake.script(_run('already-verified', 'collect'), say('Still working.'), say('No new evidence.'))
+            assert main.send_prompt('继续')
+            await finish_turn(main)
+            assert case['attempts'] == attempts and 'done' in _output(main, 'already-verified')
+    asyncio.run(go())
+
+
+def test_manual_resume_inherits_a_simple_execution(tmp_path):
+    async def go():
+        async with _fusion(tmp_path, active=UNIT_GATES) as (main, fake):
+            await _turn(main, fake, _declare('simple', 'execute'), say('Partial details.'))
+            original = main.saved.turns[-1]
+            fake.script(_declare('complex', 'execute', call_id='new-declaration'), say('More details.'))
+            assert main.send_prompt('继续')
+            await finish_turn(main)
+            resumed = main.saved.turns[-1]
+            assert resumed.fusion_task == original.fusion_task and resumed.fusion_kind == 'simple'
+            assert not resumed.fusion_plan and not main._fusion.registry.plans
+            assert 'continue' in _output(main, 'new-declaration').lower()
+            fake.script(say('More on the original task.'))
+            assert main.send_prompt('继续')
+            await finish_turn(main)
+            assert 'Original task: Check the inventory.' in str(fake.requests[-1]['input'])
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize('state', ['unbound', 'cancelled', 'waiting', 'new_scope'])
+def test_manual_resume_does_not_bypass_missing_or_waiting_authority(tmp_path, state):
+    async def go():
+        async with _fusion(tmp_path, active=UNIT_GATES) as (main, fake):
+            await _turn(main, fake, _declare('complex', 'execute'),
+                        call('submit_work_plan', {'data': {'units': [_unit(review_required=False)]}}),
+                        call('submit_route', {}), say('Still pending.'), say('Not finished.'))
+            key, plan = next(iter(main._fusion.registry.plans.items()))
+            case = plan['cases']['stock']
+            count = len(fake.requests)
+            if state == 'new_scope':
+                fake.script(_declare('simple', 'execute', call_id='new-scope'), say('New task.'))
+                assert main.send_prompt('继续，并新增导出文件。')
+                await finish_turn(main)
+                assert main.saved.turns[-1].fusion_kind == 'simple' and not main.saved.turns[-1].fusion_plan
+                return
+            if state == 'unbound':
+                record = main.saved.turns[-1]
+                record.fusion_plan = record.fusion_task = record.fusion_kind = ''
+                for entry in main.saved.items:
+                    if entry.get('type') == 'function_call_output' and str(entry.get('output')).startswith('Frozen route active:'):
+                        entry['output'] = 'No retained activation receipt.'
+            elif state == 'cancelled':
+                assert main._fusion.cancel_recovery(key)
+            else:
+                case['recoveryRequest'] = {'id': 'fusion-prerequisite-test', 'status': 'pending', 'question': 'Check the fixture.',
+                                           'revision': 0, 'stage': 'worker'}
+                main._fusion._checkpoint()
+            assert main.send_prompt('继续')
+            assert not main.busy and len(fake.requests) == count and not case['attempts']
+            question, = main.transcript.pending_prompts()
+            if state == 'waiting':
+                assert question.id == 'fusion-prerequisite-test'
+                main = await _reopen(main)
+                assert main.fusion_resume_waiting and not main.busy and len(fake.requests) == count
+                assert main.transcript.pending_prompts()[0].id == question.id
+                assert main.cancel_waiting_fusion()
+                assert not main.answer_question(question.id, ['已完成必要操作'])
+            else:
+                assert question.questions[0].options == ()
+                assert main.answer_question(question.id, None)
+                assert not main.answer_question(question.id, None)
+    asyncio.run(go())
 
 
 def test_adaptive_quote_adds_only_shortfall_without_resetting_accounting():

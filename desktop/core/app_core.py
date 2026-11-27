@@ -1913,7 +1913,7 @@ class AppCore:
         if conv.cache_dirty:
             self._mark_cache_dirty(conv)  # (it only schedules the write once the session is idle)
         self._flush_agent(conv)
-        self._settle_inflight(conv, failed=self._failed_queue_turn(conv))
+        self._settle_inflight(conv)
 
     @staticmethod
     def _failed_queue_turn(conv: Conversation) -> Turn | None:
@@ -1944,6 +1944,7 @@ class AppCore:
     def _settle_inflight(self, conv: Conversation, *, failed: Turn | None = None) -> None:
         # Both the page flush and the queue callback may run first. Consume both sources before emitting a
         # single restore: the page prepends each event, so two separate events cannot express this order.
+        failed = failed or self._failed_queue_turn(conv)
         pending = self._take_inflight(conv, failed)
         queued = self._take_queue(conv) if failed is not None and conv.queue else []
         items = ([pending] if pending is not None else []) + queued
@@ -2757,6 +2758,8 @@ class AppCore:
             if pending is not None:
                 self._set_pending_model(conv, pending)
             raise AppError("现在不能发送：会话没有就绪。")
+        if getattr(controller, 'fusion_resume_waiting', False):
+            return  # The local choice/authorization card is not a model turn or an inflight message.
         self._start_title(conv, text)
         conv.drafts = [a for a in conv.drafts if a.id not in wanted]
         if attachments or not conv.in_history or conv.engine == "devin" or getattr(controller, "_fusion", None) is not None:
@@ -2985,6 +2988,8 @@ class AppCore:
         if failed := self._failed_queue_turn(conv):
             self._settle_inflight(conv, failed=failed)
             return
+        if getattr(controller, 'fusion_resume_waiting', False):
+            return
         plan = getattr(getattr(controller, "saved", None), "plan", {})
         if isinstance(plan, dict) and plan.get("status") == "pending":
             self._unqueue_all(conv, "计划等待确认：排队的消息没有发出，已放回输入框；请明确执行或修改计划。")
@@ -3041,10 +3046,11 @@ class AppCore:
             self._discard_draft_title(conv)
             self._unqueue_all(conv, "会话没有就绪，排队消息已放回输入框。")
             return
-        self._start_title(conv, head.text)
         conv.queue.pop(0)
-        if head.attachments or not conv.in_history or conv.engine == "devin" or fusion is not None:
-            conv.inflight = (controller.transcript.turns[-1], head.text, head.attachments)
+        if not getattr(controller, 'fusion_resume_waiting', False):
+            self._start_title(conv, head.text)
+            if head.attachments or not conv.in_history or conv.engine == "devin" or fusion is not None:
+                conv.inflight = (controller.transcript.turns[-1], head.text, head.attachments)
         conv.dirty = True
         self._schedule_flush()
 

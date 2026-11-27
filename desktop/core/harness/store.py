@@ -75,6 +75,9 @@ class SavedTurn:
     fusion_outcome: str = ""
     fusion_recovery: bool = False
     fusion_resumed: bool = False
+    fusion_task: str = ""
+    fusion_kind: str = ""
+    fusion_resume_source: str = ""
 
 
 @dataclass(slots=True)
@@ -171,17 +174,25 @@ def _turn_json(turn: SavedTurn) -> dict[str, Any]:
         data["fusionRecovery"] = True
     if turn.fusion_resumed:
         data["fusionResumed"] = True
+    if turn.fusion_task and turn.fusion_kind in ("simple", "complex"):
+        data["fusionTask"], data["fusionKind"] = turn.fusion_task, turn.fusion_kind
+        if turn.fusion_resume_source:
+            data["fusionResumeSource"] = turn.fusion_resume_source
     return data
 
 
 def _turn_from(raw: Mapping[str, Any]) -> SavedTurn:
     opening, dispatches = raw.get("opening"), raw.get("dispatches")
     labels = (label for label in dispatches if isinstance(label, str) and label.strip()) if isinstance(dispatches, list) else ()
+    task, kind, source = raw.get('fusionTask'), raw.get('fusionKind'), raw.get('fusionResumeSource')
+    bound = isinstance(task, str) and _ID.fullmatch(task) and kind in ('simple', 'complex')
     return SavedTurn(int(raw["start"]), float(raw["at"]), raw.get("finished"), str(raw.get("status") or "done"),
                      str(raw.get("error") or ""), str(raw.get("model") or ""), str(raw.get("note") or ""),
                      opening=opening if isinstance(opening, str) else "", dispatches=list(dict.fromkeys(labels)),
                      fusion_plan=str(raw.get('fusionPlan') or ''), fusion_outcome=str(raw.get('fusionOutcome') or ''),
-                     fusion_recovery=raw.get('fusionRecovery') is True, fusion_resumed=raw.get('fusionResumed') is True)
+                     fusion_recovery=raw.get('fusionRecovery') is True, fusion_resumed=raw.get('fusionResumed') is True,
+                     fusion_task=task if bound else '', fusion_kind=kind if bound else '',
+                     fusion_resume_source=source if bound and source in ('manual', 'automatic') else '')
 
 
 def _session_json(session: SavedSession) -> dict[str, Any]:

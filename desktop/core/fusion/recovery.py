@@ -5,15 +5,155 @@ import json
 import math
 import re
 import time
-from dataclasses import asdict, replace
+import unicodedata
+from dataclasses import asdict, dataclass, replace
+from typing import TYPE_CHECKING
 
 from desktop.core.fusion import verification_case as ledger
 from desktop.core.prompts import APPROVAL_OPTIONS, ActionView
 from desktop.core.transcript import PermissionPrompt
 
+if TYPE_CHECKING:
+    from desktop.core.harness.store import SavedSession, SavedTurn
+
 MAX_REQUESTS = 32
 MAX_BACKOFF = 15 * 60
 MAX_RETRIES = 2
+RESUME_FOCUS = 'fusionResumeFocus'
+_RESUME_TEXTS = frozenset({'继续', '继续原任务', '继续,上次没返回', '继续,上次没有返回', 'resume', 'continue'})
+_PLAN_RECEIPT = re.compile(r'Work plan validated: ([0-9a-f]{64})\.')
+_ROUTE_RECEIPTS = frozenset(f'Frozen route active: {kind}. Use delegate_task({{"unit":"id"}}).'
+                            for kind in ('self', 'coder', 'split'))
+
+
+@dataclass(frozen=True, slots=True)
+class ResumeTarget:
+    task: str
+    kind: str
+    plan: str = ''
+    label: str = ''
+
+
+def resume_text(text: str) -> bool:
+    return unicodedata.normalize('NFKC', text).strip().rstrip('。.!！').casefold() in _RESUME_TEXTS
+
+
+def task_id(turn: SavedTurn) -> str:
+    return turn.fusion_task or ledger.digest(['fusion-task', turn.at, turn.start])
+
+
+def resumable_plan(plan: dict) -> bool:
+    """A completed/cancelled plan, or one with only hard-stopped dependency chains, is not a target."""
+    if not plan.get('activated') or plan.get('cancelled'):
+        return False
+    cases = plan['cases']
+    main = plan.get('mainRecovery', {})
+    return bool(ledger.awaiting_user(main) or waiting(main) or main.get('resumeSignal') or any(
+        case['next'] in ledger.STAGES and all(cases[dep]['next'] == 'done' for dep in plan['spec']['units'][name]['deps'])
+        for name, case in cases.items()))
+
+
+def can_start_manual(plan: dict) -> bool:
+    main = plan.get('mainRecovery', {})
+    return not (waiting(main) or ledger.awaiting_user(main)) and any(
+        plan['cases'][name]['next'] in ledger.STAGES
+        and all(plan['cases'][dep]['next'] == 'done' for dep in plan['spec']['units'][name]['deps'])
+        for name in runnable(plan))
+
+
+def _legacy_target(saved: SavedSession, start: int, end: int) -> tuple[str, str]:
+    """Match application-generated outputs to actual tool calls in this one turn, never assistant prose."""
+    if not 0 <= start < end <= len(saved.items) or end - start > 4096:
+        return '', ''
+    calls = {}
+    kind = proposed = active = ''
+    for item in saved.items[start:end]:
+        ident = item.get('call_id')
+        if not isinstance(ident, str):
+            continue
+        if item.get('type') == 'function_call' and item.get('name') in ('declare_topic', 'submit_work_plan', 'submit_route'):
+            calls[ident] = item
+            continue
+        if item.get('type') != 'function_call_output' or (call := calls.pop(ident, None)) is None:
+            continue
+        if saved.tools.get(ident, {}).get('status') != 'done' or not isinstance(item.get('output'), str):
+            continue
+        line = item['output'].partition('\n')[0]
+        try:
+            args = json.loads(call.get('arguments', '{}'))
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(args, dict):
+            continue
+        if call['name'] == 'declare_topic' and args.get('intent') == 'execute' and not kind:
+            if args.get('kind') == 'simple' and line.startswith('Declared simple: no debate.'):
+                kind = 'simple'
+            elif args.get('kind') == 'complex':
+                kind = 'complex'
+        elif call['name'] == 'submit_work_plan' and kind == 'complex' and (match := _PLAN_RECEIPT.fullmatch(line)):
+            proposed = match[1]
+        elif call['name'] == 'submit_route' and not args and proposed and line in _ROUTE_RECEIPTS:
+            active = proposed
+    return kind, active
+
+
+def resume_targets(saved: SavedSession, plans: dict) -> tuple[ResumeTarget | None, tuple[ResumeTarget, ...]]:
+    from desktop.core.chatgpt.history import user_parts
+
+    # Existing checkpoint metadata wins. Reconstruct only from a bounded suffix of this already-loaded session.
+    choices, seen = [], set()
+    direct = None
+    anchor = False
+    for index in range(len(saved.turns) - 1, max(-1, len(saved.turns) - 65), -1):
+        turn = saved.turns[index]
+        if turn.finished is None or not 0 <= turn.start < len(saved.items):
+            continue
+        item = saved.items[turn.start]
+        if item.get('type') != 'message' or item.get('role') != 'user':
+            break  # a missing send record cannot establish what the user intended
+        text, attachments, handoff = user_parts(item)
+        if not turn.fusion_task and not turn.fusion_plan and not attachments and not handoff and resume_text(text):
+            continue  # old unbound "continue" turns may have been misclassified; they never become the origin
+        latest = not anchor
+        anchor = True
+        kind, key = turn.fusion_kind, turn.fusion_plan
+        if not kind:
+            end = saved.turns[index + 1].start if index + 1 < len(saved.turns) else len(saved.items)
+            kind, old_key = ('complex', key) if key else _legacy_target(saved, turn.start, end)
+            key = key or old_key
+        task = task_id(turn)
+        ident = key or task
+        if ident in seen:
+            continue
+        seen.add(ident)
+        if turn.fusion_outcome in ('cancelled', 'verified'):
+            continue
+        if kind == 'complex':
+            plan = plans.get(key)
+            if not plan or not resumable_plan(plan):
+                continue
+            text = plan['spec']['goal'] or text
+        elif kind != 'simple' or key or not latest and turn.status not in ('interrupted', 'incomplete', 'failed', 'limit'):
+            continue
+        elif turn.fusion_resume_source:
+            # A second manual resume has the same task id, but its user text is only "continue".
+            origin = next((t for t in reversed(saved.turns[max(0, index - 64):index]) if not t.fusion_resume_source
+                           and task_id(t) == task and 0 <= t.start < len(saved.items)), None)
+            text = user_parts(saved.items[origin.start])[0] if origin else ''
+        label = ' '.join(text.split())[:80] or ('冻结工单' if key else '简单任务')
+        target = ResumeTarget(task, kind, key, label)
+        choices.append(target)
+        if latest:
+            direct = target
+    return (direct if len(choices) == 1 else None), tuple(choices)
+
+
+def restored_focus(saved: SavedSession, plans: dict) -> ResumeTarget | None:
+    row = saved.origin.get(RESUME_FOCUS)
+    if not isinstance(row, dict) or not saved.turns or row.get('after') != saved.turns[-1].start:
+        return None
+    _, choices = resume_targets(saved, plans)
+    return next((target for target in choices if target.plan and (target.plan, target.task) == (row.get('plan'), row.get('task'))), None)
 
 
 def file_fact(project, relative):
