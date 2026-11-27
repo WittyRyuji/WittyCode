@@ -4880,7 +4880,10 @@ class AppCore:
     async def _m_factory_account(self, params: dict[str, Any]) -> dict[str, Any]:
         if self.factory is None:
             return {"cli": "missing", "cliPath": "", "enabled": False, "path": self.settings.factory_path}
-        return {**await self.factory.account(), "path": self.settings.factory_path}
+        account = await self.factory.account()
+        if params.get("refresh") is True and account["enabled"]:
+            self._schedule_models()
+        return {**account, "path": self.settings.factory_path}
 
     async def _m_factory_configure(self, params: dict[str, Any]) -> dict[str, Any]:
         path, enabled = params.get("path"), params.get("enabled")

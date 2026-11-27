@@ -76,6 +76,43 @@ def test_windows_binary_discovery_order_without_changing_path(tmp_path, monkeypa
     assert os.environ.get("PATH") == original
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+def test_redetect_refreshes_the_catalog_only_when_enabled(tmp_path, monkeypatch, enabled):
+    async def scenario():
+        engine, settings, _ = engine_for(tmp_path)
+        settings.factory_enabled = enabled
+        binary = tmp_path / "droid.exe"
+        settings.factory_path = str(binary)
+        client = engine.client
+
+        def installed_client(*args, **kwargs):
+            if not engine.binary():
+                raise RuntimeError("CLI not installed yet")
+            return client(*args, **kwargs)
+
+        monkeypatch.setattr(engine, "client", installed_client)
+        events = Events()
+        core = AppCore(settings, FakePlatform(), factory=engine, persist=False, emit=events)
+        try:
+            await core.call("app.init")
+            await until(lambda: bool(events.of("models")))
+            assert core.catalog.find("factory:demo-model") is None
+            binary.touch()
+            assert (await core.call("factory.account"))["cli"] == "found"
+            assert core.catalog.find("factory:demo-model") is None
+            if not enabled:
+                monkeypatch.setattr(core, "_schedule_models", lambda: pytest.fail("disabled Factory should not refresh models"))
+            assert await core.call("factory.account", {"refresh": True}) == {
+                "cli": "found", "cliPath": str(binary.resolve()), "enabled": enabled, "path": str(binary),
+            }
+            if enabled:
+                await until(lambda: bool(core.catalog.find("factory:demo-model")), timeout=10)
+        finally:
+            await core.shutdown()
+
+    asyncio.run(scenario())
+
+
 def test_native_wire_streams_and_restores_after_an_application_restart(tmp_path):
     async def scenario():
         engine, settings, project = engine_for(tmp_path)

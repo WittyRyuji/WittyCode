@@ -397,7 +397,7 @@ export interface Calls {
   "connections.import": { params: { preview: string; confirmed: boolean }; result: { ok: boolean; count: number } };
   "connections.update": { params: { projectId?: string; id: string; enabled?: boolean; config?: Record<string, unknown>; confirmed?: boolean }; result: { ok: boolean } };
   "connections.test": { params: { projectId?: string; id: string }; result: { ok: boolean; text: string; tools: string[] } };
-  "factory.account": { params: None; result: FactoryState };
+  "factory.account": { params: { refresh?: boolean }; result: FactoryState };
   "factory.configure": { params: { path: string; enabled: boolean }; result: FactoryState };
   "app.init": { params: None; result: InitResult };
   /** no path: Python asks with the folder dialog; `added` false when the user cancelled */

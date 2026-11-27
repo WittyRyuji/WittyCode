@@ -1523,6 +1523,44 @@ def test_the_devin_program_path_is_set_from_the_settings(qapp, loop, tmp_path):
     run(loop, scenario())
 
 
+def test_factory_redetect_puts_newly_discovered_models_in_the_menu(qapp, loop, tmp_path, monkeypatch):
+    from desktop.core.factory import FactoryEngine
+
+    async def scenario():
+        detected = None
+        binary = r"C:\Demo\Factory\resources\bin\droid.exe"
+        engine = FactoryEngine(None, tmp_path / "factory", locate=lambda _: detected)
+
+        async def list_models():
+            return [{"id": "demo-model", "displayName": "Factory Demo"}] if engine.binary() else []
+
+        monkeypatch.setattr(engine, "list_models", list_models)
+        rig = await open_rig(tmp_path, factory_engine=engine)
+        try:
+            await wait_for(lambda: rig.core._models_loaded, 10, "the initial model catalog")
+            assert rig.core.catalog.find("factory:demo-model") is None
+            await rig.press(",", Qt.KeyboardModifier.ControlModifier)
+            await rig.wait_for(".settings")
+            await rig.click_text(".snav", "外部程序")
+            await rig.wait_text(".factory-program .pstate", "尚未检测到 droid")
+            detected = binary
+            await rig.click_text(".factory-program button", "重新检测")
+            await rig.wait_text(".factory-program .pstate", "已检测到 CLI")
+            assert await rig.js("document.querySelector('#factory-path').placeholder") == binary
+            assert rig.core.settings.factory_path == ""
+            if evidence := os.environ.get("WITTYCODE_TEST_EVIDENCE"):
+                await rig.shot(".factory-program", Path(evidence) / "factory-redetect.png")
+            await rig.press("Escape")
+            await rig.wait_for(".settings", 0)
+            await wait_for(lambda: rig.core.catalog.find("factory:demo-model"), 10, "the refreshed Factory models")
+            await rig.click(".controls .chip", 0)
+            await rig.wait_text(".menu", "Factory Demo")
+        finally:
+            await rig.finish()
+
+    run(loop, scenario())
+
+
 def test_the_permission_of_a_devin_conversation_is_one_of_its_modes(qapp, loop, tmp_path):
     async def scenario():
         rig, harness = await devin_rig(tmp_path)
