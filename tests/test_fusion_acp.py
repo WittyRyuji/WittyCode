@@ -37,6 +37,8 @@ def test_guard_denies_native_tools_and_keeps_only_the_private_bridge():
     (MCP_LIST, {"server_name": "other"}, False),
     (MCP_CALL, {"server_name": SERVER, "tool_name": "read_file", "arguments": {}}, True),
     (MCP_CALL, {"server_name": SERVER, "tool_name": "read_file", "arguments": []}, False),
+    (MCP_CALL, {"server_name": SERVER, "tool_name": "shell", "command": "echo misplaced"}, False),
+    (MCP_CALL, {"server_name": SERVER, "tool_name": "shell", "arguments": {"command": "echo nested"}}, True),
     (MCP_CALL, {"server_name": SERVER, "tool_name": "exec", "arguments": {}}, False),
     (MCP_CALL, {"server_name": "other", "tool_name": "read_file", "arguments": {}}, False),
     (PREFIX + "read_file", None, True),
@@ -46,7 +48,7 @@ def test_guard_denies_native_tools_and_keeps_only_the_private_bridge():
 def test_acp_wrappers_require_an_exact_private_target_at_every_check(monkeypatch, name, arguments, allowed):
     run = AcpRun(SimpleNamespace())
     run.session, run.active = "private", True
-    run.tools = SimpleNamespace(known=lambda tool: tool == "read_file")
+    run.tools = SimpleNamespace(known=lambda tool: tool in ("read_file", "shell"))
     call = {"toolCallId": name + ":0#1", "rawInput": arguments}
     params = {"sessionId": run.session, "toolCall": call, "options": [{"kind": "allow_always", "optionId": "always"}]}
     assert asyncio.run(run._request("session/request_permission", params, 0)) == CANCELLED
@@ -388,6 +390,56 @@ def test_duplicate_mcp_delivery_does_not_reexecute_or_reuse_an_id_for_other_argu
                 assert main.saved.turns[-1].status == "done"
             assert sum(item.get("type") == "function_call" for item in main.saved.items) == 1
             assert not (tmp_path / "proj" / "forbidden.txt").exists()
+        finally:
+            await core.shutdown()
+    asyncio.run(go())
+
+
+@pytest.mark.fusion_gates("observer")
+@pytest.mark.parametrize("repeat", [False, True])
+def test_devin_shell_wrapper_prompt_and_mcp_results(tmp_path, repeat):
+    from tests.fusion_acp_support import make_guarded_engine
+
+    async def go():
+        harness = make_guarded_engine(tmp_path)
+        core, model, _, _, _ = await ready_core(tmp_path, devin_engine=harness.engine)
+        try:
+            await until(lambda: any(item["source"] == "devin" for item in core.catalog.models), timeout=20)
+            project = tmp_path / "proj"
+            cid = (await core.call("session.new", {"projectId": str(project), "autonomy": "full"}))["id"]
+            main = core._by_cid[cid].controller
+            await main.update_settings(autonomy="full")
+            worker = "devin:swe-2-high"
+            main.enable_fusion(Policy("chatgpt:gpt-6.1-sol", (worker,), worker, 0))
+            action = "shell-repeat" if repeat else "shell-results"
+            task = {"scope": "src", "model": worker, "role": "worker", "task": f"[fusion-{action}] Check shell replies."}
+            model.script(call("delegate_task", task), say("Reviewed."))
+            assert main.send_prompt("Check the shell contract.")
+            await finish_turn(main)
+
+            agent, = main.agents.values()
+            [reply_file] = (tmp_path / "guarded").glob("*/shell-replies.json")
+            replies = json.loads(reply_file.read_text(encoding="utf-8"))
+            [missing, second, third] = replies
+            assert not (project / "unexpected.txt").exists()
+            errors = replies if repeat else [missing]
+            assert all(reply["content"][0]["text"].startswith("Invalid arguments for shell: 'command' is required.")
+                       and "Exit code:" not in reply["content"][0]["text"] for reply in errors)
+            assert all(reply.get("isError") is True for reply in errors)
+            if repeat:
+                assert agent.record.status == "interrupted"
+                assert any("Observer report (repeat):" in item.get("output", "") for item in main.saved.items)
+            else:
+                assert agent.record.status == "done"
+                assert second.get("isError") is True and "Exit code: 7" in second["content"][0]["text"]
+                assert not third.get("isError") and "wrapped-shell-ok" in third["content"][0]["text"]
+                assert "Exit code: 0" in third["content"][0]["text"]
+
+            wire = [json.loads(line) for line in reply_file.with_name("received.jsonl").read_text(encoding="utf-8").splitlines()]
+            [prompt] = [item["params"]["prompt"] for item in wire if item.get("method") == "session/prompt"]
+            text = "\n".join(block.get("text", "") for block in prompt)
+            example = {"server_name": SERVER, "tool_name": "shell", "arguments": {"command": "git --version"}}
+            assert f"{MCP_CALL} example: {json.dumps(example)}" in text
         finally:
             await core.shutdown()
     asyncio.run(go())

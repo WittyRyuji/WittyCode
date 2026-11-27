@@ -192,7 +192,8 @@ class AcpRun:
             content.extend({"type": "image", "data": image["data"], "mimeType": image["media_type"]}
                            for image in result.get("wc_images", ()))
             reply = {"content": content}
-            if (name in (READ_RECORD, SUBMIT_REPORT, SUBMIT_ROUTE, RATE_RECORDS, READ_MAP, CHOOSE_MAP, UPDATE_MAP)
+            # Some other tools use error status to carry a Fusion pause or handoff, not a failed execution.
+            if (name in ("shell", READ_RECORD, SUBMIT_REPORT, SUBMIT_ROUTE, RATE_RECORDS, READ_MAP, CHOOSE_MAP, UPDATE_MAP)
                     and self.host.saved.tools.get(ident, {}).get("status") == "error"):
                 reply["isError"] = True
             self._replies[invocation] = (signature, reply)
@@ -532,9 +533,14 @@ class AcpRun:
                 required = schema.get("required", [])
                 optional = [key for key in schema.get("properties", {}) if key not in required]
                 index.append([declaration["name"], required, optional])
+            shell_example = ""
+            if any(name == "shell" for name, _, _ in index):
+                wrapper = {"server_name": SERVER, "tool_name": "shell", "arguments": {"command": "git --version"}}
+                shell_example = f"{MCP_CALL} example: {json.dumps(wrapper)}\n"
             prompt = (instructions + f"\n\nAll filesystem access, commands, questions, plans and delegation MUST use the {SERVER} MCP tools. "
-                      f"Use {MCP_CALL} with server_name={SERVER}, the tool_name from the index below, and its arguments. "
-                      f"If exposed directly, use {PREFIX}<tool_name>. You do not need to list the tools before calling them. "
+                      f"Use {MCP_CALL} with server_name={SERVER} and the tool_name from the index below. "
+                      "Put all tool-specific parameters inside the arguments object, not alongside server_name or tool_name.\n"
+                      f"{shell_example}If exposed directly, use {PREFIX}<tool_name>. You do not need to list the tools before calling them. "
                       f"If you need details, {MCP_LIST} with server_name={SERVER} can show schemas. "
                       "If that list is truncated, use the index below; do not call native get_output or read any Devin output file. "
                       "WittyCode's read_output accepts only WittyCode output references, not Devin's. "

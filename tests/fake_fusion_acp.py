@@ -111,6 +111,23 @@ class GuardedFake(Fake):
                 code, result = await self.run_hook(sid, "PreToolUse", tool_name=PREFIX + "read_file", tool_input={})
                 assert code == 2 and result["decision"] == "block"
             action = "summary" if summary else match[1] if match else "report"
+            if action in ("shell-results", "shell-repeat"):
+                target = {"server_name": SERVER, "tool_name": "shell"}
+                # The model flattened command; Devin forwards only the nested arguments object.
+                flattened = {**target, "command": "echo unexpected > unexpected.txt"}
+                empty = flattened.get("arguments", {})
+                inputs = ([empty] * 3 if action == "shell-repeat"
+                          else [empty, {"command": "exit 7"}, {"command": "echo wrapped-shell-ok"}])
+                replies = []
+                for arguments in inputs:
+                    await self.approve_tool(sid, MCP_CALL, {**target, "arguments": arguments})
+                    reply = await self.mcp(sid, "tools/call", {"name": "shell", "arguments": arguments})
+                    replies.append(reply["result"])
+                (HOME / "shell-replies.json").write_text(json.dumps(replies), encoding="utf-8")
+                if action == "shell-repeat":
+                    await asyncio.wait_for(turn["cancel"].wait(), 10)
+                    stop = "cancelled"
+                    return
             tool, arguments = "", {}
             if action == "write":
                 tool, arguments = "create_file", {"file_path": "marker.txt", "content": "guarded ACP write"}

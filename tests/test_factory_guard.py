@@ -17,9 +17,9 @@ def site_policy():
             "mcpPolicy": {"enabled": True, "allowlist": ["desktop.core.fusion.acp_server"]}}
 
 
-def tool_manifest():
-    return SimpleNamespace(known=lambda n: n == "echo", declarations=lambda: [
-        {"name": "echo", "description": "Test tool", "parameters": {"type": "object", "properties": {}}}])
+def tool_manifest(name="echo"):
+    return SimpleNamespace(known=lambda n: n == name, declarations=lambda: [
+        {"name": name, "description": "Test tool", "parameters": {"type": "object", "properties": {}}}])
 
 
 @pytest.mark.parametrize("changes", [None, {"hooks": {"SessionStart": []}}, {"strictEnabledPlugins": False},
@@ -243,6 +243,43 @@ def test_factory_bridge_checks_permission_and_checkpoints_before_returning_outpu
         assert events[3:] == ["asked", "executed", "retained", "saved"]
         assert await bridge.dispatch("tools/call", params) == result and events.count("executed") == 1
         assert bridge.steps == 2
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize(("name", "status", "is_error"), [
+    ("shell", "error", True), ("shell", "done", False), ("shell", "cancelled", False), ("echo", "error", False),
+])
+def test_factory_bridge_preserves_shell_result_status_and_replay(name, status, is_error):
+    from desktop.core.harness.loop import ALLOW, Observer, Outcome, Verdict
+
+    events = []
+    host = SimpleNamespace(model="demo", turn_step_limit=lambda: 4, saved=SimpleNamespace(tools={}),
+                           _save_now=lambda *, required: events.append("saved"))
+
+    class Watcher(Observer):
+        current = True
+
+        async def before_tools(self):
+            return True
+
+        def call_done(self, call, outcome):
+            state = "cancelled" if outcome.cancelled else "error" if outcome.is_error else "done"
+            host.saved.tools[call.call_id] = {"status": state}
+
+    async def execute(call):
+        events.append("executed")
+        return Outcome("shell probe", is_error=status != "done", cancelled=status == "cancelled")
+
+    async def go():
+        tools = tool_manifest(name)
+        tools.run, tools.check = execute, lambda call: Verdict(ALLOW)
+        bridge = guard.factory_bridge(host, tools, Watcher(), [], "test")
+        bridge.active = True
+        params = {"name": name, "arguments": {}, "bridgeCallId": "shell-probe"}
+        reply = await bridge.dispatch("tools/call", params)
+        assert reply == {"content": [{"type": "text", "text": "shell probe"}], **({"isError": True} if is_error else {})}
+        assert await bridge.dispatch("tools/call", params) == reply
+        assert events == ["executed", "saved"]
     asyncio.run(go())
 
 
