@@ -4,9 +4,9 @@
 //
 // Python side, in short:
 //   providers.*  read and write `customModels` in WittyCode's own models file (models.json) and the provider names that
-//                WittyCode keeps; `test` sends one minimal request through the same base URL / key / headers the session would use.
-//                Env mode saves a variable reference; command mode saves the command; direct entry sends a write-only
-//                `newApiKey` to Python, which stores only current-user DPAPI ciphertext. Legacy inline values are never
+//                WittyCode keeps; `test` uses the same base URL/headers but always the first key in the draft.
+//                Env mode saves variable references; direct entry sends write-only `newApiKeys` edits to Python,
+//                which stores only their names and current-user DPAPI ciphertext. Legacy inline values are never
 //                returned as plaintext. `envStatus` reads os.environ and, for "pending", HKCU\Environment.
 //   window.*     the frameless window's controls: the title bar is drawn by the page. Python: Qt.FramelessWindowHint,
 //                `QWindow.startSystemMove()` / `startSystemResize(edges)` so Windows snapping keeps working, and a push of

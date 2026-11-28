@@ -17,7 +17,7 @@ import { API_EFFORTS, contextProblem, contextWindowOf, imagesAfterKindChange, im
 import { CATEGORY_LABELS, groupSummary, toolLabel, usageTotal } from "../src/lib/format.ts";
 import { changeVerb, isUnseen, parseTags, samePath, scopeLabel, sourceLine, whoConversation, whoName } from "../src/lib/memory.ts";
 import { PRESETS } from "../src/lib/vocab.ts";
-import { engineLabel, engineOfSource, envHintOf, envNameOf, envVarText, sameProviderEndpoint, sourceLabel, sourceTag } from "../src/lib/models.ts";
+import { engineLabel, engineOfSource, envHintOf, envNameOf, envNamesOf, envVarText, sameProviderEndpoint, sourceLabel, sourceTag } from "../src/lib/models.ts";
 import { effortLabel, permissionsFor, reasoningChoices, startingLevel } from "../src/lib/vocab.ts";
 import { CALL_TIMEOUT_MS, QWebChannelTransport } from "../src/transport.ts";
 import { COMMANDS, commandNamed, fromSkills, parseSlash, suggestions, unavailable } from "../src/lib/commands.ts";
@@ -878,6 +878,11 @@ test("the environment-variable field takes the bare name; what is stored is stil
   assert.equal(envNameOf(envHintOf("1BAD")), null);
   assert.equal(envNameOf(envHintOf("sk-12 34")), null);
   assert.equal(envNameOf(envHintOf("")), null);
+  const multiple = envHintOf("DEMO_FIRST, ${DEMO_SECOND}");
+  assert.equal(multiple, "${DEMO_FIRST},${DEMO_SECOND}");
+  assert.deepEqual(envNamesOf(multiple), ["DEMO_FIRST", "DEMO_SECOND"]);
+  assert.equal(envVarText(multiple), "DEMO_FIRST, DEMO_SECOND");
+  assert.deepEqual(envNamesOf(envHintOf("DEMO_FIRST,,DEMO_SECOND")), []);
 });
 
 test("window, notice, closeRequested and unknown events", () => {

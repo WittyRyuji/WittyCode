@@ -30,7 +30,7 @@ OAuth 授权码 + PKCE：
 
 **能得到什么**（我们已经有 Codex 引擎，它用的就是 ChatGPT 订阅，所以新增的只有下面几件）：
 
-1. **GPT 模型进 Droid 的 harness**：在「API Provider」里加一个「ChatGPT 套餐」来源，Base URL `https://api.openai.com/v1`，密钥用命令（Droid 的 `apiKeyHelper`，WittyCode 的编辑器已经支持「命令」这种密钥来源）每次打印一个刷新过的 access token。**没验证**：Droid 的 OpenAI provider 发的请求是不是满足上面第 3 条的限制（它很可能会带 `temperature`、`max_output_tokens`、system 消息），不满足就不能用；access token 一小时过期，helper 被 Droid 缓存多久也不知道。
+1. **GPT 模型进 Droid 的 harness**：在「API Provider」里加一个「ChatGPT 套餐」来源，Base URL `https://api.openai.com/v1`，密钥用命令（Droid 的 `apiKeyHelper`；WittyCode 已移除这种密钥来源）每次打印一个刷新过的 access token。**没验证**：Droid 的 OpenAI provider 发的请求是不是满足上面第 3 条的限制（它很可能会带 `temperature`、`max_output_tokens`、system 消息），不满足就不能用；access token 一小时过期，helper 被 Droid 缓存多久也不知道。
 2. **WittyCode 自己的模型调用不要 API key**：比如以后「回合结束后提炼值得记的笔记」（记忆的 Phase 5）、给会话起名，可以直接用订阅里的 GPT，用户不用另配 key。这是最干净的用法。
 3. **Codex 引擎换成 SIWC 登录**：只有在想让 WittyCode 自己管 token（每应用设上限、在 ChatGPT 设置里单独看用量）时才有意义；现在用 Codex 自己的登录没有问题。
 

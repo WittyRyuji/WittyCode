@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import base64
+import json
 import re
 
 from desktop.core import secret_protection
 
 PROTECTED_KEY_FIELD = "wittycodeProtectedApiKey"
+PROTECTED_KEYS_FIELD = "wittycodeProtectedKeys"
 _MAX_KEY_LENGTH = 16_384
 # A key must be safe as an HTTP header value, without transformation into an environment reference.
 _KEY = re.compile(r"[\x21-\x7e]+")
@@ -52,3 +54,21 @@ def unseal(value: str | None, kind: str, base_url: str) -> str:
     except (ValueError, secret_protection.ProtectionError, ProviderSecretError):
         raise ProviderSecretError("无法读取已保存的 API Key。请在原 Windows 用户和接口地址下使用，或重新输入密钥。") from None
     return key
+
+
+def pack_keys(keys: tuple[tuple[str, str], ...]) -> str:
+    return json.dumps([{"name": name, "data": blob} for name, blob in keys], ensure_ascii=False)
+
+
+def unpack_keys(value: str) -> tuple[tuple[str, str], ...]:
+    """Read only labels and ciphertext. A malformed list must not shift any indices."""
+    try:
+        rows = json.loads(value)
+    except ValueError:
+        return ()
+    if not isinstance(rows, list) or not all(
+        isinstance(row, dict) and isinstance(row.get("name"), str)
+        and isinstance(row.get("data"), str) for row in rows
+    ):
+        return ()
+    return tuple((row["name"], row["data"]) for row in rows)

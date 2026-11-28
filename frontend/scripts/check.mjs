@@ -783,7 +783,7 @@ await setValue('input[aria-label="Base URL"]', "groq.com");
 await page.click(".pe-foot .btn.primary");
 ok("a Base URL without http(s):// is refused", await page.eval("document.querySelector('.stack-err')?.textContent.includes('http')"));
 await setValue('input[aria-label="Base URL"]', "https://api.groq.com/openai/v1");
-ok("environment variables are the default and direct entry is explicitly discouraged", await page.eval("document.querySelector('.pe .segc .on')?.textContent === '环境变量' && [...document.querySelectorAll('.pe .segc button')].map(e => e.textContent).join() === '环境变量,命令获取,不需要,直接输入（不推荐）' && !document.querySelector('.pe input[type=password]')"));
+ok("environment variables are the default and direct entry is explicitly discouraged", await page.eval("document.querySelector('.pe .segc .on')?.textContent === '环境变量' && [...document.querySelectorAll('.pe .segc button')].map(e => e.textContent).join() === '环境变量,不需要,直接输入（不推荐）' && !document.querySelector('.pe input[type=password]')"));
 await page.waitFor("document.querySelector('.envline.unset')", 2000);
 ok("a variable that is not set says so and gives the setx line to run", await page.eval("document.querySelector('.envline.unset').textContent.includes('setx GROQ_API_KEY')"));
 await page.click(".pe-foot .btn:not(.primary)");

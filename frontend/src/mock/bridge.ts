@@ -2,7 +2,7 @@
 
 import type { Bridge, TestResult } from "../bridge";
 import type { ApiProvider, ChatGPTAccount, DevinAccount, EnvState, ProviderDraft } from "../types";
-import { envNameOf, sameProviderEndpoint } from "../lib/models.ts";
+import { envNamesOf, sameProviderEndpoint } from "../lib/models.ts";
 import { CHATGPT_ACCOUNT, DEVIN_ACCOUNT } from "./data.ts";
 import { mockImporter } from "./importer.ts";
 import { mockMemory } from "./memory.ts";
@@ -25,7 +25,7 @@ const envState = (name: string): EnvState => ENV[name] ?? "unset";
 // Only demo metadata is kept: the editor sends a fixed placeholder, never the typed key.
 const protectedProviders = new Map<string, Pick<ApiProvider, "kind" | "baseUrl">>();
 const protectedProblem = (d: ProviderDraft): string => {
-  if (d.keyMode !== "protected" || d.newApiKey) return "";
+  if (d.keyMode !== "protected" || d.newApiKeys?.every(({ key }) => !!key)) return "";
   const previous = protectedProviders.get(d.id);
   if (!previous) return "请输入 API Key。";
   return sameProviderEndpoint(d, previous) ? "" : "接口类型或 Base URL 已更改，请为新接口重新输入 API Key。";
@@ -38,7 +38,7 @@ function fakeServer(d: ProviderDraft): TestResult {
   if (d.kind !== "bedrock-converse" && !/^https?:\/\/.+/.test(d.baseUrl)) return { ok: false, text: "Base URL 要以 http:// 或 https:// 开头" };
   if (/localhost|127\.0\.0\.1/.test(d.baseUrl)) return { ok: false, text: `连不上 ${d.baseUrl.replace(/^https?:\/\//, "").replace(/\/.*$/, "")}：服务没有运行？` };
   if (d.keyMode === "env") {
-    const name = envNameOf(d.keyHint);
+    const [name] = envNamesOf(d.keyHint);
     if (!name) return { ok: false, text: "环境变量名是空的" };
     if (envState(name) === "unset") return { ok: false, text: `环境变量 ${name} 没有设置，请求没有带密钥` };
     if (envState(name) === "pending") return { ok: false, text: `环境变量 ${name} 是在 WittyCode 启动之后设置的：重启 WittyCode 再试` };
@@ -118,11 +118,15 @@ export const mockBridge: Bridge = {
     async save(d) {
       const problem = protectedProblem(d);
       if (problem) throw new Error(problem);
-      const { newApiKey: _, ...view } = d;
+      const { newApiKeys, availableKeys, ...view } = d;
       await sleep(250);
+      const names = view.keyMode === "env" ? envNamesOf(view.keyHint) : [];
       if (view.keyMode === "protected") protectedProviders.set(view.id, { kind: view.kind, baseUrl: view.baseUrl });
       else protectedProviders.delete(view.id);
-      return { ...view, keyHint: view.keyMode === "none" || view.keyMode === "protected" ? "" : view.keyHint, status: undefined } satisfies ApiProvider;
+      return { ...view, keyHint: view.keyMode === "none" || view.keyMode === "protected" ? "" : view.keyHint,
+        availableKeys: view.keyMode === "protected" ? (newApiKeys?.map(({ name }) => ({ name })) ?? availableKeys)
+          : names.length > 1 ? names.map((name) => ({ name })) : undefined,
+        status: undefined } satisfies ApiProvider;
     },
     async remove(id) {
       await sleep(150);

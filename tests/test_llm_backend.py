@@ -29,10 +29,10 @@ def settings_with(tmp_path: Path, base_url: str, **entry: Any) -> Path:
     return path
 
 
-def store_for(path: Path, environ: dict[str, str] | None = None, registry: dict[str, str] | None = None, run_command=None) -> ProviderStore:
+def store_for(path: Path, environ: dict[str, str] | None = None, registry: dict[str, str] | None = None) -> ProviderStore:
     return ProviderStore(
         models_file=path, sidecar=path.with_name("providers.json"), environ={"TEST_API_KEY": "sk-test-1"} if environ is None else environ,
-        registry_env=lambda: registry or {}, run_command=run_command,
+        registry_env=lambda: registry or {},
     )
 
 
@@ -327,14 +327,6 @@ def test_a_key_set_after_the_application_started_works_at_once_and_a_missing_one
     assert store_for(path, environ={}, registry={"TEST_API_KEY": "from-registry"}).api_key(spec) == "from-registry"
     with pytest.raises(ProviderError, match="TEST_API_KEY"):
         store_for(path, environ={}).api_key(spec)
-
-
-def test_a_key_command_is_run_once_within_its_time_to_live(tmp_path):
-    path = settings_with(tmp_path, "https://a.example/v1", apiKey=None, apiKeyHelper="get-key", apiKeyHelperTtlMs=60_000)
-    calls: list[str] = []
-    store = store_for(path, run_command=lambda command: calls.append(command) or "helper-key")
-    spec = store.api_models()[0]
-    assert store.api_key(spec) == "helper-key" and store.api_key(spec) == "helper-key" and calls == ["get-key"]
 
 
 def test_a_provider_that_needs_no_key_sends_none(tmp_path):

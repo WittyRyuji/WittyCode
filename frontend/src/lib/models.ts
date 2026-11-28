@@ -37,17 +37,23 @@ export function envNameOf(hint: string): string | null {
   return m ? m[1]! : null;
 }
 
-/** What the environment-variable field shows for a stored reference: the bare name (`MIMO_API_KEY` for `${MIMO_API_KEY}`).
- *  Only the wrapper is taken off, so a half-typed or malformed name is shown as typed. */
-export function envVarText(hint: string): string {
-  return hint.trim().replace(/^\$\{/, "").replace(/\}$/, "");
+/** Names in a stored reference list. Reject the entire list if any of its slots is invalid. */
+export function envNamesOf(hint: string): string[] {
+  const names = hint.split(",").map(envNameOf);
+  return names.every((name): name is string => name !== null) ? names : [];
 }
 
-/** The reference to store for what was typed in that field: `${NAME}`; a pasted `${NAME}` is accepted too, and nothing
- *  typed stores nothing. Typing the name only is the point: the braces are easy to get wrong. */
+/** Show bare names for a stored comma-separated list. */
+export function envVarText(hint: string): string {
+  return hint.split(",").map((part) => part.trim().replace(/^\$\{/, "").replace(/\}$/, "")).join(", ");
+}
+
+/** Store bare names as `${NAME}` references. Pasted references are accepted too. */
 export function envHintOf(typed: string): string {
-  const name = envVarText(typed);
-  return name ? `\${${name}}` : "";
+  return typed.split(",").map((part) => {
+    const name = envNameOf(part) ?? part.trim();
+    return name ? `\${${name}}` : "";
+  }).join(",");
 }
 
 /** A saved literal key can be reused only at the same interface and Base URL (see provider_secrets.endpoint). */

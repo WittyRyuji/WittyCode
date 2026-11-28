@@ -626,7 +626,7 @@ export type ApiKind = "anthropic" | "openai" | "generic-chat-completion-api" | "
 
 /** API Key source. `protected` uses Windows current-user DPAPI. `inline` is a legacy plaintext key
  *  in models.json; it cannot be entered or edited in that mode. */
-export type KeyMode = "inline" | "env" | "command" | "none" | "protected";
+export type KeyMode = "inline" | "env" | "none" | "protected";
 
 /** Whether an environment variable is there for the requests WittyCode makes: set; "pending" is set in the user's
  *  environment (registry) but WittyCode started before that, so a restart is needed; or not set at all. */
@@ -640,6 +640,7 @@ export interface ApiModel {
   /** Default reasoning level; "" = no reasoning control. Configurable levels include XHigh and Max. */
   reasoning: Effort | "";
   images: boolean; // not noImageSupport
+  selectedKeyIndex?: number; // zero-based; omit to use the first key
 }
 
 /** A model named by `providers.listModels`. Windows may come from the server or the bundled exact-id specification. */
@@ -663,8 +664,8 @@ export interface SkillItem {
 }
 
 /** One API provider as the page shows it. WittyCode's own grouping: the models file's `customModels` is a flat list, the models
- *  of one base URL and format are shown together under a name that WittyCode keeps. `keyHint` is the variable
- *  (`${OPENROUTER_API_KEY}`), the command, or a masked tail for legacy inline mode. No directly entered key is returned. */
+ *  of one base URL and format are shown together under a name that WittyCode keeps. `keyHint` stores environment variable
+ *  references or a masked tail for legacy inline mode. No directly entered key or ciphertext is returned. */
 export interface ApiProvider {
   id: string;
   name: string;
@@ -672,7 +673,7 @@ export interface ApiProvider {
   baseUrl: string;
   keyMode: KeyMode;
   keyHint: string;
-  keyTtlMs?: number; // apiKeyHelperTtlMs
+  availableKeys?: { name: string }[]; // metadata only, in selection order
   bearer?: boolean; // authMode: "bearer" (anthropic only)
   bedrock?: { method: "aws-credentials" | "credentials-command" | "environment-api-key"; region: string; profile: string };
   models: ApiModel[];
@@ -683,5 +684,5 @@ export interface ApiProvider {
   status?: { ok: boolean; text: string };
 }
 
-/** Sent to save / test / listModels only. Missing or blank in protected mode keeps the key at its existing endpoint. */
-export type ProviderDraft = ApiProvider & { newApiKey?: string };
+/** Sent to save / test / listModels only. A stored index reuses ciphertext at the same endpoint. */
+export type ProviderDraft = ApiProvider & { newApiKeys?: { name: string; key?: string; storedIndex?: number }[] };

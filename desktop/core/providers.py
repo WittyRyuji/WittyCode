@@ -19,11 +19,11 @@ Fields of one entry (``model`` is the only one that is always there):
 - ``apiKey`` (str, optional, never empty): ``${VAR_NAME}`` is expanded from the environment (also in ``extraHeaders``
   values and in ``bedrock.awsRegion`` / ``awsProfile`` / ``bedrockBaseUrl`` / ``requestMetadata``); an unset variable is
   an error naming it. The literal placeholders ``YOUR_API_KEY`` and ``YOUR_OPENAI_API_KEY`` make the entry unusable.
-  Omit it for keyless endpoints.
+  Separate multiple references with commas. Omit it for keyless endpoints.
 - ``wittycodeProtectedApiKey``: an opaque Windows current-user DPAPI value, bound to the interface kind and Base URL.
-  The editor writes this instead of ``apiKey`` / ``apiKeyHelper`` when a key is entered directly.
-- ``apiKeyHelper`` (str, optional): a shell command whose trimmed stdout is the key, run from the home directory; it wins
-  over ``apiKey``. ``apiKeyHelperTtlMs`` (positive int, default 300000 = 5 min).
+  Named or multiple directly entered keys use ``wittycodeProtectedKeys`` (a JSON string of name/ciphertext records) instead.
+- ``selectedKeyIndex`` (int, optional): which key this model uses, zero-based; omitted means the first key.
+  Legacy ``apiKeyHelper`` / ``apiKeyHelperTtlMs`` fields are ignored and removed when the entry is saved.
 - ``authMode``: ``bearer`` (send ``Authorization: Bearer`` instead of ``x-api-key``; only valid with
   ``provider: anthropic`` and no ``bedrock``) or ``provider-default``.
 - ``maxOutputTokens``, ``maxContextLimit`` (positive ints), ``reasoningEffort`` (the default level; it also makes the
@@ -86,7 +86,17 @@ from urllib.parse import urlsplit
 
 from desktop.core.llm.aws import Access, AwsError, BedrockSettings, Resolver
 from desktop.core.llm.model_specs import known_window
-from desktop.core.provider_secrets import PROTECTED_KEY_FIELD, ProviderSecretError, endpoint, seal, unseal, validate_key
+from desktop.core.provider_secrets import (
+    PROTECTED_KEY_FIELD,
+    PROTECTED_KEYS_FIELD,
+    ProviderSecretError,
+    endpoint,
+    pack_keys,
+    seal,
+    unseal,
+    unpack_keys,
+    validate_key,
+)
 from desktop.core.settings import default_settings_path
 
 log = logging.getLogger(__name__)
@@ -103,7 +113,6 @@ BEDROCK = "bedrock-converse"
 EFFORTS = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
 BEDROCK_METHODS = ("aws-credentials", "credentials-command", "environment-api-key")
 REQUEST_TIMEOUT = 10.0
-COMMAND_TIMEOUT = 10.0
 AWS_COMMAND_TIMEOUT = 20.0
 AWS_LOGIN_TIMEOUT = 180.0
 """A login command waits for the user in a browser."""
@@ -296,9 +305,9 @@ def _mask(secret: str) -> str:
 class _Key:
     mode: str
     hint: str
-    ttl: int | None = None
+    env_names: tuple[str, ...] = ()
     secret: str | None = field(default=None, repr=False)
-    protected: str | None = field(default=None, repr=False)
+    protected: tuple[tuple[str, str], ...] = field(default=(), repr=False)  # (name, ciphertext)
 
 
 _NO_KEY = _Key("none", "")
@@ -327,6 +336,8 @@ class ApiModelSpec:
     headers: tuple[tuple[str, str], ...]
     extra_args: dict
     key: _Key = field(repr=False)
+    selected_key_index: int = 0
+    """Which key to use when multiple keys are available (0-based index)."""
     bedrock: BedrockSettings | None = None
     """The entry's ``bedrock`` block as written (``${VAR}`` not yet filled in): the model is on Amazon Bedrock, whatever its ``kind``."""
     thinking: int | None = None
@@ -373,18 +384,22 @@ def _check_metadata(pairs: Sequence[tuple[str, str]]) -> None:
             raise ProviderError(f"requestMetadata 里「{key}」不合 AWS 的限制（键 1–256 个字符、值最多 256 个，只能含字母数字、空白和 : _ @ $ # = / + , . -）。")
 
 
+def _env_names(hint: str) -> tuple[str, ...]:
+    parts = [part.strip() for part in hint.split(",")]
+    return tuple(part[2:-1] for part in parts) if all(_ENV_REF.fullmatch(part) for part in parts) else ()
+
+
 def _entry_key(entry: dict) -> _Key:
-    if PROTECTED_KEY_FIELD in entry and not isinstance(entry.get("bedrock"), dict):
-        # Invalid ciphertext is still a protected key, not a reason to try an older source.
-        return _Key("protected", "", protected=_text(entry[PROTECTED_KEY_FIELD]))
-    helper = _text(entry.get("apiKeyHelper"))
-    if helper:
-        return _Key("command", helper, _positive_int(entry.get("apiKeyHelperTtlMs")))
+    if not isinstance(entry.get("bedrock"), dict):
+        if PROTECTED_KEYS_FIELD in entry:
+            return _Key("protected", "", protected=unpack_keys(_text(entry[PROTECTED_KEYS_FIELD])))
+        if PROTECTED_KEY_FIELD in entry:
+            return _Key("protected", "", protected=(("", _text(entry[PROTECTED_KEY_FIELD])),))
     key = entry.get("apiKey")
     if isinstance(key, str) and key.strip():
-        if _ENV_REF.match(key.strip()):
-            return _Key("env", key.strip())
-        return _Key("inline", _mask(key), None, key)
+        if names := _env_names(key):
+            return _Key("env", key.strip(), env_names=names)
+        return _Key("inline", _mask(key), secret=key)
     return _NO_KEY
 
 
@@ -405,9 +420,15 @@ def _protected_header_conflict(names: Iterable[str]) -> str:
     return ""
 
 
-def _open_key(info: _Key, kind: str, base_url: str) -> str:
+def _key_index(value: Any, count: int) -> int:
+    if type(value) is not int or not 0 <= value < count:
+        raise ProviderError("模型所选的 API Key 不存在，请在模型设置中重新选择。")
+    return value
+
+
+def _open_key(blob: str | None, kind: str, base_url: str) -> str:
     try:
-        return unseal(info.protected, kind, base_url)
+        return unseal(blob, kind, base_url)
     except ProviderSecretError as error:
         raise ProviderError(str(error)) from None
 
@@ -475,6 +496,9 @@ def _model_view(entry: dict) -> dict[str, Any]:
         view["maxOutput"] = output
     view["reasoning"] = reasoning if reasoning in EFFORTS else ""
     view["images"] = not no_images
+    index = entry.get("selectedKeyIndex")
+    if type(index) is int and index > 0:
+        view["selectedKeyIndex"] = index
     return view
 
 
@@ -491,8 +515,10 @@ def _provider_view(group: _Group, entries: Sequence[dict]) -> dict[str, Any]:
         "keyMode": key.mode,
         "keyHint": key.hint,
     }
-    if key.mode == "command" and key.ttl:
-        view["keyTtlMs"] = key.ttl
+    if len(key.env_names) > 1:
+        view["availableKeys"] = [{"name": name} for name in key.env_names]
+    elif key.mode == "protected":
+        view["availableKeys"] = [{"name": name} for name, _ in key.protected]
     if group.kind == "anthropic" and first.get("authMode") == "bearer":
         view["bearer"] = True
     if is_bedrock:
@@ -527,6 +553,14 @@ class _Row:
     max_output: int | None
     reasoning: str
     images: bool
+    selected_key_index: int = 0
+
+
+@dataclass
+class _KeyEdit:
+    name: str
+    key: str = field(repr=False)
+    stored_index: int | None
 
 
 @dataclass
@@ -537,14 +571,13 @@ class _Draft:
     base_url: str
     key_mode: str
     key_hint: str
-    new_api_key: str = field(repr=False)
-    ttl: int | None
     bearer: bool
     bedrock: dict[str, str] | None
     headers: list[tuple[str, str]]
     extra_args: dict[str, Any]
     reasoning_args: dict[str, dict[str, Any]] | None
     models: list[_Row]
+    key_edits: tuple[_KeyEdit, ...] = field(default=(), repr=False)
 
     def header_conflict(self) -> str:
         return _protected_header_conflict(name for name, _ in self.headers) if self.key_mode == "protected" else ""
@@ -563,6 +596,36 @@ def _optional_count(value: Any, label: str) -> int | None:
     if number is None:
         raise ProviderError(f"{label}要是正整数。")
     return number
+
+
+def _parse_key_edits(draft: Mapping) -> tuple[_KeyEdit, ...]:
+    def parse_key(value: Any) -> str:
+        if not isinstance(value, str):
+            raise ProviderError("API Key 必须是文本。")
+        value = value.strip(" \t")
+        if value:
+            try:
+                validate_key(value)
+            except ProviderSecretError as error:
+                raise ProviderError(str(error)) from None
+        return value
+
+    if "newApiKeys" not in draft:
+        key = parse_key(draft.get("newApiKey", ""))
+        return (_KeyEdit("", key, None),) if key else ()
+    edits = draft["newApiKeys"]
+    if not isinstance(edits, list) or not edits:
+        raise ProviderError("请至少输入一个 API Key。")
+    parsed = []
+    for row in edits:
+        if not isinstance(row, Mapping):
+            raise ProviderError("API Key 列表格式不对。")
+        key = parse_key(row.get("key", ""))
+        index = row.get("storedIndex")
+        if not key and index is None:
+            raise ProviderError("请填写新增的 API Key，或删除空行。")
+        parsed.append(_KeyEdit(_text(row.get("name")), key, index if not key else None))
+    return tuple(parsed)
 
 
 def _parse_draft(draft: Any, *, connection_only: bool = False) -> _Draft:
@@ -591,32 +654,22 @@ def _parse_draft(draft: Any, *, connection_only: bool = False) -> _Draft:
         if parts.username is not None or parts.password is not None:
             raise ProviderError("Base URL 里不要带用户名和密码，请单独设置密钥来源。")
 
-    key_mode, key_hint, new_api_key, ttl = "none", "", "", None
+    key_mode, key_hint = "none", ""
+    key_edits: tuple[_KeyEdit, ...] = ()
     if kind != BEDROCK:
         key_mode = draft.get("keyMode")
-        if key_mode not in ("env", "command", "none", "inline", "protected"):
+        if key_mode not in ("env", "none", "inline", "protected"):
             raise ProviderError("密钥来源不对。")
-        key_hint = _text(draft.get("keyHint")) if key_mode in ("env", "command", "inline") else ""
-        raw_key = draft.get("newApiKey", "")
+        key_hint = _text(draft.get("keyHint")) if key_mode in ("env", "inline") else ""
         if key_mode == "protected":
-            if not isinstance(raw_key, str):
-                raise ProviderError("API Key 必须是文本。")
-            new_api_key = raw_key.strip(" \t")
-            if new_api_key:
-                try:
-                    validate_key(new_api_key)
-                except ProviderSecretError as error:
-                    raise ProviderError(str(error)) from None
-        elif raw_key:
+            key_edits = _parse_key_edits(draft)
+        elif draft.get("newApiKey") or draft.get("newApiKeys"):
             raise ProviderError("仅「直接输入」模式接受 API Key。")
-        if key_mode == "env" and not _ENV_REF.match(key_hint):
-            raise ProviderError("环境变量要写成 ${变量名}：这里填的是变量名，不是密钥本身。")
-        if key_mode == "command":
-            if not key_hint:
-                raise ProviderError("取密钥的命令不能是空的。")
-            ttl = _optional_count(draft.get("keyTtlMs"), "刷新间隔")
-        if key_mode == "none":
-            key_hint = ""
+        if key_mode == "env":
+            names = _env_names(key_hint)
+            if not names:
+                raise ProviderError("环境变量要写成 ${变量名}，多个用逗号分隔，例如 ${KEY1},${KEY2}。")
+            key_hint = ",".join("${" + name + "}" for name in names)
     bearer = bool(draft.get("bearer")) and kind == "anthropic" and key_mode != "none"
 
     bedrock: dict[str, str] | None = None
@@ -684,6 +737,7 @@ def _parse_draft(draft: Any, *, connection_only: bool = False) -> _Draft:
             reasoning = item.get("reasoning") or ""
             if reasoning not in ("", *EFFORTS):
                 raise ProviderError("推理档位不对。")
+            selected_key_index = item.get("selectedKeyIndex", 0)
             models.append(
                 _Row(
                     id=model_id,
@@ -692,6 +746,7 @@ def _parse_draft(draft: Any, *, connection_only: bool = False) -> _Draft:
                     max_output=_optional_count(item.get("maxOutput"), "最大输出"),
                     reasoning=reasoning,
                     images=bool(item.get("images")),
+                    selected_key_index=selected_key_index,
                 )
             )
         if not models:
@@ -704,8 +759,7 @@ def _parse_draft(draft: Any, *, connection_only: bool = False) -> _Draft:
         base_url=base_url,
         key_mode=key_mode,
         key_hint=key_hint,
-        new_api_key=new_api_key,
-        ttl=ttl,
+        key_edits=key_edits,
         bearer=bearer,
         bedrock=bedrock,
         headers=headers,
@@ -731,32 +785,29 @@ def _build_entry(existing: dict | None, draft: _Draft, row: _Row, headers: dict[
     elif existing is None or "displayName" in entry:
         entry["displayName"] = row.id
     is_bedrock = draft.kind == BEDROCK
-    entry.pop(PROTECTED_KEY_FIELD, None)
+    own = _entry_key(entry) if draft.key_mode == "inline" else _NO_KEY
+    for name in (PROTECTED_KEY_FIELD, PROTECTED_KEYS_FIELD, "apiKeyHelper", "apiKeyHelperTtlMs", "selectedKeyIndex"):
+        entry.pop(name, None)
     if is_bedrock:
         entry.pop("baseUrl", None)
-        for name in ("apiKey", "apiKeyHelper", "apiKeyHelperTtlMs"):
-            entry.pop(name, None)
     else:
         entry["baseUrl"] = draft.base_url
-        if draft.key_mode == "env":
-            entry["apiKey"] = draft.key_hint
-            entry.pop("apiKeyHelper", None)
-            entry.pop("apiKeyHelperTtlMs", None)
-        elif draft.key_mode == "command":
-            entry.pop("apiKey", None)
-            entry["apiKeyHelper"] = draft.key_hint
-            _set_or_drop(entry, "apiKeyHelperTtlMs", draft.ttl)
-        elif draft.key_mode == "inline":
-            own = entry.get("apiKey")
-            keep = own if isinstance(own, str) and own.strip() and not _ENV_REF.match(own.strip()) else credential.secret
-            entry["apiKey"] = keep
-        elif draft.key_mode == "protected":
-            for name in ("apiKey", "apiKeyHelper", "apiKeyHelperTtlMs"):
-                entry.pop(name, None)
-            entry[PROTECTED_KEY_FIELD] = credential.protected
-        else:
-            for name in ("apiKey", "apiKeyHelper", "apiKeyHelperTtlMs"):
-                entry.pop(name, None)
+    key_count = 0
+    if draft.key_mode == "env":
+        entry["apiKey"] = draft.key_hint
+        key_count = len(_env_names(draft.key_hint))
+    elif draft.key_mode == "inline":
+        entry["apiKey"] = own.secret if own.mode == "inline" else credential.secret
+    else:
+        entry.pop("apiKey", None)
+        if draft.key_mode == "protected":
+            key_count = len(credential.protected)
+            if key_count == 1 and not credential.protected[0][0]:
+                entry[PROTECTED_KEY_FIELD] = credential.protected[0][1]
+            else:
+                entry[PROTECTED_KEYS_FIELD] = pack_keys(credential.protected)
+    if key_count and (index := _key_index(row.selected_key_index, key_count)):
+        entry["selectedKeyIndex"] = index
     if draft.bearer:
         entry["authMode"] = "bearer"
     elif entry.get("authMode") == "bearer":
@@ -826,58 +877,6 @@ def _registry_environment() -> dict[str, str]:
     except OSError:
         return {}
     return out
-
-
-def _kill_tree(process: subprocess.Popen) -> None:
-    if os.name == "nt":
-        try:
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(process.pid)],
-                capture_output=True,
-                timeout=5,
-                creationflags=CREATE_NO_WINDOW,
-            )
-        except (OSError, subprocess.SubprocessError):
-            process.kill()
-    else:
-        process.kill()
-
-
-def run_key_command(command: str, timeout: float = COMMAND_TIMEOUT, what: str = "取密钥的命令", *, need_output: bool = True) -> str:
-    """Run an apiKeyHelper (shell, home directory) and return its trimmed stdout. Never echoes output.
-    ``what`` names the command in the messages; ``need_output=False`` accepts a command that prints nothing (a login)."""
-    options: dict[str, Any] = {}
-    if os.name == "nt":
-        options["creationflags"] = CREATE_NO_WINDOW
-    try:
-        process = subprocess.Popen(
-            command,
-            shell=True,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            errors="replace",
-            cwd=str(Path.home()),
-            **options,
-        )
-    except OSError:
-        raise ProviderError(f"{what}没法运行。") from None
-    try:
-        stdout, _ = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        _kill_tree(process)
-        try:
-            process.communicate(timeout=2)
-        except subprocess.SubprocessError:
-            pass
-        raise ProviderError(f"{what} {int(timeout)} 秒内没有返回。") from None
-    if process.returncode != 0:
-        raise ProviderError(f"{what}失败了（退出码 {process.returncode}）。")
-    key = (stdout or "").strip()
-    if not key and need_output:
-        raise ProviderError(f"{what}没有输出内容。")
-    return key
 
 
 def _model_ids(payload: Any) -> list[str] | None:
@@ -1013,7 +1012,6 @@ class ProviderStore:
         registry_env: Callable[[], Mapping[str, str]] | None = None,
         *,
         opener: Callable[..., Any] | None = None,
-        run_command: Callable[[str], str] | None = None,
         aws_home: Path | None = None,
     ) -> None:
         self._environ: Mapping[str, str] = os.environ if environ is None else environ
@@ -1024,17 +1022,59 @@ class ProviderStore:
         self.sidecar = Path(sidecar) if sidecar is not None else default_settings_path().with_name("providers.json")
         self._registry_env = registry_env or _registry_environment
         self._opener = opener or urllib.request.build_opener(_NoRedirect()).open
-        self._run_command = run_command or run_key_command
         self._aws = Resolver(
             self._variable_or_none,
-            (lambda command: self._run_command(command)) if run_command else (lambda command: run_key_command(command, AWS_COMMAND_TIMEOUT, "AWS 凭据命令")),
-            (lambda command: self._run_command(command))
-            if run_command
-            else (lambda command: run_key_command(command, AWS_LOGIN_TIMEOUT, "awsAuthRefresh 命令", need_output=False)),
+            lambda command: self._run_aws_command(command, AWS_COMMAND_TIMEOUT, "AWS 凭据命令"),
+            lambda command: self._run_aws_command(command, AWS_LOGIN_TIMEOUT, "awsAuthRefresh 命令", need_output=False),
             home=aws_home,
         )
-        self._key_cache: dict[str, tuple[float, str]] = {}
         self._lock = threading.RLock()
+
+    def _run_aws_command(self, command: str, timeout: float, what: str, *, need_output: bool = True) -> str:
+        """Run an AWS command and return trimmed stdout."""
+        options: dict[str, Any] = {}
+        if os.name == "nt":
+            options["creationflags"] = CREATE_NO_WINDOW
+        try:
+            process = subprocess.Popen(
+                command,
+                shell=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                errors="replace",
+                cwd=str(Path.home()),
+                **options,
+            )
+        except OSError:
+            raise ProviderError(f"{what}没法运行。") from None
+        try:
+            stdout, _ = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            if os.name == "nt":
+                try:
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                        capture_output=True,
+                        timeout=5,
+                        creationflags=CREATE_NO_WINDOW,
+                    )
+                except (OSError, subprocess.SubprocessError):
+                    process.kill()
+            else:
+                process.kill()
+            try:
+                process.communicate(timeout=2)
+            except subprocess.SubprocessError:
+                pass
+            raise ProviderError(f"{what} {int(timeout)} 秒内没有返回。") from None
+        if process.returncode != 0:
+            raise ProviderError(f"{what}失败了（退出码 {process.returncode}）。")
+        key = (stdout or "").strip()
+        if not key and need_output:
+            raise ProviderError(f"{what}没有输出内容。")
+        return key
 
     # ------------------------------------------------------------------------------------------------ public reads
 
@@ -1163,6 +1203,7 @@ class ProviderStore:
                         extra_args=dict(extra) if isinstance(extra, dict) else {},
                         reasoning_args=_reasoning_args(entry.get("reasoningArgs", {})) if group.kind != BEDROCK else {},
                         key=_entry_key(entry),
+                        selected_key_index=entry.get("selectedKeyIndex", 0),
                         bedrock=_bedrock_settings(entry.get("bedrock")),
                         thinking=(_positive_int(entry.get("thinkingMaxTokens")) or DEFAULT_THINKING)
                         if entry.get("enableThinking") is True and entry["provider"] in ("anthropic", BEDROCK)
@@ -1187,17 +1228,15 @@ class ProviderStore:
 
     def api_key(self, spec: ApiModelSpec) -> str | None:
         """The key for a request to this model, read now: from the environment or the user's registry variables (so one set after
-        WittyCode started works at once, there being no process that needs a restart), or the key command's output (kept for
-        its time to live), or decrypted from the model entry for this endpoint. ``None``: no key is needed."""
+        WittyCode started works at once, there being no process that needs a restart), or decrypted from the model entry for this endpoint. ``None``: no key is needed."""
         key = spec.key
         if key.mode == "protected":
             if conflict := _protected_header_conflict(name for name, _ in spec.headers):
                 raise ProviderError(conflict)
-            return _open_key(key, spec.kind, spec.base_url)
+            blob = key.protected[_key_index(spec.selected_key_index, len(key.protected))][1] if key.protected else None
+            return _open_key(blob, spec.kind, spec.base_url)
         if key.mode == "env":
-            return self._variable(key.hint[2:-1])
-        if key.mode == "command":
-            return self._command_key(key)
+            return self._variable(key.env_names[_key_index(spec.selected_key_index, len(key.env_names))])
         if key.mode == "inline":
             return key.secret
         return None
@@ -1245,16 +1284,6 @@ class ProviderStore:
             return value
         raise ProviderError(f"环境变量 {name} 没有设置：设置它之后再发送（不需要重启 WittyCode）。")
 
-    def _command_key(self, key: _Key) -> str:
-        ttl = (key.ttl or 300_000) / 1000
-        cached = self._key_cache.get(key.hint)
-        now = time.monotonic()
-        if cached is not None and cached[0] > now:
-            return cached[1]
-        secret = self._run_command(key.hint)
-        self._key_cache[key.hint] = (now + ttl, secret)
-        return secret
-
     # ----------------------------------------------------------------------------------------------- public writes
 
     def save(self, draft: dict) -> dict:
@@ -1275,15 +1304,7 @@ class ProviderStore:
             if spec.key_mode == "inline":
                 credential = self._retained_key(spec, existing_entries)
             elif spec.key_mode == "protected":
-                if spec.new_api_key:
-                    try:
-                        protected = seal(spec.new_api_key, spec.kind, spec.base_url)
-                    except ProviderSecretError as error:
-                        raise ProviderError(str(error)) from None
-                    credential = _Key("protected", "", protected=protected)
-                else:
-                    credential = self._retained_key(spec, existing_entries)
-                    _open_key(credential, spec.kind, spec.base_url)  # refuse to save a key that is no longer usable
+                credential = _Key("protected", "", protected=self._save_keys(spec, existing_entries))
 
             pool = list(members)
             updated: dict[int, dict] = {}
@@ -1470,15 +1491,40 @@ class ProviderStore:
             raise ProviderError("接口类型或 Base URL 已更改。请为新接口重新输入 API Key，或选择其他密钥来源。")
         return stored
 
+    def _save_keys(self, spec: _Draft, members: Sequence[dict]) -> tuple[tuple[str, str], ...]:
+        stored = self._retained_key(spec, members).protected if not spec.key_edits or any(
+            edit.stored_index is not None for edit in spec.key_edits
+        ) else ()
+        if not spec.key_edits:
+            for _, blob in stored or (("", ""),):
+                _open_key(blob, spec.kind, spec.base_url)
+            return stored
+        keys = []
+        for edit in spec.key_edits:
+            if edit.key:
+                try:
+                    blob = seal(edit.key, spec.kind, spec.base_url)
+                except ProviderSecretError as error:
+                    raise ProviderError(str(error)) from None
+            else:
+                blob = stored[_key_index(edit.stored_index, len(stored))][1]
+                _open_key(blob, spec.kind, spec.base_url)
+            keys.append((edit.name, blob))
+        return tuple(keys)
+
     def _credential(self, spec: _Draft, members: Sequence[dict]) -> str | None:
+        # A connection probe is provider-wide and uses the first configured key.
         if spec.key_mode == "env":
-            return self._env_value(spec.key_hint[2:-1], "请求没有带密钥")
-        if spec.key_mode == "command":
-            return self._run_command(spec.key_hint)
+            return self._env_value(_env_names(spec.key_hint)[0], "请求没有带密钥")
         if spec.key_mode == "inline":
             return self._retained_key(spec, members).secret
         if spec.key_mode == "protected":
-            return spec.new_api_key or _open_key(self._retained_key(spec, members), spec.kind, spec.base_url)
+            edit = spec.key_edits[0] if spec.key_edits else None
+            if edit and edit.key:
+                return edit.key
+            stored = self._retained_key(spec, members).protected
+            index = _key_index(edit.stored_index, len(stored)) if edit else 0
+            return _open_key(stored[index][1] if stored else None, spec.kind, spec.base_url)
         return None
 
     def _env_value(self, name: str, consequence: str) -> str:
@@ -1551,11 +1597,14 @@ class ProviderStore:
             if path.exists() and not backup.exists():
                 before = self._read_settings()
                 rows = before.get("customModels", [])
-                if isinstance(rows, list) and any(isinstance(row, dict) and PROTECTED_KEY_FIELD in row for row in rows):
+                if isinstance(rows, list) and any(
+                    isinstance(row, dict) and (PROTECTED_KEY_FIELD in row or PROTECTED_KEYS_FIELD in row) for row in rows
+                ):
                     # Do not give a replaced/deleted protected key a second home in the automatic backup.
                     for row in rows:
                         if isinstance(row, dict):
                             row.pop(PROTECTED_KEY_FIELD, None)
+                            row.pop(PROTECTED_KEYS_FIELD, None)
                     self._atomic_write(backup, json.dumps(before, indent=2, ensure_ascii=False) + "\n", "没法备份 models.json，所以没有改动它。")
                 else:
                     shutil.copy2(path, backup)
