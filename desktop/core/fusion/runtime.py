@@ -693,13 +693,14 @@ class FusionRuntime:
             tools = self.parent._tools
             owner = plan.setdefault('mainRecovery', {})
             self.bind_recovery_permissions(tools, key, 'Main', owner)
-            self.bind_main_journal(tools, owner)
+            self.bind_main_journal(tools, key, owner)
         return self._unit_route(key)
 
     def start_route_turn(self) -> None:
         if tools := self.parent._tools:
             tools.recovery_ask = tools.recovery_guard = tools.recovery_pause = None
             tools.tool_started = tools.tool_recorded = None
+            tools.journal_reader = None
         self._drive_checked = False
         self._map_file_written = False
         self.route_turn = RouteTurn() if self.gate("route") else None
@@ -2303,31 +2304,42 @@ class FusionRuntime:
     def _permission_owners(self, plan):
         return [(None, plan.get('mainRecovery', {})), *plan['cases'].items()]
 
-    def bind_main_journal(self, tools, owner):
+    def bind_main_journal(self, tools, key, owner):
+        from desktop.core.fusion.main_journal import MainJournal
+
         effects = ('edit', 'exec', 'external')
+        token = owner.get('journalToken')
+        if token:
+            if owner.get('journalSession', self.parent.session_id) != self.parent.session_id:
+                raise FusionError('The recovery journal belongs to a different session.')
+            journal = MainJournal(self.parent._outputs, key, token)
+        else:
+            journal = MainJournal.create(self.parent._outputs, key, owner.get('journal', {}))
+            self._update_unit(owner, journal={}, journalToken=journal.token, journalSession=self.parent.session_id)
 
         def started(call, kind):
             if kind not in effects:
                 return
-            rows = owner.get('journal', {})
-            if len(rows) >= 256:
-                raise FusionError('The recovery journal is full; inspect retained evidence before another side effect.')
-            intent = recovery.action_key(call)
-            if call.call_id in rows or any(r['intent'] == intent and r['status'] == 'started' for r in rows.values()):
-                raise FusionError('An identical Main side effect has no confirmed result. Inspect rather than replay it.')
-            self._update_unit(owner, journal={**rows, call.call_id: {'intent': intent, 'status': 'started', 'tool': call.name}})
+            journal.start(call.call_id, recovery.action_key(call), call.name)
 
         async def recorded(call, outcome, kind):
-            rows = owner.get('journal', {})
-            if kind not in effects or call.call_id not in rows:
+            if kind not in effects:
                 return
-            ref = outcome.reference or await self._unit_detail(outcome.output)
-            rows = owner['journal']  # Other work may have journaled results while the output was retained.
-            row = {**rows[call.call_id], 'status': 'cancelled' if outcome.cancelled else 'error' if outcome.is_error else 'done',
-                   'result': ref, 'outputPending': bool(outcome.output and not ref)}
-            self._update_unit(owner, journal={**rows, call.call_id: row})
+            ref = ''
+            if outcome.output or outcome.reference:
+                ref = outcome.reference or await self._unit_detail(outcome.output)
+            status = 'cancelled' if outcome.cancelled else 'error' if outcome.is_error else 'done'
+            await asyncio.to_thread(journal.finish, call.call_id, status, ref, bool(outcome.output and not ref))
+
+        async def read(args):
+            try:
+                data = await asyncio.to_thread(journal.read, args.get('page'))
+            except FusionError as error:
+                return Outcome(str(error), True)
+            return Outcome(json.dumps(data, ensure_ascii=False))
 
         tools.tool_started, tools.tool_recorded = started, recorded
+        tools.journal_reader = read
 
     def bind_recovery_permissions(self, tools, key, name, owner, *, worker=False):
         def ask(call, verdict):

@@ -26,6 +26,7 @@ from typing import Any
 
 from desktop.core.fusion import debate_bridge
 from desktop.core.fusion import tools as fusion_tools
+from desktop.core.fusion.main_journal import READ_JOURNAL
 from desktop.core.harness import asking, outputs, plan_approval, recall_tool
 from desktop.core.harness.loop import ALLOW, ASK, DENY, Call, Outcome, Verdict
 from desktop.core.harness.mcp import McpClient, McpTool
@@ -90,6 +91,7 @@ class HarnessTools:
         self.read_only_brief = False
         self.frozen_paths: tuple[str, ...] | None = None
         self.record_reader: Callable[[str], Awaitable[Outcome]] | None = None
+        self.journal_reader: Callable[[Mapping[str, Any]], Awaitable[Outcome]] | None = None
         self.report_submitter: Callable[[Mapping[str, Any]], Outcome] | None = None
         self.route_submitter: Callable[[Mapping[str, Any]], Awaitable[Outcome]] | None = None
         self.map_reader: Callable[[Mapping[str, Any]], Awaitable[Outcome]] | None = None
@@ -156,6 +158,8 @@ class HarnessTools:
             declared.extend((dict(fusion_tools.DECLARATION), dict(fusion_tools.BATCH_DECLARATION)))
         if self.record_reader is not None:
             declared.append(dict(fusion_tools.READ_RECORD_DECLARATION))
+        if self.journal_reader is not None:
+            declared.append(dict(READ_JOURNAL))
         if self.report_submitter is not None:
             declared.append(dict(fusion_tools.REPORT_DECLARATION))
         if self.route_submitter is not None:
@@ -215,6 +219,7 @@ class HarnessTools:
                 or (name == plan_approval.NAME and self.plan_submitter is not None)
                 or (name in (fusion_tools.NAME, fusion_tools.BATCH_NAME) and (self.fusion_runner is not None or self.fusion_brief_runner is not None))
                 or (name == fusion_tools.READ_RECORD and self.record_reader is not None)
+                or (name == READ_JOURNAL['name'] and self.journal_reader is not None)
                 or (name == fusion_tools.SUBMIT_REPORT and self.report_submitter is not None)
                 or (name == fusion_tools.SUBMIT_ROUTE and self.route_submitter is not None)
                 or (name == fusion_tools.RATE_RECORDS and self.rating_submitter is not None)
@@ -339,6 +344,8 @@ class HarnessTools:
                     else Verdict(DENY, recall_tool.UNAVAILABLE))
         if call.name == fusion_tools.READ_RECORD:
             return Verdict(ALLOW) if self.record_reader is not None else Verdict(DENY, "Fusion Drive is unavailable.")
+        if call.name == READ_JOURNAL['name']:
+            return Verdict(ALLOW) if self.journal_reader is not None else Verdict(DENY, "No active Main recovery journal.")
         if call.name == fusion_tools.READ_MAP:
             return Verdict(ALLOW) if self.map_reader is not None else Verdict(DENY, "No active Fusion project map.")
         if call.name == fusion_tools.SUBMIT_REPORT:
@@ -504,6 +511,10 @@ class HarnessTools:
             if self.rating_submitter is None:
                 return Outcome("Fusion Drive is unavailable.", True)
             return await self.rating_submitter(call.args)
+        if call.name == READ_JOURNAL['name']:
+            if self.journal_reader is None:
+                return Outcome("No active Main recovery journal.", True)
+            return await self.journal_reader(call.args)
         if call.name == fusion_tools.READ_RECORD:
             if self.record_reader is None:
                 return Outcome("Fusion Drive is unavailable.", True)

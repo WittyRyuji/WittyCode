@@ -110,23 +110,26 @@ def test_program_forms_align_in_auto_and_custom_modes_and_api_provider_is_last(q
             await rig.click_text(".snav", "外部程序")
             await rig.wait_for(".program-path")
             geometry = """(() => {
-              const f = document.querySelector('.factory-program'), d = document.querySelector('.program-path');
-              const selectors = [f, d, f.querySelector('h4'), f.querySelector('input'), d.querySelector('.field-label'), d.querySelector('.pathbox')];
+              const f = document.querySelector('.factory-program'), d = document.querySelector('.devin-program');
+              const selectors = [f, d, f.querySelector('.field-label'), d.querySelector('.field-label'), f.querySelector('.pathbox'), d.querySelector('.pathbox')];
               return JSON.stringify(selectors.map(e => { const r = e.getBoundingClientRect(); return {left:r.left, width:r.width, top:r.top, bottom:r.bottom}; }));
             })()"""
             rects = json.loads(await rig.js(geometry))
-            assert abs(rects[0]["left"] - rects[1]["left"]) < 1
-            assert abs(rects[0]["width"] - rects[1]["width"]) < 1
-            assert abs(rects[1]["top"] - rects[0]["bottom"] - 14) < 1
-            assert all(abs(r["left"] - rects[2]["left"]) < 1 for r in rects[3:])
-            assert await rig.js("getComputedStyle(document.querySelector('.factory-program header')).paddingLeft") == "0px"
-            await rig.click(".program-path .segc button", 1)
-            await rig.wait_for('.program-path input[aria-label="Devin 命令行 路径"]')
-            await rig.click('.program-path input[aria-label="Devin 命令行 路径"]')
+            cards, labels, pathboxes = rects[:2], rects[2:4], rects[4:]
+            assert abs(cards[0]["left"] - cards[1]["left"]) < 1
+            assert abs(cards[0]["width"] - cards[1]["width"]) < 1
+            assert abs(cards[1]["top"] - cards[0]["bottom"] - 14) < 1
+            assert abs(labels[0]["left"] - labels[1]["left"]) < 1
+            assert abs(pathboxes[0]["left"] - pathboxes[1]["left"]) < 1
+            assert abs(pathboxes[0]["width"] - pathboxes[1]["width"]) < 1
+            assert all(abs(label["left"] - pathbox["left"]) < 1 for label, pathbox in zip(labels, pathboxes))
+            await rig.click(".devin-program .segc button", 1)
+            await rig.wait_for('.devin-program input[aria-label="Devin 命令行 路径"]')
+            await rig.click('.devin-program input[aria-label="Devin 命令行 路径"]')
             await rig.type("C:\\Apps\\Devin\\devin.exe")
             await rig.press("Enter")
             await wait_for(lambda: rig.core.settings.devin_path == "C:\\Apps\\Devin\\devin.exe")
-            assert await rig.js("(() => { const a=document.querySelector('.program-path .pathbox').getBoundingClientRect(), b=document.querySelector('.program-path input').getBoundingClientRect(); return Math.abs(a.left-b.left)<1 && Math.abs(a.width-b.width)<1 && document.querySelector('.settings-scroll').scrollWidth<=document.querySelector('.settings-scroll').clientWidth; })()")
+            assert await rig.js("(() => { const a=document.querySelector('.devin-program .pathbox').getBoundingClientRect(), b=document.querySelector('.devin-program input').getBoundingClientRect(); return Math.abs(a.left-b.left)<1 && Math.abs(a.width-b.width)<1 && document.querySelector('.settings-scroll').scrollWidth<=document.querySelector('.settings-scroll').clientWidth; })()")
         finally:
             await rig.finish()
 
