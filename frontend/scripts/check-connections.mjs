@@ -13,11 +13,11 @@ for (const live of [false, true]) for (const theme of ["light", "dark"]) {
   const init = live ? fakeBackendScripts({ initDelay: 0, accountDelay: 0, connectionErrors }).scripts : [];
   const page = await openPage(`${index}?scene=done&settings=connections&theme=${theme}&review=0`, { init, width: theme === "light" ? 1500 : 900, height: 950 });
   const clickText = async (selector, text) => {
-    const at = await page.eval(`[...document.querySelectorAll(${JSON.stringify(selector)})].findIndex(e => e.textContent.includes(${JSON.stringify(text)}))`);
+    const at = await page.findText(selector, text);
     assert(at >= 0, `missing ${selector}: ${text}`);
     await page.click(selector, at);
   };
-  const fill = (selector, value) => page.eval(`(() => { const e = document.querySelector(${JSON.stringify(selector)}); const p = e instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype; Object.getOwnPropertyDescriptor(p, 'value').set.call(e, ${JSON.stringify(value)}); e.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  const fill = (selector, value) => page.setInput(selector, value);
   try {
     if (live) {
       await page.waitFor("!!document.querySelector('.sidebar')", 6000);
@@ -139,13 +139,13 @@ for (const theme of ["light", "dark"]) {
   const connectionItems = ["Zeta", "alpha", "Beta"].map((name) => ({ id: `order-${name}`, kind: "skill", name, source: `C:/Users/me/.agents/skills/${name}/SKILL.md`, project: "", config: { path: `C:/Users/me/.agents/skills/${name}/SKILL.md` }, enabled: true, imported: false }));
   const { scripts } = fakeBackendScripts({ initDelay: 0, accountDelay: 0, connectionItems });
   const page = await openPage(`${index}?live=1&theme=${theme}`, { init: scripts, width: theme === "light" ? 1500 : 900, height: 950 });
-  const clickText = async (selector, text) => page.click(selector, await page.eval(`[...document.querySelectorAll(${JSON.stringify(selector)})].findIndex(e => e.textContent.trim() === ${JSON.stringify(text)})`));
+  const clickText = async (selector, text) => page.click(selector, await page.findText(selector, text, { exact: true }));
   try {
     await page.waitFor("!!document.querySelector('.sidebar')", 6000);
     await page.key(",", { code: "Comma", vk: 188, modifiers: 2 });
     await clickText(".snav", "外观");
     await clickText(".segc button", theme === "light" ? "浅色" : "深色");
-    await page.waitFor(`document.documentElement.dataset.theme === '${theme}'`, 3000);
+    await page.waitForCall((name) => document.documentElement.dataset.theme === name, [theme], 3000);
     await clickText(".snav", "插件");
     await page.click('.connection-tabs [data-kind=skill]');
     await page.waitFor("document.querySelectorAll('.connection-row').length === 4", 6000);
@@ -153,7 +153,8 @@ for (const theme of ["light", "dark"]) {
     await page.eval("window.__orderRows = [...document.querySelectorAll('.connection-row')]; true");
     for (const enabled of [false, true, false, true]) {
       await page.click('.connection-row .switch', 1);
-      await page.waitFor(`!document.querySelector('.connection-row .switch').disabled && document.querySelectorAll('.connection-row .switch')[1].getAttribute('aria-checked') === '${enabled}'`, 3000);
+      await page.waitForCall((on) => !document.querySelector('.connection-row .switch').disabled &&
+        document.querySelectorAll('.connection-row .switch')[1].getAttribute('aria-checked') === String(on), [enabled], 3000);
       assert(await page.eval("document.querySelectorAll('.connection-row').length === 4 && __orderRows.every((e, i) => e === document.querySelectorAll('.connection-row')[i])"), "switches keep the same DOM rows in the same order");
       assert.equal(await page.eval("document.querySelector('.connection-tabs [aria-selected=true] .num').textContent"), "4");
     }

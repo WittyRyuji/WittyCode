@@ -66,13 +66,19 @@ export async function openPage(url, { width = 1500, height = 960, port = 0, init
   let id = 0;
   const waiting = new Map();
   const events = [];
+  const contexts = new Map();
   ws.onmessage = (m) => {
     const msg = JSON.parse(m.data);
     if (msg.id && waiting.has(msg.id)) {
       const { resolve, reject } = waiting.get(msg.id);
       waiting.delete(msg.id);
       msg.error ? reject(new Error(msg.error.message)) : resolve(msg.result);
-    } else if (msg.method) events.push(msg);
+    } else if (msg.method) {
+      events.push(msg);
+      if (msg.method === "Runtime.executionContextCreated") contexts.set(msg.params.context.id, msg.params.context);
+      if (msg.method === "Runtime.executionContextDestroyed") contexts.delete(msg.params.executionContextId);
+      if (msg.method === "Runtime.executionContextsCleared") contexts.clear();
+    }
   };
   const send = (method, params = {}) =>
     new Promise((resolve, reject) => {
@@ -87,18 +93,58 @@ export async function openPage(url, { width = 1500, height = 960, port = 0, init
   await send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
   // A background headless target can otherwise become hidden and stop IntersectionObserver/keyboard updates.
   await send("Emulation.setFocusEmulationEnabled", { enabled: true });
-  await send("Page.navigate", { url });
+  const { frameId } = await send("Page.navigate", { url });
 
-  const evalJs = async (expression) => {
-    const r = await send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
+  const resultValue = (r) => {
     if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description ?? r.exceptionDetails.text);
     return r.result.value;
+  };
+  const resultOptions = { returnByValue: true, awaitPromise: true };
+  const evalJs = async (expression) => resultValue(await send("Runtime.evaluate", { expression, ...resultOptions }));
+  // Only repository-owned function definitions cross as code. DOM selectors, text and fixtures are CDP values.
+  const call = async (fn, ...args) => {
+    if (typeof fn !== "function") throw new TypeError("CDP call requires a fixed function");
+    const context = [...contexts.values()].find((c) => c.auxData?.isDefault && c.auxData.frameId === frameId);
+    if (!context) throw new Error("the test page has no main execution context");
+    return resultValue(await send("Runtime.callFunctionOn", {
+      executionContextId: context.id, functionDeclaration: Function.prototype.toString.call(fn),
+      arguments: args.map((value) => ({ value })), ...resultOptions,
+    }));
+  };
+  const waitUntil = async (check, label, timeout) => {
+    const end = Date.now() + timeout;
+    while (Date.now() < end) {
+      if (await check()) return true;
+      await sleep(100);
+    }
+    throw new Error(`timed out waiting for: ${label}`);
+  };
+  const elementRect = (selector, index, scroll) => {
+    const e = document.querySelectorAll(selector)[index];
+    if (!e) return null;
+    if (scroll) e.scrollIntoView({ block: "center" });
+    const r = e.getBoundingClientRect();
+    return { x: r.left, y: r.top, w: r.width, h: r.height };
   };
 
   const page = {
     browserPid: proc.pid,
     send,
-    eval: evalJs,
+    eval: evalJs, // Fixed source strings only. Use call() for any values supplied at runtime.
+    call,
+    async findText(selector, text, { exact = false } = {}) {
+      return call((css, label, strict) => [...document.querySelectorAll(css)].findIndex((e) =>
+        strict ? e.textContent.trim() === label : e.textContent.includes(label)), selector, text, exact);
+    },
+    async setInput(selector, value, { blur = false } = {}) {
+      await call((css, text, unfocus) => {
+        const e = document.querySelector(css);
+        const proto = e instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        Object.getOwnPropertyDescriptor(proto, "value").set.call(e, text);
+        e.dispatchEvent(new Event("input", { bubbles: true }));
+        if (unfocus) e.blur();
+      }, selector, value, blur);
+    },
     events,
     consoleErrors: () => events.filter((e) => e.method === "Runtime.exceptionThrown" || (e.method === "Runtime.consoleAPICalled" && e.params.type === "error")),
     /** the console errors as text, for a failure message */
@@ -113,17 +159,15 @@ export async function openPage(url, { width = 1500, height = 960, port = 0, init
       return this.errorTexts().filter((t) => t.startsWith("CSP violation"));
     },
     async rect(selector, index = 0) {
-      await this.waitFor(`!!document.querySelectorAll(${JSON.stringify(selector)})[${index}]`);
-      const r = await evalJs(
-        `(() => { const e = document.querySelectorAll(${JSON.stringify(selector)})[${index}]; if (!e) return null; e.scrollIntoView({block: "center"}); const r = e.getBoundingClientRect(); return {x: r.left, y: r.top, w: r.width, h: r.height}; })()`,
-      );
+      await this.waitForCall((css, i) => !!document.querySelectorAll(css)[i], [selector, index]);
+      const r = await call(elementRect, selector, index, true);
       if (!r) throw new Error(`no element for ${selector}[${index}]`);
       let previous = r, stable = 0;
       const end = Date.now() + 2500;
       while (Date.now() < end) {
         // Do not await renderer rAF here: an occluded headless window can stop emitting frames.
         await sleep(25);
-        const current = await evalJs(`(() => { const e = document.querySelectorAll(${JSON.stringify(selector)})[${index}]; if (!e) return null; const r = e.getBoundingClientRect(); return {x: r.left, y: r.top, w: r.width, h: r.height}; })()`);
+        const current = await call(elementRect, selector, index, false);
         if (!current) throw new Error(`no element for ${selector}[${index}]`);
         stable = Object.keys(current).every(k => Math.abs(current[k] - previous[k]) < 0.1) ? stable + 1 : 0;
         if (stable >= 2 && current.w > 0 && current.h > 0) return current;
@@ -173,13 +217,11 @@ export async function openPage(url, { width = 1500, height = 960, port = 0, init
     async wait(ms) {
       await sleep(ms);
     },
-    async waitFor(expression, timeout = 8000) {
-      const end = Date.now() + timeout;
-      while (Date.now() < end) {
-        if (await evalJs(`!!(${expression})`)) return true;
-        await sleep(100);
-      }
-      throw new Error(`timed out waiting for: ${expression}`);
+    waitFor(expression, timeout = 8000) {
+      return waitUntil(() => evalJs(`!!(${expression})`), expression, timeout);
+    },
+    waitForCall(fn, args, timeout = 8000) {
+      return waitUntil(() => call(fn, ...args), Function.prototype.toString.call(fn), timeout);
     },
     async shot(file) {
       const r = await send("Page.captureScreenshot", { format: "png" });

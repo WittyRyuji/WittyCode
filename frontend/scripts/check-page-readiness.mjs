@@ -21,6 +21,21 @@ try {
   assert.equal(await second.eval("document.title"), "isolated");
   assert.equal(await first.eval("document.querySelector('.newbtn').textContent"), "New");
   console.log("PASS slow first render and isolated CDP endpoints");
+  const selector = `.input[data-label='draft "A"']`;
+  const note = "First line with 'quotes' and a backslash \\ Second\n新的一行";
+  await first.call((label) => {
+    const input = document.querySelector('.input');
+    input.dataset.label = label;
+    input.addEventListener('input', (event) => { input.dataset.lastInput = event.target.value; });
+  }, 'draft "A"');
+  await first.setInput(selector, note);
+  assert.deepEqual(await first.call((css, fixture) => {
+    const input = document.querySelector(css);
+    return { value: input.value, event: input.dataset.lastInput, fixture };
+  }, selector, { notes: [note], count: 1 }), { value: note, event: note, fixture: { notes: [note], count: 1 } });
+  assert.equal(await second.call(() => document.querySelector('.input') === null), true);
+  assert.equal(await first.findText('.newbtn', 'New', { exact: true }), 0);
+  console.log("PASS CDP data arguments preserve selectors, quotes, line breaks and nested fixtures");
   assert.equal(await first.eval("document.visibilityState"), "visible", "background test pages must still render lazy content");
   assert.equal(await first.eval("document.hasFocus()"), true, "headless keyboard checks need an active page");
   const resting = await first.eval(`(() => {

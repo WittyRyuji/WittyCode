@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hmac
 import logging
-import hashlib
 import os
+import secrets
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -25,6 +26,8 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 LEGACY_TIMEOUT = 12.0
 ATTEMPT = "fusionTitleAttempt"
+# The equality marker is process-local. With a random MAC key it cannot serve as an offline verifier for the API key.
+_FACTORY_TITLE_MARKER_KEY = secrets.token_bytes(32)
 
 
 def source(controller: ChatGPTController, model: str) -> Any:
@@ -32,7 +35,10 @@ def source(controller: ChatGPTController, model: str) -> Any:
     manager = controller.manager
     if model.startswith("factory:"):
         factory = manager.factory
-        return (factory, factory.settings.factory_path, hashlib.sha256(os.environ.get("FACTORY_API_KEY", "").encode()).digest()) if factory else None
+        if factory is None:
+            return None
+        credential = os.environ.get("FACTORY_API_KEY", "").encode()
+        return factory, factory.settings.factory_path, hmac.digest(_FACTORY_TITLE_MARKER_KEY, credential, "sha256")
     if model.startswith("devin:"):
         devin = manager.devin
         account = devin.cached_account() if devin is not None else {}
