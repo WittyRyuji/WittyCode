@@ -22,7 +22,7 @@ from desktop.core.chatgpt.models import ChatGPTModel
 from desktop.core.chatgpt.responses import (
     CallBegun, CallDone, Event, Finished, ItemDone, ReasoningDelta, ReasoningDone, TextDelta, TextDone, read_events,
 )
-from desktop.core.llm import aws, bedrock
+from desktop.core.llm import aws, bedrock, grok
 from desktop.core.llm.anthropic import VERSION, anthropic_body, read_anthropic
 from desktop.core.llm.chat import chat_body, read_chat
 from desktop.core.llm.responses_api import responses_body
@@ -222,22 +222,25 @@ def bedrock_failure(error: ChatGPTError, spec: ApiModelSpec, detail: str) -> Cha
 
 
 class ApiBackend:
-    def __init__(self, providers: Providers, http: HttpClient | None = None) -> None:
+    def __init__(self, providers: Providers, http: HttpClient | None = None, *, grok_subscription: grok.GrokSubscription | None = None) -> None:
         self.providers = providers
         self.http = http or HttpClient()
+        self.grok = grok_subscription
         self._specs: tuple[tuple[int, int], list[ApiModelSpec]] | None = None
 
     def specs(self) -> list[ApiModelSpec]:
         """The providers' models, read again only when their files changed (the loop asks for a window many times a turn)."""
         stamp = self.providers.api_stamp()
         if self._specs is None or self._specs[0] != stamp:
-            self._specs = (stamp, self.providers.api_models())
-        return self._specs[1]
+            self._specs = (stamp, [spec for spec in self.providers.api_models() if not spec.id.startswith(grok.PREFIX)])
+        return self._specs[1] + self.grok.specs() if self.grok is not None else self._specs[1]
 
     def models(self) -> list[ChatGPTModel]:
         return [model_of(spec) for spec in self.specs()]
 
     def spec(self, model_id: str) -> ApiModelSpec | None:
+        if model_id.startswith(grok.PREFIX):
+            return next((spec for spec in self.grok.specs() if spec.id == model_id), None) if self.grok is not None else None
         return next((spec for spec in self.specs() if spec.id == model_id), None) if is_api_model(model_id) else None
 
     async def route(self, spec: ApiModelSpec) -> Route:
@@ -246,6 +249,13 @@ class ApiBackend:
         return route
 
     async def _route_and_protected_key(self, spec: ApiModelSpec) -> tuple[Route, str | None]:
+        if spec.id.startswith(grok.PREFIX):
+            subscription = self.spec(spec.id)
+            if self.grok is None or subscription is None:
+                raise grok.GrokError("这个 Grok 订阅模型当前不可用，请检查登录和模型权限。")
+            token = await self.grok.access_token()
+            return route_of(subscription, token, {}), token  # never use custom provider endpoints or API keys
+
         def build() -> tuple[Route, str | None]:
             key = self.providers.api_key(spec)
             return route_of(spec, key, self.providers.api_headers(spec)), key if spec.key.mode == "protected" else None
@@ -259,7 +269,10 @@ class ApiBackend:
         """Ask the model of the request: its body for the provider's wire format, and the events of the answer."""
         model_id = str(request.get("model") or "")
         spec = self.spec(model_id)
+        subscription = model_id.startswith(grok.PREFIX)
         if spec is None:
+            if subscription:
+                raise grok.GrokError("这个 Grok 订阅模型当前不可用，请检查登录和模型权限。")
             raise ChatGPTError("这个模型已经不在 API Provider 的设置里了：在设置里把它加回去，或换一个模型。", code="api")
         if spec.window is None:
             raise ChatGPTError(f"不知道「{spec.native}」的上下文上限：服务端数据和内置规格表都没有提供。请在设置 › 账号与模型中填写这个模型的上下文窗口后再发送。", code="api")
@@ -274,6 +287,9 @@ class ApiBackend:
             body, read = anthropic_body(request, route), lambda lines: read_anthropic(lines, route.origin)
         else:
             body, read = responses_body(request, route), read_events
+            if subscription:
+                for field in ("prompt_cache_key", "prompt_cache_retention", "service_tier"):
+                    body.pop(field, None)  # OpenAI-specific cache/routing fields
         lines = self.http.stream_lines("POST", route.url, headers=route.headers, json_body=body, timeout=stream_idle_timeout(request))
         guard = _KeyEchoGuard(key) if key else None
         checked = _quiet_sse(lines, guard, route.kind) if guard is not None else None
@@ -289,6 +305,8 @@ class ApiBackend:
                 # Keep safe error details, never the untrusted raw body (including arbitrary property names).
                 safe = ChatGPTError(error.message, status=error.status, code=error.code, request_id=error.request_id,
                                     transient=error.transient, retry_after=error.retry_after)
+            if subscription and (failure := grok.inference_failure(safe)) is not None:
+                raise failure from None
             raise api_failure(safe, spec) from None
         except Exception:
             if key:

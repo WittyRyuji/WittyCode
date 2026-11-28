@@ -35,6 +35,13 @@ export const liveBridge: Bridge = {
     setEnabled: (on) => liveCall("chatgpt.setEnabled", { on }),
     welcomed: () => liveCall("chatgpt.welcomed"),
   },
+  grok: {
+    account: () => liveCall("grok.account"),
+    login: () => liveCall("grok.login"),
+    reopen: () => liveCall("grok.reopen"),
+    cancelLogin: () => liveCall("grok.cancelLogin"),
+    logout: () => liveCall("grok.logout"),
+  },
   providers: {
     save: (draft) => liveCall("providers.save", { draft }),
     remove: async (id) => {

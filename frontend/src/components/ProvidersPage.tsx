@@ -9,6 +9,7 @@ import { CHATGPT_USAGE_URL, chatgptState } from "../lib/chatgpt";
 import type { ApiProvider, DevinAccount, EnvState } from "../types";
 import { Switch } from "./formkit";
 import { FactorySettings } from "./FactorySettings";
+import { GrokCard } from "./GrokCard";
 import { ModelVisibility } from "./ModelVisibility";
 
 function Card({ title, state, tone, children, actions }: { title: string; state: string; tone: "ok" | "warn" | "off" | "busy"; children?: ReactNode; actions?: ReactNode }) {
@@ -264,6 +265,7 @@ export function ProvidersPage() {
     <div className="providers">
       <ChatGPTCard />
       <DevinCard />
+      <GrokCard />
       <FactorySettings />
       <section className="pcard">
         <header className="pcard-head">

@@ -45,6 +45,14 @@ import type {
 } from "./types";
 import type { TestResult } from "./bridge";
 
+export interface GrokAccount {
+  auth: "signed-out" | "signing-in" | "signed-in";
+  /** The short code the user enters in the xAI browser page, never the OAuth device/access/refresh token. */
+  code: string;
+  canOpen: boolean;
+  error: string;
+}
+
 /** AppCore.settings_view(). `devinPath` is what the user set ("" = find it). */
 export interface SettingsView {
   maxOpen: number;
@@ -542,6 +550,11 @@ export interface Calls {
   "chatgpt.setEnabled": { params: { on: boolean }; result: ChatGPTAccount };
   /** the one-time "You're using your ChatGPT plan" note was seen */
   "chatgpt.welcomed": { params: None; result: ChatGPTAccount };
+  "grok.account": { params: None; result: GrokAccount | null };
+  "grok.login": { params: None; result: GrokAccount };
+  "grok.reopen": { params: None; result: GrokAccount };
+  "grok.cancelLogin": { params: None; result: GrokAccount };
+  "grok.logout": { params: None; result: GrokAccount };
   "providers.save": { params: { draft: ProviderDraft }; result: ApiProvider };
   "providers.remove": { params: { id: string }; result: null };
   "providers.test": { params: { draft: ProviderDraft }; result: TestResult };

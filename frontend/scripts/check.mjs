@@ -469,7 +469,9 @@ await page.close();
 
 // accounts and models: WittyCode's own engine, Devin and the API providers, no other program's
 page = await openPage(`${index}?scene=done&settings=providers&theme=dark&review=0`);
-ok("the page has the own-loop providers, Devin and an optional Factory CLI card", await page.eval("document.querySelectorAll('.providers .pcard').length === 4 && document.querySelector('.factory-card').textContent.includes('Factory CLI（可选）')"));
+await page.waitFor("!!document.querySelector('.grok-card')", 3000);
+ok("the page has the own-loop providers, Grok subscription, Devin and optional Factory CLI", await page.eval("document.querySelectorAll('.providers .pcard').length === 5 && document.querySelector('.factory-card').textContent.includes('Factory CLI（可选）')"));
+ok("Grok subscription discloses the OAuth client, Harness path and separate API Key billing", await page.eval("(() => { const text = document.querySelector('.grok-card').textContent; return ['实验性', 'WittyCode Harness', '不会自动改用 API Key', 'Grok Build'].every(s => text.includes(s)); })()"));
 ok("API Provider is the last account/model card", await page.eval("document.querySelector('.providers > .pcard:last-child h4')?.textContent === 'API Provider'"));
 ok("no console errors (accounts page)", page.consoleErrors().length === 0);
 await page.close();
@@ -627,7 +629,8 @@ ok("an empty session moved to a ChatGPT Plan model takes that engine's levels: C
 await page.close();
 
 page = await openPage(`${index}?scene=done&settings=providers&chatgpt=signed-out&theme=dark&review=0`);
-ok("the page has four cards including optional Factory CLI", await page.eval("document.querySelectorAll('.providers .pcard').length === 4"));
+await page.waitFor("!!document.querySelector('.grok-card')", 3000);
+ok("the page has five cards including Grok subscription and optional Factory CLI", await page.eval("document.querySelectorAll('.providers .pcard').length === 5"));
 ok("ChatGPT Plan starts signed out, with OpenAI's wording on a black button", await page.eval("document.querySelector('.pcard:nth-child(1)').textContent.includes('ChatGPT Plan') && document.querySelector('.pcard:nth-child(1) .pstate.off')?.textContent.includes('未登录') && document.querySelector('.pcard:nth-child(1) .btn.chatgpt-btn').textContent.trim() === 'Continue with ChatGPT' && getComputedStyle(document.querySelector('.pcard:nth-child(1) .btn.chatgpt-btn')).backgroundColor === 'rgb(0, 0, 0)'"));
 await page.click(".pcard:nth-child(1) .btn.chatgpt-btn");
 await page.waitFor("document.querySelector('.pcard:nth-child(1)').textContent.includes('正在等你在浏览器里完成登录')", 2000);

@@ -14,6 +14,8 @@ let chatgpt: ChatGPTAccount = { ...CHATGPT_ACCOUNT };
 let devinAttempt = 0;
 let chatgptCancelled = false;
 let chatgptAttempt = 0;
+const noGrok = { auth: "signed-out", code: "", canOpen: false, error: "" } as const;
+let grok: Awaited<ReturnType<Bridge["grok"]["login"]>> = noGrok;
 let maximized = false;
 
 /** The demo machine's environment: a few keys are there, one was set after WittyCode started, the rest are not set. */
@@ -104,6 +106,13 @@ export const mockBridge: Bridge = {
       chatgpt = { ...chatgpt, welcomed: true };
       return { ...chatgpt };
     },
+  },
+  grok: {
+    account: async () => grok,
+    login: async () => (grok = { ...noGrok, auth: "signing-in", code: "DEMO-2048" }),
+    reopen: async () => grok,
+    cancelLogin: async () => (grok = noGrok),
+    logout: async () => (grok = noGrok),
   },
   providers: {
     async save(d) {

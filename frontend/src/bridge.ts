@@ -19,7 +19,7 @@
 //                edits, forgets and restores them; every change is journalled and `undo` takes one back.
 
 import type { ApiProvider, ChatGPTAccount, DevinAccount, EnvState, ProviderDraft, RemoteModel } from "./types";
-import type { Calls } from "./protocol";
+import type { Calls, GrokAccount } from "./protocol";
 
 export interface TestResult {
   ok: boolean;
@@ -49,6 +49,13 @@ export interface Bridge {
     use(clientId: string): Promise<ChatGPTAccount>;
     setEnabled(on: boolean): Promise<ChatGPTAccount>;
     welcomed(): Promise<ChatGPTAccount>;
+  };
+  grok: {
+    account(): Promise<GrokAccount | null>;
+    login(): Promise<GrokAccount>;
+    reopen(): Promise<GrokAccount>;
+    cancelLogin(): Promise<GrokAccount>;
+    logout(): Promise<GrokAccount>;
   };
   providers: {
     save(draft: ProviderDraft): Promise<ApiProvider>;

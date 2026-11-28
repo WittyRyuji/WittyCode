@@ -60,6 +60,7 @@ from desktop.core.catalog import API_PREFIX, Catalog, Target, build_catalog, set
 from desktop.core.chatgpt.errors import ChatGPTError
 from desktop.core.hooks import Hooks
 from desktop.core.llm.backend import is_api_model
+from desktop.core.llm.grok import GrokError, GrokSubscription, PREFIX as GROK_PREFIX
 from desktop.core import files as filetools
 from desktop.core.handoff import AS_TEXT, CarryOption, attachment_text, build_handoff, carry_options, carry_overage, conversation_messages
 from desktop.core.harness import goal as goals
@@ -434,6 +435,7 @@ class AppCore:
         self.factory = factory
         self.devin = devin
         self.chatgpt = chatgpt
+        self.grok: GrokSubscription | None = getattr(getattr(chatgpt, "api", None), "grok", None)
         if chatgpt is not None:
             chatgpt.factory = factory
             chatgpt.devin = devin
@@ -563,6 +565,8 @@ class AppCore:
         if chatgpt is not None:
             chatgpt.add_listener(self._on_event)
             chatgpt.add_account_listener(self._on_chatgpt_account)
+        if self.grok is not None:
+            self.grok.on_models_changed = self._schedule_models
 
     # ------------------------------------------------------------------ plumbing
 
@@ -1108,13 +1112,15 @@ class AppCore:
             if self.chatgpt is None or lister is None:
                 return []
             try:
-                return list(await asyncio.to_thread(lister))
+                return [spec for spec in await asyncio.to_thread(lister) if not spec.id.startswith(GROK_PREFIX)]
             except Exception as error:
                 log.warning("could not read the API providers' models: %s", error)
                 return []
 
         # Some take seconds (the Devin account and its process): asked together, not one after the other.
         factory_models, devin_models, chatgpt_models, api_models = await asyncio.gather(from_factory(), from_devin(), from_chatgpt(), from_providers())
+        if self.grok is not None:
+            api_models.extend(self.grok.specs())
         provider_of = getattr(self.providers, "provider_of", None)
         window_of = getattr(self.providers, "window_of", None)
         self.catalog = build_catalog(
@@ -1220,7 +1226,9 @@ class AppCore:
             self._saved[normalize_folder(folder)] = [row for row in map(_row_from_cache, items if isinstance(items, list) else ()) if row]
         models = self._index.get("models")
         if isinstance(models, list) and not self.catalog.models:
-            items = [m for m in models if isinstance(m, dict) and isinstance(m.get("id"), str)]
+            grok_ids = {spec.id for spec in self.grok.specs()} if self.grok is not None else set()
+            items = [m for m in models if isinstance(m, dict) and isinstance(mid := m.get("id"), str)
+                     and (not mid.startswith(GROK_PREFIX) or mid in grok_ids)]
             if items:
                 self.catalog = Catalog.from_items(items)
         windows = self._index.get("windows")
@@ -4957,6 +4965,37 @@ class AppCore:
         self.emit("accounts", {"chatgpt": account})
         return account
 
+    def _grok_subscription(self) -> GrokSubscription:
+        if self.grok is None:
+            raise AppError("Grok 订阅登录在这个版本里不可用。")
+        return self.grok
+
+    async def _m_grok_account(self, params: dict[str, Any]) -> dict[str, Any] | None:
+        return self.grok.account() if self.grok is not None else None
+
+    async def _m_grok_login(self, params: dict[str, Any]) -> dict[str, Any]:
+        account = self._grok_subscription()
+        account.login()
+        return account.account()
+
+    async def _m_grok_reopen(self, params: dict[str, Any]) -> dict[str, Any]:
+        account = self._grok_subscription()
+        account.reopen()
+        return account.account()
+
+    async def _m_grok_cancelLogin(self, params: dict[str, Any]) -> dict[str, Any]:
+        account = self._grok_subscription()
+        await account.cancel_login()
+        return account.account()
+
+    async def _m_grok_logout(self, params: dict[str, Any]) -> dict[str, Any]:
+        account = self._grok_subscription()
+        try:
+            await account.logout()
+        except GrokError as error:
+            raise AppError(error.message) from None
+        return account.account()
+
     def _providers(self) -> Any:
         if self.providers is None:
             raise AppError("API Provider 功能不可用。")
@@ -5050,6 +5089,8 @@ class AppCore:
         self._close_video_preview()
         for flow in list(self.connectors.flows.values()):
             flow.cancel()
+        if self.grok is not None:
+            await self.grok.cancel_login()
         await asyncio.to_thread(self.skill_marketplace.close)
         if self.memory is not None:
             self.memory.flush_runs()
