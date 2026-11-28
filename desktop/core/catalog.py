@@ -14,7 +14,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from desktop.core.fusion.backends import GUARDED, backend_for
-from desktop.core.providers import EFFORTS
 
 DEVIN_PREFIX = "devin:"
 CHATGPT_PREFIX = "chatgpt:"
@@ -181,7 +180,7 @@ def build_catalog(
             "label": spec.display,
             "source": f"{API_PREFIX}{spec.provider_id}",
             "engine": OWN_ENGINE,
-            "efforts": list(EFFORTS) if spec.reasoning else [],
+            "efforts": list(spec.efforts),
             "defaultEffort": spec.reasoning,
             "window": spec.window or 0,
         }

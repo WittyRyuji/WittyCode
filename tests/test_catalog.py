@@ -3,9 +3,8 @@ the engines' models and the API providers'."""
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 from desktop.core.catalog import Catalog, Target, build_catalog
+from desktop.core.providers import ApiModelSpec, _NO_KEY
 
 
 def test_an_api_models_id_is_translated_by_its_prefix_when_the_list_does_not_know_it():
@@ -60,9 +59,11 @@ def test_an_id_of_an_engine_this_version_does_not_have_runs_nowhere():
 # ------------------------------------------------------------------------------------------------ the API providers' models
 
 
-def spec(model_id: str = "api:p1:custom:Deep-0", **over) -> SimpleNamespace:
-    base = dict(id=model_id, display="Deep", provider_id="p1", window=1_024_000, reasoning="", images=True)
-    return SimpleNamespace(**{**base, **over})
+def spec(model_id: str = "api:p1:custom:Deep-0", **over) -> ApiModelSpec:
+    base = dict(id=model_id, native="deep", display="Deep", provider_id="p1", provider_name="Provider",
+                kind="openai", base_url="https://example.invalid/v1", window=1_024_000, max_output=None,
+                reasoning="", images=True, bearer=False, headers=(), extra_args={}, key=_NO_KEY)
+    return ApiModelSpec(**{**base, **over})
 
 
 def test_an_api_providers_model_is_run_by_the_own_loop_and_its_figures_are_the_users():

@@ -27,7 +27,7 @@ from desktop.core.llm.anthropic import VERSION, anthropic_body, read_anthropic
 from desktop.core.llm.chat import chat_body, read_chat
 from desktop.core.llm.responses_api import responses_body
 from desktop.core.llm.wire import ANTHROPIC, CHAT, RESPONSES, Route, sse_data
-from desktop.core.providers import BEDROCK, EFFORTS, ApiModelSpec, BedrockPlan, ProviderError
+from desktop.core.providers import BEDROCK, ApiModelSpec, BedrockPlan, ProviderError
 
 log = logging.getLogger("desktop.llm")
 
@@ -35,8 +35,6 @@ PREFIX = "api:"
 """What every model id of an API provider starts with (the page's model ids are ``api:<provider id>:<custom id>``)."""
 
 KIND_OF = {"anthropic": ANTHROPIC, "openai": RESPONSES, "generic-chat-completion-api": CHAT}
-LEVELS = EFFORTS
-"""What the reasoning menu offers a model whose entry sets a level (the editor says so too)."""
 
 
 class Providers(Protocol):
@@ -54,7 +52,7 @@ def is_api_model(model_id: str) -> bool:
 def model_of(spec: ApiModelSpec) -> ChatGPTModel:
     """The model as the engine lists it."""
     return ChatGPTModel(
-        spec.id, spec.display, LEVELS if spec.reasoning else (), spec.reasoning, spec.window, f"{spec.provider_name} · {spec.native}", spec.images
+        spec.id, spec.display, spec.efforts, spec.reasoning, spec.window, f"{spec.provider_name} · {spec.native}", spec.images
     )
 
 
@@ -254,7 +252,7 @@ class ApiBackend:
             if self.grok is None or subscription is None:
                 raise grok.GrokError("这个 Grok 订阅模型当前不可用，请检查登录和模型权限。")
             token = await self.grok.access_token()
-            return route_of(subscription, token, {}), token  # never use custom provider endpoints or API keys
+            return route_of(subscription, token, grok.inference_headers(subscription.native)), token
 
         def build() -> tuple[Route, str | None]:
             key = self.providers.api_key(spec)
@@ -288,8 +286,7 @@ class ApiBackend:
         else:
             body, read = responses_body(request, route), read_events
             if subscription:
-                for field in ("prompt_cache_key", "prompt_cache_retention", "service_tier"):
-                    body.pop(field, None)  # OpenAI-specific cache/routing fields
+                grok.prepare_responses(body, request, spec)
         lines = self.http.stream_lines("POST", route.url, headers=route.headers, json_body=body, timeout=stream_idle_timeout(request))
         guard = _KeyEchoGuard(key) if key else None
         checked = _quiet_sse(lines, guard, route.kind) if guard is not None else None

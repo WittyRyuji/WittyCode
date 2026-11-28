@@ -8,7 +8,7 @@ import json
 import re
 import time
 from asyncio import sleep
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -32,6 +32,16 @@ SCOPE = "openid profile email offline_access grok-cli:access api:access"
 DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
 _ENTROPY = b"WittyCode/GrokSubscription/v1"
 _KNOWN_WINDOWS = {"grok-4.7": 500_000, "grok-4.3": 1_000_000, "grok-build": 128_000, "grok-build-0.1": 128_000}
+# https://docs.x.ai/developers/model-capabilities/text/reasoning
+_KNOWN_REASONING = {
+    "grok-4.3": (("off", "low", "medium"), "low"),
+    "grok-4.5": (("low", "medium", "high"), "high"),
+    "grok-4.6": (("low", "medium", "high", "xhigh"), "high"),
+    "grok-4.7": (("low", "medium", "high", "xhigh"), "high"),
+}
+_EFFORTS = ("off", "minimal", "low", "medium", "high", "xhigh")
+# Minimum compatibility version for the subscription proxy (see OpenClaw extensions/xai/stream.ts).
+_PROXY_CLIENT_VERSION = "1.0.13"
 _MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,95}")
 _CREDENTIAL = re.compile(r"[!-~]{16,16384}")
 
@@ -73,17 +83,40 @@ def _tokens(data: dict[str, Any], previous_refresh: str = "") -> _Tokens:
     return _Tokens(access, refresh, int(time.time()) + expires)
 
 
+def _effort(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    level = value.strip().lower()
+    if level == "none":
+        return "off"
+    return level if level in _EFFORTS else ""
+
+
+def _reasoning(model_id: str, listed: tuple[str, ...] | list[str] | None, default: str) -> tuple[tuple[str, ...], str]:
+    known, documented_default = _KNOWN_REASONING.get(model_id.lower().removesuffix("-latest"), ((), ""))
+    if listed is None:
+        levels = known
+    else:
+        normalized = {_effort(value) for value in listed}
+        levels = tuple(level for level in (known or _EFFORTS) if level in normalized)
+    preferred = (_effort(default), documented_default, *levels)
+    return levels, next((level for level in preferred if level in levels), "")
+
+
 @dataclass(frozen=True)
 class _Model:
     id: str
     window: int
     images: bool
+    reasoning_efforts: tuple[str, ...] | list[str] | None = None  # old encrypted records have no catalog metadata
+    default_effort: str = ""
 
     def spec(self) -> ApiModelSpec:
+        efforts, default = _reasoning(self.id, self.reasoning_efforts, self.default_effort)
         return ApiModelSpec(
             id=PREFIX + self.id, native=self.id, display=self.id, provider_id=PROVIDER_ID, provider_name="Grok 订阅",
-            kind="openai", base_url=SUBSCRIPTION_URL, window=self.window, max_output=None, reasoning="", images=self.images,
-            bearer=False, headers=(), extra_args={}, key=_NO_KEY,
+            kind="openai", base_url=SUBSCRIPTION_URL, window=self.window, max_output=None, reasoning=default, images=self.images,
+            bearer=False, headers=(), extra_args={}, key=_NO_KEY, supported_efforts=efforts,
         )
 
 
@@ -108,8 +141,36 @@ def _models(payload: dict[str, Any], access: str) -> tuple[_Model, ...]:
             modalities = row.get("input_modalities")
             images = ("image" in modalities if isinstance(modalities, list)
                       else row.get("supports_images") is True or native in {"grok-4.7", "grok-4.3"})
-            result.setdefault(model, _Model(model, window, images))
+            supports = row.get("supports_reasoning_effort", row.get("supportsReasoningEffort"))
+            listed = row.get("reasoning_efforts", row.get("reasoningEfforts"))
+            efforts = tuple(e for value in listed if (e := _effort(value))) if isinstance(listed, list) else None
+            if supports is False:
+                efforts = ()
+            default = _effort(row.get("default_reasoning_effort", row.get("defaultReasoningEffort")))
+            result.setdefault(model, _Model(model, window, images, efforts, default))
     return tuple(result.values())
+
+
+def inference_headers(model: str) -> dict[str, str]:
+    # This is the proxy's routing protocol, independent of how the app runs the agent or bills API-key models.
+    return {"X-XAI-Token-Auth": "xai-grok-cli", "x-grok-client-version": _PROXY_CLIENT_VERSION, "x-grok-model-override": model}
+
+
+def prepare_responses(body: dict[str, Any], request: Mapping[str, Any], spec: ApiModelSpec) -> None:
+    for field in ("prompt_cache_key", "prompt_cache_retention", "service_tier"):
+        body.pop(field, None)  # OpenAI-specific cache/routing fields
+    reasoning = body.get("reasoning")
+    effort = request.get("wc_reasoning_effort") or (reasoning.get("effort") if isinstance(reasoning, Mapping) else None)
+    if not effort:
+        return  # omit the field to use the subscription model's default
+    level = _effort(effort)
+    if level not in spec.efforts:
+        raise GrokError(f"Grok 订阅模型「{spec.display}」不支持所选思考等级，请换一个档位。")
+    if level == "off":
+        body["reasoning"] = {"effort": "none"}
+        body.pop("include", None)
+    else:
+        body["reasoning"] = {**(reasoning if isinstance(reasoning, Mapping) else {}), "effort": level}
 
 
 class GrokSubscription:
@@ -280,6 +341,7 @@ def inference_failure(error: ChatGPTError) -> ChatGPTError | None:
     texts = {
         401: "Grok 订阅登录不再被接受，请在「账号与模型」退出后重新登录。",
         403: "xAI 拒绝了这个 Grok 订阅请求，请检查账号订阅、地区或该模型的访问权限。未改用 API Key。",
+        426: "xAI 要求更新 Grok 订阅接入（HTTP 426）。请更新 WittyCode；未改用 API Key。",
         429: "Grok 订阅已达到用量上限或暂时被限流。未改用 API Key。",
     }
     if error.status in texts:

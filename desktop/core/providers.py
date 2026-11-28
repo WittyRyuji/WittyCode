@@ -343,6 +343,14 @@ class ApiModelSpec:
     thinking: int | None = None
     """The thought budget of an entry that turned extended thinking on (``enableThinking``, ``thinkingMaxTokens``)."""
     reasoning_args: dict[str, dict[str, Any]] = field(default_factory=dict)
+    supported_efforts: tuple[str, ...] | None = None
+    """Exact provider-specific levels, if known. Custom providers retain the general list."""
+
+    @property
+    def efforts(self) -> tuple[str, ...]:
+        if self.supported_efforts is not None:
+            return self.supported_efforts
+        return EFFORTS if self.reasoning else ()
 
 
 @dataclass(frozen=True)

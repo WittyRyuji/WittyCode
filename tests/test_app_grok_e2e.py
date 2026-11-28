@@ -68,17 +68,36 @@ def test_grok_device_login_model_selection_harness_tools_and_logout(qapp, loop, 
             await rig.wait_text(".menu-head", "GROK 订阅")
             await rig.click_text(".menu-item", "grok-4.7")
             await rig.wait_text(".controls .src-tag", "订阅")
+            await rig.wait_for(".chip-reasoning:not(:disabled)")
+            await rig.click(".chip-reasoning")
+            await rig.wait_text(".menu-item", "XHigh")
+            assert await rig.texts(".menu-item .menu-label") == ["Low", "Medium", "High", "XHigh"]
+            await rig.click_text(".menu-item", "XHigh")
+            await rig.wait_text(".chip-reasoning", "XHigh")
             await rig.send("Read sample.txt")
             await rig.wait_text(".text-block", "Grok saw the local file.")
             assert rig.core.catalog.engine_of(MODEL) == "chatgpt"
             assert len(http.inference) == 3  # title, prompt with tools, and tool output
             for method, url, headers, body in http.inference:
                 assert (method, url, headers["Authorization"], body["model"]) == ("POST", grok.SUBSCRIPTION_URL + "/responses", "Bearer " + ACCESS, "grok-4.7")
+                assert headers["x-grok-model-override"] == "grok-4.7"
+            assert [request[3]["reasoning"]["effort"] for request in http.inference[1:]] == ["xhigh", "xhigh"]
             assert any(item.get("type") == "function_call_output" and "Local sample for Grok." in str(item.get("output"))
                        for item in http.inference[-1][3]["input"])
 
             await rig.press(",", Qt.KeyboardModifier.ControlModifier)
             await rig.wait_for(".settings")
+            await rig.core.call("settings.set", {"key": "fusionWorkers", "value": [MODEL]})
+            await rig.click_text(".snav", "Fusion")
+            picker = f'.fusion-model-row[data-role="worker"][data-model="{MODEL}"] .fusion-effort-picker .selectbox'
+            await rig.wait_text(picker, "默认")
+            await rig.click(picker)
+            await rig.wait_text(".menu-item", "XHigh")
+            assert await rig.texts(".menu-item .menu-label") == ["默认", "Low", "Medium", "High", "XHigh"]
+            if evidence := os.environ.get("WITTYCODE_TEST_EVIDENCE"):
+                await rig.shot(".settings", Path(evidence) / "grok-fusion-effort.png")
+            await rig.click_text(".menu-item", "Medium")
+            await wait_for(lambda: rig.core.settings.fusion_reasoning.get(f"worker:{MODEL}") == "medium", 5, "Fusion worker effort")
             await rig.click_text(".snav", "账号与模型")
             await rig.wait_text(card, "已登录")
             await rig.click_text(f"{card} .btn", "退出登录")

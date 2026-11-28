@@ -9,9 +9,10 @@ from pathlib import Path
 
 import pytest
 
+from desktop.core.catalog import build_catalog
 from desktop.core.chatgpt.errors import ChatGPTError, friendly_failure
 from desktop.core.chatgpt.http import HttpClient, HttpResponse
-from desktop.core.chatgpt.responses import TextDone
+from desktop.core.chatgpt.responses import Shape, TextDone, build_request
 from desktop.core.llm import grok
 from desktop.core.llm.backend import ApiBackend
 from desktop.core.providers import ProviderStore
@@ -127,6 +128,9 @@ def test_device_login_discovers_the_account_models_and_keeps_tokens_out_of_page_
         # Looking up a model spec with a forged base URL/header cannot redirect a subscription bearer.
         route = await backend.route(replace(model, base_url="https://example.invalid", headers=(("Authorization", "wrong"),)))
         assert route.url == grok.SUBSCRIPTION_URL + "/responses" and route.headers["Authorization"] == "Bearer " + ACCESS
+        assert route.headers["X-XAI-Token-Auth"] == "xai-grok-cli"
+        assert route.headers["x-grok-model-override"] == model.native
+        assert route.headers["x-grok-client-version"] == grok._PROXY_CLIENT_VERSION
         events = [e async for e in backend.stream({"model": MODEL, "input": [], "stream": True, "store": False, "service_tier": "priority"})]
         assert any(isinstance(e, TextDone) and e.text == "A subscription answer." for e in events)
         ((method, url, headers, body),) = http.inference
@@ -163,7 +167,7 @@ def test_expiring_token_refreshes_once_for_concurrent_turns_and_rotation_is_pers
     asyncio.run(go())
 
 
-@pytest.mark.parametrize("status", [401, 403, 429])
+@pytest.mark.parametrize("status", [401, 403, 426, 429])
 def test_rejected_subscription_never_sends_the_turn_to_an_api_key_route(tmp_path, status):
     async def go():
         http = FakeGrok()
@@ -176,11 +180,71 @@ def test_rejected_subscription_never_sends_the_turn_to_an_api_key_route(tmp_path
         await sign_in(sub)
         backend = ApiBackend(store, http, grok_subscription=sub)
         assert len(backend.models()) == 2
+        (custom,) = [spec for spec in backend.specs() if spec.id != MODEL]
+        custom_route = await backend.route(custom)
+        assert custom_route.url == "https://api.x.ai/v1/responses"
+        assert not set(grok.inference_headers(custom.native)) & custom_route.headers.keys()
         with pytest.raises(ChatGPTError) as caught:
             _ = [e async for e in backend.stream({"model": MODEL})]
         assert "Grok 订阅" in friendly_failure(caught.value) and ACCESS not in str(caught.value)
         assert caught.value.status == status and caught.value.body is None and caught.value.transient is False
         assert [r[1] for r in http.inference] == [grok.SUBSCRIPTION_URL + "/responses"]
+
+    asyncio.run(go())
+
+
+def test_reasoning_catalog_merges_documented_defaults_and_exact_account_capabilities(tmp_path):
+    http = FakeGrok()
+    # A pre-upgrade encrypted profile gets the documented levels without signing in again.
+    path = tmp_path / "subscription.bin"
+    before = {"tokens": {"access": ACCESS, "refresh": REFRESH, "expires": 2_000_000_000},
+              "models": [{"id": "grok-4.7", "window": 500_000, "images": True}]}
+    path.write_bytes(grok.secret_protection.crypt(json.dumps(before).encode(), entropy=grok._ENTROPY))
+    sub = grok.GrokSubscription(path, open_browser=lambda url: None, http=http)
+    backend = ApiBackend(make_store(tmp_path), http, grok_subscription=sub)
+    offered = build_catalog(api_models=backend.specs()).find(MODEL)
+    assert offered["efforts"] == ["low", "medium", "high", "xhigh"] and offered["defaultEffort"] == "high"
+    (info,) = backend.models()
+    assert info.efforts == tuple(offered["efforts"]) and info.default_effort == "high"
+
+    base = {"api_backend": "responses", "context_window": 200_000}
+    rows = [base | values for values in (
+        {"id": "grok-4.7-latest", "reasoning_efforts": ["xhigh", "medium", "max", "none", "medium", 42], "default_reasoning_effort": "medium"},
+        {"id": "grok-4.7", "supports_reasoning_effort": False},
+        {"id": "grok-4.3"}, {"id": "grok-4.5"}, {"id": "grok-4.6"}, {"id": "other"},
+    )]
+    specs = [model.spec() for model in grok._models({"data": rows}, ACCESS)]
+    assert {spec.native: (spec.efforts, spec.reasoning) for spec in specs} == {
+        "grok-4.7-latest": (("medium", "xhigh"), "medium"), "grok-4.7": ((), ""),
+        "grok-4.3": (("off", "low", "medium"), "low"), "grok-4.5": (("low", "medium", "high"), "high"),
+        "grok-4.6": (("low", "medium", "high", "xhigh"), "high"), "other": ((), ""),
+    }
+
+
+def test_harness_effort_is_sent_unchanged_except_xai_none_and_never_sent_for_invalid_level(tmp_path):
+    async def go():
+        http = FakeGrok()
+        http.rows = reply(200, data=[{"id": "grok-4.7"}, {"id": "grok-4.3"}])
+        sub = grok.GrokSubscription(tmp_path / "subscription.bin", open_browser=lambda url: None, http=http)
+        await sign_in(sub)
+        backend = ApiBackend(make_store(tmp_path), http, grok_subscription=sub)
+        http.responses = [say("OK")] * 5
+        for model, levels in ((MODEL, ("low", "medium", "high", "xhigh")), (grok.PREFIX + "grok-4.3", ("off",))):
+            for effort in levels:
+                request = build_request(model=model, instructions="", items=[], tools=[], reasoning=effort, shape=Shape())
+                _ = [event async for event in backend.stream(request)]
+                _, _, headers, body = http.inference[-1]
+                assert headers["x-grok-model-override"] == body["model"] == model.removeprefix(grok.PREFIX)
+                assert "wc_reasoning_effort" not in body
+                if effort == "off":
+                    assert body["reasoning"] == {"effort": "none"} and "include" not in body
+                else:
+                    assert body["reasoning"] == {"effort": effort, "summary": "auto"}
+        for effort in ("max", "off"):
+            request = build_request(model=MODEL, instructions="", items=[], tools=[], reasoning=effort, shape=Shape())
+            with pytest.raises(grok.GrokError, match="不支持所选思考等级"):
+                _ = [event async for event in backend.stream(request)]
+        assert len(http.inference) == 5
 
     asyncio.run(go())
 
