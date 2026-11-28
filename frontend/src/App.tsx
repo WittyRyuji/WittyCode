@@ -50,7 +50,8 @@ function Main() {
   const say = useStore((s) => s.say);
   const attachFiles = useStore((s) => s.attachFiles);
   const depth = useRef(0);
-  const plan = useMemo(() => latestPlan(session?.turns ?? []), [session?.turns]);
+  const olderPlan = session?.turnHistory?.olderPlan;
+  const plan = useMemo(() => latestPlan(session?.turns ?? [], olderPlan), [session?.turns, olderPlan]);
   const [closedPlans, setClosedPlans] = useState<Set<string>>(() => new Set());
   const planOpen = !!session && !!plan && !inspectorOpen && !closedPlans.has(session.id);
   const [closedTeams, setClosedTeams] = useState<Set<string>>(() => new Set());

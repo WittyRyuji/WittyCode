@@ -168,7 +168,7 @@ class AcpRun:
             self.steps += 1
             if not await self.watcher.before_tools():
                 await self.watcher._refresh_fusion_context(self.history)
-                self.host._save_now(required=True)
+                await self.host._save_durable(required=True)
                 return {"isError": True, "content": [{"type": "text", "text": "Not run: the session rules changed. Review the current instructions before retrying:\n" + self.host.saved.prompt.get("current", "")}]}
             ident = uuid.uuid4().hex
             call = Call(ident, ident, name, json.dumps(args), args)
@@ -179,7 +179,7 @@ class AcpRun:
             self.watcher.history_grew([item])
             try:
                 await self.loop._run_calls(self.history, [call])
-                self.host._save_now(required=True)  # Retain the result before it is returned to ACP.
+                await self.host._save_durable(required=True)  # Retain the result before it is returned to ACP.
             except Exception:
                 self.violation = "The Fusion tool or evidence checkpoint failed; the ACP turn was stopped."
                 self._stop()
@@ -464,7 +464,7 @@ class AcpRun:
                 self.host.saved.origin["fusionAcp"]["previousEmptySession"] = previous_empty
             # Bind the real native session id before any retained-text write.
             self.host._archive_before_handoff()
-            self.host._save_now(required=True)
+            await self.host._save_durable(required=True)
         try:
             await asyncio.wait_for(asyncio.gather(self.guard_seen.wait(), self.bridge_seen.wait()), GUARD_SECONDS)
         except asyncio.TimeoutError:
@@ -550,7 +550,7 @@ class AcpRun:
             if self.host._turn is not None and self.host._turn.user_block is not None and self.host._turn.user_block.text.strip() == "/compact":
                 prompt = "/compact"
             saved["promptAttempted"] = True
-            self.host._save_now(required=True)  # Persist uncertainty before a request could reach the native agent.
+            await self.host._save_durable(required=True)  # Persist uncertainty before a request could reach the native agent.
             self.host._check_fusion_title_source(native_account=self.account)
             self.active = True
             requested = True
@@ -570,7 +570,7 @@ class AcpRun:
             if not self.reported and not self.boundary:
                 raise ChatGPTError("ACP 没有返回报告。", code="fusion_acp_no_report")
             saved["upto"] = len(self.host.saved.items)
-            self.host._save_now(required=True)
+            await self.host._save_durable(required=True)
             return TurnEnd(self.boundary or "done", steps=self.steps)
         except BaseException:
             if resuming and not requested and turn is not None and self._prompt_turn_id != turn.id:

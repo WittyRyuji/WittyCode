@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { ArrowDown, ArrowRightLeft, Copy, HelpCircle, RotateCw, X } from "lucide-react";
 import type { Block, Session, Turn } from "../types";
 import { useStore } from "../store";
@@ -10,7 +10,8 @@ import { ActivityView, TurnActivity } from "./blocks/Activity";
 import { PermissionCard, QuestionCard } from "./blocks/Prompts";
 import { SentAttachments } from "./Attachments";
 import { TurnNav } from "./TurnNav";
-import { activeTurnAt, turnLinks } from "../lib/turnNavigation";
+import { OlderTurns, useOlderTurns } from "./OlderTurns";
+import { readingIndex, turnLinks } from "../lib/turnNavigation";
 import { Menu, type Anchor } from "./ui";
 
 type OpenCopyMenu = (event: MouseEvent<HTMLDivElement>, text: string) => void;
@@ -52,8 +53,8 @@ function ErrorView({ block, sessionId }: { block: Extract<Block, { kind: "error"
   );
 }
 
-function BlockView({ block, turn, sessionId, inlineMedia, onCopyMenu }: {
-  block: Block; turn: Turn; sessionId: string; inlineMedia: boolean; onCopyMenu?: OpenCopyMenu;
+const BlockView = memo(function BlockView({ block, running, sessionId, inlineMedia, onCopyMenu }: {
+  block: Block; running: boolean; sessionId: string; inlineMedia: boolean; onCopyMenu?: OpenCopyMenu;
 }) {
   switch (block.kind) {
     case "user":
@@ -65,7 +66,7 @@ function BlockView({ block, turn, sessionId, inlineMedia, onCopyMenu }: {
         </div>
       ) : null;
     case "activity":
-      return <ActivityView block={block} turnRunning={turn.status === "running"} sessionId={sessionId} />;
+      return <ActivityView block={block} turnRunning={running} sessionId={sessionId} />;
     case "qa":
       return (
         <div className={`block qa${block.cancelled ? " skipped" : ""}`}>
@@ -85,7 +86,7 @@ function BlockView({ block, turn, sessionId, inlineMedia, onCopyMenu }: {
     case "switch":
       return <SwitchView block={block} />;
   }
-}
+});
 
 /** Where the conversation changed engine. States what went along (text) and what did not, so nobody assumes the new
  *  engine remembers the files it never saw. */
@@ -133,19 +134,19 @@ function Footer({ turn, label }: { turn: Turn; label: string }) {
   return text ? <div className={`turnfoot ${turn.status}`}>{text}</div> : null;
 }
 
-export function TurnView({ turn, session, inlineMedia = false, fusionMain = false, onCopyMenu }: {
-  turn: Turn; session: Session; inlineMedia?: boolean; fusionMain?: boolean; onCopyMenu?: OpenCopyMenu;
+export const TurnView = memo(function TurnView({ turn, sessionId, workingLabel = "", inlineMedia = false, fusionMain = false, onCopyMenu }: {
+  turn: Turn; sessionId: string; workingLabel?: string; inlineMedia?: boolean; fusionMain?: boolean; onCopyMenu?: OpenCopyMenu;
 }) {
   const feedback = turn.fusionFeedback;
   const grouped = fusionMain || !!feedback;
   const user = grouped && turn.blocks[0]?.kind === "user" ? turn.blocks[0] : undefined;
   const renderBlock = (b: Block) => (
-    <BlockView key={b.id} block={b} turn={turn} sessionId={session.id} inlineMedia={inlineMedia} onCopyMenu={onCopyMenu} />
+    <BlockView key={b.id} block={b} running={turn.status === "running"} sessionId={sessionId} inlineMedia={inlineMedia} onCopyMenu={onCopyMenu} />
   );
   return (
     <section className={grouped ? "turn fusion-turn" : "turn"} data-turn-id={turn.id}>
       {user && renderBlock(user)}
-      {grouped && <TurnActivity turn={turn} sessionId={session.id} />}
+      {grouped && <TurnActivity turn={turn} sessionId={sessionId} />}
       {feedback && (
         <div className="block fusion-feedback">
           {feedback.opening && <div className="fusion-opening selectable"
@@ -156,11 +157,11 @@ export function TurnView({ turn, session, inlineMedia = false, fusionMain = fals
       {turn.blocks.map((b) => b === user || grouped && b.kind === "activity" ? null : renderBlock(b))}
       {turn.prompts
         .filter((p) => p.status === "pending")
-        .map((p) => (p.kind === "permission" ? <PermissionCard key={p.id} sessionId={session.id} prompt={p} /> : <QuestionCard key={p.id} sessionId={session.id} prompt={p} />))}
-      <Footer turn={turn} label={session.workingLabel} />
+        .map((p) => (p.kind === "permission" ? <PermissionCard key={p.id} sessionId={sessionId} prompt={p} /> : <QuestionCard key={p.id} sessionId={sessionId} prompt={p} />))}
+      <Footer turn={turn} label={workingLabel} />
     </section>
   );
-}
+});
 
 
 export interface ReadingPosition {
@@ -174,6 +175,7 @@ export function Transcript({ session, positions }: { session: Session; positions
   const inner = useRef<HTMLDivElement>(null);
   const position = useRef<ReadingPosition>(positions.get(session.id) ?? { follow: true, top: 0 });
   const restoring = useRef(positions.has(session.id));
+  const prevTop = useRef(0);
   const stick = useRef(position.current.follow);
   const jumpTarget = useRef<number | null>(null);
   const scheduleActive = useRef(() => {});
@@ -188,7 +190,7 @@ export function Transcript({ session, positions }: { session: Session; positions
   const askAboutChatText = useStore((s) => s.askAboutChatText);
   const say = useStore((s) => s.say);
 
-  const openCopyMenu: OpenCopyMenu = (e, body) => {
+  const openCopyMenu = useCallback<OpenCopyMenu>((e, body) => {
     if (e.defaultPrevented || !(e.target instanceof Element)) return;
     if (e.target.closest("button, input, textarea, select, [contenteditable], .inline-media")) return;
     const anchor = { x: e.clientX, y: e.clientY };
@@ -199,7 +201,7 @@ export function Transcript({ session, positions }: { session: Session; positions
     e.stopPropagation();
     // Snapshot before a menu click can change the page selection or streaming updates can replace the text.
     setCopyMenu({ anchor, text: selection || body });
-  };
+  }, []);
   const writeCopy = async (text: string) => {
     try {
       await navigator.clipboard.writeText(text);
@@ -210,25 +212,24 @@ export function Transcript({ session, positions }: { session: Session; positions
   };
 
   const behavior = (smooth: boolean): ScrollBehavior => smooth && !window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "smooth" : "auto";
-  const remember = () => {
+  const nodes = useRef<NodeListOf<HTMLElement> | null>(null);
+  const remember = useCallback((highlight = false) => {
     const el = scroller.current;
-    if (!el || restoring.current) return;
+    if (!el || !inner.current || restoring.current) return;
     const top = jumpTarget.current ?? el.scrollTop;
-    const origin = el.getBoundingClientRect().top;
-    const turns = [...(inner.current?.querySelectorAll<HTMLElement>(":scope > .turn[data-turn-id]") ?? [])];
-    const anchor = [...turns].reverse().find((turn) => turn.getBoundingClientRect().top <= origin + 40) ?? turns[0];
-    position.current = { follow: stick.current, top, ...(anchor ? { anchor: { id: anchor.dataset.turnId!, offset: anchor.getBoundingClientRect().top - origin - (top - el.scrollTop) } } : {}) };
+    const turns = nodes.current ??= inner.current.querySelectorAll<HTMLElement>(":scope > .turn[data-turn-id]");
+    if (stick.current) {
+      position.current = { follow: true, top };
+      if (highlight && jumpTarget.current === null) setActiveId(turns[turns.length - 1]?.dataset.turnId ?? null);
+    } else {
+      const origin = el.getBoundingClientRect().top + top - el.scrollTop;
+      const index = readingIndex(turns.length, (i) => turns[i]!.getBoundingClientRect().top, origin + 40);
+      const anchor = turns[index];
+      position.current = { follow: false, top, ...(anchor && { anchor: { id: anchor.dataset.turnId!, offset: anchor.getBoundingClientRect().top - origin } }) };
+      if (highlight && jumpTarget.current === null) setActiveId(anchor?.dataset.turnId ?? null);
+    }
     positions.set(session.id, position.current);
-  };
-  const syncActive = useCallback(() => {
-    const el = scroller.current;
-    if (!el || !inner.current || jumpTarget.current !== null) return;
-    const turns = [...inner.current.querySelectorAll<HTMLElement>(":scope > .turn[data-turn-id]")];
-    const origin = el.getBoundingClientRect().top - el.scrollTop;
-    const tops = turns.map((turn) => turn.getBoundingClientRect().top - origin);
-    const index = activeTurnAt(tops, el.scrollTop + 40, stick.current || el.scrollHeight - el.scrollTop - el.clientHeight < 48);
-    setActiveId(turns[index]?.dataset.turnId ?? null);
-  }, []);
+  }, [session.id, positions]);
   const applyLayout = () => {
     const el = scroller.current;
     if (!el || !inner.current) return;
@@ -241,14 +242,14 @@ export function Transcript({ session, positions }: { session: Session; positions
       }
     } else if (restoring.current || (sizeChanged && jumpTarget.current === null)) {
       const saved = position.current;
-      const anchor = [...inner.current.querySelectorAll<HTMLElement>(":scope > .turn[data-turn-id]")].find((turn) => turn.dataset.turnId === saved.anchor?.id);
+      const anchor = saved.anchor && inner.current.querySelector<HTMLElement>(`:scope > .turn[data-turn-id="${CSS.escape(saved.anchor.id)}"]`);
       const top = anchor && saved.anchor ? el.scrollTop + anchor.getBoundingClientRect().top - el.getBoundingClientRect().top - saved.anchor.offset : saved.top;
       el.scrollTo({ top, behavior: "instant" });
     }
     restoring.current = false;
     measured.current = { content: el.scrollHeight, viewport: el.clientHeight };
-    remember();
-    syncActive();
+    prevTop.current = el.scrollTop;
+    remember(true);
   };
   const toEnd = (smooth = false) => {
     const el = scroller.current;
@@ -264,7 +265,7 @@ export function Transcript({ session, positions }: { session: Session; positions
   };
   const jumpTo = (id: string) => {
     const el = scroller.current;
-    const turn = [...(inner.current?.querySelectorAll<HTMLElement>(":scope > .turn[data-turn-id]") ?? [])].find((item) => item.dataset.turnId === id);
+    const turn = inner.current?.querySelector<HTMLElement>(`:scope > .turn[data-turn-id="${CSS.escape(id)}"]`);
     if (!el || !turn) return;
     restoring.current = false;
     const top = Math.max(0, Math.min(el.scrollHeight - el.clientHeight, el.scrollTop + turn.getBoundingClientRect().top - el.getBoundingClientRect().top - 28));
@@ -277,10 +278,7 @@ export function Transcript({ session, positions }: { session: Session; positions
   };
 
   // The parent owns positions across keyed transcript mounts; restore before the first paint, not after a flash at the end.
-  useLayoutEffect(() => {
-    applyLayout();
-    return () => remember();
-  }, [session.id]);
+  useLayoutEffect(() => () => remember(), [remember]);
 
   useEffect(() => {
     const el = inner.current;
@@ -291,7 +289,7 @@ export function Transcript({ session, positions }: { session: Session; positions
       if (frame) return;
       frame = requestAnimationFrame(() => {
         frame = 0;
-        syncActive();
+        remember(true);
       });
     };
     const ro = new ResizeObserver(applyLayout);
@@ -303,10 +301,23 @@ export function Transcript({ session, positions }: { session: Session; positions
       cancelAnimationFrame(frame);
       window.clearTimeout(scrollTimer.current);
     };
-  }, [session.id, syncActive]);
+  }, [session.id, remember]);
 
-  // A cached/live replacement may change IDs without changing any measured height.
-  useLayoutEffect(() => applyLayout(), [session.turns]);
+  // ResizeObserver handles streaming height changes. Reset the node list once when its membership can change.
+  const first = session.turns[0]?.id;
+  const last = session.turns.at(-1)?.id;
+  useLayoutEffect(() => {
+    nodes.current = null;
+    applyLayout();
+  }, [first, last, session.turns.length, session.turnHistory?.generation]);
+
+  const older = useOlderTurns(session.id, undefined, session.turnHistory, first);
+  const loadOlder = () => older.load(() => {
+    stick.current = false;
+    setAway(true);
+    jumpTarget.current = null;
+    remember(true);
+  });
 
   useEffect(() => {
     const end = () => toEnd(true);
@@ -321,11 +332,13 @@ export function Transcript({ session, positions }: { session: Session; positions
       applyLayout();
       return;
     }
+    const up = el.scrollTop < prevTop.current;
+    prevTop.current = el.scrollTop;
     if (jumpTarget.current !== null && Math.abs(el.scrollTop - jumpTarget.current) < 2) jumpTarget.current = null;
     if (jumpTarget.current === null && !restoring.current) {
       stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
       setAway(!stick.current);
-      remember();
+      if (up && el.scrollTop < 48) loadOlder();
       scheduleActive.current();
     }
     setScrolling(true);
@@ -338,8 +351,12 @@ export function Transcript({ session, positions }: { session: Session; positions
   return (
     <div className="stage">
       <TurnNav links={links} activeId={activeId} onSelect={jumpTo} />
-      <div ref={scroller} className={`scroller${scrolling ? " is-scrolling" : ""}`} onScroll={onScroll} onWheel={() => { jumpTarget.current = null; }} onPointerDown={() => { jumpTarget.current = null; }}>
+      <div ref={scroller} className={`scroller${scrolling ? " is-scrolling" : ""}`} onScroll={onScroll} onWheel={(event) => {
+        jumpTarget.current = null;
+        if (event.deltaY < 0 && event.currentTarget.scrollTop < 48) loadOlder();
+      }} onPointerDown={() => { jumpTarget.current = null; }}>
         <div ref={inner} className="transcript">
+          {older.canLoad && <OlderTurns loading={older.loading} onLoad={loadOlder} />}
           {empty ? (
             <div className="welcome">
               <div className="welcome-title">会话已就绪</div>
@@ -355,7 +372,7 @@ export function Transcript({ session, positions }: { session: Session; positions
           ) : (
             <>
               {session.turns.map((t) => (
-                <TurnView key={t.id} turn={t} session={session} inlineMedia={!!session.mark} fusionMain={session.fusion} onCopyMenu={openCopyMenu} />
+                <TurnView key={t.id} turn={t} sessionId={session.id} workingLabel={t.status === "running" ? session.workingLabel : undefined} inlineMedia={!!session.mark} fusionMain={session.fusion} onCopyMenu={openCopyMenu} />
               ))}
               {preparing && (
                 <section className="turn preparing-turn">

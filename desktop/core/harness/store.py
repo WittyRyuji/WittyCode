@@ -28,6 +28,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from threading import RLock
 from typing import Any
 
 from desktop.core.diffs import DiffLine, FileDiff
@@ -506,6 +507,7 @@ def _write(path: Path, data: Any) -> None:
 class SessionStore:
     def __init__(self, root: str | os.PathLike[str]) -> None:
         self.root = Path(root)
+        self._index_lock = RLock()  # All in-process writes/rebuilds of this index are one read-modify-write operation.
 
     def _path(self, session_id: str) -> Path:
         if not _ID.match(session_id):
@@ -542,15 +544,19 @@ class SessionStore:
             handle.close()
 
     def save(self, session: SavedSession) -> None:
-        _write(self._path(session.id), _session_json(session))
-        index = self._index()
-        index[session.id] = self._row_json(session)
-        self._write_index(index)
+        with self._index_lock:
+            _write(self._path(session.id), _session_json(session))
+            index = self._index()
+            index[session.id] = self._row_json(session)
+            self._write_index(index)
 
     def load(self, session_id: str) -> SavedSession | None:
         """The conversation as it was saved, a turn the application did not live to end included (``recover``)."""
         try:
-            raw = json.loads(self._path(session_id).read_text(encoding="utf-8"))
+            # Windows readers without delete sharing can otherwise block the worker's atomic replace.
+            with self._index_lock:
+                text = self._path(session_id).read_text(encoding="utf-8")
+            raw = json.loads(text)
         except (OSError, ValueError):
             return None
         return _session_from(raw)
@@ -560,34 +566,38 @@ class SessionStore:
 
         Never act on an ordinary archive or on a checkpoint with model/tool output, even if the caller is mistaken.
         """
-        saved = self.load(session_id)
-        if (saved is None or saved.origin.get(FIRST_PROMPT) is not True or len(saved.turns) != 1
-                or saved.turns[0].status != "running" or saved.turns[0].start != 0
-                or len(saved.items) != 1 or saved.items[0].get("role") != "user"):
-            return
-        index = self._index()  # take the existing index before unlinking, so it need not be rebuilt for this removal
-        self._path(session_id).unlink()
-        index.pop(session_id, None)
-        self._write_index(index)
+        with self._index_lock:
+            saved = self.load(session_id)
+            if (saved is None or saved.origin.get(FIRST_PROMPT) is not True or len(saved.turns) != 1
+                    or saved.turns[0].status != "running" or saved.turns[0].start != 0
+                    or len(saved.items) != 1 or saved.items[0].get("role") != "user"):
+                return
+            index = self._index()  # take the existing index before unlinking, so it need not be rebuilt for this removal
+            self._path(session_id).unlink()
+            index.pop(session_id, None)
+            self._write_index(index)
 
     def delete(self, session_id: str) -> None:
-        try:
-            self._path(session_id).unlink()
-        except OSError:
-            pass
-        if not self._path(session_id).exists():
-            from desktop.core.harness.tools import ToolError
+        with self._index_lock:
             try:
-                self.outputs(session_id).delete()
-            except (OSError, ToolError):
-                log.warning("could not delete retained outputs", exc_info=True)
-        index = self._index()
-        if index.pop(session_id, None) is not None:
-            self._write_index(index)
+                self._path(session_id).unlink()
+            except OSError:
+                pass
+            if not self._path(session_id).exists():
+                from desktop.core.harness.tools import ToolError
+                try:
+                    self.outputs(session_id).delete()
+                except (OSError, ToolError):
+                    log.warning("could not delete retained outputs", exc_info=True)
+            index = self._index()
+            if index.pop(session_id, None) is not None:
+                self._write_index(index)
 
     def rows(self, project: str | None = None, limit: int | None = None) -> list[SavedRow]:
         rows = []
-        for session_id, raw in self._index().items():
+        with self._index_lock:
+            index = self._index()
+        for session_id, raw in index.items():
             if raw.get("fusion_expert") is True:
                 continue
             if project is not None and not same_folder(raw.get("project", ""), project):

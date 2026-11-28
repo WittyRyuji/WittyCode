@@ -39,7 +39,7 @@ import type {
   SessionSettings,
   Speed,
   ThemeChoice,
-  Turn,
+  TurnHistory,
   TurnUpdate,
   Usage,
 } from "./types";
@@ -407,7 +407,7 @@ export interface Calls {
   "connections.test": { params: { projectId?: string; id: string }; result: { ok: boolean; text: string; tools: string[] } };
   "factory.account": { params: { refresh?: boolean }; result: FactoryState };
   "factory.configure": { params: { path: string; enabled?: boolean } | { path?: string; enabled: boolean }; result: FactoryState };
-  "app.init": { params: None; result: InitResult };
+  "app.init": { params: { turnWindow?: boolean }; result: InitResult };
   /** no path: Python asks with the folder dialog; `added` false when the user cancelled */
   "project.add": { params: { path?: string }; result: { added: boolean; id?: string } };
   "project.remove": { params: { id: string }; result: null };
@@ -419,6 +419,7 @@ export interface Calls {
   /** `fromId`: the conversation whose project to use when there is no `projectId` */
   "session.new": { params: { projectId?: string; modelId?: string; fromId?: string; settings?: SessionSettings; fusion?: boolean }; result: { id: string | null } };
   "session.openSaved": { params: { id: string; projectId: string; title?: string }; result: { id: string | null } };
+  "session.olderTurns": { params: { id: string; agentId?: string; generation: number; before: string }; result: { loaded: boolean } };
   "session.reorder": { params: { projectId: string; id: string; targetId: string; after: boolean }; result: { ok: boolean } };
   "session.pin": { params: { projectId: string; id: string; pinned: boolean }; result: { ok: boolean } };
   "session.close": { params: { id: string }; result: null };
@@ -574,6 +575,17 @@ export interface Calls {
 }
 export type Method = keyof Calls;
 
+/** `all` replaces the display window; `prepend` adds a self-contained older page; other events update or append. */
+interface TurnEvent {
+  id: string;
+  turns: TurnUpdate[];
+  all: boolean;
+  prepend?: boolean;
+  /** Drop this many already displayed turns from the top before appending to the default window. */
+  trim?: number;
+  history?: TurnHistory;
+}
+
 export interface Events {
   /** Throttled JPEG frames and playback state (milliseconds); delivered directly to the video component. */
   "files.video": VideoUpdate;
@@ -589,10 +601,8 @@ export interface Events {
   defaults: { defaults: SessionSettings };
   /** merge `patch` into the conversation `id` */
   session: { id: string; patch: Partial<ConversationMeta> };
-  /** the run of the sub-agent that is open in the side panel: all of it (`all`), or the turns that changed */
-  agentTurns: { id: string; agentId: string; turns: Turn[]; all: boolean };
-  /** `all`: these are all of its turns; otherwise the ones that changed (new ones come last) */
-  turns: { id: string; turns: TurnUpdate[]; all: boolean };
+  agentTurns: TurnEvent & { agentId: string };
+  turns: TurnEvent;
   /** a message with attachments whose turn failed goes back into the composer */
   restore: { id: string; text: string; attachments: AttachmentView[] };
   settings: { settings: SettingsView };

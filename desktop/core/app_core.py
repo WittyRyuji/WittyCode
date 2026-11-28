@@ -109,6 +109,7 @@ from desktop.core.speed import speed_of
 from desktop.core.usage import Tokens, UsageLedger
 from desktop.core.viewmodel import attachment_json, context_json, turn_json, usage_json
 from desktop.core.turn_delta import changed_blocks
+from desktop.core.turn_window import TurnWindow, view_window
 
 log = logging.getLogger("desktop.app")
 
@@ -296,6 +297,7 @@ class Conversation:
     naming: bool = False
     sent_ids: list[str] = field(default_factory=list)
     sent_versions: dict[str, int] = field(default_factory=dict)
+    turn_window: TurnWindow = field(default_factory=view_window)
     meta: dict[str, Any] = field(default_factory=dict)
     drafts: list[Attachment] = field(default_factory=list)
     inflight: tuple[Any, str, tuple[Attachment, ...]] | None = None
@@ -324,6 +326,9 @@ class Conversation:
     preview: bool = False
     """The page shows the cached conversation while the real history is still being loaded."""
     cached_turns: list[dict[str, Any]] = field(default_factory=list)
+    cached_prefix: int = 0
+    cached_cursor: tuple[str, str] | None = None
+    cached_older_plan: dict[str, Any] | None = None
     cached_meta: dict[str, Any] = field(default_factory=dict)
     """Settings, token use and context size as they were when the session was last cached: shown until the live ones are known."""
     json_cache: dict[str, tuple[int, dict[str, Any]]] = field(default_factory=dict)
@@ -345,6 +350,7 @@ class Conversation:
     """The sub-agent whose run the page's side panel shows (its thread id): only that one is pushed to the page."""
     agent_sent_ids: list[str] = field(default_factory=list)
     agent_sent_versions: dict[str, int] = field(default_factory=dict)
+    agent_window: TurnWindow = field(default_factory=view_window)
 
     @property
     def engine(self) -> str:
@@ -510,6 +516,7 @@ class AppCore:
         self._index: dict[str, Any] = {}
         self._index_handle: asyncio.TimerHandle | None = None
         self._hydrated = False
+        self._paged_turns = False  # opt-in at app.init so a previously built desktop page still works
         self._preview: dict[str, Any] | None = None
         self._windows: dict[str, int] = {}
         """Context window of each model (page model id) as a live session last reported it: kept in the cache so that
@@ -1386,6 +1393,14 @@ class AppCore:
         """The conversation as it was last time, at once; the real history replaces it when the engine has loaded it."""
         conv.preview = True
         conv.cached_turns = list(snapshot["turns"])
+        conv.cached_cursor = None
+        conv.cached_prefix = 0
+        conv.cached_older_plan = None
+        if isinstance(snapshot.get("offsets"), list) and isinstance(snapshot.get("stamp"), str) and isinstance(snapshot.get("key"), str):
+            conv.cached_cursor = snapshot["key"], snapshot["stamp"]
+            offset = snapshot.get("pageStart")
+            conv.cached_prefix = offset if type(offset) is int and offset > 0 else 0
+            conv.cached_older_plan = snapshot.get("olderPlan")
         conv.cached_meta = dict(snapshot.get("meta") or {})
         conv.sent_ids = ["preview"]  # whatever is sent next replaces the list instead of adding to it
         patch = {
@@ -1400,16 +1415,22 @@ class AppCore:
             "pinned": conv.sidebar_key in self.settings.pinned_sessions,
         }
         self.emit("session", {"id": conv.cid, "patch": patch})
-        self.emit("turns", {"id": conv.cid, "turns": list(snapshot["turns"]), "all": True})
+        if self._paged_turns:
+            self._flush_window(conv, cached=True)
+        else:
+            self.emit("turns", {"id": conv.cid, "turns": conv.cached_turns, "all": True})
 
     # ------------------------------------------------------------------ init
 
     async def _m_app_init(self, params: dict[str, Any]) -> dict[str, Any]:
         self._close_video_preview()  # reloading the page may skip the old player's React cleanup
         first_init = not self._hydrated
+        self._paged_turns = params.get("turnWindow") is True
         self._hydrate()
         for conv in self.order:  # a page that has just (re)started knows nothing of the open conversations yet
             conv.meta, conv.sent_ids, conv.sent_versions, conv.dirty = {}, [], {}, True
+            conv.turn_window.reset()
+            conv.agent_window.reset()
         self._schedule_flush()
         for folder in list(self.settings.projects):
             self._spawn(self._reload_project(folder), quiet=True)
@@ -1804,8 +1825,8 @@ class AppCore:
         handoff = getattr(controller, "handoff", None)
         plan = getattr(getattr(controller, "saved", None), "plan", {})
         pending_plan = ({"id": plan["id"], "text": plan["text"]}
-                        if isinstance(plan, dict) and plan.get("status") == "pending" and settings.get("mode") == "spec"
-                        and isinstance(plan.get("id"), str) and isinstance(plan.get("text"), str) else None)
+                        if controller.state is SessionState.READY and isinstance(plan, dict) and plan.get("status") == "pending"
+                        and settings.get("mode") == "spec" and isinstance(plan.get("id"), str) and isinstance(plan.get("text"), str) else None)
         if pending_plan is not None and isinstance(plan.get("warning"), str) and plan["warning"]:
             pending_plan["warning"] = plan["warning"]
         active = datetime.fromtimestamp(controller.active_at, timezone.utc)
@@ -1881,34 +1902,43 @@ class AppCore:
         turns = transcript.turns
         # Keep the local history through connection failures as well as loading. An error turn is not loaded history.
         hold = conv.preview and (controller.state is SessionState.OPENING or not getattr(controller, "_history_loaded", True))
-        if hold and not conv.sent_ids:  # a reloaded page needs the local history again, even while still offline
-            self.emit("turns", {"id": conv.cid, "turns": conv.cached_turns, "all": True})
-            conv.sent_ids = ["preview"]
-        if conv.preview and not hold:
+        promoting_preview = conv.preview and not hold
+        if promoting_preview:
             conv.preview = False
             conv.cached_turns = []
-        ids = [turn.id for turn in turns]
-        replace = ids[: len(conv.sent_ids)] != conv.sent_ids
-        if replace:
-            conv.sent_versions = {}
-        changed = [t for t in turns if conv.sent_versions.get(t.id) != t.version]
-        if (changed or replace) and not hold and conv.switch_task is None:
-            built = []
-            for turn in changed:
-                previous = conv.json_cache.get(turn.id) if not replace else None
-                if previous is not None and previous[0] != conv.sent_versions.get(turn.id):
-                    previous = None  # A cache write may have rebuilt this turn before the page received it.
-                entry = (turn.version, turn_json(turn, self._thumb))
-                conv.json_cache[turn.id] = entry
-                built.append(changed_blocks(entry[1], previous[1] if previous is not None else None))
-            payload = {"id": conv.cid, "turns": built, "all": replace}
-            conv.sent_ids = ids
-            for turn in changed:
-                conv.sent_versions[turn.id] = turn.version
+            conv.cached_cursor = None
+            conv.cached_prefix = 0
+            conv.cached_older_plan = None
+        if getattr(self, "_paged_turns", False):
+            if hold or conv.switch_task is None:
+                self._flush_window(conv, cached=hold, preserve_expansion=promoting_preview)
+        elif hold:
+            if not conv.sent_ids:  # a reloaded legacy page also needs the preview again
+                self.emit("turns", {"id": conv.cid, "turns": conv.cached_turns, "all": True})
+                conv.sent_ids = ["preview"]
+        elif conv.switch_task is None:
+            ids = [turn.id for turn in turns]
+            replace = ids[: len(conv.sent_ids)] != conv.sent_ids
             if replace:
-                conv.json_cache = {i: conv.json_cache[i] for i in ids if i in conv.json_cache}
-            self.emit("turns", payload)
-            self._mark_cache_dirty(conv)
+                conv.sent_versions = {}
+            changed = [t for t in turns if conv.sent_versions.get(t.id) != t.version]
+            if changed or replace:
+                built = []
+                for turn in changed:
+                    previous = conv.json_cache.get(turn.id) if not replace else None
+                    if previous is not None and previous[0] != conv.sent_versions.get(turn.id):
+                        previous = None  # A cache write may have rebuilt this turn before the page received it.
+                    entry = (turn.version, turn_json(turn, self._thumb))
+                    conv.json_cache[turn.id] = entry
+                    built.append(changed_blocks(entry[1], previous[1] if previous is not None else None, legacy=True))
+                payload = {"id": conv.cid, "turns": built, "all": replace}
+                conv.sent_ids = ids
+                for turn in changed:
+                    conv.sent_versions[turn.id] = turn.version
+                if replace:
+                    conv.json_cache = {i: conv.json_cache[i] for i in ids if i in conv.json_cache}
+                self.emit("turns", payload)
+                self._mark_cache_dirty(conv)
         meta = self._session_meta(conv)
         self._note_run(conv)
         patch = {key: value for key, value in meta.items() if conv.meta.get(key, _MISSING) != value}
@@ -1922,6 +1952,70 @@ class AppCore:
             self._mark_cache_dirty(conv)  # (it only schedules the write once the session is idle)
         self._flush_agent(conv)
         self._settle_inflight(conv)
+
+    def _window_turn(self, conv: Conversation, turn: Any) -> dict[str, Any]:
+        if isinstance(turn, dict):  # self-contained cache preview
+            return turn
+        entry = conv.json_cache.get(turn.id)
+        if entry is None or entry[0] != turn.version:
+            entry = (turn.version, turn_json(turn, self._thumb))
+            conv.json_cache[turn.id] = entry
+        return entry[1]
+
+    def _flush_window(self, conv: Conversation, *, cached: bool, preserve_expansion: bool = False) -> None:
+        source = conv.cached_turns if cached else conv.controller.transcript.turns
+        window = conv.turn_window
+        # A different source can reuse the same ids and versions (preview, history restore, engine handoff).
+        if not cached and window.source is not source:
+            conv.json_cache.clear()
+        payload = window.sync(source, lambda turn: self._window_turn(conv, turn),
+                              earlier_on_disk=conv.cached_prefix if cached else 0, preserve_expansion=preserve_expansion)
+        if payload is None:
+            return
+        if payload["all"] or payload.get("trim"):
+            plan = None
+            for i in range(window.start - 1, -1, -1):
+                turn = source[i]
+                if cached:
+                    plan = turn.get("plan")
+                elif turn.plan is not None:
+                    plan = {"id": turn.plan.id, "steps": [{"text": step.text, "state": step.status} for step in turn.plan.steps]}
+                if plan is not None:
+                    break
+            payload["history"]["olderPlan"] = conv.cached_older_plan if cached and plan is None else plan
+        self.emit("turns", {"id": conv.cid, **payload})
+        if not cached:
+            self._mark_cache_dirty(conv)
+
+    async def _m_session_olderTurns(self, params: dict[str, Any]) -> dict[str, bool]:
+        conv = self._conversation(params["id"])
+        if not self._paged_turns:
+            return {"loaded": False}
+        agent_id = params.get("agentId")
+        if agent_id is not None:
+            agent = (getattr(conv.controller, "agents", None) or {}).get(agent_id) if agent_id == conv.watching else None
+            if agent is None:
+                return {"loaded": False}
+            payload = conv.agent_window.older(agent.transcript.turns, lambda turn: turn_json(turn, self._thumb),
+                                              generation=params.get("generation"), before=params.get("before"))
+            if payload is not None:
+                self.emit("agentTurns", {"id": conv.cid, "agentId": agent_id, **payload})
+        else:
+            source = conv.cached_turns if conv.preview else conv.controller.transcript.turns
+            window = conv.turn_window
+            generation, before = params.get("generation"), params.get("before")
+            render = lambda turn: self._window_turn(conv, turn)
+            payload = window.older(source, render, generation=generation, before=before)
+            if payload is None and conv.preview and conv.cached_cursor is not None and conv.cached_prefix > 0 and window.accepts(source, generation, before):
+                offset = conv.cached_prefix
+                page = await asyncio.to_thread(self.cache.load_session_page, *conv.cached_cursor, offset)
+                if (page is not None and conv.preview and self._by_cid.get(conv.cid) is conv
+                        and conv.cached_prefix == offset and window.accepts(source, generation, before)):
+                    payload = window.prepend_disk(source, page, render)
+                    conv.cached_prefix = window.earlier_on_disk
+            if payload is not None:
+                self.emit("turns", {"id": conv.cid, **payload})
+        return {"loaded": payload is not None}
 
     @staticmethod
     def _failed_queue_turn(conv: Conversation) -> Turn | None:
@@ -2265,7 +2359,8 @@ class AppCore:
         Its token ledger is used whatever its age: only the part after the ledger's last figure is added."""
         if not self.cache.enabled:
             return None, None
-        snapshot = await asyncio.to_thread(self.cache.load_session, row_id)
+        load = self.cache.load_session_preview if self._paged_turns else self.cache.load_session
+        snapshot = await asyncio.to_thread(load, row_id)
         if not snapshot:
             return None, None
         if not snapshot.get("turns"):
@@ -2920,6 +3015,11 @@ class AppCore:
             conv.watching = None
             return
         turns = agent.transcript.turns
+        if self._paged_turns:
+            payload = conv.agent_window.sync(turns, lambda turn: turn_json(turn, self._thumb))
+            if payload is not None:
+                self.emit("agentTurns", {"id": conv.cid, "agentId": agent_id, **payload})
+            return
         ids = [turn.id for turn in turns]
         replace = ids[: len(conv.agent_sent_ids)] != conv.agent_sent_ids
         if replace:
@@ -2945,13 +3045,15 @@ class AppCore:
                 except Exception as error:
                     raise AppError("专家上下文无法恢复，原记录仍保留；不会自动创建新的专家。") from error
         conv.watching = agent_id
-        conv.agent_sent_ids, conv.agent_sent_versions = ["fresh"], {}  # the first push is the whole run, replacing the panel's
+        conv.agent_sent_ids, conv.agent_sent_versions = ["fresh"], {}  # legacy panel requires an initial replacement
+        conv.agent_window.reset()
         self._flush_agent(conv)
         return {"ok": True}
 
     async def _m_agents_unwatch(self, params: dict[str, Any]) -> dict[str, Any]:
         conv = self._conversation(params["id"])
         conv.watching = None
+        conv.agent_window.reset()
         return {"ok": True}
 
     def _queued_json(self, conv: Conversation) -> list[dict[str, Any]]:

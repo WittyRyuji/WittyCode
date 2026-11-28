@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import json
 import logging
 import random
@@ -160,7 +161,7 @@ class Observer:
         """Ask the user about ``call``: ``proceed_once``, ``proceed_always`` or anything else for no."""
         return "cancel"
 
-    def call_running(self, call: Call) -> None: ...
+    def call_running(self, call: Call) -> Awaitable[None] | None: ...
 
     def call_done(self, call: Call, outcome: Outcome) -> None: ...
 
@@ -673,7 +674,9 @@ class AgentLoop:
                 index = end
         except BaseException:
             for task in tasks:
-                task.cancel()
+                # A cancelled gather has already signalled its children. Don't interrupt their durable stop cleanup.
+                if not task.done() and not task.cancelling():
+                    task.cancel()
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
             # Keep completed concurrent reads, and pair every unfinished call without executing it again. A failed
@@ -743,7 +746,9 @@ class AgentLoop:
             if answer == "proceed_always":
                 self.tools.remember(call)
         self.observer.working("running_tool")
-        self.observer.call_running(call)
+        checkpoint = self.observer.call_running(call)
+        if inspect.isawaitable(checkpoint):
+            await checkpoint
         try:
             return await self.tools.run(call)
         except asyncio.CancelledError:

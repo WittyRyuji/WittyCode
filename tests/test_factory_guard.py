@@ -227,10 +227,14 @@ def test_factory_bridge_checks_permission_and_checkpoints_before_returning_outpu
         events.append("executed")
         return Outcome("inert result")
 
+    async def save(*, required):
+        assert required
+        events.append("saved")
+
     async def go():
         tools, watcher = tool_manifest(), Watcher()
         tools.run, tools.check = execute, lambda call: Verdict(ASK)
-        host = SimpleNamespace(model="demo", turn_step_limit=lambda: 4, _save_now=lambda *, required: events.append("saved"))
+        host = SimpleNamespace(model="demo", turn_step_limit=lambda: 4, _save_durable=save)
         bridge = guard.factory_bridge(host, tools, watcher, [], "test")
         bridge.active = True
         params = {"name": "echo", "arguments": {}, "bridgeCallId": "first"}
@@ -253,8 +257,12 @@ def test_factory_bridge_preserves_shell_result_status_and_replay(name, status, i
     from desktop.core.harness.loop import ALLOW, Observer, Outcome, Verdict
 
     events = []
-    host = SimpleNamespace(model="demo", turn_step_limit=lambda: 4, saved=SimpleNamespace(tools={}),
-                           _save_now=lambda *, required: events.append("saved"))
+
+    async def save(*, required):
+        assert required
+        events.append("saved")
+
+    host = SimpleNamespace(model="demo", turn_step_limit=lambda: 4, saved=SimpleNamespace(tools={}), _save_durable=save)
 
     class Watcher(Observer):
         current = True

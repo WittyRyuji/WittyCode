@@ -1066,6 +1066,18 @@ class Transcript:
         self._append_block(turn, block)
         return block
 
+    def history_builder(self) -> Transcript:
+        """An isolated set of mutable lookup tables, with ids reserved from this transcript's counter."""
+        builder = Transcript(clock=self._clock)
+        builder._counter = self._counter
+        return builder
+
+    def adopt_history(self, builder: Transcript, turns: Sequence[Turn]) -> None:
+        self._attachments.update(builder._attachments)
+        self._items.update(builder._items)
+        self._prompts.update(builder._prompts)
+        self.add_history_turns(turns)
+
     def add_history_turns(self, turns: Sequence[Turn]) -> int:
         """Put turns rebuilt from another engine's saved history (``new_history_turn`` ...) before the others."""
         self.turns[0:0] = list(turns)

@@ -558,7 +558,9 @@ class HarnessTools:
                 results = await asyncio.gather(*tasks)
             except BaseException:
                 for task in tasks:
-                    task.cancel()
+                    # A cancelled gather already signalled its tasks; let them finish stopping their expert.
+                    if not task.done() and not task.cancelling():
+                        task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
                 raise
             return Outcome("\n\n".join(f"Workstream {args[0].workstream if structured else args[0]}:\n{result.output}"
