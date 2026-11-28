@@ -3929,7 +3929,12 @@ class AppCore:
             return fetch(model)
 
         selected = [model for model in models if model.startswith(PREFIXES)]
-        await asyncio.to_thread(profiles.refresh, default_settings_path().parent, selected, lookup, include_saved=added is None)
+        root = default_settings_path().parent
+        refresh = asyncio.to_thread(profiles.refresh, root, selected, lookup, include_saved=added is None)
+        if added is None:
+            await asyncio.gather(refresh, asyncio.to_thread(profiles.refresh_frontiercode, root, selected))
+        else:
+            await refresh
 
     async def _refresh_fusion_settings(self, conv: Conversation) -> None:
         """Adopt the global preset at a new-turn boundary, never in a running model/tool step."""

@@ -16,11 +16,12 @@ from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
-from desktop.core.fusion import planning
+from desktop.core.fusion import cognition_benchmark, planning
 from desktop.core.plugin_lock import lock_file
 
 FOLDER = "fusion-profiles"
 FILE = "models.json"
+FRONTIERCODE_FILE = "cognition-frontiercode-2.0.json"
 _FIELDS = ("score", "cost")
 
 Profile = dict[str, float | None]
@@ -118,10 +119,14 @@ def _read(path: Path) -> tuple[dict[str, Profile], bool]:
 
 
 def _write(path: Path, models: Mapping[str, Profile]) -> None:
+    _write_json(path, {"models": models})
+
+
+def _write_json(path: Path, data: Mapping[str, Any]) -> None:
     handle, temp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
     try:
         with os.fdopen(handle, "w", encoding="utf-8") as stream:
-            json.dump({"models": models}, stream, ensure_ascii=False, indent=2, sort_keys=True)
+            json.dump(data, stream, ensure_ascii=False, indent=2, sort_keys=True)
             stream.write("\n")
         for attempt in range(10):
             try:
@@ -175,6 +180,48 @@ def refresh(root: Path, selected: Iterable[str], fetch: Fetch, *, include_saved:
     keys = dict.fromkeys([*models, *(_check(model) for model in selected)])
     if keys or changed:
         _save(path, {model: _request(fetch, model) for model in keys}, replace=not include_saved)
+
+
+def refresh_frontiercode(root: Path, models: Iterable[str]) -> None:
+    """Refresh one independent advisory file per startup batch; keep the last good data on a miss."""
+    if not any(cognition_benchmark.matches(model) for model in models):
+        return
+    try:
+        rows = cognition_benchmark.download()
+    except (OSError, ValueError):
+        return
+    if not rows:
+        return
+    path = Path(root) / FOLDER / FRONTIERCODE_FILE
+    document = {"source": cognition_benchmark.URL, "efforts": rows}
+    with _catalog_lock(path):
+        if _read_json(path) != document:
+            _write_json(path, document)
+
+
+def frontiercode_snapshot(root: Path, seats: Iterable[tuple[str, str, str | None]]) -> str:
+    """Advisory evidence for the declared plan, never input to the automatic model selector."""
+    selected = [(seat, model, effort) for seat, model, effort in seats if cognition_benchmark.matches(model) and effort]
+    if not selected:
+        return ""
+    try:
+        document = _read_json(Path(root) / FOLDER / FRONTIERCODE_FILE)
+    except OSError:
+        return ""
+    if not isinstance(document, dict) or document.get("source") != cognition_benchmark.URL:
+        return ""
+    rows = cognition_benchmark.clean(document.get("efforts"))
+    lines = []
+    for seat, model, effort in selected:
+        if effort in rows:
+            row = rows[effort]
+            lines.append(f"- {seat}: {model} @ {effort} — {row['new_score']:.1%}, ${row['cost']:.2f} per benchmark run.")
+    if not lines:
+        return ""
+    lead = (f"Cognition {cognition_benchmark.BENCHMARK} (vendor-reported; Devin CLI): planning reference only. "
+            "Not comparable to Artificial Analysis, not used for automatic ranking, and not a billing quote. "
+            "The effort shown is the configured Fusion effort, not the model ID suffix.")
+    return "\n".join([lead, *lines, f"Source: {cognition_benchmark.URL}"])
 
 
 def load(root: Path, model: str) -> Profile | None:

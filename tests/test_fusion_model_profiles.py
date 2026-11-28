@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from desktop.core.fusion import aa_catalog, profiles
+from desktop.core.fusion import aa_catalog, cognition_benchmark, profiles
 from desktop.core.providers import ProviderStore
 from desktop.core.settings import AppSettings, default_settings_path
 from tests.app_support import MODEL, OTHER_MODEL, make_core
@@ -243,6 +243,119 @@ class FakeResponse:
 
     def __exit__(self, *args):
         return False
+
+
+SWE = "devin:swe-2-1-medium"
+COGNITION = {"harness": {"SWE-2.1": "Devin CLI"}, "data": {"SWE-2.1": {
+    "medium": {"main": {"new_score": 0.261, "cost": 0.77}},
+    "max": {"main": {"new_score": 0.413, "cost": 4.44}},
+}}}
+
+
+def test_cognition_mapping_is_exact_and_does_not_infer_effort_from_model_id():
+    for model in ("devin:swe-2-1", SWE, "devin:swe-2-1-max"):
+        assert cognition_benchmark.matches(model)
+    for model in ("devin:swe-2-high", "devin:swe-2-1-ultrafast", "api:demo:swe-2-1-medium", "devin:swe-2-10-medium"):
+        assert not cognition_benchmark.matches(model)
+    invalid = {"medium": {"main": {"new_score": True, "cost": 1}},
+               "high": {"main": {"new_score": 41.3, "cost": 1}},
+               "low": {"main": {"new_score": 0.1}},
+               "xhigh": {"main": {"new_score": 0.3, "cost": float("inf")}}}
+    payload = {**COGNITION, "data": {"SWE-2.1": {**COGNITION["data"]["SWE-2.1"], **invalid}}}
+    assert cognition_benchmark.parse(payload) == {"max": {"new_score": 0.413, "cost": 4.44}}
+    assert not cognition_benchmark.parse({**payload, "harness": {"SWE-2.1": "Other"}})
+
+
+def test_frontiercode_download_is_bounded_and_not_redirected(monkeypatch):
+    requested = []
+
+    def opener(request, timeout):
+        requested.append((request.full_url, timeout))
+        return FakeResponse(json.dumps(COGNITION).encode())
+
+    monkeypatch.setattr(cognition_benchmark, "_urlopen", opener)
+    assert cognition_benchmark.download()["max"]["new_score"] == 0.413
+    assert requested == [(cognition_benchmark.URL, 10)]
+    handler = cognition_benchmark._NoRedirect()
+    assert handler.redirect_request(None, None, 302, "", {}, "https://other.example/x") is None
+    monkeypatch.setattr(cognition_benchmark, "_urlopen", lambda *a, **k: FakeResponse(b"x" * (cognition_benchmark.MAX_BYTES + 1)))
+    with pytest.raises(ValueError, match="larger than expected"):
+        cognition_benchmark.download()
+
+
+def test_frontiercode_is_read_only_at_plan_time_and_separate_from_rankings(tmp_path, monkeypatch):
+    from desktop.core.chatgpt.controller import ChatGPTController
+    from desktop.core.fusion.registry import FusionRegistry, Policy
+    from desktop.core.fusion.runtime import FusionRuntime
+
+    async def go():
+        root = default_settings_path().parent
+        seed(root, {SWE: UNKNOWN, MODEL: MEASURED})
+        before = catalog_path(root).read_bytes()
+        downloads = []
+
+        def opener(request, timeout):
+            downloads.append(request.full_url)
+            if len(downloads) > 1:
+                raise OSError("offline")
+            return FakeResponse(json.dumps(COGNITION).encode())
+
+        monkeypatch.setattr(cognition_benchmark, "_urlopen", opener)
+        profiles.refresh_frontiercode(root, [MODEL])
+        assert not downloads
+        profiles.refresh_frontiercode(root, [SWE, "devin:swe-2-1-max"])
+        assert downloads == [cognition_benchmark.URL]
+        profiles.refresh_frontiercode(root, [SWE])  # An offline refresh must not erase the verified result.
+        advisory = catalog_path(root).with_name(profiles.FRONTIERCODE_FILE)
+        stored = advisory.read_bytes()
+        policy = Policy(MODEL, (MODEL, SWE), MODEL, 0, reasoning={f"worker:{SWE}": "max"})
+        manager = SimpleNamespace(model_info=lambda model: SimpleNamespace(efforts=("medium", "max")))
+        parent = SimpleNamespace(manager=manager)
+        fusion = SimpleNamespace(registry=FusionRegistry(tmp_path, policy), unit_enabled=True, parent=parent)
+        fusion.reasoning_for = FusionRuntime.reasoning_for.__get__(fusion)
+        ctl = SimpleNamespace(_fusion=fusion)
+        ctl._frontiercode_reference = ChatGPTController._frontiercode_reference.__get__(ctl)
+        plan = await ChatGPTController._team_snapshot(ctl)
+        assert "submit_work_plan" in plan and "Cognition FrontierCode 2.0" in plan
+        assert f"L2: {SWE} @ max — 41.3%, $4.44" in plan and "26.1%" not in plan
+        assert "not used for automatic ranking" in plan and cognition_benchmark.URL in plan
+        for effort, expected in (("medium", "26.1%, $0.77"), (None, None), ("high", None)):
+            fusion.registry.policy = Policy(MODEL, (SWE,), MODEL, 0, reasoning={f"worker:{SWE}": effort} if effort else {})
+            plan = await ChatGPTController._team_snapshot(ctl)
+            if expected:
+                assert expected in plan
+            else:
+                assert "Cognition FrontierCode" not in plan
+        assert profiles.load(root, SWE) == UNKNOWN and profiles.load(root, MODEL) == MEASURED
+        assert catalog_path(root).read_bytes() == before and advisory.read_bytes() == stored
+        assert len(downloads) == 2
+
+    asyncio.run(go())
+
+
+def test_startup_refreshes_frontiercode_without_polluting_artificial_analysis(tmp_path, monkeypatch):
+    async def go():
+        root = default_settings_path().parent
+        downloads = []
+
+        def opener(request, timeout):
+            downloads.append(request.full_url)
+            return FakeResponse(json.dumps(COGNITION).encode())
+
+        monkeypatch.setattr(cognition_benchmark, "_urlopen", opener)
+        core, _, _, _, _ = make_core(tmp_path, settings=AppSettings(fusion_workers=[SWE]))
+        core._profiles_source = aa_catalog.source(loader=lambda: LEADERBOARD)
+        try:
+            await core.call("app.init")
+            await until(lambda: "41.3%" in profiles.frontiercode_snapshot(root, [("L2", SWE, "max")]))
+            assert profiles.load(root, SWE) == UNKNOWN
+            await core.call("app.init")
+            await asyncio.gather(*list(core._tasks))
+            assert downloads == [cognition_benchmark.URL]
+        finally:
+            await core.shutdown()
+
+    asyncio.run(go())
 
 
 def test_download_only_ever_asks_artificial_analysis():

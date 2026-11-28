@@ -839,7 +839,7 @@ class ChatGPTController:
         from desktop.core.settings import default_settings_path
         if self._fusion.unit_enabled:
             from desktop.core.fusion.planning import UNIT_CONTRACT
-            return UNIT_CONTRACT
+            return UNIT_CONTRACT + await self._frontiercode_reference()
         policy = self._fusion.registry.policy
 
         def effort(model: str, role: str) -> str:
@@ -852,6 +852,26 @@ class ChatGPTController:
                  "worker": (policy.workers[0], effort(policy.workers[0], "worker")),
                  "light": (policy.light, effort(policy.light, "light"))}
         return await asyncio.to_thread(profiles.team_snapshot, default_settings_path().parent, seats)
+
+    async def _frontiercode_reference(self) -> str:
+        from desktop.core.fusion import cognition_benchmark, profiles
+        from desktop.core.fusion.registry import FusionError
+        from desktop.core.settings import default_settings_path
+
+        fusion = self._fusion
+        policy = fusion.registry.policy
+        seats = []
+        for seat, role, models in (("L1", "main", (policy.main,)), ("L2", "worker", policy.workers), ("L3", "light", policy.lights)):
+            for model in models:
+                if cognition_benchmark.matches(model):
+                    try:
+                        seats.append((seat, model, fusion.reasoning_for(model, role)))
+                    except FusionError:
+                        continue  # No confirmed effort; never infer one from the native model ID.
+        if not seats:
+            return ""
+        reference = await asyncio.to_thread(profiles.frontiercode_snapshot, default_settings_path().parent, seats)
+        return "\n\n" + reference if reference else ""
 
     async def _submit_work_plan(self, data: Mapping[str, Any]) -> Outcome:
         """Validate the turn's V3 work plan into the receipt that gates routing, delegation and writes."""
