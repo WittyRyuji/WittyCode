@@ -4,8 +4,8 @@ Lives in ``<settings folder>\\cache\\`` (``%APPDATA%\\WittyCode\\cache``):
 
 * ``index.json``: the saved-session rows of every project, the model list, the Codex account (plan, limits) and the
   Droid version, as they were last seen;
-* ``sessions\\<id>.json``: one session's conversation as the page shows it (the view model's turns) with its title,
-  settings, token use and context size, written periodically while it runs as well as when it is idle or closes.
+* ``sessions\\<id>.json``: one session's conversation as the page shows it (the view model's turns), plus metadata.
+* ``session-pages\\<id>.json``: a small preview and byte offsets into the matching session JSON; older pages are read on demand.
 
 Nothing here is the truth: the engines are. The page is shown the cached state first, and the real state replaces it
 as soon as it arrives (a moment later, in the background). A file that is missing, unreadable, from another version or
@@ -19,8 +19,11 @@ import logging
 import os
 import re
 import tempfile
+import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
+
+from desktop.core.turn_window import PAGE_SIZE
 
 log = logging.getLogger("wittycode.cache")
 
@@ -30,12 +33,12 @@ MAX_SESSION_BYTES = 12 * 1024 * 1024
 _UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
 
 
-def _write_atomic(path: Path, text: str) -> None:
+def _write_atomic(path: Path, text: str | bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     handle, temporary = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
     try:
-        with os.fdopen(handle, "w", encoding="utf-8") as stream:
-            stream.write(text)
+        with os.fdopen(handle, "wb") as stream:
+            stream.write(text.encode("utf-8") if isinstance(text, str) else text)
         os.replace(temporary, path)
     except BaseException:
         try:
@@ -78,20 +81,98 @@ class Cache:
     def load_session(self, key: str) -> dict[str, Any] | None:
         return self._read(self.session_path(key))
 
+    @staticmethod
+    def _page_index(path: Path) -> Path:
+        return path.parent.parent / "session-pages" / path.name
+
+    @staticmethod
+    def _same_snapshot(stream: BinaryIO, index: dict[str, Any]) -> bool:
+        stamp = index.get("stamp")
+        if not isinstance(stamp, str) or re.fullmatch(r"[a-f0-9]{32}", stamp) is None:
+            return False
+        prefix = f'{{"stamp":"{stamp}",'.encode("ascii")
+        return stream.read(len(prefix)) == prefix and stream.seek(0, os.SEEK_END) == index.get("size")
+
+    def load_session_preview(self, key: str) -> dict[str, Any] | None:
+        path = self.session_path(key)
+        if path is None:
+            return None
+        index = self._read(self._page_index(path))
+        if index is not None and index.get("key") == key:
+            try:
+                with path.open("rb") as stream:
+                    if self._same_snapshot(stream, index):
+                        return index
+            except OSError:
+                pass
+        # Older versions and an interrupted two-file update still have the original valid JSON snapshot.
+        return self.load_session(key)
+
+    def load_session_page(self, key: str, stamp: str, end: int) -> list[dict[str, Any]] | None:
+        path = self.session_path(key)
+        index = self._read(self._page_index(path)) if path is not None else None
+        if path is None or index is None or index.get("key") != key or index.get("stamp") != stamp:
+            return None
+        offsets = index.get("offsets")
+        if not isinstance(offsets, list) or not 0 < end < len(offsets):
+            return None
+        lo, hi = offsets[max(0, end - PAGE_SIZE)], offsets[end]
+        if not (type(lo) is type(hi) is int and 0 < lo < hi <= MAX_SESSION_BYTES):
+            return None
+        try:
+            with path.open("rb") as stream:
+                if not self._same_snapshot(stream, index):
+                    return None
+                stream.seek(lo)
+                page = json.loads(b"[" + stream.read(hi - lo).rstrip(b",") + b"]")
+                return page if all(isinstance(turn, dict) and isinstance(turn.get("id"), str) for turn in page) else None
+        except (OSError, ValueError):
+            return None
+
     def save_session(self, key: str, data: dict[str, Any]) -> bool:
-        """``False`` when it was not written (no cache, too big, or the disk said no)."""
+        """Normal JSON for compatibility, with a separate index that can read just the requested UTF-8 range."""
         path = self.session_path(key)
         if path is None:
             return False
-        return self._write(path, {"v": CACHE_VERSION, "key": key, **data}, limit=MAX_SESSION_BYTES)
+        turns = data.get("turns")
+        if not isinstance(turns, list):
+            return self._write(path, {"v": CACHE_VERSION, "key": key, **data}, limit=MAX_SESSION_BYTES)
+        index_path = self._page_index(path)
+        stamp = uuid.uuid4().hex
+        meta = {"v": CACHE_VERSION, "key": key, **{k: v for k, v in data.items() if k != "turns"}}
+        try:
+            encode = lambda value: json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            blob = bytearray(encode({"stamp": stamp, **meta})[:-1] + b',"turns":[')
+            offsets = []
+            for i, turn in enumerate(turns):
+                if i:
+                    blob.extend(b",")
+                offsets.append(len(blob))
+                blob.extend(encode(turn))
+                if len(blob) + 2 > MAX_SESSION_BYTES:
+                    self.forget_session(key)
+                    return False
+            offsets.append(len(blob))
+            blob.extend(b"]}")
+            if len(blob) > MAX_SESSION_BYTES:
+                self.forget_session(key)
+                return False
+            _write_atomic(path, bytes(blob))
+            start = max(0, len(turns) - PAGE_SIZE)
+            plans = (turn.get("plan") for turn in reversed(turns[:start]) if isinstance(turn, dict))
+            plan = next((value for value in plans if value is not None), None)
+            self._write(index_path, {**meta, "stamp": stamp, "size": len(blob), "offsets": offsets,
+                                     "pageStart": start, "turns": turns[start:], "olderPlan": plan})
+            return True
+        except (OSError, TypeError, ValueError) as error:
+            log.warning("could not write cache file %s: %s", path.name, error)
+            return False
 
     def forget_session(self, key: str) -> None:
         path = self.session_path(key)
         if path is not None:
-            try:
-                path.unlink()
-            except OSError:
-                pass
+            self.forget_stale(path)
+            self.forget_stale(self._page_index(path))
 
     # ------------------------------------------------------------------ files
 

@@ -31,6 +31,8 @@
 .chip-suggest:hover { background: var(--ink); border-color: var(--ink); color: var(--paper); }
 
 /* ---------------------------------------------------------------- turns */
+.history-more { text-align: center; margin-bottom: 18px; color: var(--muted); }
+.history-more button:disabled { opacity: 0.65; cursor: wait; }
 .turn { margin: 0 0 26px; }
 .turn + .turn { padding-top: 26px; border-top: 1px solid var(--line); }
 

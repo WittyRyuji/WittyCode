@@ -33,6 +33,8 @@ import threading
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
@@ -81,6 +83,7 @@ DEFAULT_LEVEL = "code"
 INTERRUPT_GRACE_SECONDS = 8.0
 MCP_WAIT_SECONDS = 20.0
 SAVE_DELAY_SECONDS = 2.0
+_CHECKPOINT_WRITERS = ThreadPoolExecutor(max_workers=2, thread_name_prefix="witty-checkpoint")
 STOP_NOTES = {
     "max_output_tokens": "回答太长，被截断了；可以回复「继续」。",
     "content_filter": "回答被内容过滤停止了。",
@@ -126,6 +129,14 @@ class _ResumeBatch:
     pending: list[fusion_recovery.ResumeTarget]
     waiting: list[fusion_recovery.ResumeTarget] = field(default_factory=list)
     active: fusion_recovery.ResumeTarget | None = None
+
+
+@dataclass(slots=True)
+class _Checkpoint:
+    writing: Future[None]
+    archive: Callable[[], None] | None
+    error: OSError | None = None
+    settled: bool = False
 
 
 @dataclass(eq=False)
@@ -197,6 +208,7 @@ class ChatGPTController:
     _listeners: list[Callable[[ChatGPTController, str], None]] = field(default_factory=list)
     _background: set[asyncio.Task[Any]] = field(default_factory=set)
     _save_handle: asyncio.TimerHandle | None = None
+    _checkpoint: _Checkpoint | None = None
     _close_requested: bool = False
     _close_task: asyncio.Task[None] | None = None
     _session_lock: Any = None
@@ -491,7 +503,7 @@ class ChatGPTController:
         saved = await asyncio.to_thread(self.manager.sessions.load, self.session_id)
         if saved is None:
             raise ChatGPTError("这个会话的存档找不到了。", code="missing_session")
-        recovered = recover(saved)
+        recovered = await asyncio.to_thread(recover, saved)
         if saved.origin.pop(FIRST_PROMPT, None) is True:
             # The process died before it could tell whether the first dispatch reached the model. Preserve it.
             recovered = True
@@ -517,8 +529,13 @@ class ChatGPTController:
         self.mode = PLAN if saved.mode == PLAN else "auto"
         self.saved_title = saved.title or self.saved_title
         self.transcript.model = saved.model or None
-        shown_items = await asyncio.to_thread(self._outputs.expand, saved.items, strict=False)
-        self.transcript.add_history_turns(saved_history.build_turns(self.transcript, self.manager.registry, replace(saved, items=shown_items)))
+        builder, outputs, registry = self.transcript.history_builder(), self._outputs, self.manager.registry
+
+        def replay() -> list[Turn]:
+            shown_items = outputs.expand(saved.items, strict=False)
+            return saved_history.build_turns(builder, registry, replace(saved, items=shown_items))
+
+        self.transcript.adopt_history(builder, await asyncio.to_thread(replay))
         usage = saved.usage
         if usage:
             self._usage_total = Tokens.of(usage)
@@ -556,12 +573,17 @@ class ChatGPTController:
             except FusionError as error:
                 raise ChatGPTError("Fusion 状态损坏或主模型不一致，已暂停恢复，原始存档未被覆盖。", code="fusion") from error
         if recovered_plan:
-            self._save_now(required=True)
+            await self._save_durable(required=True)
             self.transcript.add_notice(saved.plan["warning"])
         if recovered:
             log.warning("the ChatGPT conversation %s was saved in the middle of a turn (the application closed or crashed); repaired", self.session_id)
+            writing = asyncio.create_task(asyncio.to_thread(self.manager.sessions.save, deepcopy(saved)))
             try:
-                self.manager.sessions.save(saved)
+                await asyncio.shield(writing)
+            except asyncio.CancelledError:
+                with contextlib.suppress(OSError):
+                    await asyncio.shield(writing)
+                raise
             except OSError:
                 log.warning("could not save the repaired conversation", exc_info=True)
         if saved.goal:
@@ -921,8 +943,10 @@ class ChatGPTController:
         if connections is not None and self._connection_started:
             with contextlib.suppress(Exception):
                 await connections.hooks("SessionEnd", self.project, {"session_id": self.session_id, "reason": "other"})
-        self._save_now()
-        self._release_session()
+        try:
+            await self._save_durable()
+        finally:
+            self._release_session()
         self.state = SessionState.CLOSED
         self.manager._forget(self)
         self._notify("state")
@@ -1372,8 +1396,8 @@ class ChatGPTController:
                 self.saved.plan["execution"] = "started"
             self.saved.model, self.saved.reasoning, self.saved.autonomy = self.model, self.reasoning, self.autonomy
             self.saved.mode = PLAN if self.mode == PLAN else ""
-            if self._checkpoint_written or self.saved.turns[:-1]:
-                self._save_now(required=True)
+            if self._checkpoint_written or len(self.saved.turns) > 1:
+                await self._save_durable(required=True)
             if self._fusion is not None:
                 await self._fusion.sample_metrics(turn, start=True)
                 await self._fusion.retain_plan_route()
@@ -1442,7 +1466,7 @@ class ChatGPTController:
                     continuation = "\n\n".join(asks) + (MERGE_CLAUSE if held else
                         " Then end with the answer to the user request, not with a report of these steps.")
                     loop.observer.history_grew([{"type": "message", "role": "developer", "content": [{"type": "input_text", "text": continuation}]}])
-                    self._save_now(required=True)
+                    await self._save_durable(required=True)
                     history = compact.view_of(self.saved.items, self.saved.compaction)
                     if native_run is not None:
                         end = await native_run(tools, loop.observer, history, continuation, (),
@@ -1478,7 +1502,7 @@ class ChatGPTController:
                 self._release_steers()
                 self.transcript.abort_turn("本轮已停止。")
                 self._record_turn("interrupted", note=note)
-                self._end_turn(turn)
+                await self._end_turn(turn)
             raise
         except Exception as error:  # the session must survive anything
             failure = error
@@ -1492,7 +1516,7 @@ class ChatGPTController:
                 self.last_turn_end = TurnEnd('retry_after', steps=loop.completed_steps)
             if loop is not None and self._fusion is not None and self._fusion.acceptance_verdict() is not None:
                 loop.observer.release_answer()
-            self._turn_failed(turn, failure)
+            await self._turn_failed(turn, failure)
             return
         assert end is not None
         self.last_turn_end = end
@@ -1500,7 +1524,7 @@ class ChatGPTController:
             self._release_steers()
             self.transcript.abort_turn("Observer 已暂停此专家。")
             self._record_turn("interrupted")
-            self._end_turn(turn)
+            await self._end_turn(turn)
             return
         if end.reason == "plan":
             previous = self.saved.plan
@@ -1520,13 +1544,13 @@ class ChatGPTController:
             before = (record.finished, record.status, record.error, record.note) if record is not None else None
             self._record_turn("done")
             try:
-                self._save_now(required=True)
+                await self._save_durable(required=True)
             except ChatGPTError as error:
                 self.saved.plan = previous
                 self.saved.origin = before_origin
                 if record is not None and before is not None:
                     record.finished, record.status, record.error, record.note = before
-                self._turn_failed(turn, error)
+                await self._turn_failed(turn, error)
                 return
         note = ""
         if end.reason == "incomplete":
@@ -1564,7 +1588,7 @@ class ChatGPTController:
                 else:
                     self._start_parallel_fusion_title()  # A successful prompt need not emit a progress event.
         finally:
-            self._end_turn(turn)
+            await self._end_turn(turn)
             self.refresh_context()
 
     def _checkpoint_dispatch(self) -> None:
@@ -1611,6 +1635,8 @@ class ChatGPTController:
         return error.code == "api" or (isinstance(error.body, dict) and error.code not in ("stream", "stream_idle", "timeout"))
 
     def _discard_first_prompt(self) -> None:
+        if self._checkpoint is not None:
+            self._finish_checkpoint(self._checkpoint)
         try:
             self.manager.sessions.discard_first_prompt(self.session_id)
         except OSError:
@@ -1624,7 +1650,7 @@ class ChatGPTController:
             self._first_prompt_retained = True
             self._notify("history")
 
-    def _turn_failed(self, turn: Turn, error: BaseException) -> None:
+    async def _turn_failed(self, turn: Turn, error: BaseException) -> None:
         if isinstance(error, ChatGPTError):
             self._recovery_delay = error.retry_after
             if self._fusion is not None and (key := self._fusion._unit_key()):
@@ -1671,7 +1697,7 @@ class ChatGPTController:
             self._record_turn("failed", message, note=note)
         self._release_steers()
         self.transcript.fail_turn(message)
-        self._end_turn(turn)
+        await self._end_turn(turn)
 
     def _fusion_turn_receipt(self, turn: Turn, reason: str) -> str:
         rt = self._fusion
@@ -1865,7 +1891,7 @@ class ChatGPTController:
             with contextlib.suppress(ChatGPTError):
                 rt._checkpoint()
 
-    def _end_turn(self, turn: Turn) -> None:
+    async def _end_turn(self, turn: Turn) -> None:
         if self._turn is not turn:
             return
         self._pending_fusion_title = None
@@ -1897,18 +1923,20 @@ class ChatGPTController:
         self._turn = None
         self._turn_model = self._turn_reasoning = self._turn_mode = ""
         self._proposed_plan = ""
-        if self._turn_done is not None:
-            self._turn_done.set()
         self.active_at = time.time()
-        if self.state is SessionState.RUNNING:
-            self.state = SessionState.READY
         self.refresh_context()  # (a model chosen during the turn now gives its window)
-        self._save_now()
-        if self._acp is not None and self._fusion_parent is None:
-            self._acp.arm_idle()
-        self._notify("state")
-        self._changed()
-        self._schedule_fusion_recovery()
+        try:
+            await self._save_durable()
+        finally:
+            if self.state is SessionState.RUNNING:
+                self.state = SessionState.READY
+            if self._turn_done is not None:
+                self._turn_done.set()
+            if self._acp is not None and self._fusion_parent is None:
+                self._acp.arm_idle()
+            self._notify("state")
+            self._changed()
+            self._schedule_fusion_recovery()
 
     # ------------------------------------------------------------------ steering and stopping
 
@@ -2009,7 +2037,7 @@ class ChatGPTController:
             # The loop of this turn is still winding down but no longer owns the conversation (``_Watch`` drops what it
             # reports). Its calls get their outputs here: the next turn must not send a history with a call that has none.
             pair_in_place(self.saved, INTERRUPTED)
-            self._end_turn(turn)
+            await self._end_turn(turn)
 
     # ------------------------------------------------------------------ command: /compact
 
@@ -2087,7 +2115,7 @@ class ChatGPTController:
         except asyncio.CancelledError:
             if self._turn is turn:
                 self.transcript.abort_turn("压缩已停止，对话没有改动。")
-                self._end_turn(turn)
+                await self._end_turn(turn)
             raise
         except Exception as error:
             failure = error
@@ -2103,7 +2131,7 @@ class ChatGPTController:
                     "没有压缩：" + ("这段对话已经是一段摘要了。" if self.saved.compaction else "对话还太短，摘要不会比原文更小。")
                 )
             self.transcript.finish_turn(turn, TurnStatus.DONE)
-        self._end_turn(turn)
+        await self._end_turn(turn)
 
     # ------------------------------------------------------------------ context and usage
 
@@ -2408,7 +2436,7 @@ class ChatGPTController:
 
     # ------------------------------------------------------------------ saving
 
-    def _snapshot(self) -> SavedSession:
+    def _snapshot(self, *, pair: bool = True) -> SavedSession:
         saved = self.saved
         saved.project = str(self.project)
         saved.title = self.title if self.title != "新会话" else saved.title
@@ -2418,19 +2446,21 @@ class ChatGPTController:
         saved.recalled = sorted(self.recalled)
         # (a call still waiting or running has no output yet; the file must be a history the next request could send
         # even if the real output never gets written. The turns and the compaction follow their items.)
-        return paired(saved)
+        return paired(saved) if pair else saved
 
     def _save_soon(self) -> None:
-        if self._save_handle is not None or not self.saved.turns:
+        if self._save_handle is not None or not self.saved.turns or self._close_requested:
             return
+
+        def launch() -> None:
+            self._save_handle = None
+            if not self._close_requested:
+                self._spawn(self._save_durable())
+
         with contextlib.suppress(RuntimeError):
-            self._save_handle = asyncio.get_running_loop().call_later(SAVE_DELAY_SECONDS, self._save_now)
+            self._save_handle = asyncio.get_running_loop().call_later(SAVE_DELAY_SECONDS, launch)
 
-    def _save_pending(self) -> None:
-        if self._save_handle is not None:
-            self._save_now()
-
-    def _save_now(self, *, required: bool = False, title_only: bool = False, already_synced: bool = False) -> bool:
+    def _prepare_save(self, *, title_only: bool = False) -> bool | None:
         if title_only and not self._checkpoint_written:
             return False  # The side request must never create the conversation.
         if not title_only and self._save_handle is not None:
@@ -2445,21 +2475,90 @@ class ChatGPTController:
                 return True  # settings, Fusion configuration and local turn setup are not archives
         if not title_only and self._archive_pending and not self._archive_broken:
             self._archive_begin()
+        return None
+
+    def _save_error(self, error: OSError, *, title_only: bool = False) -> str:
+        if title_only:
+            log.warning("could not checkpoint the optional title", exc_info=error)
+            return ""
+        if not self._checkpoint_written:
+            self.saved.origin.pop(FIRST_PROMPT, None)
+        log.warning("could not save the conversation", exc_info=error)
+        message = "会话保存失败，请检查存储空间和权限；未保存的内容在退出后可能丢失，后续请求和写操作已暂停。"
+        if not self._save_failed:
+            self._save_failed = True
+            self.transcript.add_notice(message)
+            self._changed()
+        return message
+
+    def _finish_checkpoint(self, pending: _Checkpoint) -> None:
+        if pending.settled:
+            return
+        try:
+            pending.writing.result()
+        except OSError as error:
+            pending.error = error
+            self._save_error(error)
+        else:
+            self._checkpoint_written = True
+            self._save_failed = False
+            if pending.archive is not None:
+                pending.archive()
+        finally:
+            pending.settled = True
+            if self._checkpoint is pending:
+                self._checkpoint = None
+
+    async def _wait_checkpoint(self, pending: _Checkpoint) -> None:
+        waiting = asyncio.wrap_future(pending.writing)
+        cancelled = None
+        while True:
+            try:
+                await asyncio.shield(waiting)
+                break
+            except asyncio.CancelledError as error:
+                # Even repeated stop/close requests must not let a rollback overtake this write.
+                if waiting.cancelled():
+                    raise
+                cancelled = error
+            except OSError:
+                break  # publish the failure exactly once on the event loop below
+        self._finish_checkpoint(pending)
+        if cancelled is not None:
+            raise cancelled
+
+    async def _save_durable(self, *, required: bool = False) -> bool:
+        """Freeze state on the owner thread; await full encoding, index and atomic fsync in an ordered worker."""
+        while self._checkpoint is not None:
+            await self._wait_checkpoint(self._checkpoint)
+        if self.state is SessionState.CLOSED:
+            return False
+        decision = self._prepare_save()
+        if decision is not None:
+            return decision
+        snapshot = deepcopy(self._snapshot(pair=False))
+        segment = None if self._archive_binding is None or (self._turn and self._unsent_prompt == self._turn.id) else self._archive_segment()
+        archive = (lambda: self._archive_sync(snapshot=snapshot, segment=segment)) if segment is not None else None
+        store = self.manager.sessions
+        pending = self._checkpoint = _Checkpoint(_CHECKPOINT_WRITERS.submit(lambda: store.save(paired(snapshot))), archive)
+        await self._wait_checkpoint(pending)
+        if pending.error is not None and required:
+            # The notice precedes this error, which must still stop the caller's side effect or next request.
+            raise ChatGPTError("会话保存失败，后续请求和写操作已暂停。", code="checkpoint") from pending.error
+        return pending.error is None
+
+    def _save_now(self, *, required: bool = False, title_only: bool = False, already_synced: bool = False) -> bool:
+        """For synchronous state transactions only; never let a pending older write overwrite this one."""
+        if self._checkpoint is not None:
+            self._finish_checkpoint(self._checkpoint)
+        decision = self._prepare_save(title_only=title_only)
+        if decision is not None:
+            return decision
         try:
             self.manager.sessions.save(self._snapshot())
         except OSError as error:
-            if title_only:
-                log.warning("could not checkpoint the optional title", exc_info=True)
-                return False
-            if not self._checkpoint_written:
-                self.saved.origin.pop(FIRST_PROMPT, None)
-            log.warning("could not save the conversation", exc_info=True)
-            message = "会话保存失败，请检查存储空间和权限；未保存的内容在退出后可能丢失，后续请求和写操作已暂停。"
-            if not self._save_failed:
-                self._save_failed = True
-                self.transcript.add_notice(message)
-                self._changed()
-            if required:
+            message = self._save_error(error, title_only=title_only)
+            if required and not title_only:
                 raise ChatGPTError(message, code="checkpoint") from error
             return False
         self._checkpoint_written = True
@@ -2538,19 +2637,20 @@ class ChatGPTController:
         if self._archive_broken:
             raise ChatGPTError("会话归档写入失败，未进行交接；原始历史完整保留。请检查归档目录或存储设置后重试。", code="archive")
 
-    def _archive_sync(self) -> None:
-        """Append to the archive what the durable log has and it does not; a failure marks the archive broken
-        so compaction cannot proceed on stale evidence, and a later success clears the mark."""
+    def _archive_sync(self, *, snapshot: SavedSession | None = None, segment: tuple[str, str, str] | None = None) -> None:
+        """Append what was durable in this checkpoint, never live state that grew while the worker wrote."""
         binding = self._archive_binding
-        if binding is None or (self._turn and self._unsent_prompt == self._turn.id):
+        if binding is None or (snapshot is None and self._turn and self._unsent_prompt == self._turn.id):
             return  # Do not append an unsent, still reversible user item to an immutable archive.
         try:
-            segment = self._archive_segment()
+            if segment is None:
+                segment = self._archive_segment()
             if segment is None:
                 return  # the ACP stretch has no real native id yet; nothing is written until the handshake
             backend, connection, native = segment
             binding.ensure_instance(backend, native, connection)
-            binding.sync(self.saved.items, self.saved.turns)
+            durable = snapshot if snapshot is not None else self.saved
+            binding.sync(durable.items, durable.turns)
         except Exception:
             self._archive_fail()
         else:
@@ -2817,12 +2917,12 @@ class _Watch(Observer):
                 return answer
         return await self.ctl._ask(call)
 
-    def call_running(self, call: Call) -> None:
+    async def call_running(self, call: Call) -> None:
         if not self.current:
             return
         spec = self.tools.registry.get(call.name)
         if spec is None or spec.kind != "read" or self.tools.connections is not None:
-            self.ctl._save_now(required=True)  # Failure must prevent the tool and its hooks from running.
+            await self.ctl._save_durable(required=True)  # Failure must prevent the tool and its hooks from running.
         turn = self._turn
         tool = turn.tools.get(call.call_id) if turn is not None else None
         if turn is not None and tool is not None:
@@ -2981,7 +3081,7 @@ class _Watch(Observer):
         snapshot.update(current=current, sections=sections)
         history.append(update)
         ctl.saved.items.append(update)
-        ctl._save_now(required=True)
+        await ctl._save_durable(required=True)
         if tuple(notes) != ctl._prompt_notes:
             ctl._prompt_notes = tuple(notes)
             for note in notes:
@@ -2994,7 +3094,7 @@ class _Watch(Observer):
             return False
         fusion = self.ctl._fusion or getattr(self.ctl._fusion_parent, "_fusion", None)
         if self.ctl._save_failed:
-            self.ctl._save_now(required=True)
+            await self.ctl._save_durable(required=True)
         if fusion is not None:
             estimate += await self._refresh_fusion_context(history)
             try:

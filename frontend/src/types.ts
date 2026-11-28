@@ -185,8 +185,19 @@ export interface QuestionPrompt {
 
 export type Prompt = PermissionPrompt | QuestionPrompt;
 
-/** Only live deltas may reference an unchanged block; cached/full history always contains actual blocks. */
-export type TurnUpdate = Omit<Turn, "blocks"> & { blocks: (Block | { id: string; kind: "unchanged" })[] };
+interface FieldPatch<T> {
+  fields?: Partial<T>;
+  remove?: string[];
+  suffix?: string;
+}
+
+type ActivityUpdate = ActivityEntry | ({ id: string; kind: "entryPatch" } & FieldPatch<ActivityEntry>);
+export type BlockUpdate = Block | { id: string; kind: "unchanged" }
+  | ({ id: string; kind: "textPatch" } & FieldPatch<TextBlock>)
+  | { id: string; kind: "activityPatch"; entries: ActivityUpdate[]; order?: string[] };
+
+/** Only ordered live deltas may refer to old blocks; full history and page loads are self-contained. */
+export type TurnUpdate = Omit<Turn, "blocks"> & { blocks: BlockUpdate[] };
 
 export interface Turn {
   id: string;
@@ -284,6 +295,13 @@ export interface FusionSessionPolicy {
   hadUnknown: boolean;
 }
 
+export interface TurnHistory {
+  generation: number;
+  more: boolean;
+  /** A current plan can have been created before the loaded display window. */
+  olderPlan?: Turn["plan"] | null;
+}
+
 export interface Session {
   id: string;
   projectId: string;
@@ -306,6 +324,7 @@ export interface Session {
   /** the engine's own session id of an open conversation */
   nativeId?: string;
   turns: Turn[];
+  turnHistory?: TurnHistory;
   usage: Usage | null;
   /** Token totals attributed to configured model ids; the remainder of usage is unknown legacy usage. */
   usageModels?: Record<string, number>;

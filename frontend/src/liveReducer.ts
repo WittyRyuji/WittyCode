@@ -6,7 +6,10 @@
 // "dv:...") or an open conversation ("c1", "c2", ...). Saved rows have no `mark`; open conversations always have one.
 
 import type {
+  ActivityEntry,
   ApiProvider,
+  Block,
+  BlockUpdate,
   ChatGPTAccount,
   DevinAccount,
   Engine,
@@ -19,6 +22,7 @@ import type {
   SessionSettings,
   ThemeChoice,
   Turn,
+  TurnHistory,
   TurnUpdate,
 } from "./types";
 import type { Events, FollowUp, InitResult, SavedRow, SettingsView } from "./protocol";
@@ -99,6 +103,7 @@ export interface LiveData {
   /** the sub-agent open in the side panel (of a conversation, by its thread id) and its run */
   agentPanel: { sessionId: string; agentId: string } | null;
   agentTurns: Turn[];
+  agentHistory?: TurnHistory;
   /** The file inspector replaces the sub-agent's; video frames go directly to the mounted player, never into this state. */
   filePanel: FilePanelState | null;
   /** the menu of a file path in the conversation (right click): which path, and where */
@@ -306,6 +311,34 @@ export function selectWhenKnown(s: Pick<LiveData, "sessions">, id: string): Part
   return s.sessions[id]?.projectId ? { currentId: id, pendingSelect: null } : { pendingSelect: id };
 }
 
+function patchFields<T extends object>(base: T, patch: { fields?: Partial<T>; remove?: string[]; suffix?: string }, append: string): T {
+  const fields = { ...base, ...patch.fields } as Record<string, unknown>;
+  for (const key of patch.remove ?? []) delete fields[key];
+  if (patch.suffix !== undefined) fields[append] = String(fields[append] ?? "") + patch.suffix;
+  return fields as T;
+}
+
+function applyBlock(block: BlockUpdate, base: Block | undefined): Block | undefined {
+  switch (block.kind) {
+    case "unchanged": return base;
+    case "textPatch": return base?.kind === "text" ? patchFields(base, block, "markdown") : undefined;
+    case "activityPatch": {
+      if (base?.kind !== "activity") return undefined;
+      const entries = new Map(base.entries.map((entry) => [entry.id, entry]));
+      for (const entry of block.entries) {
+        if (entry.kind !== "entryPatch") entries.set(entry.id, entry);
+        else {
+          const old = entries.get(entry.id);
+          if (old) entries.set(entry.id, patchFields<ActivityEntry>(old, entry, old.kind === "thinking" ? "text" : "output"));
+        }
+      }
+      const list = block.order ? block.order.flatMap((id) => entries.has(id) ? [entries.get(id)!] : []) : [...entries.values()];
+      return { ...base, entries: list };
+    }
+    default: return block;
+  }
+}
+
 /** Changed turns replace the ones with the same id; new ones are appended in the order given. */
 export function upsertTurns(turns: Turn[], incoming: TurnUpdate[]): Turn[] {
   if (incoming.length === 0) return turns;
@@ -313,12 +346,12 @@ export function upsertTurns(turns: Turn[], incoming: TurnUpdate[]): Turn[] {
   const out = [...turns];
   for (const update of incoming) {
     const i = at.get(update.id);
-    const previous = new Map((i === undefined ? [] : out[i]!.blocks).map((block) => [block.id, block]));
-    const turn: Turn = !update.blocks.some((block) => block.kind === "unchanged") ? update as Turn : { ...update, blocks: update.blocks.flatMap((block) => {
-      if (block.kind !== "unchanged") return [block];
-      const kept = previous.get(block.id);
-      return kept ? [kept] : [];
-    }) };
+    const delta = update.blocks.some((block) => block.kind === "unchanged" || block.kind === "textPatch" || block.kind === "activityPatch");
+    const previous = delta ? new Map((i === undefined ? [] : out[i]!.blocks).map((block) => [block.id, block])) : null;
+    const turn: Turn = previous ? { ...update, blocks: update.blocks.flatMap((block) => {
+      const next = applyBlock(block, previous.get(block.id));
+      return next ? [next] : [];
+    }) } : update as Turn;
     if (i === undefined) {
       at.set(turn.id, out.length);
       out.push(turn);
@@ -393,21 +426,34 @@ function onSession(s: LiveData, e: Events["session"]): Partial<LiveData> {
   if (s.agentPanel?.sessionId === e.id && e.patch.agents && !e.patch.agents.some((a) => a.id === s.agentPanel?.agentId)) {
     patch.agentPanel = null;
     patch.agentTurns = [];
+    patch.agentHistory = undefined;
   }
   return patch;
+}
+
+function mergeTurnEvent(turns: Turn[], history: TurnHistory | undefined, e: Events["turns"]) {
+  if (e.history && !e.all && history?.generation !== e.history.generation) return null;
+  if (e.prepend) {
+    // Preserve the loaded turn and block objects (and any newer deltas) when an older page arrives.
+    const loaded = new Set(turns.map((t) => t.id));
+    return { turns: [...upsertTurns([], e.turns.filter((t) => !loaded.has(t.id))), ...turns], history: { ...history, ...e.history! } };
+  }
+  const base = e.all ? [] : e.trim ? turns.slice(e.trim) : turns;
+  return { turns: upsertTurns(base, e.turns), history: e.all ? e.history : e.history ? { ...history, ...e.history } : history };
 }
 
 function onAgentTurns(s: LiveData, e: Events["agentTurns"]): Partial<LiveData> {
   const panel = s.agentPanel;
   if (!panel || panel.sessionId !== e.id || panel.agentId !== e.agentId) return {};
-  return { agentTurns: e.all ? [...e.turns] : upsertTurns(s.agentTurns, e.turns) };
+  const next = mergeTurnEvent(s.agentTurns, s.agentHistory, e);
+  return next ? { agentTurns: next.turns, agentHistory: next.history } : {};
 }
 
 function onTurns(s: LiveData, e: Events["turns"]): Partial<LiveData> {
   if (!s.tabs.includes(e.id)) return {};
   const before = s.sessions[e.id] ?? newConversation(e.id);
-  const turns = upsertTurns(e.all ? [] : before.turns, e.turns);
-  return { sessions: { ...s.sessions, [e.id]: { ...before, turns } } };
+  const next = mergeTurnEvent(before.turns, before.turnHistory, e);
+  return next ? { sessions: { ...s.sessions, [e.id]: { ...before, turns: next.turns, turnHistory: next.history } } } : {};
 }
 
 /** A message that did not go out comes back (a failed send, a withdrawn queue entry, a steer nobody took in): its text
@@ -431,7 +477,7 @@ export function applyEvent(s: LiveData, name: string, payload: unknown): Applied
       const fileGone = s.filePanel !== null && !e.tabs.includes(s.filePanel.sessionId);
       return done({
         ...withTabs(s, [...e.tabs], s.sessions, e.select),
-        ...(gone ? { agentPanel: null, agentTurns: [] } : {}),
+        ...(gone ? { agentPanel: null, agentTurns: [], agentHistory: undefined } : {}),
         ...(fileGone ? { filePanel: null } : {}),
       });
     }
