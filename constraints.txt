@@ -2,6 +2,7 @@
 # .venv run the same code: pip install -r requirements-dev.txt -c constraints.txt
 # Exported from the development .venv (Python 3.11.9). Change a version here together with requirements*.txt.
 colorama==0.4.6
+execnet==2.1.2
 iniconfig==2.3.1
 packaging==26.3
 pluggy==1.7.0

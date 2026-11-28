@@ -6,7 +6,7 @@
 
 - 本地与 CI 验收使用 Python 3.11.9、Node 24.22.3；Python 入口：`.\.venv\Scripts\python.exe`（`_pyguard` 会拒绝其他版本）。
 - **提交前与 CI 对齐**：`.\.venv\Scripts\python.exe scripts/check_ci.py --clean`。在仓库外建立一次性的副本、独立 Git 根与 venv，安装 `requirements-dev.txt -c constraints.txt` 和 `npm ci`，再调用 CI / release 共用的构建、单测、页面检查和 Python 测试。退出时自动回收本次副本和依赖，结果留在 `outputs/test-runs/<本次运行>/result.json`。`--part frontend|python` 可只跑一个 CI 作业；`--part windows` 会重建页面并运行全部被 CI 排除的整机模块（按同一个 glob 自动选取），不要只跑主 e2e 文件。
-- 测试（不调用模型）：`.\.venv\Scripts\python.exe -m pytest tests -q -p no:cacheprovider`。全量约 8 分钟，放到后台跑、输出重定向到文件。`tests/test_app_e2e.py` 是整机测试（真 Qt 窗口 + 真 React 页 + 自有循环接本机假 Responses 服务，需要第二个引擎时用假 Devin），页面没构建时自动跳过；CI 不跑它（`--ignore`），只在本地跑，变异测试也只在本地跑。CI 用 `constraints.txt` 固定依赖版本。尚未定位的测试失败见[已知问题](known-issues.md)。
+- 本地 Python 测试（不调用模型）：`.\.venv\Scripts\python.exe desktop/core/test_runs.py -- .\.venv\Scripts\python.exe -m pytest tests -q -p no:cacheprovider --ignore-glob=tests/test_app*e2e*.py --ignore=tests/test_shell.py`。托管入口默认 `-n 16`，可显式传 `-n 0` 串行或 `-n 8` 降低并发。已有 `.venv` 如需补装插件，用 `-m pip install -r requirements-dev.txt -c constraints.txt`。CI 并发设置不变。整机测试用上面的 `--part windows`，使用真 Qt、真 React 页和本机假服务；变异测试也只在本地跑。尚未定位的测试失败见[已知问题](known-issues.md)。
 - 构建页面（改 `frontend/` 后必须做，否则应用和 e2e 跑的是旧页面）：`cd frontend; npm run build:app`。界面检查在 `frontend/` 里运行：`node scripts/check-page-readiness.mjs`、`node scripts/check.mjs`（模拟数据与新连接页）、`node scripts/check-live.mjs`（真 QWebChannel 客户端接假后端，不调用模型）、`npm run unit`、`npm run typecheck`。统一入口会强制使用选定 Python 的真实 Qt 客户端，不静默换成 stand-in。
 - 启动：`.\.venv\Scripts\python.exe -m desktop`；无控制台：`.\.venv\Scripts\pythonw.exe WittyCode.pyw`。
 - 自己开窗口试用时把设置指到 `sandbox/`：`.\.venv\Scripts\python.exe -m desktop --settings sandbox/try/settings.json --project .`（不动 `%APPDATA%\WittyCode\`）。
@@ -26,7 +26,7 @@
 
 - 本机构建前，可在 Git 已忽略的 `frontend/.env.local` 中设置 `VITE_WITTYCODE_CONTACT_EMAIL=demo@example.com`，保留文件中的其他配置。修改后要重新运行 `npm run build:app`；未配置或配置不符合单个邮箱格式时，「联系方式」指向项目的 GitHub Issues。
 - GitHub 发布由维护者在仓库 **Settings → Secrets and variables → Actions → Variables** 中设置 `WITTYCODE_CONTACT_EMAIL`。Release 工作流将它映射为 `VITE_WITTYCODE_CONTACT_EMAIL`，注入执行 `scripts/check_ci.py --part all` 的步骤；该步骤构建随后打包的页面。变量未设置时，发布版一样可用 GitHub Issues 联系。邮箱会写进前端发布产物，只填愿意公开的地址；不要把真实地址放进 Git、示例或测试证据。
-- 定向验证（仓库根目录，使用项目 venv 的 Python）：`python desktop/core/test_runs.py -- node --test frontend/scripts/about.test.mjs`。整机验证先设 `$env:WITTYCODE_ABOUT_E2E='1'`，再运行 `python desktop/core/test_runs.py -- python -m pytest tests/test_about.py -q -p no:cacheprovider`；它在临时目录分别构建空配置和示例配置，不读取本机的 `.env.local`，也不覆盖 `desktop/ui_dist`。
+- 定向验证（仓库根目录，使用项目 venv 的 Python）：`python desktop/core/test_runs.py -- node --test frontend/scripts/about.test.mjs`。整机验证先设 `$env:WITTYCODE_ABOUT_E2E='1'`，再运行 `python desktop/core/test_runs.py -- python -m pytest tests/test_about.py -n 0 -q -p no:cacheprovider`；它在临时目录分别构建空配置和示例配置，不读取本机的 `.env.local`，也不覆盖 `desktop/ui_dist`。
 
 ## 测试的坑
 
