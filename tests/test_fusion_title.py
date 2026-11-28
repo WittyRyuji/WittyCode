@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import pickle
 from types import SimpleNamespace
 
 import pytest
@@ -24,9 +25,13 @@ def test_factory_title_discards_result_if_credential_changes(monkeypatch, change
             _summary_effort=lambda: None, _save_now=lambda **_: writes.append(saved.title) or True,
             _notify=notices.append,
         )
-        monkeypatch.setenv("FACTORY_API_KEY", "fixture-" + "first")
+        initial = "fixture-" + "first"
+        monkeypatch.setenv("FACTORY_API_KEY", initial)
         accepted = title.source(controller, model)
         assert title.source(controller, model) == accepted
+        assert initial not in repr(accepted)
+        with pytest.raises(TypeError, match="cannot be serialized"):
+            pickle.dumps(accepted[-1])
 
         def channel(host, chosen, *, before_prompt):
             assert host is controller and chosen == model

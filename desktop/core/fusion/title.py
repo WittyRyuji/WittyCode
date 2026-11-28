@@ -6,7 +6,6 @@ import contextlib
 import hmac
 import logging
 import os
-import secrets
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -26,8 +25,21 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 LEGACY_TIMEOUT = 12.0
 ATTEMPT = "fusionTitleAttempt"
-# The equality marker is process-local. With a random MAC key it cannot serve as an offline verifier for the API key.
-_FACTORY_TITLE_MARKER_KEY = secrets.token_bytes(32)
+
+
+class _FactoryCredentialSnapshot:
+    """An in-memory equality check for one title attempt, not a serializable credential fingerprint."""
+
+    __slots__ = ("__value",)
+
+    def __init__(self, value: str) -> None:
+        self.__value = value.encode()
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, _FactoryCredentialSnapshot) and hmac.compare_digest(self.__value, other.__value)
+
+    def __reduce_ex__(self, protocol: int) -> Any:
+        raise TypeError("Factory title credentials cannot be serialized.")
 
 
 def source(controller: ChatGPTController, model: str) -> Any:
@@ -37,8 +49,8 @@ def source(controller: ChatGPTController, model: str) -> Any:
         factory = manager.factory
         if factory is None:
             return None
-        credential = os.environ.get("FACTORY_API_KEY", "").encode()
-        return factory, factory.settings.factory_path, hmac.digest(_FACTORY_TITLE_MARKER_KEY, credential, "sha256")
+        snapshot = _FactoryCredentialSnapshot(os.environ.get("FACTORY_API_KEY", ""))
+        return factory, factory.settings.factory_path, snapshot
     if model.startswith("devin:"):
         devin = manager.devin
         account = devin.cached_account() if devin is not None else {}
