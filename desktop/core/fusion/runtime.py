@@ -999,6 +999,20 @@ class FusionRuntime:
             self.parent._changed()
         return loaded
 
+    async def _current_profile(self, name: str) -> identity.Identity:
+        # Legacy briefs use configs/agents for machine settings; catalog edits replace only the text.
+        legacy = self.identities.get(name)
+        if legacy is None:
+            raise FusionError("The requested Fusion identity is unavailable.")
+        try:
+            resolved = await asyncio.to_thread(lambda: self.catalog.resolve(legacy.name))
+        except (ExpertCatalogError, OSError, ValueError) as error:
+            raise FusionError(f"Cannot load the requested Fusion identity: {error}") from error
+        if resolved.summary.version == 0:
+            return legacy
+        return replace(legacy, description=resolved.identity.description, instructions=resolved.instructions,
+                       display_name=resolved.identity.display_name)
+
     @property
     def drive_enabled(self) -> bool:
         return self.gate("drive")
@@ -1461,10 +1475,13 @@ class FusionRuntime:
             return
         from desktop.core.chatgpt import side
 
+        profile = await self._current_profile("Observer")
+
         async def ask(prompt: str) -> str | None:
             with contextlib.suppress(FusionError):
                 self.check_budget()
-                return await side.ask(self.parent.manager, prompt, model_id=model, timeout=10, fusion_host=self.parent,
+                return await side.ask(self.parent.manager, f"{profile.instructions}\n\n{prompt}", model_id=model,
+                                      instructions=observer.JUDGEMENT_CONTRACT, timeout=10, fusion_host=self.parent,
                                       reasoning=self.reasoning_for(self.registry.policy.light, "light"),
                                       on_usage=lambda usage, used: self.parent._add_usage(
                                           usage, measures_context=False, counts_speed=False, model=used))
@@ -1801,7 +1818,7 @@ class FusionRuntime:
                 b = self.registry.binding(view.record.plan, view.record.workstream, view.record.stage)
                 profile = self._version_profile(b)
             else:
-                profile = self.identities.get(view.record.identity)
+                profile = await self._current_profile(view.record.identity)
             if profile is None:
                 raise FusionError("The expert's identity is no longer defined; it was not reopened without its limits.")
         reasoning = self._expert_effort(view.record, profile)
@@ -2656,7 +2673,7 @@ class FusionRuntime:
     async def delegate_brief(self, brief: Brief, *, tool_call: Call | None = None) -> Outcome:
         if not self.brief_enabled:
             return Outcome("Structured Fusion delegation is unavailable.", True)
-        profile = self.identities.get(brief.identity)
+        profile = await self._current_profile(brief.identity)
         if profile is None or profile.name == "Observer":
             return Outcome("This identity cannot be delegated by the main agent.", True)
         if brief.ignored_write_paths and "edit" not in profile.tools:
@@ -2792,6 +2809,8 @@ class FusionRuntime:
             transferred_new = bool(expert.transferred_from and expert.started_at == 0)
             self.registry.begin(expert.id, resume=resume or recovering is not None)
             expert.task = task
+            if profile is not None:
+                expert.display_name = profile.display_name
             if case is not None:
                 before_case = dict(case)
                 if stage == 'worker' and (case['revision'] == 0 or case['paused'] == 'repair'):

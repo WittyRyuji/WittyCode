@@ -80,7 +80,8 @@ def resolve(units, requested, *, policy, settings, pools, catalog, goal, canonic
                 continue
             if entry is None or not entry.enabled:
                 raise ValueError(f"{item['id']}: no enabled {stage} expert.")
-            roster[stage] = {**choice, 'identity': entry.name, 'expert': entry.stable_id, 'version': entry.version,
+            roster[stage] = {**choice, 'identity': entry.stable_id if entry.builtin else entry.name,
+                             'expert': entry.stable_id, 'version': entry.version,
                              'hash': entry.content_hash, 'role': entry.role, 'effort': effort(choice['model'], choice['seat'])}
         if not independent(roster):
             raise ValueError(f"{item['id']}: author and reviewer must differ in both identity and native model.")
@@ -92,7 +93,7 @@ def resolve(units, requested, *, policy, settings, pools, catalog, goal, canonic
         if type(requested['seconds']) is int:
             seconds = min(seconds, requested['seconds'])
         resolved[item['id']] = {**item, 'paths': paths, 'roster': roster, 'facts': result['facts'], 'derived': result['derived'],
-                                'author': {'expert': author.stable_id, 'identity': author.name, 'actual_model': roster['worker']['actual_model']},
+                                'author': {'expert': author.stable_id, 'identity': roster['worker']['identity'], 'actual_model': roster['worker']['actual_model']},
                                 'reasons': result['reasons'], 'budget': {**asdict(band), 'seconds': seconds,
                                     'adaptive_steps': settings.fusion_steps_max_adaptive,
                                     'adaptive_seconds': policy.max_seconds_adaptive,

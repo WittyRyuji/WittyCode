@@ -24,8 +24,8 @@ runnable expert and is not resolved.
 
 The API never accepts a caller-supplied body path. Paths shown in summaries are catalog-relative evidence, not
 write locations. The Markdown header may tighten the work type's permission ceiling but cannot raise it; Observer
-uses the same read-only ceiling as the built-in identity, and the built-in identities are represented read-only so
-old sessions can still resolve names such as ``Coder`` exactly as before. The dispatch layer must use ASCII expert
+uses the same read-only ceiling as the built-in identity. Built-in text edits are versioned in the same index;
+version zero is the factory definition, and built-in machine names never change. The dispatch layer must use ASCII expert
 references of at most 180 bytes (for example ``expert:<stable-id>@v<version>``); the write-time P1 limit reserves
 that much reference space plus worst-case first-pack framing.
 """
@@ -147,7 +147,11 @@ class UnknownExpertError(ExpertCatalogError):
 
 
 class ProtectedExpertError(ExpertCatalogError):
-    """Built-in identities are readable for compatibility but cannot be changed through the catalog."""
+    """A change would replace a built-in's protected identity or capabilities."""
+
+
+class ExpertConflictError(ExpertCatalogError):
+    """The version edited by the caller is no longer current."""
 
 
 class ExpertStorageError(ExpertCatalogError):
@@ -251,7 +255,7 @@ def _name(value: str) -> str:
     if not isinstance(value, str):
         raise ValueError("name must be text.")
     name = value.strip()
-    if not name or len(name) > MAX_NAME_CHARS or "\0" in name or "\r" in name or "\n" in name:
+    if not name or len(name) > MAX_NAME_CHARS or "\0" in name or len(name.splitlines()) != 1:
         raise ValueError(f"name must be one line of 1-{MAX_NAME_CHARS} characters.")
     return name
 
@@ -312,7 +316,7 @@ def _row_summary(row: sqlite3.Row) -> ExpertSummary:
     return ExpertSummary(
         row["id"], row["name"], row["work_type"], tuple(json.loads(row["tags"])), bool(row["enabled"]),
         int(row["version"]), row["md_path"], row["content_hash"], int(row["body_tokens"]), row["role"],
-        float(row["created"]), float(row["updated"]), False, bool(row["deleted"]),
+        float(row["created"]), float(row["updated"]), row["id"] in _BUILTIN_WORK_TYPES, bool(row["deleted"]),
     )
 
 
@@ -320,7 +324,7 @@ def _version_summary(row: sqlite3.Row) -> ExpertSummary:
     return ExpertSummary(
         row["id"], row["name"], row["work_type"], tuple(json.loads(row["tags"])), bool(row["enabled"]),
         int(row["version"]), row["md_path"], row["content_hash"], int(row["body_tokens"]), row["role"],
-        float(row["created"]), float(row["created"]), False, bool(row["deleted"]),
+        float(row["created"]), float(row["created"]), row["id"] in _BUILTIN_WORK_TYPES, bool(row["deleted"]),
     )
 
 
@@ -459,7 +463,18 @@ COMMIT;
         finally:
             Path(temporary).unlink(missing_ok=True)
 
-    def _document(self, name: str, work_type: str, markdown: str) -> _Document:
+    @staticmethod
+    def _parse(markdown: str, name: str, work_type: str, builtin: str) -> Identity:
+        if not builtin:
+            return parse_controlled(markdown, name=name, ceiling=_ceiling(work_type))
+        base = load(None).get(builtin)
+        parsed = parse_controlled(markdown, name=builtin, ceiling=base)
+        # Only presentation and prompt text are editable, even through a direct API call.
+        if replace(parsed, description=base.description, instructions=base.instructions) != base:
+            raise ProtectedExpertError("Built-in Fusion capabilities are protected.")
+        return replace(parsed, display_name=name if name != builtin else "")
+
+    def _document(self, name: str, work_type: str, markdown: str, builtin: str = "") -> _Document:
         markdown = _normalize_markdown(markdown)
         if "\0" in markdown:
             raise ValueError("markdown must not contain NUL.")
@@ -473,7 +488,7 @@ COMMIT;
         if not body.strip():
             raise ValueError("expert Markdown body must not be empty.")
         body_tokens = estimate_text(body)
-        identity = parse_controlled(markdown, name=name, ceiling=_ceiling(work_type))
+        identity = self._parse(markdown, name, work_type, builtin)
         serialized_cost = _p1_serialized_cost(identity.instructions)
         if serialized_cost > MAX_P1_SERIALIZED_UTF8:
             excess = serialized_cost - MAX_P1_SERIALIZED_UTF8
@@ -512,7 +527,8 @@ COMMIT;
 
     def _check_namespace(self, db: sqlite3.Connection, stable_id: str, name: str, *, current: str | None = None) -> None:
         stable_key, name_key = stable_id.casefold(), name.casefold()
-        if stable_key in self._builtin_keys() or name_key in self._builtin_keys():
+        reserved = self._builtin_keys() - {_lookup_key(current)}
+        if stable_key in reserved or name_key in reserved:
             raise ProtectedExpertError("Built-in Fusion identities are protected.")
         row = db.execute("SELECT id FROM experts WHERE id_key = ?", (stable_key,)).fetchone()
         if row is not None and row["id"] != current:
@@ -567,13 +583,11 @@ COMMIT;
         rows = db.execute(
             "SELECT * FROM experts WHERE " + " AND ".join(clauses) + " ORDER BY name_key, id_key", params
         ).fetchall()
-        custom = tuple(_row_summary(row) for row in rows)
-        wanted_tags = {tag.casefold() for tag in tags}
-        builtins = tuple(entry for entry in self._builtins()
+        stored = {row["id"]: _row_summary(row) for row in rows}
+        builtins = tuple(stored.pop(entry.stable_id, entry) for entry in self._builtins()
                          if (work_type is None or entry.work_type == work_type)
-                         and (enabled is None or entry.enabled == enabled)
-                         and wanted_tags <= {tag.casefold() for tag in entry.tags})
-        return builtins + custom
+                         and (enabled is None or enabled) and not tags)
+        return (*builtins, *stored.values())
 
     def list(self) -> tuple[ExpertSummary, ...]:
         """All non-deleted experts, built-ins first. This never reads a Markdown body."""
@@ -600,14 +614,11 @@ COMMIT;
 
     def get(self, key: str) -> ExpertSummary | None:
         """Look up a non-deleted expert by stable id, or by name for legacy/runtime compatibility."""
-        wanted = _lookup_key(key)
-        builtin = next((entry for entry in self._builtins()
-                        if entry.stable_id.casefold() == wanted or entry.name.casefold() == wanted), None)
-        if builtin is not None:
-            return builtin
         with self._connect() as db:
             row = self._find_row(db, key)
-            return _row_summary(row) if row is not None else None
+            if row is not None:
+                return _row_summary(row)
+        return self._builtin_summary(key.strip()) if _lookup_key(key) in self._builtin_keys() else None
 
     def create(self, *, stable_id: str, name: str, work_type: str, markdown: str,
                tags: str | Iterable[str] = (), enabled: bool = True) -> ExpertSummary:
@@ -616,54 +627,54 @@ COMMIT;
         document = self._document(name, work_type, markdown)
         with self._write() as db:
             self._check_namespace(db, stable_id, name)
-            now = self._clock()
-            self._write_body(document)
-            db.execute("INSERT INTO experts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (
-                stable_id, stable_id.casefold(), name, name.casefold(), work_type, _tags_json(tags), int(enabled), 1,
-                document.content_hash, document.md_path, document.body_tokens, document.identity.role, now, now, 0,
-            ))
-            self._replace_tags(db, stable_id, tags)
-            self._insert_version(db, stable_id, 1, name, work_type, tags, enabled, document.content_hash,
-                                 document.md_path, document.body_tokens, document.identity.role, now, False)
-            self._bump(db)
-            return _row_summary(db.execute("SELECT * FROM experts WHERE id = ?", (stable_id,)).fetchone())
+            return self._save(db, stable_id, name, work_type, tags, enabled, document, 1)
+
+    def _save(self, db, stable_id, name, work_type, tags, enabled, document, version) -> ExpertSummary:
+        now = self._clock()
+        self._write_body(document)
+        db.execute("""INSERT INTO experts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                      ON CONFLICT(id) DO UPDATE SET name=excluded.name, name_key=excluded.name_key,
+                      work_type=excluded.work_type, tags=excluded.tags, enabled=excluded.enabled,
+                      version=excluded.version, content_hash=excluded.content_hash, md_path=excluded.md_path,
+                      body_tokens=excluded.body_tokens, role=excluded.role, updated=excluded.updated""", (
+            stable_id, stable_id.casefold(), name, name.casefold(), work_type, _tags_json(tags), int(enabled), version,
+            document.content_hash, document.md_path, document.body_tokens, document.identity.role, now, now,
+        ))
+        self._replace_tags(db, stable_id, tags)
+        self._insert_version(db, stable_id, version, name, work_type, tags, enabled, document.content_hash,
+                             document.md_path, document.body_tokens, document.identity.role, now, False)
+        self._bump(db)
+        return _row_summary(db.execute("SELECT * FROM experts WHERE id = ?", (stable_id,)).fetchone())
 
     def update(self, stable_id: str, *, name: str | None = None, work_type: str | None = None,
                tags: str | Iterable[str] | None = None, enabled: bool | None = None,
-               markdown: str | None = None) -> ExpertSummary:
-        """Replace any supplied fields and append one immutable version when the expert definition changed."""
+               markdown: str | None = None, expected_version: int | None = None) -> ExpertSummary:
+        """Replace supplied fields under the writer lock; v0 stays virtual until the first edit."""
         stable_id = _stable_id(stable_id)
-        if stable_id.casefold() in self._builtin_keys():
-            raise ProtectedExpertError("Built-in Fusion identities are protected.")
         with self._write() as db:
             row = db.execute("SELECT * FROM experts WHERE id_key = ? AND deleted = 0", (stable_id.casefold(),)).fetchone()
-            if row is None:
+            if row is not None:
+                old = _row_summary(row)
+            elif stable_id.casefold() in self._builtin_keys():
+                old = self._builtin_summary(stable_id)
+            else:
                 raise UnknownExpertError("No enabled or disabled expert has this stable id.")
-            new_name = _name(name) if name is not None else row["name"]
-            new_work_type = _work_type(work_type) if work_type is not None else row["work_type"]
-            new_tags = split_tags(tags) if tags is not None else tuple(json.loads(row["tags"]))
-            new_enabled = _enabled(enabled) if enabled is not None else bool(row["enabled"])
+            if expected_version is not None and (type(expected_version) is not int or expected_version != old.version):
+                raise ExpertConflictError("The expert version changed; refresh before saving.")
+            new_name = _name(name) if name is not None else old.name
+            new_work_type = _work_type(work_type) if work_type is not None else old.work_type
+            new_tags = split_tags(tags) if tags is not None else old.tags
+            new_enabled = _enabled(enabled) if enabled is not None else old.enabled
+            metadata = (new_work_type, new_tags, new_enabled)
+            if old.builtin and metadata != (old.work_type, old.tags, old.enabled):
+                raise ProtectedExpertError("Built-in Fusion identities are protected.")
             if markdown is None:
-                markdown, _ = self._read_body(row["content_hash"], row["md_path"])
-            document = self._document(new_name, new_work_type, markdown)
-            changed = (new_name != row["name"] or new_work_type != row["work_type"] or new_tags != tuple(json.loads(row["tags"]))
-                       or new_enabled != bool(row["enabled"]) or document.content_hash != row["content_hash"])
-            if not changed:
-                return _row_summary(row)
-            self._check_namespace(db, stable_id, new_name, current=row["id"])
-            now, version = self._clock(), int(row["version"]) + 1
-            self._write_body(document)
-            db.execute("""UPDATE experts SET name = ?, name_key = ?, work_type = ?, tags = ?, enabled = ?, version = ?,
-                          content_hash = ?, md_path = ?, body_tokens = ?, role = ?, updated = ? WHERE id = ?""", (
-                new_name, new_name.casefold(), new_work_type, _tags_json(new_tags), int(new_enabled), version,
-                document.content_hash, document.md_path, document.body_tokens, document.identity.role, now, row["id"],
-            ))
-            self._replace_tags(db, row["id"], new_tags)
-            self._insert_version(db, row["id"], version, new_name, new_work_type, new_tags, new_enabled,
-                                 document.content_hash, document.md_path, document.body_tokens,
-                                 document.identity.role, now, False)
-            self._bump(db)
-            return _row_summary(db.execute("SELECT * FROM experts WHERE id = ?", (row["id"],)).fetchone())
+                markdown = self._resolved(old).markdown
+            document = self._document(new_name, new_work_type, markdown, old.stable_id if old.builtin else "")
+            if (new_name, *metadata, document.content_hash) == (old.name, old.work_type, old.tags, old.enabled, old.content_hash):
+                return old
+            self._check_namespace(db, old.stable_id, new_name, current=old.stable_id)
+            return self._save(db, old.stable_id, new_name, *metadata, document, old.version + 1)
 
     def set_enabled(self, stable_id: str, enabled: bool) -> ExpertSummary:
         """Enable or disable the current expert. The exact frozen versions remain resolvable."""
@@ -704,16 +715,11 @@ COMMIT;
             self._bump(db)
             return True
 
-    def _resolve_builtin(self, summary: ExpertSummary) -> ResolvedExpert:
-        identity = load(None).get(summary.name)
-        markdown = builtin_markdown(summary.name)
-        if identity is None or markdown is None:
-            raise ExpertStorageError("A built-in Fusion identity is missing.")
-        return ResolvedExpert(summary, markdown, identity)
-
-    def _resolve_custom(self, summary: ExpertSummary) -> ResolvedExpert:
+    def _resolved(self, summary: ExpertSummary) -> ResolvedExpert:
+        if summary.builtin and summary.version == 0:
+            return ResolvedExpert(summary, builtin_markdown(summary.stable_id), load(None).get(summary.stable_id))
         markdown, _ = self._read_body(summary.content_hash, summary.md_path)
-        parsed = parse_controlled(markdown, name=summary.name, ceiling=_ceiling(summary.work_type))
+        parsed = self._parse(markdown, summary.name, summary.work_type, summary.stable_id if summary.builtin else "")
         # The role in SQLite is an index cache. The immutable document plus its work-type ceiling is authoritative.
         if parsed.role != summary.role:
             summary = replace(summary, role=parsed.role)
@@ -726,31 +732,24 @@ COMMIT;
             raise UnknownExpertError("No visible expert matches this stable id or name.")
         if not summary.enabled:
             raise ExpertCatalogError("This expert is disabled; resolve a previously frozen version explicitly instead.")
-        return self._resolve_builtin(summary) if summary.builtin else self._resolve_custom(summary)
+        return self._resolved(summary)
 
     def resolve_version(self, key: str, version: int) -> ResolvedExpert:
         """Resolve one frozen immutable version, even after later edits, disablement or deletion.
 
-        Built-ins have version ``0``. A version row created by delete is only a tombstone and raises
-        ``ExpertCatalogError``; all earlier runnable versions remain available.
+        Version zero is always the factory definition. Deletion tombstones are not runnable.
         """
-        if not isinstance(version, int) or version < 0:
+        if type(version) is not int or version < 0:
             raise ValueError("version must be a non-negative integer.")
-        wanted = _lookup_key(key)
-        builtin = next((entry for entry in self._builtins()
-                        if entry.stable_id.casefold() == wanted or entry.name.casefold() == wanted), None)
-        if builtin is not None:
-            if version != 0:
-                raise UnknownExpertError("A built-in expert only has version 0.")
-            return self._resolve_builtin(builtin)
         with self._connect() as db:
             owner = self._find_row(db, key, include_deleted=True)
-            if owner is None:
-                raise UnknownExpertError("No expert matches this stable id or name.")
-            row = db.execute("SELECT * FROM versions WHERE id = ? AND version = ?", (owner["id"], version)).fetchone()
+            stable_id = owner["id"] if owner is not None else _lookup_key(key)
+            if version == 0 and stable_id.casefold() in self._builtin_keys():
+                return self._resolved(self._builtin_summary(stable_id))
+            row = db.execute("SELECT * FROM versions WHERE id = ? AND version = ?", (stable_id, version)).fetchone()
         if row is None:
             raise UnknownExpertError("No such expert version.")
         summary = _version_summary(row)
         if summary.deleted:
             raise ExpertCatalogError("This version is a deletion tombstone, not a runnable expert.")
-        return self._resolve_custom(summary)
+        return self._resolved(summary)

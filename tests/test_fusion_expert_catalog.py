@@ -64,15 +64,57 @@ def test_builtin_identities_are_visible_legacy_resolvable_and_protected(tmp_path
     assert catalog.resolve_version("coder", 0).identity == resolved.identity
 
     for operation in (
-        lambda: catalog.update("Coder", name="Changed"),
+        lambda: catalog.update("Coder", work_type="review"),
         lambda: catalog.set_enabled("observer", False),
         lambda: catalog.delete("Runner"),
         lambda: catalog.create(stable_id="coder-copy", name="Coder", work_type="execute", markdown=_markdown()),
     ):
         with pytest.raises(ProtectedExpertError, match="protected"):
             operation()
-    with pytest.raises(UnknownExpertError, match="version 0"):
+    with pytest.raises(UnknownExpertError, match="No such expert version"):
         catalog.resolve_version("Coder", 1)
+
+
+@pytest.mark.parametrize("name", ["Coder", "Runner", "QualitySampler", "Observer"])
+def test_builtin_text_edits_keep_canonical_capabilities_and_frozen_versions(tmp_path, name):
+    catalog = _catalog(tmp_path)
+    factory = catalog.resolve(name)
+    first = catalog.update(name.lower(), name="显示名", expected_version=0)
+    assert first.version == 1 and first.stable_id == name and first.builtin
+    assert catalog.resolve("显示名").identity.instructions == factory.instructions
+    text = _markdown("Review inventory.", f"name: {name}\ndescription: Count totals.\n")
+    second = catalog.update(name, name="新版", markdown=text, expected_version=1)
+    assert catalog.update(name, markdown=text) == second  # no-op does not consume a version
+    reopened = _catalog(tmp_path)
+    assert reopened.get("显示名") is None and reopened.get("新版") == second
+    assert len(reopened.list()) == 4 and second in reopened.query(work_type=first.work_type)
+    assert reopened.snapshot().get(name) == second and reopened.snapshot().revision == 2
+    assert reopened.resolve_version(name, 0) == factory
+    assert reopened.resolve_version(name, 1).summary.name == "显示名"
+    profile = reopened.resolve(name).identity
+    assert profile.name == name and profile.description == "Count totals." and profile.editable_body == "Review inventory."
+    assert profile.instructions.endswith("\nDo not delegate or write to long-term memory.")
+    assert (profile.tools, profile.reuse, profile.role) == (factory.identity.tools, factory.identity.reuse, factory.identity.role)
+
+
+def test_builtin_update_checks_conflicts_and_never_changes_protected_fields(tmp_path):
+    catalog = _catalog(tmp_path)
+    catalog.create(stable_id="custom-id", name="Custom name", work_type="execute", markdown=_markdown())
+    other = _catalog(tmp_path)
+    catalog.update("Observer", name="Monitor", expected_version=0)
+    with pytest.raises(catalog_module.ExpertConflictError):
+        other.update("Observer", name="Stale", expected_version=0)
+    for name in ("Coder", "custom-ID", "Custom NAME"):
+        with pytest.raises((ProtectedExpertError, ValueError)):
+            catalog.update("Observer", name=name)
+    for edits in ({"enabled": False}, {"work_type": "execute"}, {"tags": "route"},
+                  *({"markdown": _markdown(header=header + "\n")} for header in
+                    ("tools: read, exec", "role: worker", "reuse: true", "name: Coder", "reasoning: high", "compact_at: 5"))):
+        with pytest.raises((ProtectedExpertError, ValueError)):
+            catalog.update("observer", **edits)
+    with pytest.raises(ValueError, match="collide"):
+        catalog.update("custom-id", name="MONITOR")
+    assert catalog.get("Observer").version == 1 and catalog.get("Monitor").enabled
 
 
 @pytest.mark.parametrize("work_type, role, tools, reuse", [

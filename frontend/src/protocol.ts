@@ -379,7 +379,7 @@ export interface ExpertCatalogView {
   experts: ExpertSummary[];
   workTypes: { id: string; label: string }[];
 }
-export interface ExpertDetail { expert: ExpertSummary; markdown: string }
+export interface ExpertDetail { expert: ExpertSummary; markdown: string; description: string; body: string }
 export interface ExpertDraft {
   stableId?: string;
   name: string;
@@ -454,7 +454,7 @@ export interface Calls {
   "experts.list": { params: None; result: ExpertCatalogView };
   "experts.get": { params: { stableId: string }; result: ExpertDetail };
   "experts.create": { params: Required<ExpertDraft>; result: ExpertCatalogView };
-  "experts.update": { params: ExpertDraft & { stableId: string }; result: ExpertCatalogView };
+  "experts.update": { params: Partial<ExpertDraft> & { stableId: string; expectedVersion?: number }; result: ExpertCatalogView };
   "experts.setEnabled": { params: { stableId: string; enabled: boolean }; result: ExpertCatalogView };
   "experts.delete": { params: { stableId: string }; result: ExpertCatalogView };
   "fusion.transferExpert": { params: { id: string; agentId: string; model: string; role: "worker" | "light" }; result: { ok: boolean; agentId: string } };

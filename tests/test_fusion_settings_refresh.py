@@ -499,6 +499,15 @@ def test_expert_catalog_bridge_crud_uses_lazy_controlled_settings_root(tmp_path,
             detail = await core.call("experts.get", {"stableId": "review-security"})
             assert detail["expert"]["version"] == 3
 
+            await core.call("experts.update", {"stableId": "Coder", "name": "实现", "expectedVersion": 0})
+            with pytest.raises(AppError, match="已有新版本"):
+                await core.call("experts.update", {"stableId": "Coder", "name": "旧草稿", "expectedVersion": 0})
+            with pytest.raises(AppError, match="受保护"):
+                await core.call("experts.update", {"stableId": "Coder", "enabled": False})
+            coder = await core.call("experts.get", {"stableId": "Coder"})
+            assert coder["expert"]["name"] == "实现" and coder["expert"]["version"] == 1
+            assert coder["description"] and coder["body"] and "Do not delegate" not in coder["body"]
+
             removed = await core.call("experts.delete", {"stableId": "review-security"})
             assert all(item["stableId"] != "review-security" for item in removed["experts"])
             with pytest.raises(AppError, match="没有找到这个专家"):

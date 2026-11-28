@@ -17,23 +17,25 @@ const DESIGN_WORK_TYPES = [
 
 function designExpert(stableId: string, name: string, workType: string, tags: string[], enabled = true): ExpertSummary {
   return {
-    stableId, name, workType, tags, enabled, version: 1,
+    stableId, name, workType, tags, enabled, version: 0,
     mdPath: `design/${stableId}.md`, contentHash: stableId, bodyTokens: 180,
     role: workType, created: 1, updated: 1, builtin: true,
   };
 }
 
 let designCatalog = {
-  revision: 1,
+  revision: 0,
   entries: [
-    designExpert("builtin-coder", "执行专家", "execute", ["coder", "implement"]),
-    designExpert("builtin-runner", "运行专家", "research", ["runner", "inspect"]),
-    designExpert("builtin-reviewer", "审查专家", "review", ["quality", "verify"]),
+    designExpert("Coder", "Coder", "execute", []),
+    designExpert("Runner", "Runner", "verify", []),
+    designExpert("QualitySampler", "QualitySampler", "review", []),
+    designExpert("Observer", "Observer", "observe", []),
   ],
   markdown: {
-    "builtin-coder": "---\nname: 执行专家\nwork_type: execute\npermission: Coder\n---\n按目标完成实现，并保持改动可验证。",
-    "builtin-runner": "---\nname: 运行专家\nwork_type: research\npermission: Runner\n---\n运行命令、收集证据并回报事实。",
-    "builtin-reviewer": "---\nname: 审查专家\nwork_type: review\npermission: QualitySampler\n---\n核对实现是否满足验收条件。",
+    Coder: "---\ndescription: 实现和修复\n---\n按目标完成实现，并保持改动可验证。",
+    Runner: "---\ndescription: 运行验证\n---\n运行命令、收集证据并回报事实。",
+    QualitySampler: "---\ndescription: 独立审查\n---\n核对实现是否满足验收条件。",
+    Observer: "---\ndescription: 观察专家运行\n---\n报告循环、越界或停滞。",
   } as Record<string, string>,
 };
 
@@ -46,12 +48,14 @@ async function designCall(method: string, params: Record<string, unknown>): Prom
   if (method === "experts.get") {
     const expert = designCatalog.entries.find((entry) => entry.stableId === params.stableId);
     if (!expert) throw new Error("没有找到这个专家。");
-    return { expert: clone(expert), markdown: designCatalog.markdown[expert.stableId] ?? "" };
+    const markdown = designCatalog.markdown[expert.stableId];
+    const [, header, ...body] = markdown.split(/^---$/m);
+    return { expert: clone(expert), markdown, description: header?.match(/^description: *(.*)$/m)?.[1] ?? "", body: body.join("---").trim() };
   }
   const id = String(params.stableId ?? "").trim();
   if (method === "experts.setEnabled") {
     const expert = designCatalog.entries.find((entry) => entry.stableId === id);
-    if (!expert || expert.builtin) throw new Error(expert?.builtin ? "内置专家身份是只读的。" : "没有找到这个专家。");
+    if (!expert || expert.builtin) throw new Error(expert?.builtin ? "内置专家不能停用或删除。" : "没有找到这个专家。");
     expert.enabled = params.enabled === true;
     expert.version += 1;
     designCatalog.revision += 1;
@@ -59,7 +63,7 @@ async function designCall(method: string, params: Record<string, unknown>): Prom
   }
   if (method === "experts.delete") {
     const expert = designCatalog.entries.find((entry) => entry.stableId === id);
-    if (!expert || expert.builtin) throw new Error(expert?.builtin ? "内置专家身份是只读的。" : "没有找到这个专家。");
+    if (!expert || expert.builtin) throw new Error(expert?.builtin ? "内置专家不能停用或删除。" : "没有找到这个专家。");
     designCatalog.entries = designCatalog.entries.filter((entry) => entry.stableId !== id);
     delete designCatalog.markdown[id];
     designCatalog.revision += 1;
@@ -68,18 +72,20 @@ async function designCall(method: string, params: Record<string, unknown>): Prom
   if (method === "experts.create" || method === "experts.update") {
     const name = String(params.name ?? "").trim();
     const workType = String(params.workType ?? "");
-    const markdown = String(params.markdown ?? "");
+    const markdown = String(params.markdown ?? designCatalog.markdown[id] ?? "");
     if (!id || !name || !markdown.trim()) throw new Error("专家设置不合法。");
     const tags = splitTags(String(params.tags ?? ""));
     if (method === "experts.create") {
       if (designCatalog.entries.some((entry) => entry.stableId === id)) throw new Error("这个专家标识已经存在。");
-      const expert: ExpertSummary = { ...designExpert(id, name, workType, tags, params.enabled !== false), builtin: false, created: Date.now() / 1000, updated: Date.now() / 1000 };
+      const expert: ExpertSummary = { ...designExpert(id, name, workType, tags, params.enabled !== false), builtin: false, version: 1, created: Date.now() / 1000, updated: Date.now() / 1000 };
       designCatalog.entries.push(expert);
       designCatalog.markdown[id] = markdown;
     } else {
       const expert = designCatalog.entries.find((entry) => entry.stableId === id);
-      if (!expert || expert.builtin) throw new Error(expert?.builtin ? "内置专家身份是只读的。" : "没有找到这个专家。");
-      Object.assign(expert, { name, workType, tags, enabled: params.enabled !== false, updated: Date.now() / 1000 });
+      if (!expert) throw new Error("没有找到这个专家。");
+      if (params.expectedVersion !== expert.version) throw new Error("这个专家已有新版本，请刷新后再编辑。");
+      if (!expert.builtin) Object.assign(expert, { workType, tags, enabled: params.enabled !== false });
+      Object.assign(expert, { name, updated: Date.now() / 1000 });
       expert.version += 1;
       designCatalog.markdown[id] = markdown;
     }
@@ -98,7 +104,7 @@ async function expertCall(method: string, params: Record<string, unknown> = {}):
     case "experts.list": return liveCall("experts.list");
     case "experts.get": return liveCall("experts.get", params as { stableId: string });
     case "experts.create": return liveCall("experts.create", params as unknown as Required<ExpertDraft>);
-    case "experts.update": return liveCall("experts.update", params as unknown as ExpertDraft & { stableId: string });
+    case "experts.update": return liveCall("experts.update", params as Partial<ExpertDraft> & { stableId: string; expectedVersion?: number });
     case "experts.setEnabled": return liveCall("experts.setEnabled", params as { stableId: string; enabled: boolean });
     default: return liveCall("experts.delete", params as { stableId: string });
   }
@@ -115,6 +121,8 @@ export function ExpertCatalog() {
   const [error, setError] = useState("");
   const [result, setResult] = useState("");
   const [draft, setDraft] = useState({ stableId: "", name: "", workType: "execute", tags: "", enabled: true, markdown: "" });
+  const [description, setDescription] = useState("");
+  const [body, setBody] = useState("");
 
   const load = async (selectId?: string) => {
     setBusy(true); setError("");
@@ -132,6 +140,7 @@ export function ExpertCatalog() {
     try {
       const next = await expertCall("experts.get", { stableId });
       setDetail(next); setCreating(false);
+      setDescription(next.description); setBody(next.body);
       setDraft({
         stableId: next.expert.stableId,
         name: next.expert.name,
@@ -148,10 +157,11 @@ export function ExpertCatalog() {
 
   const workItems = (view?.workTypes ?? DESIGN_WORK_TYPES).map((type) => ({ id: type.id, label: `${type.label} · ${type.id}`, checked: draft.workType === type.id, onSelect: () => setDraft((cur) => ({ ...cur, workType: type.id })) }));
   const selected = detail?.expert;
-  const readOnly = Boolean(selected?.builtin) && !creating;
+  const builtin = Boolean(selected?.builtin) && !creating;
+  const textChanged = builtin && (description !== detail?.description || body !== detail?.body);
   const tags = splitTags(draft.tags);
   const dirty = Boolean(detail) && (
-    draft.name !== detail!.expert.name || draft.workType !== detail!.expert.workType ||
+    textChanged || draft.name !== detail!.expert.name || draft.workType !== detail!.expert.workType ||
     tags.join(" ") !== detail!.expert.tags.join(" ") || draft.enabled !== detail!.expert.enabled || draft.markdown !== detail!.markdown
   );
 
@@ -167,10 +177,13 @@ export function ExpertCatalog() {
     setBusy(true); setError(""); setResult("");
     try {
       const method = creating ? "experts.create" : "experts.update";
-      const next = await expertCall(method, { ...draft, tags: draft.tags });
+      const edits = builtin ? { stableId: draft.stableId, name: draft.name,
+        ...(textChanged ? { markdown: `---\ndescription: ${description}\n---\n${body}` } : {}) } : draft;
+      const next = await expertCall(method, { ...edits, ...(!creating && { expectedVersion: selected?.version }) });
       setView(next); setCreating(false);
       await open(draft.stableId, true);
-      setResult(creating ? "专家已创建。" : `已保存版本 ${detail?.expert.version ? detail.expert.version + 1 : ""}。`);
+      const saved = next.experts.find((entry) => entry.stableId === draft.stableId);
+      if (saved) setResult(creating ? "专家已创建。" : `已保存版本 ${saved.version}。`);
     } catch (e) { setError(messageOf(e)); }
     finally { setBusy(false); }
   };
@@ -205,7 +218,7 @@ export function ExpertCatalog() {
 
   return <section className="expert-catalog providers" aria-label="Fusion 专家目录">
     <h3 className="settings-section-title">专家目录</h3>
-    <p className="page-note">专家身份按版本保存。这里改的是全局目录；会话运行时接入后按稳定标识与哈希冻结引用。</p>
+    <p className="page-note">专家设置在整个应用中生效。新派工使用最新版本，已冻结的计划仍使用原版本。</p>
     <div className="pcard">
       <div className="pcard-head">
         <div>
@@ -237,35 +250,41 @@ export function ExpertCatalog() {
       <div className="pcard-head">
         <div>
           <h4>{creating ? "新建专家" : draft.name || selected?.name}</h4>
-          <div className="pstate">{creating ? "保存后进入版本目录" : `v${selected?.version} · ${selected?.enabled ? "启用" : "停用"}${selected?.builtin ? " · 内置只读" : ""}`}</div>
+          <div className="pstate">{creating ? "保存后进入版本目录" : `v${selected?.version} · ${selected?.enabled ? "启用" : "停用"}${builtin ? (selected?.version === 0 ? " · 内置出厂版本" : " · 内置专家") : ""}`}</div>
         </div>
-        {!creating && <div className="pcard-actions">
-          <button type="button" className="btn small" disabled={busy || readOnly} onClick={() => void setEnabled(!selected?.enabled)}>{selected?.enabled ? "停用" : "启用"}</button>
-          <button type="button" className="btn small danger" disabled={busy || readOnly} onClick={remove}>删除</button>
+        {!creating && !builtin && <div className="pcard-actions">
+          <button type="button" className="btn small" disabled={busy} onClick={() => void setEnabled(!selected?.enabled)}>{selected?.enabled ? "停用" : "启用"}</button>
+          <button type="button" className="btn small danger" disabled={busy} onClick={remove}>删除</button>
         </div>}
       </div>
-      {readOnly && <p className="pcard-note">内置身份只读；可以复制其内容后新建自定义专家。</p>}
       <div className="pe-row">
         <div style={{ flex: "1 1 240px" }}><Stack label="稳定标识" hint="创建后不可改；运行时按它和版本哈希冻结引用。"><input className="textin mono selectable" value={draft.stableId} aria-label="专家稳定标识" placeholder="例如 review-security" disabled={busy || !creating} onChange={(e) => setDraft({ ...draft, stableId: e.target.value.trim() })} /></Stack></div>
-        <div style={{ flex: "1 1 240px" }}><Stack label="显示名"><input className="textin selectable" value={draft.name} aria-label="专家显示名" disabled={busy || readOnly} onChange={(e) => setDraft({ ...draft, name: e.target.value })} /></Stack></div>
+        <div style={{ flex: "1 1 240px" }}><Stack label="显示名"><input className="textin selectable" value={draft.name} aria-label="专家显示名" disabled={busy} onChange={(e) => setDraft({ ...draft, name: e.target.value })} /></Stack></div>
       </div>
+      {builtin ? <>
+        <Stack label="描述"><input className="textin selectable" aria-label="专家描述" value={description} disabled={busy} onChange={(e) => setDescription(e.target.value)} /></Stack>
+        <Stack label="角色提示词" hint="写下专家的职责和工作方式。系统权限、派工范围和报告要求仍由 Fusion 控制。">
+          <textarea className="rules-editor selectable" rows={6} aria-label="专家角色提示词" value={body} disabled={busy} spellCheck={false} onChange={(e) => setBody(e.target.value)} />
+        </Stack>
+      </> : <>
       <div className="pe-row">
-        <div style={{ flex: "1 1 240px" }}><Stack label="工作类型" hint="类型决定权限上限；Markdown 只能收紧，不能抬高。"><Select value={workItems.find((item) => item.checked)?.label ?? draft.workType} ariaLabel="专家工作类型" disabled={busy || readOnly} items={workItems} /></Stack></div>
-        <div style={{ flex: "0 0 auto" }}><Stack label="启用"><div className="pe-check"><Switch on={draft.enabled} disabled={busy || readOnly} label="专家启用" onChange={(enabled) => setDraft({ ...draft, enabled })} /><span>{draft.enabled ? "启用" : "停用"}</span></div></Stack></div>
+        <div style={{ flex: "1 1 240px" }}><Stack label="工作类型" hint="类型决定权限上限；Markdown 只能收紧，不能抬高。"><Select value={workItems.find((item) => item.checked)?.label ?? draft.workType} ariaLabel="专家工作类型" disabled={busy} items={workItems} /></Stack></div>
+        <div style={{ flex: "0 0 auto" }}><Stack label="启用"><div className="pe-check"><Switch on={draft.enabled} disabled={busy} label="专家启用" onChange={(enabled) => setDraft({ ...draft, enabled })} /><span>{draft.enabled ? "启用" : "停用"}</span></div></Stack></div>
       </div>
       <Stack label="Tags" hint="用空格分隔；保存时去重，大小写不敏感但保留第一次的写法。">
-        <input className="textin selectable" value={draft.tags} aria-label="专家 Tags" placeholder="security review api" disabled={busy || readOnly} onChange={(e) => setDraft({ ...draft, tags: e.target.value })} />
+        <input className="textin selectable" value={draft.tags} aria-label="专家 Tags" placeholder="security review api" disabled={busy} onChange={(e) => setDraft({ ...draft, tags: e.target.value })} />
         <div className="expert-tag-chips">{tags.map((tag) => <span key={tag} className="src-tag">{tag}</span>)}</div>
       </Stack>
       <Stack label="Markdown 指令" hint="正文是运行时注入的专家说明；目录字段决定名称、工作类型和标签，front matter 只能收紧工具、角色或复用权限。">
-        <textarea className="rules-editor selectable" rows={13} value={draft.markdown} aria-label="专家 Markdown 指令" disabled={busy || readOnly} spellCheck={false} onChange={(e) => setDraft({ ...draft, markdown: e.target.value })} />
+        <textarea className="rules-editor selectable" rows={13} value={draft.markdown} aria-label="专家 Markdown 指令" disabled={busy} spellCheck={false} onChange={(e) => setDraft({ ...draft, markdown: e.target.value })} />
       </Stack>
-      {selected && <div className="pcard-meta selectable">{selected.mdPath} · sha256:{selected.contentHash.slice(0, 16)} · 约 {selected.bodyTokens} tokens</div>}
-      {!readOnly && <div className="pe-btns">
-        <button type="button" className="btn primary" disabled={busy || (!creating && !dirty) || !draft.stableId.trim() || !draft.name.trim() || !draft.markdown.trim()} onClick={() => void save()}>{creating ? "创建专家" : "保存新版本"}</button>
+      </>}
+      {selected && !builtin && <div className="pcard-meta selectable">{selected.mdPath} · {selected.contentHash.slice(0, 23)} · 约 {selected.bodyTokens} tokens</div>}
+      <div className="pe-btns">
+        <button type="button" className="btn primary" disabled={busy || (!creating && !dirty) || !draft.stableId.trim() || !draft.name.trim() || !(builtin ? body : draft.markdown).trim()} onClick={() => void save()}>{creating ? "创建专家" : "保存新版本"}</button>
         {creating && <button type="button" className="btn" disabled={busy} onClick={() => { setCreating(false); if (view?.experts[0]) void open(view.experts[0].stableId); }}>取消</button>}
         {!creating && dirty && <span className="field-hint">有未保存的更改；保存会追加一个新版本。</span>}
-      </div>}
+      </div>
     </div>}
     {error && <p role="alert" className="connection-error">{error}</p>}
     {result && <p role="status" className="connection-result">{result}</p>}

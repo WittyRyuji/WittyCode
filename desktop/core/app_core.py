@@ -4445,9 +4445,11 @@ class AppCore:
 
     @staticmethod
     def _expert_error(error: Exception) -> AppError:
-        from desktop.core.fusion.expert_catalog import ExpertStorageError, ProtectedExpertError, UnknownExpertError
+        from desktop.core.fusion.expert_catalog import ExpertConflictError, ExpertStorageError, ProtectedExpertError, UnknownExpertError
+        if isinstance(error, ExpertConflictError):
+            return AppError("这个专家已有新版本，本次未保存。请刷新后再编辑。")
         if isinstance(error, ProtectedExpertError):
-            return AppError("内置专家身份是只读的，不能编辑、停用或删除。")
+            return AppError("内置专家标识受保护，只能修改显示名、描述和角色提示词。")
         if isinstance(error, UnknownExpertError):
             return AppError("没有找到这个专家，可能已经在别处被删除。")
         if isinstance(error, ExpertStorageError):
@@ -4479,7 +4481,8 @@ class AppCore:
             if summary is None:
                 raise UnknownExpertError("No visible expert matches this stable id.")
             resolved = self.expert_catalog().resolve_version(summary.stable_id, summary.version)
-            return {"expert": self._expert_json(resolved.summary), "markdown": resolved.markdown}
+            return {"expert": self._expert_json(resolved.summary), "markdown": resolved.markdown,
+                    "description": resolved.identity.description, "body": resolved.identity.editable_body}
 
         from desktop.core.fusion.expert_catalog import ExpertCatalogError, UnknownExpertError
         try:
@@ -4502,10 +4505,14 @@ class AppCore:
         stable_id = params.get("stableId")
         if not isinstance(stable_id, str) or not stable_id.strip():
             raise AppError("专家标识不合法。")
-        allowed = {"stableId", "name", "workType", "tags", "enabled", "markdown"}
+        allowed = {"stableId", "name", "workType", "tags", "enabled", "markdown", "expectedVersion"}
         if set(params) - allowed:
             raise AppError("专家设置不合法。")
         edits: dict[str, Any] = {}
+        if "expectedVersion" in params:
+            if type(params["expectedVersion"]) is not int or params["expectedVersion"] < 0:
+                raise AppError("专家版本不合法。")
+            edits["expected_version"] = params["expectedVersion"]
         for key in ("name", "workType", "markdown"):
             if key in params:
                 if not isinstance(params[key], str):

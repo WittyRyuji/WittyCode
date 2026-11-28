@@ -117,6 +117,23 @@ def test_structured_models_reuse_and_batch_ownership(tmp_path):
     asyncio.run(go())
 
 
+def test_current_profile_refreshes_text_but_preserves_legacy_limits(tmp_path):
+    from desktop.core.fusion.expert_catalog import ExpertCatalog
+    (_identity_folder() / "Coder.md").write_text("---\nname: Coder\ntools: read\n---\nLegacy prompt.", encoding="utf-8")
+
+    async def go():
+        async with _fusion(tmp_path) as (main, _):
+            catalog = ExpertCatalog(default_settings_path().parent / "fusion-experts")
+            assert (await main._fusion._current_profile("Coder")).instructions == "Legacy prompt."
+            for version in (1, 2):
+                text = f"Check inventory using protocol {version}."
+                catalog.update("Coder", name=f"Implementer {version}", markdown="---\n---\n" + text)
+                profile = await main._fusion._current_profile("Coder")
+                assert (profile.name, profile.display_name, profile.tools) == ("Coder", f"Implementer {version}", {"read"})
+                assert profile.instructions == text + "\nDo not delegate or write to long-term memory."
+    asyncio.run(go())
+
+
 def test_bad_and_legacy_calls_return_parser_refusals(tmp_path):
     async def go():
         async with _fusion(tmp_path) as (main, fake):

@@ -16,6 +16,11 @@ class Identity:
     compact_at: int | None
     reuse: bool
     instructions: str
+    display_name: str = ""  # Presentation only. Routing and permission checks always use name.
+
+    @property
+    def editable_body(self) -> str:
+        return self.instructions.removesuffix("\n" + _EXPERT_BOUNDARY)
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,7 +203,7 @@ def parse_controlled(markdown: str, *, name: str, ceiling: Identity) -> Identity
     if fields.get("reuse", "").casefold() == "true" and not ceiling.reuse:
         raise ValueError("reuse cannot exceed the controlled permission ceiling.")
     parsed = replace(_identity(fields, body, ceiling), name=name)
-    if not parsed.instructions.endswith(_EXPERT_BOUNDARY):
+    if parsed.instructions.split("\n")[-1] != _EXPERT_BOUNDARY:
         instructions = f"{parsed.instructions}\n{_EXPERT_BOUNDARY}" if parsed.instructions else _EXPERT_BOUNDARY
         parsed = replace(parsed, instructions=instructions)
     return parsed

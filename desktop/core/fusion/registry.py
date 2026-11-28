@@ -124,10 +124,11 @@ class Expert:
     stage: str = ""
     revision: int = 0  # Checks for a new author revision never inherit stale check history.
 
+    display_name: str = ""  # Saved label, never an authorization or ownership key.
     @property
     def label(self) -> str:
         workstream = self.workstream or self.scope
-        return display_name(self.identity, workstream) if self.identity else workstream
+        return display_name(self.display_name or self.identity, workstream) if self.identity else workstream
 
     def to_json(self) -> dict[str, Any]:
         return {"id": self.id, "scope": self.scope, "model": self.model, "role": self.role, "status": self.status,
@@ -135,6 +136,7 @@ class Expert:
                 "transferredFrom": self.transferred_from, "handoffComplete": self.handoff_complete, "aliases": list(self.aliases),
                 "workstream": self.workstream, "paths": list(self.paths), "identity": self.identity, "seat": self.seat,
                 **({"plan": self.plan, "stage": self.stage, "revision": self.revision} if self.plan else {}),
+                **({"displayName": self.display_name} if self.display_name else {}),
                 **({"replacedStatus": self.replaced_status} if self.replaced_status else {}),
                 **({"allocationWorkstream": self.allocation_workstream} if self.allocation_workstream else {})}
 
@@ -581,6 +583,9 @@ class FusionRegistry:
             elif workstream != "":
                 raise FusionError("The expert workstream is invalid.")
             identity = item.get("identity", "")
+            name = item.get("displayName", "")
+            if not isinstance(name, str) or len(name) > 80 or "\0" in name or len(name.splitlines()) > 1:
+                raise FusionError("The expert display name is invalid.")
             if plan:
                 frozen = result.plans[plan]
                 unit = frozen['spec']['units'][workstream]
@@ -643,7 +648,7 @@ class FusionRegistry:
             result.agents[ident] = Expert(ident, canonical, model, role, "interrupted" if status == "running" else status,
                                           task, float(started), float(finished) if finished is not None else None,
                                           source, handoff, aliases, workstream, paths, identity,
-                                          seat=seat, replaced_status=replaced, allocation_workstream=frozen_label, plan=plan, stage=stage, revision=item.get('revision', 0))
+                                          seat=seat, replaced_status=replaced, allocation_workstream=frozen_label, plan=plan, stage=stage, revision=item.get('revision', 0), display_name=name)
         for expert in result.agents.values():
             seen = {expert.id}
             source = expert.transferred_from
