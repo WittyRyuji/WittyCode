@@ -10,7 +10,7 @@ page offers to ask again, and no request is made with it.
 
 ``stream`` is the one function the loop calls to ask the model: it takes a fresh access token, posts the request and reads
 the events. ``WITTYCODE_CHATGPT_SHAPE`` (a JSON object of ``responses.Shape`` fields) changes what the request looks like
-without a new build, for the parts of the route that were not verified on a real account.
+without a new build. For example, ``{"cache_developer_instructions": false}`` restores top-level instructions on GPT-6.2+.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import time
 import uuid
 import webbrowser
@@ -31,6 +32,7 @@ from typing import TYPE_CHECKING, Any
 from desktop.core.chatgpt.accounts import AccountStore, TokenProvider
 from desktop.core.chatgpt.errors import AuthError, ChatGPTError, PlanNotEnabled
 from desktop.core.chatgpt.http import HttpClient, stream_idle_timeout
+from desktop.core.fusion.backends import GUARDED
 from desktop.core.chatgpt.models import FALLBACK_MODELS, ChatGPTModel, models_from_result
 from desktop.core.chatgpt.oauth import Endpoints, SignIn
 from desktop.core.chatgpt.responses import BASE_URL, Event, Shape, for_responses, read_events
@@ -93,6 +95,7 @@ class ChatGPTEngine:
     ) -> None:
         self.settings = settings
         self.api = api
+        self.factory: Any = None
         self.devin: Any = None  # Optional guarded ACP runner used only by Fusion sessions.
         """The API providers' models (``core/llm``): a request for one of them goes there, to the provider itself, and needs no sign-in."""
         self.root = Path(root)
@@ -268,7 +271,10 @@ class ChatGPTEngine:
     async def stream(self, request: dict[str, Any]) -> AsyncIterator[Event]:
         """Ask the model: a fresh access token, the request, the events of the answer. A model of an API provider is asked at the
         provider, with its own key."""
-        if self.api is not None and is_api_model(str(request.get("model") or "")):
+        model = str(request.get("model") or "")
+        if model.startswith(GUARDED) or is_api_model(model) and self.api is None:
+            raise ChatGPTError("所选后端不能通过 Plan 传输运行；未发送请求。", code="fusion_transport")
+        if self.api is not None and is_api_model(model):
             async with contextlib.aclosing(self.api.stream(request)) as events:
                 async for event in events:
                     yield event
@@ -276,9 +282,13 @@ class ChatGPTEngine:
         client_id = self.accounts.active_id()
         token = await self.tokens.access_token(client_id)
         info = self.model_info(str(request.get("model") or ""))
-        body = {**request, "input": for_responses(request.get("input") or (), supports_images=info is not None and info.supports_images)}
+        session_id = request.get("wc_session")
+        body = {key: value for key, value in request.items() if not key.startswith("wc_")}
+        body["input"] = for_responses(request.get("input") or (), supports_images=info is not None and info.supports_images)
         for attempt in range(2):
             headers = {"Authorization": f"Bearer {token}", "Accept": "text/event-stream", "originator": APP_NAME.lower()}
+            if isinstance(session_id, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", session_id):
+                headers["session_id"] = session_id
             lines = self.http.stream_lines("POST", f"{self.base_url}/responses", headers=headers, json_body=body, timeout=stream_idle_timeout(request))
             begun = False
             retry = False
@@ -329,6 +339,12 @@ class ChatGPTEngine:
         return models or list(FALLBACK_MODELS)
 
     def model_info(self, model_id: str) -> ChatGPTModel | None:
+        if model_id.startswith("factory:"):
+            raw = self.factory.model_info(model_id[8:]) if self.factory and self.settings.factory_enabled else None
+            if not raw:
+                return None
+            return ChatGPTModel(model_id, raw.get("displayName") or model_id[8:], tuple(raw.get("supportedReasoningEfforts") or ()),
+                                raw.get("defaultReasoningEffort") or "", raw.get("contextWindow"), supports_images=False)
         if model_id.startswith("devin:"):
             return self.devin.model_info(model_id[6:]) if self.devin is not None and self.settings.devin_enabled else None
         if self.api is not None and is_api_model(model_id):
@@ -337,6 +353,8 @@ class ChatGPTEngine:
         return next((m for m in self._models or FALLBACK_MODELS if m.id == model_id), None)
 
     def model_window(self, model_id: str) -> int | None:
+        if model_id.startswith("factory:"):
+            return self.factory.model_window(model_id[8:]) if self.factory else None
         if model_id.startswith("devin:"):
             return self.devin.model_window(model_id[6:]) if self.devin is not None else None
         if self.api is not None and is_api_model(model_id):
@@ -381,9 +399,9 @@ class ChatGPTEngine:
     ) -> ChatGPTController:
         from desktop.core.chatgpt.controller import DEFAULT_LEVEL, PLAN, ChatGPTController, normalize_level
 
-        if str(model or "").startswith("devin:"):
+        if str(model or "").startswith(GUARDED):
             if self.model_info(str(model)) is None:
-                raise ChatGPTError("Devin 模型当前不可用；未选择替代模型。", code="fusion_acp")
+                raise ChatGPTError("受控模型当前不可用；未选择替代模型。", code="fusion_transport")
         elif not is_api_model(str(model or "")):  # (an API provider's model needs its key, not a ChatGPT sign-in)
             await self.ensure_ready()
         controller = ChatGPTController(

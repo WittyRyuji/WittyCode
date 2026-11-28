@@ -51,7 +51,7 @@ export async function installLive(transport: Transport): Promise<void> {
   set(liveActions());
   guardLinks();
   try {
-    const init = await liveCall("app.init");
+    const init = await liveCall("app.init", { turnWindow: true });
     set((s) => ({ ...applyInit(s, init), ready: true, bootError: null }));
   } catch (error) {
     set({ bootError: messageOf(error) });
@@ -228,6 +228,7 @@ function liveActions(): Partial<Store> {
       return r.id;
     },
     reorderSession: (projectId, id, targetId, after) => void attempt(liveCall("session.reorder", { projectId, id, targetId, after })),
+    reorderProject: (id, targetId, after) => void attempt(liveCall("project.reorder", { id, targetId, after })),
     setSessionPinned: (projectId, id, pinned) => void attempt(liveCall("session.pin", { projectId, id, pinned })),
     archiveSession: async (id) => {
       const s = get().sessions[id];
@@ -263,7 +264,7 @@ function liveActions(): Partial<Store> {
       // The panel opens at once with what is being asked for; the file replaces the wait (or the sentence says why not).
       const watched = get().agentPanel;
       const request = { sessionId: id, ref, status: "loading" } as const;
-      set({ agentPanel: null, agentTurns: [], filePanel: request });
+      set({ agentPanel: null, agentTurns: [], agentHistory: undefined, filePanel: request });
       if (watched) void attempt(liveCall("agents.unwatch", { id: watched.sessionId }));
       try {
         const file = await liveCall("files.read", { id, path: ref });
@@ -315,13 +316,13 @@ function liveActions(): Partial<Store> {
     showPathMenu: (ref, x, y) => set({ pathMenu: { ref, x, y } }),
     hidePathMenu: () => set({ pathMenu: null }),
     openAgent: async (sessionId, agentId) => {
-      set({ agentPanel: { sessionId, agentId }, agentTurns: [], filePanel: null });
+      set({ agentPanel: { sessionId, agentId }, agentTurns: [], agentHistory: undefined, filePanel: null });
       const r = await attempt(liveCall("agents.watch", { id: sessionId, agentId }));
-      if (r === FAILED) set({ agentPanel: null, agentTurns: [] });
+      if (r === FAILED) set({ agentPanel: null, agentTurns: [], agentHistory: undefined });
     },
     closeAgent: () => {
       const panel = get().agentPanel;
-      set({ agentPanel: null, agentTurns: [] });
+      set({ agentPanel: null, agentTurns: [], agentHistory: undefined });
       if (panel) void attempt(liveCall("agents.unwatch", { id: panel.sessionId }));
     },
     transferFusionExpert: async (id, agentId, model, role) => {
@@ -453,6 +454,8 @@ function liveActions(): Partial<Store> {
     setFollowUp: (how) => void setting("followUp", how),
     setMaxOpen: (n) => void setting("maxOpen", Math.max(1, Math.min(16, n))),
     setMaxSteps: (n) => void setting("maxSteps", n),
+    setReconnectInterval: (n) => void setting("reconnectInterval", n),
+    setReconnectLimit: (n) => void setting("reconnectLimit", n),
     setMemoryEnabled: (on) => void setting("memoryEnabled", on),
     setMemoryRecall: (on) => void setting("memoryRecall", on),
     setMemoryCapture: (on) => void setting("memoryCapture", on),

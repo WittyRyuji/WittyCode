@@ -10,7 +10,7 @@ import pytest
 
 from desktop.core.devin.policy import CANCELLED
 from desktop.core.fusion.acp import AcpRun, guard_config
-from desktop.core.fusion.acp_server import MCP_CALL, MCP_LIST, PREFIX, SERVER, hook
+from desktop.core.fusion.acp_server import MCP_CALL, MCP_LIST, MCP_WRAPPERS, PREFIX, SERVER, hook
 from desktop.core.fusion.registry import Policy
 from tests.app_support import ready_core
 from tests.chatgpt_support import finish_turn
@@ -37,6 +37,8 @@ def test_guard_denies_native_tools_and_keeps_only_the_private_bridge():
     (MCP_LIST, {"server_name": "other"}, False),
     (MCP_CALL, {"server_name": SERVER, "tool_name": "read_file", "arguments": {}}, True),
     (MCP_CALL, {"server_name": SERVER, "tool_name": "read_file", "arguments": []}, False),
+    (MCP_CALL, {"server_name": SERVER, "tool_name": "shell", "command": "echo misplaced"}, False),
+    (MCP_CALL, {"server_name": SERVER, "tool_name": "shell", "arguments": {"command": "echo nested"}}, True),
     (MCP_CALL, {"server_name": SERVER, "tool_name": "exec", "arguments": {}}, False),
     (MCP_CALL, {"server_name": "other", "tool_name": "read_file", "arguments": {}}, False),
     (PREFIX + "read_file", None, True),
@@ -46,7 +48,7 @@ def test_guard_denies_native_tools_and_keeps_only_the_private_bridge():
 def test_acp_wrappers_require_an_exact_private_target_at_every_check(monkeypatch, name, arguments, allowed):
     run = AcpRun(SimpleNamespace())
     run.session, run.active = "private", True
-    run.tools = SimpleNamespace(known=lambda tool: tool == "read_file")
+    run.tools = SimpleNamespace(known=lambda tool: tool in ("read_file", "shell"))
     call = {"toolCallId": name + ":0#1", "rawInput": arguments}
     params = {"sessionId": run.session, "toolCall": call, "options": [{"kind": "allow_always", "optionId": "always"}]}
     assert asyncio.run(run._request("session/request_permission", params, 0)) == CANCELLED
@@ -57,7 +59,13 @@ def test_acp_wrappers_require_an_exact_private_target_at_every_check(monkeypatch
     payload = {"hook_event_name": "PreToolUse", "tool_name": name, "tool_input": arguments}
     assert hook(payload)[1] == (0 if allowed else 2)
     run._notify("session/update", {"sessionId": run.session, "update": {"sessionUpdate": "tool_call", **call}})
-    assert bool(run.violation) is not allowed
+    deferred = not allowed and name in MCP_WRAPPERS and not isinstance(arguments, dict)
+    assert bool(run.violation) is (not allowed and not deferred)
+    if deferred:  # A recognized wrapper may still complete its input on a later update.
+        assert run._pending[call["toolCallId"]] == name
+        run._notify("session/update", {"sessionId": run.session, "update": {
+            "sessionUpdate": "tool_call_update", "toolCallId": call["toolCallId"], "rawInput": {"server_name": "other"}}})
+        assert "mcp_list_tools" in run.violation and "other" not in run.violation
     run.active = False
     assert hook(payload)[1] == 2
     run.active, run.tool_free = True, True
@@ -167,6 +175,52 @@ def test_truncated_acp_tool_list_can_use_the_private_index(tmp_path):
             assert turn.status == "done", turn.error
             outputs = [item["output"] for item in main.saved.items if item.get("type") == "function_call_output"]
             assert any("INDEX_RECOVERY_EVIDENCE" in result for result in outputs)
+        finally:
+            await core.shutdown()
+    asyncio.run(go())
+
+
+def test_pending_acp_wrapper_call_is_approved_once_its_input_arrives(tmp_path):
+    from tests.fusion_acp_support import make_guarded_engine
+
+    async def go():
+        harness = make_guarded_engine(tmp_path, FAKE_FUSION_MCP_WRAPPERS="1", FAKE_FUSION_STAGED="1")
+        core, _, _, _, _ = await ready_core(tmp_path, devin_engine=harness.engine)
+        try:
+            await until(lambda: any(item["source"] == "devin" for item in core.catalog.models), timeout=20)
+            core.settings.fusion_main = core.settings.fusion_light = "devin:swe-2-high"
+            core.settings.fusion_workers = ["devin:swe-2-high"]
+            project = tmp_path / "proj"
+            (project / "evidence.txt").write_text("STAGED_EVIDENCE", encoding="utf-8")
+            cid = (await core.call("session.new", {"projectId": str(project), "fusion": True}))["id"]
+            main = core._by_cid[cid].controller
+            assert main.send_prompt("[fusion-read] Read the project note.")
+            await finish_turn(main, timeout=30)
+            turn = main.saved.turns[-1]
+            assert turn.status == "done", turn.error
+            outputs = [item["output"] for item in main.saved.items if item.get("type") == "function_call_output"]
+            assert any("STAGED_EVIDENCE" in result for result in outputs)
+        finally:
+            await core.shutdown()
+    asyncio.run(go())
+
+
+def test_acp_turn_fails_when_a_wrapper_call_is_never_completed(tmp_path):
+    from tests.fusion_acp_support import make_guarded_engine
+
+    async def go():
+        harness = make_guarded_engine(tmp_path)
+        core, _, _, _, _ = await ready_core(tmp_path, devin_engine=harness.engine)
+        try:
+            await until(lambda: any(item["source"] == "devin" for item in core.catalog.models), timeout=20)
+            core.settings.fusion_main = core.settings.fusion_light = "devin:swe-2-high"
+            core.settings.fusion_workers = ["devin:swe-2-high"]
+            cid = (await core.call("session.new", {"projectId": str(tmp_path / "proj"), "fusion": True}))["id"]
+            main = core._by_cid[cid].controller
+            assert main.send_prompt("[fusion-unresolved] Stall")
+            await finish_turn(main, timeout=30)
+            turn = main.saved.turns[-1]
+            assert turn.status == "failed" and "unverified tool calls" in turn.error
         finally:
             await core.shutdown()
     asyncio.run(go())
@@ -336,6 +390,56 @@ def test_duplicate_mcp_delivery_does_not_reexecute_or_reuse_an_id_for_other_argu
                 assert main.saved.turns[-1].status == "done"
             assert sum(item.get("type") == "function_call" for item in main.saved.items) == 1
             assert not (tmp_path / "proj" / "forbidden.txt").exists()
+        finally:
+            await core.shutdown()
+    asyncio.run(go())
+
+
+@pytest.mark.fusion_gates("observer")
+@pytest.mark.parametrize("repeat", [False, True])
+def test_devin_shell_wrapper_prompt_and_mcp_results(tmp_path, repeat):
+    from tests.fusion_acp_support import make_guarded_engine
+
+    async def go():
+        harness = make_guarded_engine(tmp_path)
+        core, model, _, _, _ = await ready_core(tmp_path, devin_engine=harness.engine)
+        try:
+            await until(lambda: any(item["source"] == "devin" for item in core.catalog.models), timeout=20)
+            project = tmp_path / "proj"
+            cid = (await core.call("session.new", {"projectId": str(project), "autonomy": "full"}))["id"]
+            main = core._by_cid[cid].controller
+            await main.update_settings(autonomy="full")
+            worker = "devin:swe-2-high"
+            main.enable_fusion(Policy("chatgpt:gpt-6.1-sol", (worker,), worker, 0))
+            action = "shell-repeat" if repeat else "shell-results"
+            task = {"scope": "src", "model": worker, "role": "worker", "task": f"[fusion-{action}] Check shell replies."}
+            model.script(call("delegate_task", task), say("Reviewed."))
+            assert main.send_prompt("Check the shell contract.")
+            await finish_turn(main)
+
+            agent, = main.agents.values()
+            [reply_file] = (tmp_path / "guarded").glob("*/shell-replies.json")
+            replies = json.loads(reply_file.read_text(encoding="utf-8"))
+            [missing, second, third] = replies
+            assert not (project / "unexpected.txt").exists()
+            errors = replies if repeat else [missing]
+            assert all(reply["content"][0]["text"].startswith("Invalid arguments for shell: 'command' is required.")
+                       and "Exit code:" not in reply["content"][0]["text"] for reply in errors)
+            assert all(reply.get("isError") is True for reply in errors)
+            if repeat:
+                assert agent.record.status == "interrupted"
+                assert any("Observer report (repeat):" in item.get("output", "") for item in main.saved.items)
+            else:
+                assert agent.record.status == "done"
+                assert second.get("isError") is True and "Exit code: 7" in second["content"][0]["text"]
+                assert not third.get("isError") and "wrapped-shell-ok" in third["content"][0]["text"]
+                assert "Exit code: 0" in third["content"][0]["text"]
+
+            wire = [json.loads(line) for line in reply_file.with_name("received.jsonl").read_text(encoding="utf-8").splitlines()]
+            [prompt] = [item["params"]["prompt"] for item in wire if item.get("method") == "session/prompt"]
+            text = "\n".join(block.get("text", "") for block in prompt)
+            example = {"server_name": SERVER, "tool_name": "shell", "arguments": {"command": "git --version"}}
+            assert f"{MCP_CALL} example: {json.dumps(example)}" in text
         finally:
             await core.shutdown()
     asyncio.run(go())

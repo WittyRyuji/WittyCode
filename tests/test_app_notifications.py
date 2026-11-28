@@ -17,6 +17,11 @@ from tests.fakes import until
 from tests.test_app_core import idle, new_session, three_saved
 
 
+def project_sessions(core, folder):
+    """One project's ``sessionIds`` found by its id, not its position: a newly added project opens the list."""
+    return next(p["sessionIds"] for p in core.project_rows() if p["id"] == str(folder))
+
+
 def test_three_concurrent_streams_stay_put_but_each_final_result_promotes_within_its_project(tmp_path):
     async def scenario():
         core, plan, events, platform, _ = await ready_core(tmp_path, projects=False)
@@ -31,7 +36,7 @@ def test_three_concurrent_streams_stay_put_but_each_final_result_promotes_within
                 before = len(plan.requests)
                 await core.call("session.send", {"id": cid, "text": "Continue " + native})
                 await until(lambda: len(plan.requests) > before)
-                assert core.project_rows()[0]["sessionIds"][0] == cid
+                assert project_sessions(core, project)[0] == cid
             expected = list(reversed(ids))
             other = tmp_path / "other"
             other.mkdir()
@@ -48,14 +53,14 @@ def test_three_concurrent_streams_stay_put_but_each_final_result_promotes_within
                     controller.transcript.append_text(turn, "progress", 0, "Working")
                     controller._changed()
                     core._emit_sidebar()
-                    assert core.project_rows()[0]["sessionIds"] == expected
-                    assert core.project_rows()[1]["sessionIds"] == [other_cid]
+                    assert project_sessions(core, project) == expected
+                    assert project_sessions(core, other) == [other_cid]
             for native, cid in zip(("old", "mid", "new"), ids):
                 plan.release(native)
                 await idle(core, cid)
                 expected.remove(cid)
                 expected.insert(0, cid)
-                assert core.project_rows()[0]["sessionIds"] == expected
+                assert project_sessions(core, project) == expected
             await until(lambda: len(platform.played_sounds) == 3)
             assert [Path(p).stem for p in platform.played_sounds] == ["complete"] * 3
             order = list(core.settings.session_order)

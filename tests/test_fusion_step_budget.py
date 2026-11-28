@@ -1,0 +1,387 @@
+"""Every delegation's step budget is resolved from the shared configured band and the task's size."""
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+
+from desktop.core.app_core import AppError
+from desktop.core.fusion import step_budget
+from desktop.core.fusion.step_budget import Band, Side
+from tests.app_support import ready_core
+from tests.chatgpt_support import finish_turn, until
+from tests.fake_responses import call, say
+from tests.test_fusion_identity_runtime import WORKER, _brief, _fusion, _output, _turn
+
+pytestmark = pytest.mark.fusion_gates
+
+
+# --------------------------------------------------------------------------- pure helpers
+
+
+def test_acceptance_items_count_discernible_list_lines():
+    assert step_budget.acceptance_items("") == 0 and step_budget.acceptance_items("  ") == 0
+    assert step_budget.acceptance_items("Counts match the inventory.") == 1
+    assert step_budget.acceptance_items("- a passes\n- b passes") == 2
+    assert step_budget.acceptance_items("1. first\n2) second\n3、third") == 3
+    assert step_budget.acceptance_items("* one\n• two\n– three") == 3
+    wrapped = "One long criterion\nthat keeps going on a second line."
+    assert step_budget.acceptance_items(wrapped) == 1, "plain wrapped text stays one item"
+
+
+def test_task_size_is_bounded_and_monotonic_in_each_signal():
+    base = step_budget.task_size(paths=0, acceptance="", text="")
+    assert base == 0
+    bigger = step_budget.task_size(paths=1, acceptance="- a", text="x" * 1200)
+    assert bigger == 1 + 0 + 1
+    assert step_budget.task_size(paths=999, acceptance="\n".join(f"{i}. x" for i in range(99)), text="x" * 99999) == 8 + 7 + 4
+    for paths, acceptance, text in ((0, "", ""), (2, "- a\n- b\n- c", "y" * 2500)):
+        small = step_budget.task_size(paths=paths, acceptance=acceptance, text=text)
+        assert small <= step_budget.task_size(paths=paths + 1, acceptance=acceptance, text=text)
+        assert small <= step_budget.task_size(paths=paths, acceptance=acceptance + "\n- extra", text=text)
+        assert small <= step_budget.task_size(paths=paths, acceptance=acceptance, text=text + "z" * 1000)
+
+
+def test_the_adaptive_band_grows_from_16_32_and_stays_bounded():
+    assert step_budget.adaptive_band(0) == (16, 32), "a minimal task suggests 16-32"
+    assert step_budget.adaptive_band(4) == (32, 64)
+    assert step_budget.adaptive_band(19) == (92, 184)
+    assert step_budget.adaptive_band(100) == (96, 192)
+    lows = [step_budget.adaptive_band(size) for size in range(20)]
+    assert all(a[0] <= b[0] and a[1] <= b[1] for a, b in zip(lows, lows[1:])), "monotone in size"
+
+
+@pytest.mark.parametrize(("low", "high", "expected", "source"), [
+    (Side(True, 9), Side(True, 9), (16, 32), "adaptive 16-32"),
+    (Side(False, 5), Side(False, 15), (5, 15), "manual 5-15"),
+    (Side(True, 9), Side(False, 60), (16, 60), "adaptive min 16 + manual max 60"),
+    (Side(False, 40), Side(True, 9), (40, 40), "manual min 40 + adaptive max 40"),
+])
+def test_resolve_band_mixes_manual_and_adaptive_sides(low, high, expected, source):
+    band = step_budget.resolve_band(low, high, size=0, cap=1000)
+    assert (band.low, band.high) == expected and band.source == source
+
+
+def test_a_mixed_inversion_keeps_the_manual_side():
+    # Adaptive ceiling 32 under a manual floor 50: the manual side wins.
+    band = step_budget.resolve_band(Side(False, 50), Side(True, 9), size=0, cap=1000)
+    assert (band.low, band.high) == (50, 50) and band.source == "manual min 50 + adaptive max 50"
+    band = step_budget.resolve_band(Side(True, 9), Side(False, 10), size=4, cap=1000)
+    assert (band.low, band.high) == (10, 10) and band.source == "adaptive min 10 + manual max 10"
+
+
+def test_the_global_cap_truncates_last_and_is_named_in_the_source():
+    band = step_budget.resolve_band(Side(True, 9), Side(True, 9), size=2, cap=10)
+    assert (band.low, band.high) == (10, 10) and "global cap 10" in band.source
+    band = step_budget.resolve_band(Side(False, 20), Side(False, 40), size=0, cap=5)
+    assert (band.low, band.high) == (5, 5), "the cap wins even under a manual floor"
+
+
+def test_effective_steps_clamps_the_request_and_defaults_to_the_ceiling():
+    band = Band(20, 40, "x")
+    assert step_budget.effective_steps(8, band) == 20
+    assert step_budget.effective_steps(30, band) == 30
+    assert step_budget.effective_steps(99, band) == 40
+    assert step_budget.effective_steps(None, band) == 40
+    assert step_budget.note(band, 8) == "x; requested 8" and step_budget.note(band, None) == "x"
+
+
+# --------------------------------------------------------------------------- runtime
+
+
+def _band(main, low=1, high=1, *, low_adaptive=False, high_adaptive=False):
+    settings = main.manager.settings
+    settings.fusion_steps_min, settings.fusion_steps_min_adaptive = low, low_adaptive
+    settings.fusion_steps_max, settings.fusion_steps_max_adaptive = high, high_adaptive
+
+
+def test_requested_steps_are_clamped_into_the_adaptive_band_for_every_identity(tmp_path):
+    async def go():
+        async with _fusion(tmp_path) as (main, fake):
+            # The Coder brief declares one write path (size 1 -> 20-40); the read-only identities get size 0 -> 16-32.
+            for identity, expected in (("Coder", 20), ("Runner", 16), ("QualitySampler", 16)):
+                await _turn(main, fake, call("delegate_task", _brief(identity, budget={"steps": 8}), call_id=identity),
+                            say("Done."), say("Reviewed."))
+                agent = list(main.agents.values())[-1]
+                assert agent.controller._fusion_step_limit == expected, identity
+                assert agent.record.status == "done", "a report may be submitted well before the floor"
+                # The record shows the effective count and where it came from.
+                assert f"Budget: {expected} steps (adaptive {expected}-{'40' if expected == 20 else '32'}; requested 8)" in agent.record.task
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize(("empty", "manual", "global_limit", "expected"), [
+    (False, False, 100, 40),
+    (True, True, 100, 15),
+    (False, True, 10, 10),
+], ids=["omitted-adaptive", "empty-manual", "omitted-global-cap"])
+def test_default_budget_is_applied_and_reported(tmp_path, empty, manual, global_limit, expected):
+    async def go():
+        async with _fusion(tmp_path, max_seconds=12) as (main, fake):
+            main.manager.settings.max_steps = global_limit
+            if manual:
+                _band(main, 5, 15)
+            brief = _brief(budget={})
+            if not empty:
+                del brief["budget"]
+            await _turn(main, fake, call("delegate_task", brief, call_id="default"), say("Done."), say("Reviewed."))
+            agent, = main.agents.values()
+            assert main._fusion.registry.calls == 1 and agent.record.status == "done"
+            assert agent.controller._fusion_step_limit == expected
+            assert f"Budget: {expected} steps, 12 seconds" in agent.record.task
+            assert f"Default budget: {expected} steps, 12 seconds" in _output(main, "default")
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize(("budget", "ignored", "steps"), [
+    ("12 steps", "budget (expected an object, got str)", 15),
+    (12, "budget (expected an object, got int)", 15),
+    ([12], "budget (expected an object, got list)", 15),
+    (None, "budget (expected an object, got null)", 15),
+    ({"steps": 0}, "budget fields 'steps'", 15),
+    ({"steps": "many"}, "budget fields 'steps'", 15),
+    ({"tokens": 5}, "budget fields 'tokens'", 15),
+    ({"steps": True}, "budget fields 'steps'", 15),
+    ({"steps": 12, "tokens": 5}, "budget fields 'tokens'", 12),
+])
+def test_malformed_budget_allows_first_write_delegation(tmp_path, budget, ignored, steps):
+    from tests.test_fusion_route_runtime import ROUTE_GATES, _route
+
+    async def go():
+        async with _fusion(tmp_path, active=ROUTE_GATES, max_seconds=12) as (main, fake):
+            _band(main, 5, 15)
+            write = call("create_file", {"file_path": "inventory.txt", "content": "Counted."})
+            await _turn(main, fake, _route(), call("delegate_task", _brief(budget=budget), call_id="delegate"),
+                        write, say("Done."), say("Reviewed."))
+            agent, = main.agents.values()
+            assert main._fusion.registry.calls == 1 and agent.record.status == "done"
+            assert (main.project / "inventory.txt").read_text(encoding="utf-8") == "Counted."
+            assert agent.controller.turn_step_limit() == steps
+            assert _output(main, "delegate").startswith(f"Ignored {ignored}; using {steps} steps, 12 seconds")
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("budget_field", ["steps", "seconds"])
+def test_oversized_budget_is_ignored_without_echoing_its_value(tmp_path, budget_field):
+    async def go():
+        async with _fusion(tmp_path, max_seconds=12) as (main, fake):
+            _band(main, 5, 10)
+            huge = 10 ** 1199
+            await _turn(main, fake, call("delegate_task", _brief(budget={budget_field: huge, "tokens": 5}), call_id="delegate"),
+                        say("Done."), say("Reviewed."))
+            agent, = main.agents.values()
+            assert agent.record.status == "done" and agent.controller.turn_step_limit() == 10
+            receipt = _output(main, "delegate")
+            line = receipt.splitlines()[0]
+            assert str(huge) not in receipt and str(huge) not in agent.record.task
+            assert line.startswith(f"Ignored budget fields '{budget_field}', 'tokens'; using 10 steps, 12 seconds")
+            assert len(line) <= 160
+            assert "Budget: 10 steps, 12 seconds" in agent.record.task
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize(("unit", "steps", "seconds", "expected"), [
+    ("step", 1, 12, "1 step, 12 seconds"),
+    ("time", 5, 1, "5 steps, 1 second"),
+])
+def test_default_budget_is_reported_when_expert_hits_its_limit(tmp_path, unit, steps, seconds, expected):
+    async def go():
+        async with _fusion(tmp_path, max_seconds=seconds) as (main, fake):
+            _band(main, steps, steps)
+            worker = (call("list_dir", {"directory_path": "."}) if unit == "step"
+                      else [("hold", "expert"), *say("Too late.")])
+            try:
+                await _turn(main, fake, call("delegate_task", _brief(budget={}), call_id="delegate"),
+                            worker, say("Reviewed the interruption."))
+            finally:
+                if unit == "time":
+                    fake.release("expert")
+            agent, = main.agents.values()
+            assert agent.record.status == "interrupted" and main._fusion.registry.calls == 1
+            receipt = _output(main, "delegate")
+            assert f"exceeded its {unit} budget" in receipt
+            assert f"Default budget: {expected}" in receipt
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize(("unit", "seconds"), [("step", 12), ("time", 2)])
+def test_budget_interruption_receipt_uses_the_live_global_step_cap(tmp_path, unit, seconds):
+    async def go():
+        async with _fusion(tmp_path, max_seconds=seconds) as (main, fake):
+            _band(main, 5, 10)
+            main.manager.settings.max_steps = 100
+            worker = call("list_dir", {"directory_path": "."}) if unit == "step" else say("Too late.")
+            fake.script(call("delegate_task", _brief(budget={"tokens": 5}), call_id="delegate"),
+                        [("hold", "expert"), *worker], say("Reviewed the interruption."))
+            assert main.send_prompt("Check the inventory.")
+            try:
+                await until(lambda: len(fake.requests) >= 2)
+                agent, = main.agents.values()
+                assert agent.controller.turn_step_limit() == 10
+                main.manager.settings.max_steps = 1
+                if unit == "step":
+                    fake.release("expert")
+                await finish_turn(main)
+                assert agent.record.status == "interrupted"
+                if unit == "step":
+                    assert agent.controller.last_turn_end.steps == 1
+                receipt = _output(main, "delegate")
+                assert f"exceeded its {unit} budget" in receipt
+                assert f"Ignored budget fields 'tokens'; using 1 step, {seconds} seconds" in receipt
+                assert "using 10 steps" not in receipt
+            finally:
+                fake.release("expert")
+    asyncio.run(go())
+
+
+def test_a_larger_brief_gets_a_larger_adaptive_band(tmp_path):
+    async def go():
+        async with _fusion(tmp_path) as (main, fake):
+            brief = _brief("Coder", paths=["a.py", "b.py", "c.py"], acceptance="- a works\n- b works\n- c works")
+            await _turn(main, fake, call("delegate_task", brief, call_id="big"), say("Done."), say("Reviewed."))
+            agent, = main.agents.values()
+            assert agent.controller._fusion_step_limit == 36, "size 5 -> adaptive 36-72, request 8 raised to the floor"
+            assert "(adaptive 36-72; requested 8)" in agent.record.task
+    asyncio.run(go())
+
+
+def test_a_seconds_only_budget_gets_the_effective_ceiling(tmp_path):
+    async def go():
+        async with _fusion(tmp_path) as (main, fake):
+            await _turn(main, fake, call("delegate_task", _brief("Runner", budget={"seconds": 60}), call_id="runner"),
+                        say("Checked."), say("Reviewed."))
+            agent, = main.agents.values()
+            assert agent.controller._fusion_step_limit == 32
+            assert "Budget: 32 steps, 30 seconds (adaptive 16-32)" in agent.record.task
+    asyncio.run(go())
+
+
+def test_a_manual_pair_and_a_mixed_pair_drive_the_limit(tmp_path):
+    async def go():
+        async with _fusion(tmp_path) as (main, fake):
+            _band(main, 5, 15)
+            await _turn(main, fake, call("delegate_task", _brief("Coder", budget={"steps": 30}), call_id="manual"),
+                        say("Done."), say("Reviewed."))
+            agent = list(main.agents.values())[-1]
+            assert agent.controller._fusion_step_limit == 15
+            assert "(manual 5-15; requested 30)" in agent.record.task
+            # A manual floor above the adaptive ceiling keeps the manual side; the adaptive side moves to it.
+            _band(main, 50, 9, high_adaptive=True)
+            await _turn(main, fake, call("delegate_task", _brief("Runner", budget={"steps": 8}), call_id="mixed"),
+                        say("Done."), say("Reviewed."))
+            agent = list(main.agents.values())[-1]
+            assert agent.controller._fusion_step_limit == 50
+            assert "(manual min 50 + adaptive max 50; requested 8)" in agent.record.task
+    asyncio.run(go())
+
+
+def test_the_global_per_turn_cap_still_wins_below_the_floor(tmp_path):
+    async def go():
+        async with _fusion(tmp_path) as (main, fake):
+            main.manager.settings.max_steps = 10
+            await _turn(main, fake, call("delegate_task", _brief("Coder", budget={"steps": 8}), call_id="low"),
+                        say("Done."), say("Reviewed."))
+            agent, = main.agents.values()
+            assert agent.controller._fusion_step_limit == 10
+            assert "global cap 10" in agent.record.task and "requested 8" in agent.record.task
+    asyncio.run(go())
+
+
+def test_the_legacy_delegation_entry_gets_the_adaptive_ceiling(tmp_path):
+    async def go():
+        async with _fusion(tmp_path) as (main, fake):
+            fake.script(say("Old expert text."))
+            result = await main._fusion.delegate("Inventory", WORKER, "worker", "Read totals.", ("inventory.txt",))
+            assert not result.is_error
+            agent, = main.agents.values()
+            assert agent.controller._fusion_step_limit == 40, "no request: the adaptive ceiling applies"
+            assert "Budget: 40 steps (adaptive 20-40)" in agent.record.task
+    asyncio.run(go())
+
+
+def test_the_pair_is_read_live_at_delegation_time(tmp_path):
+    async def go():
+        async with _fusion(tmp_path) as (main, fake):
+            _band(main, 5, 15)
+            await _turn(main, fake, call("delegate_task", _brief("Coder", budget={"steps": 30}), call_id="one"),
+                        say("Done."), say("Reviewed."))
+            assert list(main.agents.values())[-1].controller._fusion_step_limit == 15
+            _band(main, 60, 90)
+            await _turn(main, fake, call("delegate_task", _brief("Coder", workstream="Ledger", paths=["ledger.txt"],
+                                                                 budget={"steps": 30}), call_id="two"),
+                        say("Done."), say("Reviewed."))
+            assert list(main.agents.values())[-1].controller._fusion_step_limit == 60
+    asyncio.run(go())
+
+
+def test_the_band_setting_is_saved_and_rejected_atomically(tmp_path):
+    async def go():
+        core, _, events, _, _ = await ready_core(tmp_path)
+        view = core.settings_view()
+        assert (view["fusionStepsMin"], view["fusionStepsMinAdaptive"], view["fusionStepsMax"], view["fusionStepsMaxAdaptive"]) == (16, True, 32, True)
+        view = await core.call("settings.set", {"key": "fusionSteps",
+                                                "value": {"min": 5, "minAdaptive": False, "max": 15, "maxAdaptive": True}})
+        assert (view["fusionStepsMin"], view["fusionStepsMinAdaptive"], view["fusionStepsMax"], view["fusionStepsMaxAdaptive"]) == (5, False, 15, True)
+        assert (core.settings.fusion_steps_min, core.settings.fusion_steps_max_adaptive) == (5, True)
+        saved = events.last("settings")["settings"]
+        assert (saved["fusionStepsMin"], saved["fusionStepsMaxAdaptive"]) == (5, True)
+        # A manual floor above an adaptive ceiling is allowed; only a both-manual inversion is refused.
+        await core.call("settings.set", {"key": "fusionSteps",
+                                         "value": {"min": 90, "minAdaptive": False, "max": 10, "maxAdaptive": True}})
+        assert (core.settings.fusion_steps_min, core.settings.fusion_steps_max_adaptive) == (90, True)
+        for value in ({"min": 91, "minAdaptive": False, "max": 90, "maxAdaptive": False},
+                      {"min": 5, "minAdaptive": False, "max": 15},
+                      {"min": 5, "minAdaptive": False, "max": 15, "maxAdaptive": True, "extra": 1},
+                      {"min": 0, "minAdaptive": False, "max": 15, "maxAdaptive": False},
+                      {"min": 5, "minAdaptive": "yes", "max": 15, "maxAdaptive": False},
+                      {"min": 5.5, "minAdaptive": False, "max": 15, "maxAdaptive": False},
+                      "5-15", [5, False, 15, False]):
+            with pytest.raises(AppError):
+                await core.call("settings.set", {"key": "fusionSteps", "value": value})
+        assert (core.settings.fusion_steps_min, core.settings.fusion_steps_max_adaptive) == (90, True), "refused pairs change nothing"
+        await core.shutdown()
+    asyncio.run(go())
+
+
+# --------------------------------------------------------------------------- curve04 pure API (new dispatch)
+
+
+def test_curve04_anchor_ceilings_and_monotonicity():
+    assert step_budget.curve04_ceiling(10) == 50
+    assert step_budget.curve04_ceiling(35) == 90
+    assert step_budget.curve04_ceiling(100) == 150
+    ceilings = [step_budget.curve04_ceiling(m) for m in range(1, 201)]
+    assert all(first <= second for first, second in zip(ceilings, ceilings[1:])), "curve04 ceilings are monotone in m"
+
+
+def test_curve04_minimum_uses_the_existing_size_scale_and_normalized_difficulty():
+    assert step_budget.curve04_minimum(0, 0) == 16
+    assert step_budget.curve04_minimum(1, 0.5) == 25  # base 20 plus floor(20 * 0.5 / 2)
+    assert step_budget.curve04_minimum(99, 0) == 92, "S is clamped to the existing 0..19 scale"
+    assert step_budget.curve04_minimum(19, 1) == 138
+
+
+def test_curve04_manual_min_auto_max_uses_the_actual_minimum_and_defaults_to_m_not_max():
+    decision = step_budget.resolve_curve04(Side(False, 35), Side(True, 0), size=0, cap=1000)
+    assert (decision.m, decision.low, decision.high, decision.steps) == (35, 35, 90, 35)
+    assert decision.steps == decision.m < decision.high, "an omitted steps value starts at m, not the ceiling"
+    assert "manual min 35" in decision.source and "adaptive max 90" in decision.source
+
+
+def test_curve04_explicit_requests_clamp_inside_the_resolved_band():
+    band = lambda requested: step_budget.resolve_curve04(Side(False, 35), Side(True, 0), size=0, cap=1000,
+                                                         requested=requested)
+    assert band(8).steps == 35 and band(60).steps == 60 and band(200).steps == 90
+
+
+def test_curve04_upper_limits_win_even_below_the_floor():
+    decision = step_budget.resolve_curve04(Side(True, 0), Side(True, 0), size=0, cap=10)
+    assert (decision.m, decision.low, decision.high, decision.steps) == (16, 10, 10, 10)
+    assert "global cap 10" in decision.caps
+
+
+def test_curve04_manual_max_is_the_selected_upper_before_global_caps():
+    decision = step_budget.resolve_curve04(Side(False, 35), Side(False, 85), size=0, cap=1000)
+    assert (decision.low, decision.high, decision.steps) == (35, 85, 35)
+    decision = step_budget.resolve_curve04(Side(False, 35), Side(False, 85), size=0, cap=80)
+    assert (decision.low, decision.high, decision.steps) == (35, 80, 35)

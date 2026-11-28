@@ -27,13 +27,18 @@ export function turnLinks(turns: Turn[]): TurnLink[] {
 
 /** Last turn whose top has crossed the reading line; the bottom always highlights the latest turn. */
 export function activeTurnAt(tops: number[], readingLine: number, atEnd = false): number {
-  if (!tops.length) return -1;
-  if (atEnd) return tops.length - 1;
+  return readingIndex(tops.length, (i) => tops[i]!, readingLine, atEnd);
+}
+
+/** Read only the geometry needed for the search; at the end no geometry is needed at all. */
+export function readingIndex(count: number, topAt: (index: number) => number, readingLine: number, atEnd = false): number {
+  if (!count) return -1;
+  if (atEnd) return count - 1;
   let low = 0;
-  let high = tops.length;
+  let high = count;
   while (low < high) {
     const middle = (low + high) >>> 1;
-    if (tops[middle]! <= readingLine) low = middle + 1;
+    if (topAt(middle) <= readingLine) low = middle + 1;
     else high = middle;
   }
   return Math.max(0, low - 1);

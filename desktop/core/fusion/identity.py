@@ -1,7 +1,7 @@
 """Fusion identities and their local Markdown overrides."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
 
@@ -16,6 +16,11 @@ class Identity:
     compact_at: int | None
     reuse: bool
     instructions: str
+    display_name: str = ""  # Presentation only. Routing and permission checks always use name.
+
+    @property
+    def editable_body(self) -> str:
+        return self.instructions.removesuffix("\n" + _EXPERT_BOUNDARY)
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,11 +42,19 @@ class Identities:
 DECOMPOSITION = """You are the Fusion main agent. Own routing, work briefs, verification and communication with the user.
 - Answer questions, investigate, review and plan yourself; do not delegate during planning. Read-only work needs no route.
 - Before the first write or write delegation, submit a route with the destination, reason and verification depth. Use the approved plan's route when there is one.
-- For a one- or two-step edit, choose self and self-check. This is a hard limit: you may make at most two edits yourself in a turn and the third is refused, so do not start a larger change yourself. Any multi-step change (more than two edits, or code plus its tests) goes whole to one Coder with a Runner. Split only when deliverables can be accepted independently. For a difficult change that cannot be split, do it yourself or use one Coder with a Runner and a QualitySampler.
+- For a one- or two-step edit, choose self and self_check. This is a hard limit: you may make at most two edits yourself in a turn and the third is refused, so do not start a larger change yourself. Any multi-step change (more than two edits, or code plus its tests) goes whole to one Coder with a Runner. Split only when deliverables can be accepted independently. For a difficult change that cannot be split, do it yourself or use one Coder with a Runner and a QualitySampler.
 - Give each expert a self-contained brief with acceptance criteria, write paths and budget. Reuse the Coder for the same responsibility. Run at most four independent workstreams with disjoint write paths in parallel; run dependent work in order.
 - For split work, have a Runner check each deliverable and use a QualitySampler to sample the work. With one Coder, add sampling for a difficult change or a risk signal: concerns, an Observer report, out-of-scope changes or a fix after a failed check. If there is nothing runnable, record why instead of sending a Runner.
 - Review the diff and evidence yourself once against the user's request and acceptance criteria. Send blocking findings back to the original Coder and rerun only affected checks. Record verification before claiming completion. Only you decide what to keep in long-term memory or the project map.
 - If an expert is blocked or over budget, the estimate or split was wrong. Reassess the report, record the routing mistake and route again. Handle Observer findings yourself."""
+
+WORK_ITEM_ROLES = "worker (Coder, QualitySampler) or light (Runner) by default"
+
+ALLOCATION = f"""Before delegating writes, freeze one item per workstream in submit_route: stable id, workstream, role, score, reason, paths, deps and acceptance.
+- Set role to {WORK_ITEM_ROLES}. Use score (0..1) for evidence-based difficulty and responsibility, with a one-line reason. Omit N and seat: the session uses its cost–quality preference and the score to pick light at or below the low gate, main at or above the high gate, otherwise worker.
+- Keep the id, responsibility, paths and deps fixed. Only new_facts may justify re-scoring before assignment. All deps must succeed first.
+- With an approved plan, freeze that version's items, not replacements. Write delegation needs a frozen item and must stay within its paths. Verify the integrated result once, not per file.
+- V3 exception to the sampling guidance above: if all frozen items seat L3 and there are no risk signals, selected optional checks or required L1 review, keep the Runner checks but do not add a QualitySampler. Use runner, not runner_and_sampler, in this case."""
 
 _EXPERT_BOUNDARY = "Do not delegate or write to long-term memory."
 _BUILTIN_TEXT = (
@@ -91,14 +104,19 @@ _TOOL_KINDS = frozenset(("read", "edit", "exec"))
 _MAX_BYTES = 64 * 1024
 
 
-def _front_matter(text: str) -> tuple[dict[str, str], str]:
+def split_front_matter(text: str, *, require_name: bool = True) -> tuple[dict[str, str], str]:
+    """Split the small line-oriented identity header from the Markdown body.
+
+    Catalog entries keep the display name outside the document, so they pass ``require_name=False``;
+    legacy override files keep the old requirement that the header itself names the identity.
+    """
     lines = text.splitlines(keepends=True)
     if not lines or lines[0].strip() != "---":
         raise ValueError("Expected opening front matter delimiter (---).")
     fields: dict[str, str] = {}
     for index, line in enumerate(lines[1:], 1):
         if line.strip() == "---":
-            if not fields.get("name"):
+            if require_name and not fields.get("name"):
                 raise ValueError("Front matter needs a name.")
             return fields, "".join(lines[index + 1:]).strip("\r\n")
         if not line.strip():
@@ -114,13 +132,21 @@ def _front_matter(text: str) -> tuple[dict[str, str], str]:
     raise ValueError("Expected closing front matter delimiter (---).")
 
 
+def _front_matter(text: str) -> tuple[dict[str, str], str]:
+    return split_front_matter(text)
+
+
+def _tools_field(value: str) -> frozenset[str]:
+    return frozenset(item.strip() for item in value.split(",")) if value else frozenset()
+
+
 def _identity(fields: dict[str, str], body: str, base: Identity | None = None) -> Identity:
     role = fields.get("role", base.role if base else "")
     if role != "worker" and role != "light":
         raise ValueError("role must be worker or light.")
     tools = base.tools if base else frozenset()
     if "tools" in fields:
-        requested = frozenset(item.strip() for item in fields["tools"].split(",")) if fields["tools"] else frozenset()
+        requested = _tools_field(fields["tools"])
         if not requested <= _TOOL_KINDS:
             raise ValueError("tools must be a comma-separated list of read, edit and/or exec.")
         tools = requested & base.tools if base else requested
@@ -141,6 +167,46 @@ def _identity(fields: dict[str, str], body: str, base: Identity | None = None) -
 
 
 _BUILTINS = Identities(tuple(_identity(*_front_matter(f"{text}\n{_EXPERT_BOUNDARY}")) for text in _BUILTIN_TEXT), DECOMPOSITION)
+_BUILTIN_MARKDOWN: dict[str, str] = {}
+for _text in _BUILTIN_TEXT:
+    _markdown = f"{_text}\n{_EXPERT_BOUNDARY}"
+    _BUILTIN_MARKDOWN[_front_matter(_markdown)[0]["name"]] = _markdown
+
+
+def builtin_markdown(name: str) -> str | None:
+    """The immutable built-in Markdown for ``name`` (case-insensitive), or ``None`` for a custom identity."""
+    key = name.casefold()
+    return next((text for identity, text in _BUILTIN_MARKDOWN.items() if identity.casefold() == key), None)
+
+
+def parse_controlled(markdown: str, *, name: str, ceiling: Identity) -> Identity:
+    """Parse catalog-controlled Markdown into the existing runtime identity shape.
+
+    The catalog's display ``name`` and permission ``ceiling`` are authoritative. A header may tighten tools,
+    reuse or the model-role ceiling, and may repeat the same name; attempts to exceed the ceiling or use a
+    conflicting name are rejected instead of silently widening the expert. Unknown header fields stay ignored,
+    as they are in legacy override files.
+    """
+    fields, body = split_front_matter(markdown, require_name=False)
+    declared = fields.get("name", "")
+    if declared and declared.casefold() != name.casefold():
+        raise ValueError("Front matter name must match the catalog entry name.")
+    fields["name"] = name
+    if "tools" in fields:
+        requested = _tools_field(fields["tools"])
+        if not requested <= _TOOL_KINDS:
+            raise ValueError("tools must be a comma-separated list of read, edit and/or exec.")
+        if not requested <= ceiling.tools:
+            raise ValueError("tools cannot exceed the controlled permission ceiling.")
+    if fields.get("role") == "worker" and ceiling.role == "light":
+        raise ValueError("role cannot exceed the controlled permission ceiling.")
+    if fields.get("reuse", "").casefold() == "true" and not ceiling.reuse:
+        raise ValueError("reuse cannot exceed the controlled permission ceiling.")
+    parsed = replace(_identity(fields, body, ceiling), name=name)
+    if parsed.instructions.split("\n")[-1] != _EXPERT_BOUNDARY:
+        instructions = f"{parsed.instructions}\n{_EXPERT_BOUNDARY}" if parsed.instructions else _EXPERT_BOUNDARY
+        parsed = replace(parsed, instructions=instructions)
+    return parsed
 
 
 def load(folder: Path | None) -> Identities:

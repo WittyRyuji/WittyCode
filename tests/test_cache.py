@@ -59,3 +59,29 @@ def test_a_write_that_fails_is_reported_not_raised(tmp_path, monkeypatch):
     monkeypatch.setattr(os, "replace", broken)
     assert cache.save_session("s-1", {"turns": [1]}) is False
     assert not [p for p in (tmp_path / "cache").rglob("*.tmp")], "the temporary file is cleaned up too"
+
+
+def test_preview_and_older_page_only_read_their_byte_ranges(tmp_path, monkeypatch):
+    cache = Cache(tmp_path / "cache")
+    turns = [{"id": f"t{i}", "text": f"文本🙂, {i}"} for i in range(12)]
+    assert cache.save_session("demo", {"turns": turns, "title": "示例"})
+    assert cache.load_session("demo")["turns"] == turns  # an older desktop can still read the whole valid JSON
+
+    def full_read(*_):
+        raise AssertionError("pagination must not decode the full conversation")
+
+    monkeypatch.setattr(cache, "load_session", full_read)
+    preview = cache.load_session_preview("demo")
+    assert preview["turns"] == turns[7:] and preview["title"] == "示例"
+    assert cache.load_session_page("demo", preview["stamp"], 7) == turns[2:7]
+    assert cache.load_session_page("demo", preview["stamp"], 2) == turns[:2]
+    assert cache.save_session("demo", {"turns": turns + [{"id": "new"}]})
+    assert cache.load_session_page("demo", preview["stamp"], 7) is None
+
+
+def test_pre_pagination_cache_is_a_compatible_fallback(tmp_path):
+    cache = Cache(tmp_path / "cache")
+    path = cache.session_path("demo")
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"v": CACHE_VERSION, "key": "demo", "turns": [{"id": "old"}]}), encoding="utf-8")
+    assert cache.load_session_preview("demo")["turns"] == [{"id": "old"}]

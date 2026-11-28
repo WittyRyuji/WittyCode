@@ -8,7 +8,7 @@ export interface PlanView {
 
 /** Prefer the accepted current snapshot, which follows updates even when an existing tool row changes in place.
  *  Older cached history falls back to structured tool inputs; an explicit empty update clears the panel. */
-export function latestPlan(turns: Turn[]): PlanView | null {
+export function latestPlan(turns: Turn[], older?: Turn["plan"] | null): PlanView | null {
   for (let t = turns.length - 1; t >= 0; t--) {
     const current = turns[t]!.plan;
     if (current && typeof current.id === "string" && Array.isArray(current.steps)) {
@@ -29,5 +29,5 @@ export function latestPlan(turns: Turn[]): PlanView | null {
       }
     }
   }
-  return null;
+  return older?.steps.length ? { ...older, completed: older.steps.filter((s) => s.state === "completed").length } : null;
 }

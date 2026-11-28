@@ -184,6 +184,7 @@ class DevinEngine:
         """Processes that were let go (the path changed, they died): ``close_all`` sees to it that each is really gone."""
         self._client_lock = asyncio.Lock()
         self._connection_users = 0
+        self.can_park = False
         self._binary: DevinBinary | None = None
         self._binary_for: str | None = None
         self._located = False
@@ -272,6 +273,8 @@ class DevinEngine:
     async def connection(self) -> AcpClient:
         """``devin acp``, started and initialized on first use (and again after it died)."""
         async with self._client_lock:
+            if self._closing:
+                raise DevinProcessError("Devin is shutting down", closed=True)
             client = self._client
             if client is not None and client.running:
                 return client
@@ -284,7 +287,7 @@ class DevinEngine:
             route.client = client
             await client.start()
             try:
-                await client.request(
+                initialized = await client.request(
                     "initialize",
                     {
                         "protocolVersion": 1,
@@ -303,6 +306,11 @@ class DevinEngine:
                 with contextlib.suppress(Exception):
                     await client.close()
                 raise
+            if self._closing:
+                await client.close()
+                raise DevinProcessError("Devin is shutting down", closed=True)
+            caps = initialized.get("agentCapabilities") if isinstance(initialized, Mapping) else None
+            self.can_park = isinstance(caps, Mapping) and caps.get("loadSession") is True
             log.info("devin acp %s started (pid %s)", binary.version, client.pid)
             self._client = client
             return client
@@ -323,9 +331,10 @@ class DevinEngine:
             yield await self.connection()
 
     async def release_idle(self) -> None:
-        """Release our unused process (and its Windows executable lock), never an open session's connection."""
+        """Release the shared process once no open session is attached to it or about to open."""
         async with self._client_lock:
-            if self._connection_users or self.open_controllers():
+            if self._connection_users or any(c.is_open and (not c._parked or c._client is not None)
+                                             for c in self.controllers):
                 return
             client, self._client = self._client, None
             if client is not None:
@@ -386,6 +395,8 @@ class DevinEngine:
         return process.returncode or 0, out.decode("utf-8", "replace")
 
     async def _start_process(self, argv: list[str], **options: Any) -> asyncio.subprocess.Process:
+        if self._closing:
+            raise DevinProcessError("Devin is shutting down", closed=True)
         # Windows can launch the child before create_subprocess_exec returns. Cancellation must still acquire it.
         starting = asyncio.create_task(asyncio.create_subprocess_exec(*argv, env=self._cli_env, **options))
         try:
@@ -700,9 +711,12 @@ class DevinEngine:
     async def close(self, controller: DevinController) -> None:
         await controller.close()
 
+    def stop_starting(self) -> None:
+        self._closing = True
+
     async def close_all(self, timeout: float = 20.0) -> None:
         """Close every session, then the process."""
-        self._closing = True
+        self.stop_starting()
         controllers = list(self.controllers)
         if controllers:
             with contextlib.suppress(asyncio.TimeoutError):

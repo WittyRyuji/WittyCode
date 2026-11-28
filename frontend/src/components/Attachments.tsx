@@ -2,6 +2,7 @@ import { X } from "lucide-react";
 import type { AttachmentView } from "../types";
 import { formatBytes } from "../lib/format";
 import { useStore } from "../store";
+import { useImageMenu } from "./ImageMenu";
 
 const EXT: Record<AttachmentView["kind"], string> = { image: "IMG", text: "TXT", pdf: "PDF" };
 
@@ -9,6 +10,7 @@ const EXT: Record<AttachmentView["kind"], string> = { image: "IMG", text: "TXT",
 export function AttachmentCard({ a, onRemove }: { a: AttachmentView; onRemove?: () => void }) {
   const openLightbox = useStore((s) => s.openLightbox);
   const picture = a.kind === "image" && a.url;
+  const { show, menu } = useImageMenu();
   return (
     // The kind goes in an attribute: "att-text" is already the class of the name-and-size column.
     <div className="att" data-kind={a.kind}>
@@ -20,7 +22,7 @@ export function AttachmentCard({ a, onRemove }: { a: AttachmentView; onRemove?: 
         disabled={!picture}
         title={picture ? "点击查看大图" : a.name}
       >
-        {picture ? <img className="att-thumb" src={a.url} alt="" /> : <span className={`ficon ficon-${a.kind}`}>{EXT[a.kind]}</span>}
+        {picture ? <img className="att-thumb" src={a.url} alt="" onContextMenu={(e) => show(e, a.id)} /> : <span className={`ficon ficon-${a.kind}`}>{EXT[a.kind]}</span>}
         <span className="att-text">
           <span className="fname">{a.name}</span>
           <span className="fmeta">
@@ -35,6 +37,7 @@ export function AttachmentCard({ a, onRemove }: { a: AttachmentView; onRemove?: 
           <X size={13} />
         </button>
       )}
+      {menu}
     </div>
   );
 }
@@ -42,17 +45,19 @@ export function AttachmentCard({ a, onRemove }: { a: AttachmentView; onRemove?: 
 /** Pictures of a sent message are shown larger than the composer cards. */
 export function SentAttachments({ items }: { items: AttachmentView[] }) {
   const openLightbox = useStore((s) => s.openLightbox);
+  const { show, menu } = useImageMenu();
   return (
     <div className="atts">
       {items.map((a) =>
         a.kind === "image" && a.url ? (
           <button key={a.id} type="button" className="att-img" onClick={() => openLightbox(a)} title={`${a.name} · 点击查看大图`}>
-            <img src={a.url} alt={a.name} />
+            <img src={a.url} alt={a.name} onContextMenu={(e) => show(e, a.id)} />
           </button>
         ) : (
           <AttachmentCard key={a.id} a={a} />
         ),
       )}
+      {menu}
     </div>
   );
 }

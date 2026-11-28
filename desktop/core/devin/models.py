@@ -97,6 +97,17 @@ def model_entries(options: Any) -> list[tuple[str, str, bool]]:
 class FamilyInfo:
     window: int | None = None
     free: bool = False
+    family_label: str = ""
+
+
+def _trusted_family_label(family: Mapping[str, Any], variants: list[Mapping[str, Any]], slug: str) -> str:
+    """A CLI family name only when the listing shows it is more than one variant's label copied upward."""
+    label = _text(family.get("family_label"))
+    if not label:
+        return ""
+    distinct_label = any(_text(variant.get("label")).casefold() != label.casefold() for variant in variants if _text(variant.get("label")))
+    distinct_variant = bool(slug) and any(variant["model_uid"] != slug for variant in variants)
+    return label if distinct_label or distinct_variant else ""
 
 
 def cli_info(listing: Any) -> dict[str, FamilyInfo]:
@@ -106,21 +117,24 @@ def cli_info(listing: Any) -> dict[str, FamilyInfo]:
     for family in (listing.get("families") if isinstance(listing, Mapping) else None) or ():
         if not isinstance(family, Mapping):
             continue
+        variants = [
+            variant for variant in family.get("variants") or ()
+            if isinstance(variant, Mapping) and _text(variant.get("model_uid"))
+        ]
+        slug = _text(family.get("slug"))
+        family_label = _trusted_family_label(family, variants, slug)
         windows = []
         tiers = []
-        for variant in family.get("variants") or ():
-            if not isinstance(variant, Mapping) or not _text(variant.get("model_uid")):
-                continue
+        for variant in variants:
             window = variant.get("max_context_tokens")
             window = int(window) if isinstance(window, (int, float)) and not isinstance(window, bool) and window > 0 else None
             free = variant.get("cost_tier") == "Free"
-            info[variant["model_uid"]] = FamilyInfo(window, free)
+            info[variant["model_uid"]] = FamilyInfo(window, free, family_label)
             if window:
                 windows.append(window)
             tiers.append(free)
-        slug = _text(family.get("slug"))
         if slug and slug not in info and windows:
-            info[slug] = FamilyInfo(min(windows), bool(tiers) and all(tiers))
+            info[slug] = FamilyInfo(min(windows), bool(tiers) and all(tiers), family_label)
     return info
 
 
@@ -136,6 +150,23 @@ def known_about(model_id: str, info: Mapping[str, FamilyInfo]) -> FamilyInfo:
     return info.get(best, FamilyInfo())
 
 
+def _name_key(text: str) -> str:
+    return " ".join(text.casefold().split())
+
+
+def _display_name(model_id: str, name: str, efforts: tuple[str, ...], default: str, family_label: str = "") -> str:
+    """The model family's name when ACP repeated the default thought level as the name's last whole word."""
+    if not default or default not in efforts or name == model_id:
+        return name
+    parts = name.rstrip().rsplit(None, 1)
+    if len(parts) != 2 or parts[1].casefold() != default.casefold():
+        return name
+    base = parts[0].rstrip()
+    if not base or family_label and _name_key(name) == _name_key(family_label):
+        return name
+    return base
+
+
 def build_models(
     entries: Sequence[tuple[str, str, bool]],
     levels: Mapping[str, tuple[tuple[str, ...], str]],
@@ -148,7 +179,7 @@ def build_models(
         models.append(
             DevinModel(
                 id=model_id,
-                display_name=name,
+                display_name=_display_name(model_id, name, efforts, default, known.family_label),
                 efforts=efforts,
                 default_effort=default,
                 supports_images=images,

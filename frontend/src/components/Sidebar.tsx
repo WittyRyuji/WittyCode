@@ -4,7 +4,7 @@ import { useStore } from "../store";
 import type { Project, Session } from "../types";
 import { MARK_TEXT } from "../lib/format";
 import { findModel, sourceLabel } from "../lib/models";
-import { sameSessionPartition } from "../lib/sessionOrder";
+import { pinnedOrder, sameSessionPartition } from "../lib/sessionOrder";
 import { formatRelative } from "../lib/time";
 import { Menu, StateDot, type Anchor, type MenuItem } from "./ui";
 import "../styles/sidebar.css";
@@ -29,8 +29,11 @@ function useTick(every = 30_000) {
 const nativeIdOf = (s: Session) => s.nativeId || (s.id.startsWith("cx:") || s.id.startsWith("dv:") ? s.id.slice(3) : s.id);
 
 const SESSION_DRAG = "application/x-wittycode-session";
+const PROJECT_DRAG = "application/x-wittycode-project";
+/** The project being dragged right now (one drag at a time in the window). */
+const projectDrag: { current: string | null } = { current: null };
 
-function SessionRow({ session, current, onMenu, dragging }: { session: Session; current: boolean; onMenu: (s: Session, a: Anchor) => void; dragging: { current: string | null } }) {
+function SessionRow({ session, current, onMenu, dragging, projectName }: { session: Session; current: boolean; onMenu: (s: Session, a: Anchor) => void; dragging: { current: string | null }; projectName?: string }) {
   const [drop, setDrop] = useState<"before" | "after" | null>(null);
   const reorder = useStore((s) => s.reorderSession);
   const select = useStore((s) => s.select);
@@ -43,14 +46,14 @@ function SessionRow({ session, current, onMenu, dragging }: { session: Session; 
   const from = session.fusion === true ? "WittyFusion" : source ? sourceLabel(source, providers) : "";
   // Measured from this moment, not from the last tick: a row that has just arrived is never a tick behind.
   const when = session.modifiedAt ? formatRelative(session.modifiedAt, Date.now()) : session.modified;
-  const sub = [open ? MARK_TEXT[session.mark!] : "", when, from].filter(Boolean).join(" · ");
+  const sub = [projectName, open ? MARK_TEXT[session.mark!] : "", when, from].filter(Boolean).join(" · ");
   const canDrop = (id: string | null) => !!id && id !== session.id && sameSessionPartition(useStore.getState().sessions[id], session);
   return (
     <div
       className={`srow${current ? " current" : ""}${open ? " open" : ""}${session.mark ? ` m-${session.mark}` : ""}${drop ? ` drop-${drop}` : ""}`}
       data-session-id={session.id}
       draggable
-      title="拖动可调整本项目同一置顶分区内的会话顺序"
+      title={session.pinned ? "拖动可调整置顶会话的顺序" : "拖动可调整本项目会话的顺序"}
       onDragStart={(e) => {
         dragging.current = session.id;
         e.dataTransfer.setData(SESSION_DRAG, session.id);
@@ -73,11 +76,13 @@ function SessionRow({ session, current, onMenu, dragging }: { session: Session; 
       onDrop={(e) => {
         setDrop(null);
         const id = e.dataTransfer.getData(SESSION_DRAG);
-        if (!id || id !== dragging.current || !canDrop(id)) return;
+        const source = id ? useStore.getState().sessions[id] : undefined;
+        if (!id || id !== dragging.current || !source || !canDrop(id)) return;
         e.preventDefault();
         e.stopPropagation();
         const r = e.currentTarget.getBoundingClientRect();
-        reorder(session.projectId, id, session.id, e.clientY > r.top + r.height / 2);
+        // the call takes the dragged row's own project — pinned rows may sit in different ones
+        reorder(source.projectId, id, session.id, e.clientY > r.top + r.height / 2);
         dragging.current = null;
       }}
       role="option"
@@ -117,15 +122,54 @@ function SessionRow({ session, current, onMenu, dragging }: { session: Session; 
 
 function ProjectGroup({ project, onSessionMenu, onProjectMenu }: { project: Project; onSessionMenu: (s: Session, a: Anchor) => void; onProjectMenu: (p: Project, a: Anchor) => void }) {
   const sessions = useStore((s) => s.sessions);
+  const pinnedIds = useStore((s) => s.pinnedSessionIds);
   const dragging = useRef<string | null>(null);
   const currentId = useStore((s) => s.currentId);
   const toggle = useStore((s) => s.toggleProject);
   const newSession = useStore((s) => s.newSession);
-  const list = project.sessionIds.map((id) => sessions[id]).filter((x): x is Session => !!x);
+  const reorderProject = useStore((s) => s.reorderProject);
+  const [drop, setDrop] = useState<"before" | "after" | null>(null);
+  // every member is in sessionIds; the pinned ones show in the strip above, not here
+  const pinned = new Set(pinnedIds);
+  const list = project.sessionIds.map((id) => sessions[id]).filter((x): x is Session => !!x && !pinned.has(x.id));
   return (
-    <div className="proj">
+    <div
+      className={`proj${drop ? ` drop-${drop}` : ""}`}
+      data-project-id={project.id}
+      onDragOver={(e) => {
+        if (!e.dataTransfer.types.includes(PROJECT_DRAG) || projectDrag.current === project.id) {
+          setDrop(null);
+          return;
+        }
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        const r = e.currentTarget.getBoundingClientRect();
+        setDrop(e.clientY > r.top + r.height / 2 ? "after" : "before");
+      }}
+      onDragLeave={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDrop(null);
+      }}
+      onDrop={(e) => {
+        setDrop(null);
+        const id = e.dataTransfer.getData(PROJECT_DRAG);
+        if (!id || id !== projectDrag.current || id === project.id) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const r = e.currentTarget.getBoundingClientRect();
+        reorderProject(id, project.id, e.clientY > r.top + r.height / 2);
+        projectDrag.current = null;
+      }}
+    >
       <div
         className="phead-row"
+        draggable
+        title="拖动可调整项目顺序"
+        onDragStart={(e) => {
+          projectDrag.current = project.id;
+          e.dataTransfer.setData(PROJECT_DRAG, project.id);
+          e.dataTransfer.effectAllowed = "move";
+        }}
+        onDragEnd={() => { projectDrag.current = null; setDrop(null); }}
         onContextMenu={(e) => {
           e.preventDefault();
           onProjectMenu(project, { x: e.clientX, y: e.clientY });
@@ -160,6 +204,33 @@ function ProjectGroup({ project, onSessionMenu, onProjectMenu }: { project: Proj
           {list.length === 0 ? <div className="snote">还没有会话</div> : list.map((s) => <SessionRow key={s.id} session={s} current={s.id === currentId} onMenu={onSessionMenu} dragging={dragging} />)}
         </div>
       )}
+    </div>
+  );
+}
+
+/** The global pinned strip between the 新会话 button and the project list: one partition across
+ *  projects, each row naming its own project. Rows reorder only inside the strip. */
+function PinnedSection({ onSessionMenu }: { onSessionMenu: (s: Session, a: Anchor) => void }) {
+  const projects = useStore((s) => s.projects);
+  const sessions = useStore((s) => s.sessions);
+  const declared = useStore((s) => s.pinnedSessionIds);
+  const currentId = useStore((s) => s.currentId);
+  const dragging = useRef<string | null>(null);
+  const ids = pinnedOrder(projects, sessions, declared);
+  // a declared id whose `session` event has not landed yet stays reserved but renders nothing here
+  const rows = ids.map((id) => sessions[id]).filter((s): s is Session => !!s);
+  if (rows.length === 0) return null;
+  const projectOf = (s: Session) => projects.find((p) => p.id === s.projectId)?.name;
+  return (
+    <div className="side-pinned">
+      <div className="side-head">
+        <span>已置顶</span>
+      </div>
+      <div className="pinned-list" role="listbox" aria-label="置顶会话">
+        {rows.map((s) => (
+          <SessionRow key={s.id} session={s} current={s.id === currentId} onMenu={onSessionMenu} dragging={dragging} projectName={projectOf(s)} />
+        ))}
+      </div>
     </div>
   );
 }
@@ -256,6 +327,7 @@ export function Sidebar() {
           <kbd>Ctrl+N</kbd>
         </button>
       </div>
+      <PinnedSection onSessionMenu={onSessionMenu} />
       <div className="side-head">
         <span>项目</span>
         <div className="side-head-actions">

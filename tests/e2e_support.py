@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from PySide6.QtCore import QMimeData, QPoint, QPointF, Qt, QUrl
+from PySide6.QtCore import QMimeData, QPoint, QPointF, QRect, Qt, QUrl
 from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent, QInputMethodEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
@@ -170,6 +170,40 @@ class Rig:
         await self.focus_composer()
         await self.type(text)
         await self.press("Enter")
+
+    async def shot(self, selector: str, path: Path, *, settle: float = 0.6) -> None:
+        """``path`` gets only the element's rectangle: wait out the entrance animation (and ancestor fades),
+        let Chromium present a frame, then crop the window grab so chrome like the session rail stays out."""
+        probe = (
+            "(function(){var e = document.querySelector(%s); if (!e || !e.getAnimations) return 0;"
+            " var a = e.getAnimations({subtree: true}), p = e.parentElement;"
+            " while (p) { if (p.getAnimations) a = a.concat(p.getAnimations()); p = p.parentElement; }"
+            " return a.filter(function(x){var t = x.effect && x.effect.getComputedTiming ? x.effect.getComputedTiming() : null;"
+            " return t && t.iterations !== Infinity && (x.playState === 'running' || x.playState === 'pending');}).length;})()"
+            % json.dumps(selector)
+        )
+
+        async def settled() -> bool:
+            return await self.js(probe) == 0
+
+        await wait_for(settled, 30, f"{selector} animations")
+        await asyncio.sleep(settle)
+        raw = await self.js(
+            "JSON.stringify((function(){var r = document.querySelector(%s).getBoundingClientRect();"
+            " return [r.left, r.top, r.width, r.height];})())" % json.dumps(selector)
+        )
+        left, top, width, height = json.loads(raw)
+        zoom = self.window.view.zoomFactor()
+        offset = self.window.view.mapTo(self.window, QPoint(0, 0))
+        image = self.window.grab()
+        ratio = image.devicePixelRatio()
+        area = QRect(
+            round((offset.x() + left * zoom) * ratio),
+            round((offset.y() + top * zoom) * ratio),
+            round(width * zoom * ratio),
+            round(height * zoom * ratio),
+        )
+        assert image.copy(area).save(str(path)), f"cannot save {path}"
 
     async def finish(self) -> None:
         await self.window.shutdown()

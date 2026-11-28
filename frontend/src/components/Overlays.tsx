@@ -1,6 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { FolderPlus, X } from "lucide-react";
 import { useStore, type DialogSpec } from "../store";
+import type { AttachmentView } from "../types";
+import { useImageMenu } from "./ImageMenu";
 import { CARRY_HOW, CARRY_KIND, carryOverage } from "../lib/carry";
 import { formatBytes } from "../lib/format";
 import { CHATGPT_USAGE_URL, chatgptReady } from "../lib/chatgpt";
@@ -208,30 +210,102 @@ export function ChatGPTWelcome() {
   );
 }
 
-export function LightboxHost() {
-  const a = useStore((s) => s.lightbox);
-  const close = useStore((s) => s.openLightbox);
+const FIT_PICTURE = { scale: 1, x: 0, y: 0 };
+
+function Lightbox({ a, close }: { a: AttachmentView; close: () => void }) {
+  const notice = useStore((s) => s.notice);
+  const [view, setView] = useState(FIT_PICTURE);
+  const [panning, setPanning] = useState(false);
+  const scrim = useRef<HTMLDivElement>(null);
+  const frame = useRef<HTMLDivElement>(null);
+  const drag = useRef<{ id: number; x: number; y: number } | null>(null);
+  const { show, menu } = useImageMenu();
+  const reset = () => setView(FIT_PICTURE);
+
   useEffect(() => {
-    if (!a) return;
-    const key = (e: KeyboardEvent) => e.key === "Escape" && close(null);
+    const node = scrim.current;
+    if (!node) return;
+    const zoom = (e: WheelEvent) => {
+      e.preventDefault();
+      const r = frame.current?.getBoundingClientRect();
+      if (!r || !e.deltaY) return;
+      const x = e.clientX - (r.left + r.width / 2);
+      const y = e.clientY - (r.top + r.height / 2);
+      const delta = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? node.clientHeight : 1);
+      setView((prev) => {
+        const scale = Math.min(8, Math.max(0.2, prev.scale * Math.exp(-delta * 0.002)));
+        if (scale === prev.scale) return prev;
+        // The point in the image under the pointer stays under it after the scale changes.
+        const ratio = scale / prev.scale;
+        return { scale, x: x - (x - prev.x) * ratio, y: y - (y - prev.y) * ratio };
+      });
+    };
+    // A non-passive listener keeps both the page and Chromium's own zoom still.
+    node.addEventListener("wheel", zoom, { passive: false });
+    return () => node.removeEventListener("wheel", zoom);
+  }, []);
+
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
+      if (e.key === "Escape") close();
+      else if (e.key === "0" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();
+        reset();
+      }
+    };
     document.addEventListener("keydown", key);
     return () => document.removeEventListener("keydown", key);
-  }, [a, close]);
-  if (!a) return null;
+  }, [close]);
+
   return (
-    <div className="scrim lightbox" onMouseDown={(e) => e.target === e.currentTarget && close(null)}>
+    <div ref={scrim} className="scrim lightbox" role="dialog" aria-modal="true" aria-label={a.name}
+      onMouseDown={(e) => e.target === e.currentTarget && close()}>
       <figure>
-        <img src={a.url} alt={a.name} />
+        <div className="lb-image-frame" ref={frame}>
+          <img src={a.url} alt={a.name} draggable={false} data-pannable={view.scale > 1 ? "" : undefined}
+            data-panning={panning ? "" : undefined} style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.scale})` }}
+            onContextMenu={show} onDoubleClick={reset}
+            onPointerDown={(e) => {
+              if (e.button !== 0 || view.scale <= 1 || drag.current) return;
+              e.currentTarget.setPointerCapture(e.pointerId);
+              drag.current = { id: e.pointerId, x: e.clientX, y: e.clientY };
+              setPanning(true);
+            }}
+            onPointerMove={(e) => {
+              const p = drag.current;
+              if (!p || p.id !== e.pointerId) return;
+              const dx = e.clientX - p.x;
+              const dy = e.clientY - p.y;
+              drag.current = { id: p.id, x: e.clientX, y: e.clientY };
+              setView((prev) => prev.scale > 1 ? { ...prev, x: prev.x + dx, y: prev.y + dy } : prev);
+            }}
+            onLostPointerCapture={(e) => {
+              if (drag.current?.id !== e.pointerId) return;
+              drag.current = null;
+              setPanning(false);
+            }} />
+        </div>
         <figcaption>
-          {a.name} · {a.width ? `${a.width}×${a.height} · ` : ""}
-          {formatBytes(a.size)}
+          <span>
+            {a.name} · {a.width ? `${a.width}×${a.height} · ` : ""}
+            {formatBytes(a.size)}
+          </span>
+          <div role="status">{notice && <span key={notice.id} className="notice-text">{notice.text}</span>}</div>
         </figcaption>
       </figure>
-      <button type="button" className="lb-close" aria-label="关闭" onClick={() => close(null)}>
+      <button type="button" className="lb-close" aria-label="关闭" onClick={close} autoFocus>
         <X size={18} />
       </button>
+      {menu}
     </div>
   );
+}
+
+export function LightboxHost() {
+  const a = useStore((s) => s.lightbox);
+  const open = useStore((s) => s.openLightbox);
+  return a && <Lightbox key={a.id} a={a} close={() => open(null)} />;
 }
 
 export function DropOverlay() {

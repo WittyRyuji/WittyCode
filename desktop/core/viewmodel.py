@@ -228,6 +228,8 @@ def prompt_json(prompt: Prompt) -> dict[str, Any]:
     out = {"kind": "question", "id": prompt.id, "status": status, "questions": [_question_json(q) for q in prompt.questions]}
     if prompt.who:
         out["who"] = prompt.who
+    if prompt.options_only:
+        out["optionsOnly"] = True
     return out
 
 
@@ -244,8 +246,12 @@ def turn_json(turn: Turn, thumbnail: Thumbnailer | None = None) -> dict[str, Any
         "id": turn.id,
         "status": _TURN_STATUS[turn.status],
         "blocks": [block_json(block, thumbnail) for block in turn.blocks],
-        "prompts": [prompt_json(prompt) for prompt in turn.prompts if prompt.status is PromptStatus.PENDING],
+        "prompts": [prompt_json(prompt) for prompt in (*turn.prompts, *turn.recovery_prompts) if prompt.status is PromptStatus.PENDING],
     }
+    if turn.fusion_outcome:
+        out["fusionOutcome"] = turn.fusion_outcome
+    if turn.fusion_opening or turn.fusion_dispatches:
+        out["fusionFeedback"] = {"opening": turn.fusion_opening, "dispatches": list(turn.fusion_dispatches)}
     if turn.plan is not None:
         out["plan"] = {"id": turn.plan.id, "steps": [{"text": step.text, "state": step.status} for step in turn.plan.steps]}
     if turn.duration is not None:

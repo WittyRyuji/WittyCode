@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from copy import deepcopy
 from dataclasses import replace
 
@@ -9,6 +10,7 @@ import pytest
 
 from desktop.core.app_core import AppError
 from desktop.core.fusion import tools
+from desktop.core.settings import default_settings_path, load_settings, save_settings, settings_to_dict
 from tests.app_support import ready_core
 from tests.chatgpt_support import finish_turn
 from tests.fake_responses import call, say
@@ -65,6 +67,39 @@ def test_changed_roles_apply_on_send_and_preserve_expert_handoff_and_history(tmp
             assert main.manager.sessions.load(main.session_id).fusion["policy"]["main"] == LUNA
         finally:
             await core.shutdown()
+    asyncio.run(go())
+
+
+def test_main_only_change_keeps_all_34_experts_and_session_authorisations(tmp_path):
+    from desktop.core.fusion.runtime import ExpertView
+
+    async def go():
+        core, fake, _, _, _ = await ready_core(tmp_path)
+        try:
+            cid, main = await open_fusion(core, tmp_path)
+            fake.script(say("Before."))
+            await core.call("session.send", {"id": cid, "text": "Start"})
+            await finish_turn(main)
+            assert (await core.call("fusion.authorizeModel", {"id": cid, "model": SOL}))["ok"]
+            runtime = main._fusion
+            for i in range(34):
+                record = runtime.registry.assign_workstream(f"Sample {i}", (), SOL if i < 14 else LUNA,
+                                                            "worker", identity="Coder")
+                record.status, record.started_at, record.finished_at = "done", 1.0, 2.0
+                runtime.agents[record.id] = ExpertView(record)
+            runtime._checkpoint()
+            before = [record.to_json() for record in runtime.registry.agents.values()]
+            count = len(fake.requests)
+            await core.call("settings.set", {"key": "fusionMain", "value": LUNA})
+            fake.script(say("Handoff."), say("No delegation."))
+            await core.call("session.send", {"id": cid, "text": "Continue"})
+            await finish_turn(main)
+            assert [record.to_json() for record in runtime.registry.agents.values()] == before
+            assert runtime.registry.policy.workers == (LUNA, SOL)
+            assert len(main.agents) == 34 and runtime.registry.calls == 0 and len(fake.requests) == count + 2
+        finally:
+            await core.shutdown()
+
     asyncio.run(go())
 
 
@@ -295,7 +330,7 @@ def test_summary_unknown_usage_survives_policy_replacement_and_blocks_legacy_bud
     asyncio.run(go())
 
 
-def test_unstarted_replacement_of_interrupted_owner_can_be_watched_and_acknowledged(tmp_path):
+def test_role_change_leaves_interrupted_owner_in_history_until_explicit_resume(tmp_path):
     async def go():
         core, fake, _, _, _ = await ready_core(tmp_path)
         try:
@@ -310,15 +345,15 @@ def test_unstarted_replacement_of_interrupted_owner_can_be_watched_and_acknowled
             fake.script(say("Assess the changed team first."))
             await core.call("session.send", {"id": cid, "text": "Assess"})
             await finish_turn(main)
-            new = next(view for view in main.agents.values() if view.record.status != "retired")
-            assert new.record.status == "interrupted" and not new.record.started_at
-            assert main.manager.sessions.load(new.record.id) is None
-            assert (await core.call("agents.watch", {"id": cid, "agentId": new.record.id}))["ok"]
-            assert (await core.call("fusion.resumeExpert", {"id": cid, "agentId": new.record.id}))["ok"]
-            assert len(fake.requests) == 4 and new.record.status == "idle"
-            fake.script(call("delegate_task", assignment(SOL)), say("Continued safely."), say("Verified."))
+            assert list(main.agents) == [old.record.id]
+            assert main.agents[old.record.id].record.replaced_status == "interrupted"
+            assert (await core.call("agents.watch", {"id": cid, "agentId": old.record.id}))["ok"]
+            rejected = await main._fusion.delegate("Login flow", SOL, "worker", "Check first", ("src/auth",))
+            assert rejected.is_error and len(main.agents) == 1 and len(fake.requests) == 4
+            fake.script(call("delegate_task", assignment(SOL, resume=True)), say("Continued safely."), say("Verified."))
             await core.call("session.send", {"id": cid, "text": "Continue after checking"})
             await finish_turn(main)
+            new = next(view for view in main.agents.values() if view.record.transferred_from == old.record.id)
             assert new.record.status == "done" and new.record.handoff_complete
             assert len(fake.requests) == 7
         finally:
@@ -395,3 +430,88 @@ def test_cross_engine_fusion_restore_checks_images_after_latest_preset_is_applie
 def test_resume_flag_requires_a_boolean():
     assert tools.parse(assignment(resume="true"))[0] is None
     assert tools.parse(assignment(resume=True))[0][-1] is True
+
+
+def test_light_pool_legacy_migration_and_settings_bridge_contract(tmp_path):
+    legacy = tmp_path / "settings.json"
+    legacy.write_text(json.dumps({"fusion_light": LUNA, "fusion_lights": [SOL, SOL]}), encoding="utf-8")
+    loaded = load_settings(legacy)
+    assert loaded.fusion_lights == [LUNA, SOL]
+    assert loaded.fusion_light == LUNA
+    save_settings(loaded, legacy)
+    written = json.loads(legacy.read_text(encoding="utf-8"))
+    assert written["fusion_lights"] == [LUNA, SOL] and written["fusion_light"] == LUNA
+    assert settings_to_dict(loaded)["fusion_light"] == LUNA
+
+    async def go():
+        core, _, _, _, _ = await ready_core(tmp_path)
+        try:
+            await core.call("settings.set", {"key": "fusionWorkers", "value": [SOL, LUNA, SOL]})
+            await core.call("settings.set", {"key": "fusionLights", "value": [LUNA, SOL, LUNA]})
+            assert core.settings.fusion_workers == [SOL, LUNA]
+            assert core.settings.fusion_lights == [LUNA, SOL]
+            assert core.settings.fusion_light == LUNA
+            view = core.settings_view()
+            assert view["fusionWorkers"] == [SOL, LUNA]
+            assert view["fusionLights"] == [LUNA, SOL]
+            assert view["fusionLight"] == LUNA
+            await core.call("settings.set", {"key": "fusionLight", "value": SOL})
+            assert core.settings.fusion_lights == [SOL] and core.settings.fusion_light == SOL
+        finally:
+            await core.shutdown()
+    asyncio.run(go())
+
+
+def test_expert_catalog_bridge_crud_uses_lazy_controlled_settings_root(tmp_path, monkeypatch):
+    monkeypatch.setenv("WITTYCODE_SETTINGS", str(tmp_path / "profile" / "settings.json"))
+    markdown = "---\ndescription: Checks security-sensitive changes.\ntools: read\n---\n检查认证、授权和密钥处理，只报告事实。"
+
+    async def go():
+        core, _, _, _, _ = await ready_core(tmp_path)
+        try:
+            root = default_settings_path().parent / "fusion-experts"
+            assert not root.exists()
+            initial = await core.call("experts.list")
+            catalog_root = str(core.expert_catalog()._root).removeprefix("\\\\?\\")
+            assert root.is_dir() and catalog_root == str(root.resolve())
+            assert initial["revision"] == 0
+            assert initial["experts"] and all(entry["builtin"] for entry in initial["experts"])
+            assert {item["id"] for item in initial["workTypes"]} == {"execute", "manage", "review", "research", "verify", "observe"}
+
+            created = await core.call("experts.create", {
+                "stableId": "review-security", "name": "安全检查", "workType": "review",
+                "markdown": markdown, "tags": "security api security", "enabled": True,
+            })
+            entry = next(item for item in created["experts"] if item["stableId"] == "review-security")
+            assert (entry["version"], entry["enabled"], entry["tags"], entry["builtin"]) == (1, True, ["security", "api"], False)
+            detail = await core.call("experts.get", {"stableId": "review-security"})
+            assert detail["markdown"] == markdown and detail["expert"]["contentHash"] == entry["contentHash"]
+
+            updated = await core.call("experts.update", {
+                "stableId": "review-security", "name": "安全复核", "workType": "verify",
+                "tags": "security verify", "markdown": markdown + "\n保留证据路径。",
+            })
+            entry = next(item for item in updated["experts"] if item["stableId"] == "review-security")
+            assert (entry["name"], entry["workType"], entry["version"], entry["tags"]) == ("安全复核", "verify", 2, ["security", "verify"])
+            disabled = await core.call("experts.setEnabled", {"stableId": "review-security", "enabled": False})
+            entry = next(item for item in disabled["experts"] if item["stableId"] == "review-security")
+            assert not entry["enabled"] and entry["version"] == 3
+            detail = await core.call("experts.get", {"stableId": "review-security"})
+            assert detail["expert"]["version"] == 3
+
+            await core.call("experts.update", {"stableId": "Coder", "name": "实现", "expectedVersion": 0})
+            with pytest.raises(AppError, match="已有新版本"):
+                await core.call("experts.update", {"stableId": "Coder", "name": "旧草稿", "expectedVersion": 0})
+            with pytest.raises(AppError, match="受保护"):
+                await core.call("experts.update", {"stableId": "Coder", "enabled": False})
+            coder = await core.call("experts.get", {"stableId": "Coder"})
+            assert coder["expert"]["name"] == "实现" and coder["expert"]["version"] == 1
+            assert coder["description"] and coder["body"] and "Do not delegate" not in coder["body"]
+
+            removed = await core.call("experts.delete", {"stableId": "review-security"})
+            assert all(item["stableId"] != "review-security" for item in removed["experts"])
+            with pytest.raises(AppError, match="没有找到这个专家"):
+                await core.call("experts.get", {"stableId": "review-security"})
+        finally:
+            await core.shutdown()
+    asyncio.run(go())

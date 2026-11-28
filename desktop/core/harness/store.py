@@ -28,6 +28,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from threading import RLock
 from typing import Any
 
 from desktop.core.diffs import DiffLine, FileDiff
@@ -68,6 +69,16 @@ class SavedTurn:
     model: str = ""
     note: str = ""
     """What the page said about how the turn ended (``limit``, ``incomplete``, a turn ``recover`` found cut off)."""
+    opening: str = ""
+    dispatches: list[str] = field(default_factory=list)
+    """Fusion display only: opening line and the labels of experts actually sent work this turn."""
+    fusion_plan: str = ""
+    fusion_outcome: str = ""
+    fusion_recovery: bool = False
+    fusion_resumed: bool = False
+    fusion_task: str = ""
+    fusion_kind: str = ""
+    fusion_resume_source: str = ""
 
 
 @dataclass(slots=True)
@@ -149,6 +160,42 @@ def diff_from_json(raw: Any) -> FileDiff | None:
         return None
 
 
+def _turn_json(turn: SavedTurn) -> dict[str, Any]:
+    data = {"start": turn.start, "at": turn.at, "finished": turn.finished, "status": turn.status,
+            "error": turn.error, "model": turn.model, "note": turn.note}
+    if turn.opening:
+        data["opening"] = turn.opening
+    if turn.dispatches:
+        data["dispatches"] = turn.dispatches
+    if turn.fusion_plan:
+        data["fusionPlan"] = turn.fusion_plan
+    if turn.fusion_outcome:
+        data["fusionOutcome"] = turn.fusion_outcome
+    if turn.fusion_recovery:
+        data["fusionRecovery"] = True
+    if turn.fusion_resumed:
+        data["fusionResumed"] = True
+    if turn.fusion_task and turn.fusion_kind in ("simple", "complex"):
+        data["fusionTask"], data["fusionKind"] = turn.fusion_task, turn.fusion_kind
+        if turn.fusion_resume_source:
+            data["fusionResumeSource"] = turn.fusion_resume_source
+    return data
+
+
+def _turn_from(raw: Mapping[str, Any]) -> SavedTurn:
+    opening, dispatches = raw.get("opening"), raw.get("dispatches")
+    labels = (label for label in dispatches if isinstance(label, str) and label.strip()) if isinstance(dispatches, list) else ()
+    task, kind, source = raw.get('fusionTask'), raw.get('fusionKind'), raw.get('fusionResumeSource')
+    bound = isinstance(task, str) and _ID.fullmatch(task) and kind in ('simple', 'complex')
+    return SavedTurn(int(raw["start"]), float(raw["at"]), raw.get("finished"), str(raw.get("status") or "done"),
+                     str(raw.get("error") or ""), str(raw.get("model") or ""), str(raw.get("note") or ""),
+                     opening=opening if isinstance(opening, str) else "", dispatches=list(dict.fromkeys(labels)),
+                     fusion_plan=str(raw.get('fusionPlan') or ''), fusion_outcome=str(raw.get('fusionOutcome') or ''),
+                     fusion_recovery=raw.get('fusionRecovery') is True, fusion_resumed=raw.get('fusionResumed') is True,
+                     fusion_task=task if bound else '', fusion_kind=kind if bound else '',
+                     fusion_resume_source=source if bound and source in ('manual', 'automatic') else '')
+
+
 def _session_json(session: SavedSession) -> dict[str, Any]:
     from desktop.core.harness.outputs import RETAIN_CHARS, hint
     from desktop.core.harness.loop import clip_output
@@ -178,7 +225,7 @@ def _session_json(session: SavedSession) -> dict[str, Any]:
         "mode": session.mode,
         "created_at": session.created_at,
         "modified_at": session.modified_at,
-        "turns": [{"start": t.start, "at": t.at, "finished": t.finished, "status": t.status, "error": t.error, "model": t.model, "note": t.note} for t in session.turns],
+        "turns": [_turn_json(t) for t in session.turns],
         "tools": session.tools,
         "usage": session.usage,
         "context_used": session.context_used,
@@ -237,11 +284,7 @@ def _session_from(raw: Any) -> SavedSession | None:
     if "fusion" in raw and (not isinstance(raw["fusion"], Mapping) or not raw["fusion"]):
         return None  # Never silently reopen a damaged Fusion session as an ordinary conversation.
     try:
-        turns = [
-            SavedTurn(int(t["start"]), float(t["at"]), t.get("finished"), str(t.get("status") or "done"), str(t.get("error") or ""), str(t.get("model") or ""), str(t.get("note") or ""))
-            for t in raw.get("turns") or ()
-            if isinstance(t, Mapping)
-        ]
+        turns = [_turn_from(t) for t in raw.get("turns") or () if isinstance(t, Mapping)]
         items = [item for item in raw.get("items") or () if isinstance(item, dict)]
         prune_tool_images(items)
         return SavedSession(
@@ -432,6 +475,14 @@ def recover(session: SavedSession) -> bool:
         turn.status = "interrupted"
         turn.finished = max(turn.at, following.at if following is not None else session.modified_at)
         turn.note = CUT_OFF_UNKNOWN.format(count=unknown) if unknown else CUT_OFF
+        if turn.fusion_plan:
+            turn.fusion_outcome = 'unverified'
+            turn.fusion_recovery = True
+            turn.note += '\nFusion：原任务尚未验收。已保留检查点；先核对未取得结果的动作，不自动重放。'
+            for item in session.items[turn.start : end]:
+                if item.get('type') == 'message' and item.get('role') == 'assistant':
+                    from desktop.core.fusion.candidate import CANDIDATE
+                    item.pop(CANDIDATE, None)
         changed = True
     return changed
 
@@ -456,6 +507,7 @@ def _write(path: Path, data: Any) -> None:
 class SessionStore:
     def __init__(self, root: str | os.PathLike[str]) -> None:
         self.root = Path(root)
+        self._index_lock = RLock()  # All in-process writes/rebuilds of this index are one read-modify-write operation.
 
     def _path(self, session_id: str) -> Path:
         if not _ID.match(session_id):
@@ -492,15 +544,19 @@ class SessionStore:
             handle.close()
 
     def save(self, session: SavedSession) -> None:
-        _write(self._path(session.id), _session_json(session))
-        index = self._index()
-        index[session.id] = self._row_json(session)
-        self._write_index(index)
+        with self._index_lock:
+            _write(self._path(session.id), _session_json(session))
+            index = self._index()
+            index[session.id] = self._row_json(session)
+            self._write_index(index)
 
     def load(self, session_id: str) -> SavedSession | None:
         """The conversation as it was saved, a turn the application did not live to end included (``recover``)."""
         try:
-            raw = json.loads(self._path(session_id).read_text(encoding="utf-8"))
+            # Windows readers without delete sharing can otherwise block the worker's atomic replace.
+            with self._index_lock:
+                text = self._path(session_id).read_text(encoding="utf-8")
+            raw = json.loads(text)
         except (OSError, ValueError):
             return None
         return _session_from(raw)
@@ -510,34 +566,38 @@ class SessionStore:
 
         Never act on an ordinary archive or on a checkpoint with model/tool output, even if the caller is mistaken.
         """
-        saved = self.load(session_id)
-        if (saved is None or saved.origin.get(FIRST_PROMPT) is not True or len(saved.turns) != 1
-                or saved.turns[0].status != "running" or saved.turns[0].start != 0
-                or len(saved.items) != 1 or saved.items[0].get("role") != "user"):
-            return
-        index = self._index()  # take the existing index before unlinking, so it need not be rebuilt for this removal
-        self._path(session_id).unlink()
-        index.pop(session_id, None)
-        self._write_index(index)
+        with self._index_lock:
+            saved = self.load(session_id)
+            if (saved is None or saved.origin.get(FIRST_PROMPT) is not True or len(saved.turns) != 1
+                    or saved.turns[0].status != "running" or saved.turns[0].start != 0
+                    or len(saved.items) != 1 or saved.items[0].get("role") != "user"):
+                return
+            index = self._index()  # take the existing index before unlinking, so it need not be rebuilt for this removal
+            self._path(session_id).unlink()
+            index.pop(session_id, None)
+            self._write_index(index)
 
     def delete(self, session_id: str) -> None:
-        try:
-            self._path(session_id).unlink()
-        except OSError:
-            pass
-        if not self._path(session_id).exists():
-            from desktop.core.harness.tools import ToolError
+        with self._index_lock:
             try:
-                self.outputs(session_id).delete()
-            except (OSError, ToolError):
-                log.warning("could not delete retained outputs", exc_info=True)
-        index = self._index()
-        if index.pop(session_id, None) is not None:
-            self._write_index(index)
+                self._path(session_id).unlink()
+            except OSError:
+                pass
+            if not self._path(session_id).exists():
+                from desktop.core.harness.tools import ToolError
+                try:
+                    self.outputs(session_id).delete()
+                except (OSError, ToolError):
+                    log.warning("could not delete retained outputs", exc_info=True)
+            index = self._index()
+            if index.pop(session_id, None) is not None:
+                self._write_index(index)
 
     def rows(self, project: str | None = None, limit: int | None = None) -> list[SavedRow]:
         rows = []
-        for session_id, raw in self._index().items():
+        with self._index_lock:
+            index = self._index()
+        for session_id, raw in index.items():
             if raw.get("fusion_expert") is True:
                 continue
             if project is not None and not same_folder(raw.get("project", ""), project):

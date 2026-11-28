@@ -50,7 +50,8 @@ function Main() {
   const say = useStore((s) => s.say);
   const attachFiles = useStore((s) => s.attachFiles);
   const depth = useRef(0);
-  const plan = useMemo(() => latestPlan(session?.turns ?? []), [session?.turns]);
+  const olderPlan = session?.turnHistory?.olderPlan;
+  const plan = useMemo(() => latestPlan(session?.turns ?? [], olderPlan), [session?.turns, olderPlan]);
   const [closedPlans, setClosedPlans] = useState<Set<string>>(() => new Set());
   const planOpen = !!session && !!plan && !inspectorOpen && !closedPlans.has(session.id);
   const [closedTeams, setClosedTeams] = useState<Set<string>>(() => new Set());
@@ -118,7 +119,7 @@ function Main() {
           <button type="button" className={`plan-toggle agents-toggle${teamOpen ? " open" : ""}`} aria-label={teamOpen ? "关闭 Agents Team" : "打开 Agents Team"} aria-expanded={teamOpen} aria-controls={teamOpen ? "conversation-team" : undefined} onClick={() => setTeamOpen(!teamOpen)}>
             <UsersRound size={16} aria-hidden />
             <span>Agents</span>
-            <span className="num">{agents.length}</span>
+            <span className="num">{agents.filter((agent) => !agent.unstartedTransfer).length}</span>
           </button>
         )}
       </Tabs>

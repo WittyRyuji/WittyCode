@@ -1,4 +1,5 @@
 # Everything needed to run the test suite: pip install -r requirements-dev.txt
 -r requirements.txt
 pytest==9.2.0
-# Resolved transitive versions: pluggy==1.7.0  packaging==26.3  iniconfig==2.3.1  colorama==0.4.6
+pytest-xdist==3.8.0
+# Resolved transitive versions: execnet==2.1.2  pluggy==1.7.0  packaging==26.3  iniconfig==2.3.1  colorama==0.4.6

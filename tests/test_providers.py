@@ -20,7 +20,6 @@ from desktop.core.providers import (
     ProviderError,
     ProviderStore,
     custom_model_id,
-    run_key_command,
 )
 
 SECRET = "sk-" + "SENTINEL-0123456789-abcdef-7Qd2"
@@ -63,14 +62,13 @@ class Opener:
         return {k.lower(): v for k, v in self.requests[-1].header_items()}
 
 
-def make_store(tmp_path: Path, *, environ=None, registry=None, opener=None, run_command=None) -> ProviderStore:
+def make_store(tmp_path: Path, *, environ=None, registry=None, opener=None) -> ProviderStore:
     return ProviderStore(
         models_file=tmp_path / "home" / ".factory" / "settings.json",
         sidecar=tmp_path / "app" / "providers.json",
         environ={} if environ is None else environ,
         registry_env=lambda: {} if registry is None else registry,
         opener=opener,
-        run_command=run_command,
     )
 
 
@@ -227,9 +225,8 @@ def test_saved_view_matches_the_page_shape(tmp_path):
     store = make_store(tmp_path)
     saved = store.save(
         draft(
-            keyMode="command",
-            keyHint="C:\\tools\\mint.cmd",
-            keyTtlMs=60000,
+            keyMode="env",
+            keyHint="${OPENROUTER_API_KEY}",
             models=[model("m1", displayName="One", contextWindow=250000, maxOutput=16384, reasoning="high", images=True), model("m2")],
             headers=[{"k": "X-A", "v": "1"}],
             extraArgs='{"top_p": 0.9}',
@@ -240,9 +237,8 @@ def test_saved_view_matches_the_page_shape(tmp_path):
         "name": "OpenRouter",
         "kind": "generic-chat-completion-api",
         "baseUrl": "https://openrouter.ai/api/v1",
-        "keyMode": "command",
-        "keyHint": "C:\\tools\\mint.cmd",
-        "keyTtlMs": 60000,
+        "keyMode": "env",
+        "keyHint": "${OPENROUTER_API_KEY}",
         "models": [
             {"id": "m1", "displayName": "One", "contextWindow": 250000, "maxOutput": 16384, "reasoning": "high", "images": True},
             {"id": "m2", "displayName": "m2", "reasoning": "", "images": False},
@@ -264,9 +260,7 @@ def test_new_entries_follow_the_documented_field_order(tmp_path):
     ("d", "present", "absent"),
     [
         (draft(keyMode="env", keyHint="${GROQ_API_KEY}"), {"apiKey": "${GROQ_API_KEY}"}, ("apiKeyHelper", "apiKeyHelperTtlMs")),
-        (draft(keyMode="command", keyHint="mint.cmd", keyTtlMs=300000), {"apiKeyHelper": "mint.cmd", "apiKeyHelperTtlMs": 300000}, ("apiKey",)),
-        (draft(keyMode="command", keyHint="mint.cmd"), {"apiKeyHelper": "mint.cmd"}, ("apiKey", "apiKeyHelperTtlMs")),
-        (draft(keyMode="none", keyHint="ignored"), {}, ("apiKey", "apiKeyHelper", "apiKeyHelperTtlMs")),
+        (draft(keyMode="none", keyHint="ignored"), {}, ("apiKey", "apiKeyHelper", "apiKeyHelperTtlMs", "selectedKeyIndex")),
     ],
 )
 def test_key_modes_write_only_references(tmp_path, d, present, absent):
@@ -279,6 +273,43 @@ def test_key_modes_write_only_references(tmp_path, d, present, absent):
         assert name not in written
     assert saved["keyMode"] == d["keyMode"]
     assert saved["keyHint"] == ("" if d["keyMode"] == "none" else d["keyHint"])
+
+
+def test_models_select_distinct_environment_keys_without_changing_model_ids(tmp_path):
+    opener = Opener({"data": []})
+    store = make_store(tmp_path, opener=opener, environ={"DEMO_A": "first", "DEMO_B": "second"})
+    old = store.save(draft(keyHint="${DEMO_A}", models=[model("a"), model("b")]))
+    ids = [spec.id for spec in store.api_models()]
+    saved = store.save({**old, "keyHint": "${DEMO_A}, ${DEMO_B}", "models": [old["models"][0], {**old["models"][1], "selectedKeyIndex": 1}]})
+    assert saved["availableKeys"] == [{"name": "DEMO_A"}, {"name": "DEMO_B"}]
+    assert saved["keyHint"] == "${DEMO_A},${DEMO_B}"
+    assert [spec.id for spec in store.api_models()] == ids
+    assert [store.api_key(spec) for spec in store.api_models()] == ["first", "second"]
+    assert run(store.test(saved))["ok"] and opener.headers["authorization"] == "Bearer first"
+    with pytest.raises(ProviderError, match="模型所选的 API Key 不存在"):
+        store.save({**saved, "keyHint": "${DEMO_A}"})
+    with pytest.raises(ProviderError, match="环境变量要写成"):
+        store.save({**saved, "keyHint": "${DEMO_A},"})
+    assert store.list() == [saved]
+
+
+def test_legacy_key_helper_is_never_run_and_is_removed_on_save(tmp_path, monkeypatch):
+    def unexpected(*args, **kwargs):
+        pytest.fail("legacy API key helper must not execute")
+
+    monkeypatch.setattr("desktop.core.providers.subprocess.Popen", unexpected)
+    opener = Opener({"data": []})
+    store = make_store(tmp_path, opener=opener)
+    saved = store.save(draft(keyMode="none"))
+    (row,) = entries_of(store)
+    put_settings(store, {"customModels": [{**row, "apiKeyHelper": "unused-helper", "apiKeyHelperTtlMs": 1000}]})
+    assert store.list() == [saved]
+    assert store.api_key(store.api_models()[0]) is None
+    assert run(store.test(saved))["ok"] and "authorization" not in opener.headers
+    store.save(saved)
+    assert {"apiKeyHelper", "apiKeyHelperTtlMs"}.isdisjoint(entries_of(store)[0])
+    with pytest.raises(ProviderError, match="密钥来源"):
+        store.save({**saved, "keyMode": "command"})
 
 
 def test_reasoning_and_images_rows(tmp_path):
@@ -389,7 +420,7 @@ def test_saving_an_inline_provider_keeps_its_key_and_gives_it_to_new_models(tmp_
 
 @pytest.mark.parametrize(
     ("mode", "hint", "field"),
-    [("env", "${OPENAI_API_KEY}", "apiKey"), ("command", "mint.cmd", "apiKeyHelper"), ("none", "", None)],
+    [("env", "${OPENAI_API_KEY}", "apiKey"), ("none", "", None)],
 )
 def test_switching_away_from_inline_removes_the_plaintext(tmp_path, mode, hint, field):
     store = make_store(tmp_path)
@@ -806,8 +837,6 @@ def test_removing_something_that_is_not_there_changes_nothing(tmp_path):
         ({"baseUrl": "api.example.com/v1"}, "http"),
         ({"baseUrl": "https://"}, "http"),
         ({"keyMode": "magic"}, "密钥来源"),
-        ({"keyMode": "command", "keyHint": " "}, "命令"),
-        ({"keyMode": "command", "keyHint": "x", "keyTtlMs": -5}, "刷新间隔"),
         ({"models": []}, "至少"),
         ({"models": [model(" ")]}, "至少"),
         ({"models": [model("a"), model("a")]}, "重复"),
@@ -1200,32 +1229,6 @@ def test_header_variables_are_expanded_or_reported():
     assert result["ok"] is False and "MISSING" in result["text"] and "X-Team" in result["text"]
 
 
-def test_a_command_key_is_run_and_sent():
-    asked = []
-    opener = Opener({"data": [{"id": "m"}]})
-    store = ProviderStore(
-        models_file=Path("u.json"),
-        sidecar=Path("u2.json"),
-        environ={},
-        opener=opener,
-        run_command=lambda command: asked.append(command) or SECRET,
-    )
-    result = run(store.test(conn(keyMode="command", keyHint="mint-token.cmd --scope x")))
-    assert result["ok"] is True and asked == ["mint-token.cmd --scope x"]
-    assert opener.headers["authorization"] == f"Bearer {SECRET}"
-    assert SECRET not in json.dumps(result)
-
-
-def test_a_failing_key_command_is_a_test_failure():
-    def failing(command: str) -> str:
-        raise ProviderError("取密钥的命令失败了（退出码 2）。")
-
-    opener = Opener({"data": []})
-    store = ProviderStore(models_file=Path("u.json"), sidecar=Path("u2.json"), environ={}, opener=opener, run_command=failing)
-    result = run(store.test(conn(keyMode="command", keyHint="x")))
-    assert result["text"] == "取密钥的命令失败了（退出码 2）" and opener.requests == []
-
-
 def test_the_stored_inline_key_is_used_for_a_test_but_never_returned(tmp_path):
     opener = Opener({"data": [{"id": "m"}]})
     store = make_store(tmp_path, opener=opener)
@@ -1259,36 +1262,6 @@ def test_a_stored_secret_header_is_used_for_a_test_but_never_returned(tmp_path):
     result = run(store.test({**view, "keyMode": "none", "keyHint": ""}))
     assert result["ok"] is True and opener.headers["authorization"] == f"Bearer {SECRET}"
     assert SECRET not in json.dumps(result, ensure_ascii=False)
-
-
-# ---------------------------------------------------------------------------------------------- key commands
-
-
-def python_command(tmp_path: Path, source: str) -> str:
-    script = tmp_path / "helper.py"
-    script.write_text(source, encoding="utf-8")
-    return f'"{sys.executable}" "{script}"'
-
-
-def test_the_real_key_command_runner(tmp_path):
-    assert run_key_command(python_command(tmp_path, "print('  tok-123  ')")) == "tok-123"
-    with pytest.raises(ProviderError, match="退出码 3"):
-        run_key_command(python_command(tmp_path, "import sys; sys.exit(3)"))
-    with pytest.raises(ProviderError, match="没有输出"):
-        run_key_command(python_command(tmp_path, "pass"))
-
-
-def test_the_key_command_runner_never_echoes_output(tmp_path):
-    source = f"import sys; print({SECRET!r}); print({SECRET!r}, file=sys.stderr); sys.exit(1)"
-    with pytest.raises(ProviderError) as caught:
-        run_key_command(python_command(tmp_path, source))
-    assert SECRET not in str(caught.value)
-
-
-def test_a_key_command_that_hangs_is_stopped(tmp_path, monkeypatch):
-    monkeypatch.setattr(providers_module, "COMMAND_TIMEOUT", 0.5)
-    with pytest.raises(ProviderError, match="没有返回"):
-        run_key_command(python_command(tmp_path, "import time; time.sleep(30)"))
 
 
 # ------------------------------------------------------------------------------ no secret in any returned value

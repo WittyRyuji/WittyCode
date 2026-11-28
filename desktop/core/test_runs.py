@@ -152,6 +152,15 @@ class ManagedTestRun:
             raise RuntimeError("The command passed, but test finalization did not complete.") from (cleanup_error or report_error)
 
 
+def _test_command(command: list[str]) -> list[str]:
+    executable = Path(command[0]).name.lower().removesuffix(".exe")
+    module = 2 if command[1:2] == ["-B"] else 1
+    if executable in {"python", "python3", "python3.11"} and command[module:module + 2] == ["-m", "pytest"]:
+        # Pytest takes the last -n, so caller arguments still set the worker count.
+        return [*command[:module + 2], "-n", "16", *command[module + 2:]]
+    return command
+
+
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     if not args or args[0] != "--" or len(args) < 2:
@@ -159,7 +168,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         with ManagedTestRun(Path.cwd()) as run:
-            subprocess.run(args[1:], env={**os.environ, **run.environment()}, check=True)
+            subprocess.run(_test_command(args[1:]), env={**os.environ, **run.environment()}, check=True)
     except KeyboardInterrupt:
         return 130
     except subprocess.CalledProcessError as error:

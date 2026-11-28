@@ -77,9 +77,9 @@ def test_exhausted_title_retries_do_not_dispatch_and_preserve_the_draft(tmp_path
             await core.call("attachments.add", {"id": cid, "files": [png_upload("draft.png")]})
             plan.fake.title_answer = "两行\n无效标题"
             message = {"id": cid, "text": "检查库存接口"}
-            with pytest.raises(AppError, match="重试 3 次后仍未成功，首条消息没有发出"):
+            with pytest.raises(AppError, match="尝试 3 次后仍未成功，首条消息没有发出"):
                 await core.call("session.send", message)
-            assert len(plan.fake.title_requests) == 4
+            assert len(plan.fake.title_requests) == 3
             assert events.last("restore")["text"] == message["text"] and len(conv.drafts) == 1
             assert not conv.in_history and not conv.controller.transcript.turns and not plan.requests
             assert not core.settings.session_auto_titles and not core.chatgpt.sessions.load(conv.controller.session_id)
@@ -89,7 +89,7 @@ def test_exhausted_title_retries_do_not_dispatch_and_preserve_the_draft(tmp_path
             plan.script(say("收到。"))
             assert (await core.call("session.send", message))["ok"]
             await idle(core, cid)
-            assert len(plan.requests) == 1 and len(plan.fake.title_requests) == 5
+            assert len(plan.requests) == 1 and len(plan.fake.title_requests) == 4
             assert core._title_of(conv) == "库存校验"
             assert len(conv.controller.transcript.turns[0].user_block.attachments) == 1
         finally:
@@ -106,11 +106,11 @@ def test_first_title_uses_raw_text_and_retries_invalid_answers_without_sending_m
         try:
             raw = "  检查库存导入\n并核对事务边界  "
             name = "库存数据导入事务检查"
-            plan.fake.title_turns = [say("超长" * 6), say("两行\n标题"), say("新会话"), [("hold", "last-title"), *say(name)]]
+            plan.fake.title_turns = [say("超长" * 6), say("新会话"), [("hold", "last-title"), *say(name)]]
             plan.script(say("已检查。"))
             cid = await new_session(core, events, tmp_path / "proj")
             send = asyncio.create_task(core.call("session.send", {"id": cid, "text": raw}))
-            await until(lambda: len(plan.fake.title_requests) == 4)
+            await until(lambda: len(plan.fake.title_requests) == 3)
             assert not send.done() and not plan.requests
             for request in plan.fake.title_requests:
                 assert request["instructions"] == FIRST_SYSTEM and not request.get("tools")
@@ -150,9 +150,16 @@ def test_stopping_first_title_does_not_start_the_turn(tmp_path):
     asyncio.run(scenario())
 
 
-def test_api_titles_use_the_selected_provider_without_a_chatgpt_login(tmp_path):
+def test_api_titles_use_the_selected_provider_and_a_30_second_deadline(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from desktop.core.fusion import title
     from tests.llm_support import FakeApi
     from tests.test_app_api import api_core, api_model_id, new_session as api_session, says
+
+    deadline = Mock(wraps=asyncio.timeout)
+    monkeypatch.setattr(title, "asyncio", SimpleNamespace(timeout=deadline))
 
     async def scenario():
         with FakeApi() as api:
@@ -165,6 +172,7 @@ def test_api_titles_use_the_selected_provider_without_a_chatgpt_login(tmp_path):
                 await core.call("session.send", {"id": cid, "text": "检查导入库存的事务和重复行"})
                 await until(lambda: bool(core.settings.session_auto_titles))
                 assert core._title_of(core._by_cid[cid]) == "库存事务校验"
+                deadline.assert_called_once_with(30.0)
                 assert len(api.title_posts) == 1
                 path, _, body = api.title_posts[0]
                 assert path == "/v1/chat/completions" and body["model"] == "deep-chat"

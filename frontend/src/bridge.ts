@@ -4,9 +4,9 @@
 //
 // Python side, in short:
 //   providers.*  read and write `customModels` in WittyCode's own models file (models.json) and the provider names that
-//                WittyCode keeps; `test` sends one minimal request through the same base URL / key / headers the session would use.
-//                Env mode saves a variable reference; command mode saves the command; direct entry sends a write-only
-//                `newApiKey` to Python, which stores only current-user DPAPI ciphertext. Legacy inline values are never
+//                WittyCode keeps; `test` uses the same base URL/headers but always the first key in the draft.
+//                Env mode saves variable references; direct entry sends write-only `newApiKeys` edits to Python,
+//                which stores only their names and current-user DPAPI ciphertext. Legacy inline values are never
 //                returned as plaintext. `envStatus` reads os.environ and, for "pending", HKCU\Environment.
 //   window.*     the frameless window's controls: the title bar is drawn by the page. Python: Qt.FramelessWindowHint,
 //                `QWindow.startSystemMove()` / `startSystemResize(edges)` so Windows snapping keeps working, and a push of
@@ -19,7 +19,7 @@
 //                edits, forgets and restores them; every change is journalled and `undo` takes one back.
 
 import type { ApiProvider, ChatGPTAccount, DevinAccount, EnvState, ProviderDraft, RemoteModel } from "./types";
-import type { Calls } from "./protocol";
+import type { Calls, GrokAccount } from "./protocol";
 
 export interface TestResult {
   ok: boolean;
@@ -49,6 +49,13 @@ export interface Bridge {
     use(clientId: string): Promise<ChatGPTAccount>;
     setEnabled(on: boolean): Promise<ChatGPTAccount>;
     welcomed(): Promise<ChatGPTAccount>;
+  };
+  grok: {
+    account(): Promise<GrokAccount | null>;
+    login(): Promise<GrokAccount>;
+    reopen(): Promise<GrokAccount>;
+    cancelLogin(): Promise<GrokAccount>;
+    logout(): Promise<GrokAccount>;
   };
   providers: {
     save(draft: ProviderDraft): Promise<ApiProvider>;

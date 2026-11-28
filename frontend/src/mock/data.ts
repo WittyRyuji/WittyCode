@@ -22,7 +22,7 @@ export const DEVIN_MODELS: ModelChoice[] = [
   { id: "devin:swe-2-high", label: "SWE-2", note: "Free", source: "devin", group: "Cognition", efforts: ["medium", "high", "max"], defaultEffort: "high", window: 262_000 },
   { id: "devin:claude-opus-5-5-medium", label: "Claude Opus 5.5", source: "devin", group: "Anthropic", efforts: ["low", "medium", "high", "xhigh", "max"], defaultEffort: "medium", window: 1_000_000 },
   { id: "devin:gpt-6-sol-medium", label: "GPT-6 Sol", source: "devin", group: "OpenAI", efforts: ["none", "low", "medium", "high", "xhigh", "max"], defaultEffort: "medium", window: 1_000_000 },
-  { id: "devin:glm-5-2", label: "GLM-5.2 High", source: "devin", group: "Zhipu", efforts: ["none", "high", "max"], defaultEffort: "high", window: 200_000, noImages: true },
+  { id: "devin:glm-5-2", label: "GLM-5.2", source: "devin", group: "Zhipu", efforts: ["none", "high", "max"], defaultEffort: "high", window: 200_000, noImages: true },
 ];
 
 /** The ChatGPT plan run by WittyCode's own harness. Ids carry a `chatgpt:` prefix; the figures come from the account's own list. */

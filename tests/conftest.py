@@ -34,6 +34,18 @@ def _no_files_of_the_real_user(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_real_network(monkeypatch):
+    """Block public profile downloads without changing urllib for local peers or injected loaders."""
+    from desktop.core.fusion import aa_catalog, cognition_benchmark
+
+    def blocked(*args, **kwargs):
+        raise OSError("public leaderboard downloads are disabled in tests")
+
+    monkeypatch.setattr(aa_catalog, "_urlopen", blocked)
+    monkeypatch.setattr(cognition_benchmark, "_urlopen", blocked)
+
+
+@pytest.fixture(autouse=True)
 def _fusion_gates_off(request, monkeypatch):
     """Fusion gates are off in tests; ``@pytest.mark.fusion_gates`` turns all on, with names only those."""
     from desktop.core.fusion import gates

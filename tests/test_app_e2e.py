@@ -9,16 +9,21 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
+from pathlib import Path
 
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication, QImage
 
+from desktop.core.context_envelope import strip as strip_context
 from desktop.core.session_state import SessionState
+from tests.app_support import without_numbered_reply
 from tests.devin_support import make_engine as make_devin
 from tests.e2e_support import open_rig
-from tests.fake_responses import call, say, usage
+from tests.fake_devin import is_title_prompt
+from tests.fake_responses import call, fail, http_error, say, usage
 from tests.fakes import until
 from tests.support import tiny_png
 from tests.ui_support import release, run, wait_for
@@ -33,7 +38,7 @@ def user_parts(request):
 
 def user_text(request) -> str:
     parts = user_parts(request)
-    return parts[0]["text"] if parts else ""
+    return without_numbered_reply(parts[0]["text"]) if parts else ""
 
 
 class Model:
@@ -128,8 +133,26 @@ def test_chinese_and_english_mixed_can_be_typed_and_arrive_unchanged(qapp, loop,
     run(loop, scenario())
 
 
+def test_bad_gateway_shows_the_30_second_retry_notice(qapp, loop, tmp_path):
+    async def scenario():
+        rig = await open_rig(tmp_path)
+        try:
+            await new_conversation(rig)
+            rig.plan.script(http_error(502, {"error": {"message": "Bad gateway"}}, {"Retry-After": "60"}))
+            await rig.send("检查库存接口")
+            await rig.wait_text(".block.notice", "服务暂时出错（HTTP 502），30 秒后自动重试（第 1/5 次）。", timeout=10)
+            assert len(rig.plan.requests) == 1
+            if evidence := os.environ.get("WITTYCODE_TEST_EVIDENCE"):
+                await rig.shot(".block.notice", Path(evidence) / "bad-gateway-retry.png")
+        finally:
+            await rig.finish()
+
+    run(loop, scenario())
+
+
 def devin_prompts(harness) -> list[str]:
-    return [request["prompt"][0]["text"] for request in harness.requests("session/prompt")]
+    prompts = (request["prompt"][0]["text"] for request in harness.requests("session/prompt"))
+    return [strip_context(text) for text in prompts if not is_title_prompt(text)]
 
 
 async def devin_listed(rig) -> None:
@@ -154,7 +177,8 @@ def test_you_can_type_and_send_while_the_session_is_still_connecting(qapp, loop,
             assert await rig.count(".qs-row .qs-icons button") == 4, "and can be seen, changed, taken back and sent"
             assert await rig.js("document.querySelectorAll(\".qs-row .qs-icons button\")[3].disabled"), "sending it now has to wait for the connection"
             assert await rig.js("document.querySelector('.input').value") == "", "the box is empty again"
-            await wait_for(lambda: devin_prompts(harness) == ["你好 hello"], 15, "the message to be sent once ready")
+            await wait_for(lambda: len(devin_prompts(harness)) > 0, 15, "the message to be sent once ready")
+            assert devin_prompts(harness) == ["你好 hello"]
             await rig.wait_for(".qs-row", 0)  # the real turn replaces the waiting one ...
             assert await rig.count(".block.user") == 1 and await rig.text(".block.user .body") == "你好 hello"  # ... with the same words
             await rig.wait_text(".statusbar .st-left", "就绪", timeout=15)
@@ -383,8 +407,9 @@ def test_a_pasted_picture_becomes_an_attachment_and_goes_out_with_the_message(qa
         await rig.type("what is this")
         await rig.press("Enter")
         await model.asked()
-        parts = user_parts(model.requests[-1])
-        assert [p["type"] for p in parts].count("input_image") == 1 and parts[0]["text"] == "what is this"
+        request = model.requests[-1]
+        parts = user_parts(request)
+        assert [p["type"] for p in parts].count("input_image") == 1 and user_text(request) == "what is this"
         await rig.wait_for(".block.user .att-img", 1)
         await finish(rig, model)
 
@@ -600,8 +625,9 @@ def test_files_dropped_from_explorer_are_attached(qapp, loop, tmp_path):
         assert await rig.text(".att-row .fname") == "notes.txt"
         await rig.send("read it")
         await model.asked()
-        texts = [p.get("text", "") for p in user_parts(model.requests[-1])]
-        assert texts[0] == "read it" and any("notes.txt" in t and "remember the milk" in t for t in texts[1:]) and notes.exists()
+        request = model.requests[-1]
+        texts = [p.get("text", "") for p in user_parts(request)[1:]]
+        assert user_text(request) == "read it" and any("notes.txt" in t and "remember the milk" in t for t in texts) and notes.exists()
         await finish(rig, model)
 
     run(loop, scenario())
@@ -759,6 +785,51 @@ def test_while_a_turn_runs_enter_queues_the_message_and_ctrl_enter_gives_it_to_t
         model.go()
         await rig.wait_text(".statusbar .st-left", "就绪")
         await finish(rig, model)
+
+    run(loop, scenario())
+
+
+def test_a_failed_first_send_restores_queue_before_the_current_draft(qapp, loop, tmp_path):
+    async def scenario():
+        rig = await open_rig(tmp_path)
+        model = await new_conversation(rig)
+        model.next(fail("invalid_request_error", "test failure"))
+        model.next(say("Retried."))
+        messages = ["First: inspect repository", "Second: run lint", "Third: run tests", "Fourth: keep this draft"]
+        names = [f"message-{n}.txt" for n in range(1, 5)]
+        try:
+            for i, (text, name) in enumerate(zip(messages, names)):
+                note = tmp_path / name
+                note.write_text(f"Attachment {i + 1}", encoding="utf-8")
+                await rig.drop_files([note])
+                await rig.wait_for(".att-row .att", 1)
+                await rig.focus_composer()
+                await rig.type(text)
+                if i < 3:
+                    await rig.press("Enter")
+                    if i == 0:
+                        await model.asked()
+                        await rig.wait_for(".send.stop")
+                    else:
+                        await rig.wait_for(".qs-row", i)
+            model.go()
+            joined = "\n\n".join(messages)
+
+            async def restored():
+                return await rig.js("document.querySelector('.input').value") == joined
+
+            await wait_for(restored, 10, "draft in original message order")
+            await rig.wait_for(".qs-row", 0)
+            assert await rig.texts(".att-row .fname") == names
+            assert model.prompts == messages[:1], "a failed turn must not send queued messages"
+            if evidence := os.environ.get("WITTYCODE_TEST_EVIDENCE"):
+                await rig.shot(".composer", Path(evidence) / "ordered-retry-draft.png")
+            await rig.focus_composer()
+            await rig.press("Enter")
+            await model.asked(2)
+            assert model.prompts == [messages[0], joined]
+        finally:
+            await finish(rig, model)
 
     run(loop, scenario())
 
@@ -1417,11 +1488,14 @@ def test_a_devin_conversation_goes_from_the_model_menu_to_the_answer_and_an_appr
             await rig.click(".block.activity .gsum")
             await rig.click(".block.activity .irow")
             await rig.wait_text(".idetail", "审批：允许（仅此一次）")  # (the answer given is written on the tool)
-            # closed, it is a saved session in the list, named as Devin's
+            title = await rig.text(".srow.open .stitle")
+            assert title.strip() and title != "新会话"
+            assert await rig.text(".tab.current .tab-title") == title
             await rig.click(".tab-x")
             await rig.wait_for(".tab", 0)
-            await rig.wait_text(".srow", "hello devin", timeout=15)
-            assert "· Devin" in await rig.text(".srow .ssub")
+            await rig.wait_text(".srow:not(.open) .stitle", title, timeout=15)
+            assert await rig.text(".srow:not(.open) .stitle") == title
+            assert "· Devin" in await rig.text(".srow:not(.open) .ssub")
         finally:
             await rig.finish()
 
@@ -1438,11 +1512,110 @@ def test_the_devin_program_path_is_set_from_the_settings(qapp, loop, tmp_path):
             await rig.click_text(".snav", "外部程序")
             await rig.wait_text(".settings-body", "Devin 命令行")
             assert rig.core.settings.devin_path == ""
-            buttons = await rig.texts(".settings-body .segc button")
-            assert buttons == ["自动检测", "指定路径"], "only Devin has a path: the own loop needs no program"
-            await rig.click(".settings-body .segc button", 1)
+            buttons = await rig.texts(".devin-program .segc button")
+            assert buttons == ["自动检测", "指定路径"]
+            await rig.click(".devin-program .segc button", 1)
             await wait_for(lambda: rig.core.settings.devin_path != "", 10, "the path to reach the settings")
             assert rig.core.settings.devin_path.endswith("fake_devin.py"), "the program in use becomes the path to use"
+        finally:
+            await rig.finish()
+
+    run(loop, scenario())
+
+
+def test_factory_program_path_matches_devin_and_is_separate_from_models(qapp, loop, tmp_path):
+    from desktop.core.factory import FactoryEngine
+
+    async def scenario():
+        detected = r"C:\Demo\Factory\resources\bin\droid.exe"
+        manual = tmp_path / "droid.exe"
+        manual.touch()
+        engine = FactoryEngine(None, tmp_path / "factory", locate=lambda _: detected)
+
+        async def list_models():
+            return [{"id": "demo-model", "displayName": "Factory Demo"}] if engine.binary() else []
+
+        engine.list_models = list_models
+        rig = await open_rig(tmp_path, factory_engine=engine)
+        try:
+            await wait_for(lambda: rig.core._models_loaded, 10, "the initial model catalog")
+            rig.core.emit("accounts", {"devin": {"cli": "found", "cliPath": r"C:\Demo\Devin\bin\devin.exe", "auth": "signed-out", "enabled": False}})
+            await rig.press(",", Qt.KeyboardModifier.ControlModifier)
+            await rig.wait_for(".settings")
+            await rig.click_text(".snav", "外部程序")
+            await rig.wait_text(".factory-program .pathbox", detected)
+            await rig.wait_text(".devin-program .pathbox", "devin.exe")
+            assert await rig.texts(".program-path .field-label") == ["Factory 命令行", "Devin 命令行"]
+            assert await rig.texts(".program-path .segc button") == ["自动检测", "指定路径"] * 2
+            assert not await rig.exists(".programs .switch, .programs .mvis, .programs input")
+            if evidence := os.environ.get("WITTYCODE_TEST_EVIDENCE"):
+                await rig.shot(".programs", Path(evidence) / "external-programs.png")
+
+            await rig.click_text(".factory-program .segc button", "指定路径")
+            field = '.factory-program input'
+            await rig.wait_for(f"{field}:not([readonly])")
+            assert await rig.js(f"document.querySelector('{field}').value") == detected
+            await rig.click(field)
+            await rig.press("A", Qt.KeyboardModifier.ControlModifier)
+            await rig.type(str(manual))
+            await rig.press("Enter")
+            await rig.wait_text(".factory-program .pathbox", str(manual))
+            assert rig.core.settings.factory_enabled
+
+            await rig.click_text(".snav", "账号与模型")
+            toggle = '.factory-card button[role="switch"][aria-label="启用 Factory CLI"]'
+            await rig.wait_for(f"{toggle}:not(:disabled)")
+            assert not await rig.exists(".factory-card input")
+            assert await rig.exists(".factory-card .mvis")
+            await rig.click(toggle)
+            await rig.wait_for(f'{toggle}[aria-checked="false"]')
+            assert rig.core.settings.factory_path == str(manual)
+
+            await rig.click_text(".snav", "外部程序")
+            await rig.wait_text(".factory-program .pathbox", str(manual))
+            await rig.click(field)
+            await rig.press("A", Qt.KeyboardModifier.ControlModifier)
+            await rig.type("discarded.exe")
+            await rig.click_text(".factory-program .segc button", "自动检测")
+            await rig.wait_text(".factory-program .pathbox", detected)
+            assert not await rig.exists(field)
+            assert rig.core.settings.factory_path == ""
+            assert not rig.core.settings.factory_enabled
+        finally:
+            await rig.finish()
+
+    run(loop, scenario())
+
+
+def test_factory_redetect_puts_newly_discovered_models_in_the_menu(qapp, loop, tmp_path, monkeypatch):
+    from desktop.core.factory import FactoryEngine
+
+    async def scenario():
+        detected = None
+        binary = r"C:\Demo\Factory\resources\bin\droid.exe"
+        engine = FactoryEngine(None, tmp_path / "factory", locate=lambda _: detected)
+
+        async def list_models():
+            return [{"id": "demo-model", "displayName": "Factory Demo"}] if engine.binary() else []
+
+        monkeypatch.setattr(engine, "list_models", list_models)
+        rig = await open_rig(tmp_path, factory_engine=engine)
+        try:
+            await wait_for(lambda: rig.core._models_loaded, 10, "the initial model catalog")
+            assert rig.core.catalog.find("factory:demo-model") is None
+            await rig.press(",", Qt.KeyboardModifier.ControlModifier)
+            await rig.wait_for(".settings")
+            await rig.click_text(".snav", "账号与模型")
+            await rig.wait_text(".factory-card .pstate", "尚未检测到 droid")
+            detected = binary
+            await rig.click_text(".factory-card button", "重新检测")
+            await rig.wait_text(".factory-card .pstate", "已检测到 CLI")
+            assert rig.core.settings.factory_path == ""
+            await rig.press("Escape")
+            await rig.wait_for(".settings", 0)
+            await wait_for(lambda: rig.core.catalog.find("factory:demo-model"), 10, "the refreshed Factory models")
+            await rig.click(".controls .chip", 0)
+            await rig.wait_text(".menu", "Factory Demo")
         finally:
             await rig.finish()
 
@@ -1567,6 +1740,9 @@ async def chatgpt_rig(tmp_path, fake, *, welcomed: bool = True, **options):
 
 def test_a_chatgpt_plan_model_can_ask_a_question_mid_turn_and_goes_on_with_the_answer(qapp, loop, tmp_path):
     async def scenario():
+        import os
+        from pathlib import Path
+
         from tests.chatgpt_support import ACCESS_TOKEN
         from tests.fake_responses import FakeResponses, call, say
 
@@ -1593,6 +1769,48 @@ def test_a_chatgpt_plan_model_can_ask_a_question_mid_turn_and_goes_on_with_the_a
                 assert "Postgres" in await rig.text(".block.qa"), "the page keeps what was asked and answered"
                 output = [item for item in fake.requests[-1]["input"] if item.get("type") == "function_call_output"][-1]["output"]
                 assert output.startswith("The user answered:") and "Answer: Postgres" in output, "the model was given the answer"
+
+                # The own-answer box takes a plain Enter for the same submit (clicking stays the other way).
+                ask = {"questions": [{"question": "Which region?", "header": "Region", "options": ["EU", "US"]},
+                                     {"question": "Which protocol?", "header": "Wire", "options": ["HTTP", "gRPC"]}]}
+                fake.script(call("ask_user", ask, call_id="c2"), say("Region and protocol noted."))
+                await rig.send("now the region and protocol")
+                await rig.wait_for(".prompt.ask", 1, timeout=20)
+                sent = len(fake.requests)
+                if evidence := os.environ.get("WITTYCODE_TEST_EVIDENCE"):
+                    await rig.shot(".prompt.ask", Path(evidence) / "question-card-enter.png")
+
+                # Enter on an empty box only marks the questions missing: nothing is sent to the model.
+                await rig.click(".prompt.ask .otherinput", 0)
+                await rig.press("Enter")
+                await rig.wait_for(".prompt.ask .qerr", 2)
+                assert len(fake.requests) == sent, "an incomplete answer does not reach the model"
+
+                # One typed answer still leaves the second question required.
+                await rig.type("a region of my own")
+                await rig.press("Enter")
+                await rig.wait_for(".prompt.ask .qerr", 1)
+                assert len(fake.requests) == sent, "every question still needs an answer"
+                await rig.click_text(".prompt.ask .opt", "gRPC")
+
+                # An Enter that only confirms an IME composition, a held key's repeat and a modified Enter are not submits.
+                box = "document.querySelectorAll('.prompt.ask .otherinput')[0]"
+                await rig.click(".prompt.ask .otherinput", 0)
+                await rig.js(f"{box}.dispatchEvent(new KeyboardEvent('keydown', {{key: 'Enter', keyCode: 229, isComposing: true, bubbles: true}}))")
+                await rig.js(f"{box}.dispatchEvent(new KeyboardEvent('keydown', {{key: 'Enter', repeat: true, bubbles: true}}))")
+                await rig.press("Enter", Qt.KeyboardModifier.ControlModifier)
+                assert len(fake.requests) == sent and await rig.exists(".prompt.ask"), "no composing, repeat or modified Enter submits"
+
+                # A plain Enter submits like the button: the model gets each answer, once.
+                await rig.press("Enter")
+                await rig.wait_text(".transcript", "Region and protocol noted.", timeout=30)
+                await rig.wait_for(".prompt.ask", 0)
+                await rig.wait_text(".statusbar .st-left", "就绪", timeout=15)
+                assert len(fake.requests) == sent + 1, "the answers went out exactly once"
+                outputs = [item for item in fake.requests[-1]["input"] if item.get("type") == "function_call_output" and item.get("call_id") == "c2"]
+                assert len(outputs) == 1, "the model was given the answers exactly once"
+                output = outputs[0]["output"]
+                assert "Answer: a region of my own" in output and "Answer: gRPC" in output, "the model was given the answers"
             finally:
                 await rig.finish()
 

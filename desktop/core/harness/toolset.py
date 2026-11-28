@@ -21,14 +21,18 @@ import asyncio
 import hashlib
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import replace
 from typing import Any
 
+from desktop.core.fusion import debate_bridge
 from desktop.core.fusion import tools as fusion_tools
-from desktop.core.harness import asking, plan_approval
+from desktop.core.fusion.main_journal import READ_JOURNAL
+from desktop.core.harness import asking, outputs, plan_approval, recall_tool
 from desktop.core.harness.loop import ALLOW, ASK, DENY, Call, Outcome, Verdict
 from desktop.core.harness.mcp import McpClient, McpTool
 from desktop.core.harness.permissions import _rememberable_command, action_view, decide, remember_key
-from desktop.core.harness.tools import ToolContext, ToolRegistry, ToolSpec
+from desktop.core.harness.shell import RUNNER_SHELL_DESCRIPTION, ShellStatus, ShellWatch
+from desktop.core.harness.tools import ToolContext, ToolError, ToolRegistry, ToolSpec
 from desktop.core.prompts import ActionView, QuestionView
 
 MCP_PREFIX = "mcp__"
@@ -73,21 +77,38 @@ class HarnessTools:
         self.clients = list(clients)
         self.connections = None
         self.asker = asker
+        self.recovery_ask: Callable[[Call, Verdict], str | None] | None = None
+        self.recovery_guard: Callable[[Call], str] | None = None
+        self.recovery_pause: Callable[[], bool] | None = None
+        self.tool_started: Callable[[Call, str], None] | None = None
+        self.tool_recorded: Callable[[Call, Outcome, str], Awaitable[None]] | None = None
         self.tool_finished: Callable[[Call, Outcome, str], Awaitable[None]] | None = None
         self.plan_submitter: Callable[[str], None] | None = None
         self.fusion_runner: Callable[..., Awaitable[Outcome]] | None = None
+        self.unit_runner: Callable[..., Awaitable[Outcome]] | None = None
         self.fusion_brief_runner: Callable[..., Awaitable[Outcome]] | None = None
         self.identity_tools: frozenset[str] | None = None
         self.read_only_brief = False
+        self.frozen_paths: tuple[str, ...] | None = None
         self.record_reader: Callable[[str], Awaitable[Outcome]] | None = None
+        self.journal_reader: Callable[[Mapping[str, Any]], Awaitable[Outcome]] | None = None
         self.report_submitter: Callable[[Mapping[str, Any]], Outcome] | None = None
         self.route_submitter: Callable[[Mapping[str, Any]], Awaitable[Outcome]] | None = None
+        self.map_reader: Callable[[Mapping[str, Any]], Awaitable[Outcome]] | None = None
         self.map_chooser: Callable[[Call], Awaitable[Outcome]] | None = None
         self.map_updater: Callable[[Mapping[str, Any]], Awaitable[Outcome]] | None = None
+        self.topic_declarer: Callable[[str, str, str, str], Awaitable[Outcome]] | None = None
+        self.declare_state: Callable[[], Mapping[str, Any] | None] | None = None
+        """The main session's V3 turn declaration receipt (``intent``, ``failed``), or ``None`` while undeclared."""
+        self.work_plan_submitter: Callable[[Mapping[str, Any]], Awaitable[Outcome]] | None = None
         self.route_guard: Callable[[str, tuple[str, ...]], str] | None = None
         self.route_edit: Callable[[], None] | None = None
         self.rating_submitter: Callable[[Mapping[str, Any]], Awaitable[Outcome]] | None = None
         self.strict_context = False
+        self.runner_shell = False  # Enabled only by the Fusion delegation that owns the hard deadline.
+        self.active_shell: ShellWatch | None = None
+        self.shell_progress: Callable[[Call, ShellStatus], None] | None = None
+        self.shell_health_check: Callable[[Call, ShellStatus], str | None] | None = None
         self.permission_parent: HarnessTools | None = None
         """Fusion experts use the main session's live level and grants, without sharing their own approvals back."""
         self.plan = False
@@ -111,31 +132,59 @@ class HarnessTools:
 
     # ------------------------------------------------------------------ loop.Tools
 
+    def _frozen_units(self) -> bool:
+        state = self.declare_state() if self.declare_state else None
+        return bool(self.unit_runner and state and (state.get('workplan') or {}).get('frozen'))
+
     def declarations(self) -> list[dict[str, Any]]:
         declared = [{"name": spec.name, "description": spec.description, "parameters": spec.parameters} for spec in self.registry.specs()]
+        if self.runner_shell:
+            for item in declared:
+                if item["name"] == "shell":
+                    schema = item["parameters"]
+                    item["parameters"] = {**schema, "properties": {k: v for k, v in schema["properties"].items() if k != "timeout"}}
+                    item["description"] = RUNNER_SHELL_DESCRIPTION
+                    break
         if self.asker is not None:
             declared.append(dict(asking.DECLARATION))
         if self.plan_submitter is not None:
             declared.append(dict(plan_approval.DECLARATION))
-        if self.fusion_brief_runner is not None:
+        if self._frozen_units():
+            from desktop.core.fusion.protocol import UNIT_BATCH, UNIT_DELEGATE
+            declared.extend((UNIT_DELEGATE, UNIT_BATCH))
+        elif self.fusion_brief_runner is not None:
             declared.extend((dict(fusion_tools.DELEGATE_DECLARATION), dict(fusion_tools.BRIEF_BATCH_DECLARATION)))
         elif self.fusion_runner is not None:
             declared.extend((dict(fusion_tools.DECLARATION), dict(fusion_tools.BATCH_DECLARATION)))
         if self.record_reader is not None:
             declared.append(dict(fusion_tools.READ_RECORD_DECLARATION))
+        if self.journal_reader is not None:
+            declared.append(dict(READ_JOURNAL))
         if self.report_submitter is not None:
             declared.append(dict(fusion_tools.REPORT_DECLARATION))
         if self.route_submitter is not None:
-            declared.append(dict(fusion_tools.ROUTE_DECLARATION))
+            from desktop.core.fusion.protocol import UNIT_ROUTE
+            declared.append(dict(UNIT_ROUTE if self._frozen_units() else fusion_tools.ROUTE_DECLARATION))
         if self.rating_submitter is not None:
             declared.append(dict(fusion_tools.RATE_DECLARATION))
+        if self.map_reader is not None:
+            declared.append(dict(fusion_tools.READ_MAP_DECLARATION))
         if self.map_chooser is not None:
             declared.append(dict(fusion_tools.CHOOSE_MAP_DECLARATION))
         if self.map_updater is not None:
             declared.append(dict(fusion_tools.UPDATE_MAP_DECLARATION))
+        if self.topic_declarer is not None:
+            declared.append(dict(debate_bridge.DECLARE_TOPIC_DECLARATION))
+        if self.work_plan_submitter is not None:
+            declared.append(dict(debate_bridge.SUBMIT_WORK_PLAN_DECLARATION))
+        if self._history_declared():
+            declared.append(dict(recall_tool.DECLARATION))
         for name, (_, tool) in self._mcp.items():
             declared.append({"name": name, "description": tool.description, "parameters": tool.input_schema})
         return [item for item in declared if not self.identity_refusal(item["name"])] if self.identity_tools is not None else declared
+
+    def _history_declared(self) -> bool:
+        return bool(getattr(self.context.history_recall, "declared", False))
 
     def identity_refusal(self, name: str) -> str:
         kinds = self.identity_tools
@@ -155,7 +204,8 @@ class HarnessTools:
             kind = spec.kind
         elif name == fusion_tools.READ_RECORD:
             kind = "read"
-        elif name in (asking.NAME, plan_approval.NAME, fusion_tools.NAME, fusion_tools.BATCH_NAME):
+        elif name in (asking.NAME, plan_approval.NAME, fusion_tools.NAME, fusion_tools.BATCH_NAME,
+                      debate_bridge.DECLARE_TOPIC, debate_bridge.SUBMIT_WORK_PLAN, recall_tool.NAME):
             return IDENTITY_REFUSAL
         else:
             return ""  # Unknown names still go through the usual unknown-tool handling.
@@ -169,16 +219,37 @@ class HarnessTools:
                 or (name == plan_approval.NAME and self.plan_submitter is not None)
                 or (name in (fusion_tools.NAME, fusion_tools.BATCH_NAME) and (self.fusion_runner is not None or self.fusion_brief_runner is not None))
                 or (name == fusion_tools.READ_RECORD and self.record_reader is not None)
+                or (name == READ_JOURNAL['name'] and self.journal_reader is not None)
                 or (name == fusion_tools.SUBMIT_REPORT and self.report_submitter is not None)
                 or (name == fusion_tools.SUBMIT_ROUTE and self.route_submitter is not None)
                 or (name == fusion_tools.RATE_RECORDS and self.rating_submitter is not None)
+                or (name == fusion_tools.READ_MAP and self.map_reader is not None)
                 or (name == fusion_tools.CHOOSE_MAP and self.map_chooser is not None)
-                or (name == fusion_tools.UPDATE_MAP and self.map_updater is not None))
+                or (name == fusion_tools.UPDATE_MAP and self.map_updater is not None)
+                or (name == debate_bridge.DECLARE_TOPIC and self.topic_declarer is not None)
+                or (name == debate_bridge.SUBMIT_WORK_PLAN and self.work_plan_submitter is not None)
+                or (name == recall_tool.NAME and self._history_declared()))
 
     def _identity_check(self, call: Call) -> Verdict | None:
         reason = self.identity_refusal(call.name)
         if reason:
             return Verdict(DENY, reason)
+        if self.frozen_paths is not None:
+            spec = self.registry.get(call.name)
+            if spec is not None and spec.kind == 'edit':
+                raw = call.args.get('file_path')
+                if not isinstance(raw, str):
+                    return Verdict(DENY, 'An unscoped write is outside the frozen unit.')
+                try:
+                    root = self.context.project
+                    target = (root / raw).resolve()
+                    if not any(target.is_relative_to(root / path) for path in self.frozen_paths):
+                        return Verdict(DENY, 'Write outside frozen unit paths.')
+                except (OSError, ValueError, RuntimeError):
+                    return Verdict(DENY, 'Invalid frozen unit path.')
+            mcp = self._mcp.get(call.name)
+            if mcp and not (getattr(mcp[0], 'trusted_annotations', False) and mcp[1].read_only):
+                return Verdict(DENY, 'This server tool cannot establish the frozen write scope.')
         spec = self.registry.get(call.name) if self.read_only_brief else None
         if spec is not None and spec.kind == "exec":
             verdict = self._planned(spec, call)
@@ -187,7 +258,55 @@ class HarnessTools:
             return verdict
         return None
 
+    def _intent_check(self, call: Call) -> str:
+        """The V3 intent gate: a turn that may plan, route, delegate or change needs a declared intent — ``execute``
+        lets them through once a complex execution validated its work plan, ``plan`` only the work-plan and
+        submit_plan calls. Chat and reads never need a declaration; an untrusted server's ``read_only`` flag does
+        not exempt a tool, and the map callbacks act like the writes they are."""
+        if call.name == debate_bridge.DECLARE_TOPIC:
+            return ""
+        plan_only = call.name == plan_approval.NAME
+        work_plan = call.name == debate_bridge.SUBMIT_WORK_PLAN
+        if not (plan_only or work_plan):
+            gated = call.name in (fusion_tools.SUBMIT_ROUTE, fusion_tools.NAME, fusion_tools.BATCH_NAME,
+                                  fusion_tools.CHOOSE_MAP, fusion_tools.UPDATE_MAP)
+            spec = self.registry.get(call.name)
+            if not gated and spec is not None:
+                gated = spec.kind == "edit" or spec.kind == "exec" and self._planned(spec, call).verdict != ALLOW
+            if not gated and spec is None:
+                mcp = self._mcp.get(call.name)
+                gated = mcp is not None and not (mcp[1].read_only and getattr(mcp[0], "trusted_annotations", False))
+            if not gated:
+                return ""
+        receipt = self.declare_state()
+        if isinstance(receipt, Mapping) and receipt.get("failed"):
+            return "The turn's declaration failed, so it may not plan, route, delegate or change anything."
+        intent = receipt.get("intent") if isinstance(receipt, Mapping) else None
+        kind = receipt.get("kind") if isinstance(receipt, Mapping) else None
+        if work_plan:
+            if intent == "plan" or intent == "execute" and kind == "complex":
+                return ""
+            return "submit_work_plan follows a plan or complex-execute declaration."
+        if intent == "execute":
+            if plan_only:
+                return ""
+            if kind == "complex" and not receipt.get("approved") and not receipt.get("workplan"):
+                return "Validate this turn's work plan with submit_work_plan before routing, delegating or changing anything."
+            return ""
+        if intent == "plan" and plan_only:
+            if receipt.get("workplan"):
+                return ""
+            return "Validate the work plan with submit_work_plan before submitting the plan for approval."
+        if intent == "plan":
+            return "This turn was declared for planning: submit_work_plan and submit_plan are the only gated calls it allows."
+        if intent == "discussion":
+            return "This turn was declared a discussion: it may not plan, route, delegate or change anything."
+        return "Call declare_topic first: without a declared intent this turn may not plan, route, delegate or change anything."
+
     def _route_check(self, call: Call) -> str:
+        if self.declare_state is not None:
+            if refusal := self._intent_check(call):
+                return refusal
         guard = self.route_guard
         if guard is None or self.plan or self.permission_parent is not None and self.permission_parent.plan:
             return ""
@@ -219,8 +338,16 @@ class HarnessTools:
             return Verdict(ALLOW)  # (asking is not an action: the question is the user's say)
         if call.name == "read_output":
             return Verdict(ALLOW)  # Validated opaque references only, confined to this conversation.
+        if call.name == recall_tool.NAME:
+            # A read of this session's own archive under the turn ledger; it is never an action on the workspace.
+            return (Verdict(ALLOW) if getattr(self.context.history_recall, "enabled", False)
+                    else Verdict(DENY, recall_tool.UNAVAILABLE))
         if call.name == fusion_tools.READ_RECORD:
             return Verdict(ALLOW) if self.record_reader is not None else Verdict(DENY, "Fusion Drive is unavailable.")
+        if call.name == READ_JOURNAL['name']:
+            return Verdict(ALLOW) if self.journal_reader is not None else Verdict(DENY, "No active Main recovery journal.")
+        if call.name == fusion_tools.READ_MAP:
+            return Verdict(ALLOW) if self.map_reader is not None else Verdict(DENY, "No active Fusion project map.")
         if call.name == fusion_tools.SUBMIT_REPORT:
             return Verdict(ALLOW) if self.report_submitter is not None else Verdict(DENY, "No active expert report.")
         if call.name == fusion_tools.RATE_RECORDS:  # (a judgement on retained data: nothing in the workspace changes)
@@ -234,6 +361,10 @@ class HarnessTools:
             if plan:
                 return Verdict(DENY, PLAN_REFUSAL)
             return Verdict(ALLOW) if self.route_submitter is not None else Verdict(DENY, "No active Fusion route.")
+        if call.name == debate_bridge.DECLARE_TOPIC:  # (read-only: the debate never changes the workspace)
+            return Verdict(ALLOW) if self.topic_declarer is not None else Verdict(DENY, "Fusion debate is unavailable.")
+        if call.name == debate_bridge.SUBMIT_WORK_PLAN:  # (read-only too: it only records the turn's validated plan)
+            return Verdict(ALLOW) if self.work_plan_submitter is not None else Verdict(DENY, "Fusion work plans are unavailable.")
         spec = self.registry.get(call.name)
         if spec is not None:
             if plan:
@@ -288,6 +419,12 @@ class HarnessTools:
             return ""
         return "delegates" if call.name == fusion_tools.NAME else "reads"
 
+    def finish_call(self, call: Call) -> str:
+        """The submission that ends the turn once accepted: it must be the only call of its step."""
+        if call.name == fusion_tools.SUBMIT_REPORT and self.report_submitter is not None:
+            return "report"
+        return ""
+
     def remember(self, call: Call) -> None:
         spec = self.registry.get(call.name)
         if spec is not None and spec.kind == "exec" and not _rememberable_command(str(call.args.get("command") or "")):
@@ -300,13 +437,24 @@ class HarnessTools:
             return Outcome(f"Refused: {identity.reason}", True)
         if refusal := self._route_check(call):
             return Outcome(f"Refused: {refusal}", True)
+        if self.recovery_guard is not None and (refusal := self.recovery_guard(call)):
+            return Outcome(f'Refused: {refusal}', True)
+        spec = self.registry.get(call.name)
+        kind = spec.kind if spec is not None else 'external' if call.name in self._mcp else 'read'
+        if self.tool_started is not None:
+            self.tool_started(call, kind)
         if self.connections is not None:
             from desktop.core.connections import ConnectionError
             try:
                 await self.connections.hooks("PreToolUse", self.context.project, {"tool_name": call.name, "tool_input": call.args})
             except ConnectionError as error:
-                return Outcome(str(error), True, cancelled=True)
+                outcome = Outcome(str(error), True, cancelled=True)
+                if self.tool_recorded is not None:
+                    await self.tool_recorded(call, outcome, kind)
+                return outcome
         outcome = await self._run(call)
+        if self.tool_recorded is not None:
+            await self.tool_recorded(call, outcome, kind)
         if self.connections is not None:
             from desktop.core.connections import ConnectionError
             try:
@@ -318,11 +466,30 @@ class HarnessTools:
             if edited is not None and edited.kind == "edit":
                 self.route_edit()  # (the main agent's own edits are counted: more than a couple is a Coder's work)
         if self.tool_finished is not None:
-            spec = self.registry.get(call.name)
-            await self.tool_finished(call, outcome, spec.kind if spec is not None else "read")
+            await self.tool_finished(call, outcome, kind)
         return outcome
 
     async def _run(self, call: Call) -> Outcome:
+        if call.name == debate_bridge.DECLARE_TOPIC:
+            verdict = self.check(call)
+            if verdict.verdict != ALLOW or self.topic_declarer is None:
+                return Outcome(verdict.reason, True)
+            values, problem = debate_bridge.parse_topic(call.args)
+            if problem or values is None:
+                return Outcome(problem, True)
+            return await self.topic_declarer(*values)
+        if call.name == debate_bridge.SUBMIT_WORK_PLAN:
+            verdict = self.check(call)
+            if verdict.verdict != ALLOW or self.work_plan_submitter is None:
+                return Outcome(verdict.reason, True)
+            data = call.args.get("data")
+            if not isinstance(data, Mapping):
+                return Outcome("Provide the work plan as a `data` JSON object.", True)
+            return await self.work_plan_submitter(data)
+        if call.name == fusion_tools.READ_MAP:
+            if self.map_reader is None:
+                return Outcome("No active Fusion project map.", True)
+            return await self.map_reader(call.args)
         if call.name == fusion_tools.CHOOSE_MAP:
             verdict = self.check(call)
             if verdict.verdict != ALLOW or self.map_chooser is None:
@@ -344,6 +511,10 @@ class HarnessTools:
             if self.rating_submitter is None:
                 return Outcome("Fusion Drive is unavailable.", True)
             return await self.rating_submitter(call.args)
+        if call.name == READ_JOURNAL['name']:
+            if self.journal_reader is None:
+                return Outcome("No active Main recovery journal.", True)
+            return await self.journal_reader(call.args)
         if call.name == fusion_tools.READ_RECORD:
             if self.record_reader is None:
                 return Outcome("Fusion Drive is unavailable.", True)
@@ -353,6 +524,42 @@ class HarnessTools:
             return await self.record_reader(pointer)
         runner = self.fusion_brief_runner or self.fusion_runner
         structured = self.fusion_brief_runner is not None
+        if self._frozen_units() and call.name in (fusion_tools.NAME, fusion_tools.BATCH_NAME):
+            verdict = self.check(call)
+            if verdict.verdict != ALLOW:
+                return Outcome(verdict.reason, True)
+            from desktop.core.fusion.protocol import valid_unit_action
+            tasks = call.args.get('tasks') if call.name == fusion_tools.BATCH_NAME else [call.args]
+            if (not isinstance(tasks, list) or not 1 <= len(tasks) <= fusion_tools.MAX_PARALLEL
+                    or not all(valid_unit_action(t) for t in tasks)):
+                return Outcome('Use only a frozen unit id with at most one of resume, budget_decision, user_question, or replan.', True)
+            if len({t['unit'] for t in tasks}) != len(tasks):
+                return Outcome('A batch cannot act on the same unit twice.', True)
+            pending = [asyncio.create_task(self.unit_runner(t['unit'], resume=t.get('resume', False),
+                                                           decision=t.get('budget_decision'), tool_call=call,
+                                                           **{k: t[k] for k in ('user_question', 'replan') if k in t})) for t in tasks]
+            try:
+                results = await asyncio.gather(*pending)
+            finally:
+                for task in pending:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+            if len(results) == 1:
+                return results[0]
+            output = '\n'.join(r.output for r in results)
+            reference = ''
+            if (store := self.context.outputs) is not None and any(r.reference for r in results):
+                # The turn logs one retained reference per tool outcome. Publish the batch's handoffs together.
+                def retain_batch():
+                    blocks = [r.output + ('\n' + store.read(r.reference) if r.reference else '') for r in results]
+                    return store.put('\n\n'.join(blocks))
+
+                try:
+                    reference = await asyncio.to_thread(retain_batch)
+                except (OSError, ToolError):
+                    pass
+            return Outcome(output, any(r.is_error for r in results), reference=reference)
         if call.name == fusion_tools.BATCH_NAME and self.check(call).verdict == ALLOW and runner is not None:
             values, problem = fusion_tools.parse_batch(call.args, structured=structured)
             if problem or values is None:
@@ -362,7 +569,9 @@ class HarnessTools:
                 results = await asyncio.gather(*tasks)
             except BaseException:
                 for task in tasks:
-                    task.cancel()
+                    # A cancelled gather already signalled its tasks; let them finish stopping their expert.
+                    if not task.done() and not task.cancelling():
+                        task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
                 raise
             return Outcome("\n\n".join(f"Workstream {args[0].workstream if structured else args[0]}:\n{result.output}"
@@ -386,9 +595,42 @@ class HarnessTools:
             if answers is None:
                 return Outcome(asking.SKIPPED, cancelled=True)
             return Outcome(asking.result(views, answers))
+        if call.name == recall_tool.NAME:
+            bound = self.context.history_recall
+            if not getattr(bound, "enabled", False):
+                return Outcome("Refused: " + recall_tool.UNAVAILABLE, True)
+            question, reason, problem = recall_tool.parse(call.args)
+            if problem:
+                return Outcome(problem, True)
+            # Disk IO on the session archive; a worker thread keeps the loop free like the registry's sync handlers.
+            text = await asyncio.to_thread(bound, question, reason)
+            outcome = Outcome(text, text.startswith("[recall] denied"))
+            store = getattr(self.context, "outputs", None)
+            if store is not None and len(text) > outputs.RETAIN_CHARS:
+                # The result would be retained wholesale; attach a real reference to the non-evidence note instead,
+                # so the archive text never enters the store and read_output cannot replay it past the ledger.
+                try:
+                    outcome.reference = await asyncio.to_thread(store.put, outputs.NOT_REPLAYABLE)
+                except (OSError, ToolError):
+                    pass
+            return outcome
         spec = self.registry.get(call.name)
         if spec is not None:
-            result = await self.registry.run(call.name, call.args, self.context)
+            if call.name == "shell" and self.runner_shell:
+                def on_status(status: ShellStatus) -> str | None:
+                    if self.shell_progress is not None:
+                        self.shell_progress(call, status)
+                    return self.shell_health_check(call, status) if self.shell_health_check is not None else None
+
+                watch = self.active_shell = ShellWatch(on_status)
+                try:
+                    # Ignore a legacy/hallucinated timeout instead of bringing back a second timer.
+                    args = {k: v for k, v in call.args.items() if k != "timeout"}
+                    result = await self.registry.run(call.name, args, replace(self.context, shell_watch=watch))
+                finally:
+                    self.active_shell = None
+            else:
+                result = await self.registry.run(call.name, call.args, self.context)
             return Outcome(result.output, result.is_error, tuple(result.diffs), images=result.images)
         client, tool = self._mcp[call.name]
         result_ = await client.call(tool.name, call.args)

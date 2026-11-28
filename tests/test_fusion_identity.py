@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from desktop.core.fusion.identity import DECOMPOSITION, Identity, display_name, load
+from desktop.core.fusion.identity import DECOMPOSITION, Identity, display_name, load, parse_controlled
 
 
 @pytest.mark.parametrize("name, role, tools, reuse, instruction", [
@@ -132,3 +132,33 @@ def test_missing_folder_is_the_usual_case_and_an_unreadable_one_is_a_problem(tmp
     blocked = load(not_a_folder)
     assert blocked.names == load(None).names and len(blocked.problems) == 1
     assert "Cannot read identity folder" in blocked.problems[0]
+
+
+def test_controlled_identity_keeps_custom_name_and_tightened_permissions():
+    ceiling = load(None).get("Coder")
+    parsed = parse_controlled(
+        "---\nname: 定制执行\ndescription: Focused.\nrole: light\nreasoning: high\ntools: read\ncompact_at: 75\nreuse: false\n---\nInspect first.",
+        name="定制执行", ceiling=ceiling,
+    )
+    assert parsed == Identity("定制执行", "Focused.", "light", "high", frozenset({"read"}), 75, False,
+                              "Inspect first.\nDo not delegate or write to long-term memory.")
+
+
+@pytest.mark.parametrize("markdown, problem", [
+    ("---\nname: Another\n---\nBody", "must match"),
+    ("---\ntools: read, edit\n---\nBody", "tools cannot exceed"),
+    ("---\nrole: worker\n---\nBody", "role cannot exceed"),
+    ("---\nreuse: true\n---\nBody", "reuse cannot exceed"),
+])
+def test_controlled_identity_rejects_elevation_instead_of_widening(markdown, problem):
+    with pytest.raises(ValueError, match=problem):
+        parse_controlled(markdown, name="Read-only helper", ceiling=load(None).get("Runner"))
+
+
+def test_controlled_identity_accepts_legacy_document_without_catalog_duplicated_name():
+    parsed = parse_controlled("---\nunknown: ignored\ncompact_at: 80\n---\nLegacy body.",
+                              name="Legacy", ceiling=load(None).get("Coder"))
+    assert parsed.name == "Legacy"
+    assert parsed.compact_at == 80
+    assert parsed.tools == {"read", "edit", "exec"}
+    assert parsed.instructions.endswith("Legacy body.\nDo not delegate or write to long-term memory.")

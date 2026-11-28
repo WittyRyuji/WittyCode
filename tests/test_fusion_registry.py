@@ -15,7 +15,7 @@ def test_policy_pins_the_main_and_authorises_only_configured_models():
     assert policy.allowed("chatgpt:small", "light")
     assert not policy.allowed("chatgpt:other", "worker")
     with pytest.raises(FusionError):
-        Policy(main="factory:external", workers=("api:demo:worker",), light="chatgpt:small", max_calls=3)
+        Policy(main="unsupported:external", workers=("api:demo:worker",), light="chatgpt:small", max_calls=3)
     with pytest.raises(FusionError):
         Policy(main="chatgpt:main", workers=("api:demo:worker",), light="chatgpt:small", max_calls=-1)
 

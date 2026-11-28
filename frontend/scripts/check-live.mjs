@@ -31,26 +31,39 @@ console.log(`QWebChannel client: ${client}`);
 const page = await openPage(pageUrl, { init: scripts, width: 1440, height: 900 });
 
 const js = (expression) => page.eval(expression);
-const calls = (method) => js(`__fake.callsOf(${JSON.stringify(method)})`);
+const calls = (method) => page.call((name) => __fake.callsOf(name), method);
 const lastCall = async (method) => (await calls(method)).at(-1);
-const waitCalls = (method, n = 1, timeout = 5000) => page.waitFor(`__fake.callsOf(${JSON.stringify(method)}).length >= ${n}`, timeout);
-const emit = (name, payload) => js(`__fake.emit(${JSON.stringify(name)}, ${JSON.stringify(payload)})`);
-const noMock = () => js(`(() => { const t = document.body.innerText; return ${JSON.stringify(MOCK)}.filter((m) => t.includes(m)); })()`);
+const waitCalls = (method, n = 1, timeout = 5000) => page.waitForCall((name, count) => __fake.callsOf(name).length >= count, [method, n], timeout);
+const emit = (name, payload) => page.call((event, data) => __fake.emit(event, data), name, payload);
+const mockText = (names) => names.filter((m) => document.body.innerText.includes(m));
+const noMock = () => page.call(mockText, MOCK);
 const notice = () => js("document.querySelector('.notice-text')?.textContent ?? ''");
 const shot = (name) => page.shot(resolve(`shots/live-${name}.png`));
 const clickText = async (selector, text) => {
-  const i = await js(`[...document.querySelectorAll(${JSON.stringify(selector)})].findIndex(e => e.textContent.includes(${JSON.stringify(text)}))`);
+  const i = await page.findText(selector, text);
   if (i < 0) throw new Error(`no ${selector} containing "${text}"`);
   await page.click(selector, i);
 };
 const press = (key, code, vk, modifiers = 0) => page.key(key, { code, vk, modifiers });
 const blur = () => js("document.activeElement && document.activeElement.blur()");
-const setInput = (selector, value) =>
-  js(`(() => { const e = document.querySelector(${JSON.stringify(selector)}); const proto = e instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype; Object.getOwnPropertyDescriptor(proto, 'value').set.call(e, ${JSON.stringify(value)}); e.dispatchEvent(new Event('input', { bubbles: true })); })()`);
-/** a real ClipboardEvent on the message box, carrying files made in the page */
-const paste = (filesJs) =>
-  js(`(async () => { const files = await (${filesJs})(); const dt = new DataTransfer(); for (const f of files) dt.items.add(f); document.querySelector('.input').dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true })); return true; })()`);
-const PNG = `() => new Promise((res) => { const c = document.createElement('canvas'); c.width = 64; c.height = 40; c.getContext('2d').fillRect(0, 0, 64, 40); c.toBlob((b) => res([new File([b], 'shot.png', { type: 'image/png' })])); })`;
+const setInput = (selector, value) => page.setInput(selector, value);
+/** A real ClipboardEvent carrying a file made in the page from a structured fixture. */
+const paste = (fixture) => page.call(async ({ name, type = '', text, size, png }) => {
+  let content;
+  if (png) {
+    const canvas = document.createElement('canvas');
+    canvas.width = 64;
+    canvas.height = 40;
+    canvas.getContext('2d').fillRect(0, 0, 64, 40);
+    content = await new Promise((resolve) => canvas.toBlob(resolve));
+  } else {
+    content = size ? new Uint8Array(size) : text;
+  }
+  const dt = new DataTransfer();
+  dt.items.add(new File([content], name, { type }));
+  document.querySelector('.input').dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+}, fixture);
+const PNG = { name: 'shot.png', type: 'image/png', png: true };
 
 // ------------------------------------------------------------------------------------- 1. before app.init answers
 ok("the page talks QWebChannel: app.init is its first call", (await js("__fake.calls[0]?.method")) === "app.init");
@@ -250,7 +263,7 @@ const command = async (text) => {
   await setInput(".input", text);
   await page.key("Enter");
 };
-const draftIs = (text) => js(`document.querySelector('.input').value === ${JSON.stringify(text)}`);
+const draftIs = (text) => page.call((value) => document.querySelector('.input').value === value, text);
 const sendsAtSkills = (await calls("session.send")).length;
 // /compact and /goal go to Python on any engine (this conversation is the own loop's); what Python says is shown
 await command("/compact");
@@ -310,11 +323,11 @@ const upload = (await lastCall("attachments.add")).files[0];
 ok("a pasted picture goes to Python as base64 (attachments.add)", upload.name === "shot.png" && upload.type === "image/png" && upload.data.startsWith("iVBOR"), { ...upload, data: upload.data.slice(0, 12) });
 await page.waitFor("document.querySelectorAll('.att-row .att').length === 1", 3000);
 ok("the card is Python's view of it, with its note", await js("document.querySelector('.att-row .fmeta').textContent.includes('已压缩') && document.querySelector('.att-row img').src.startsWith('data:image/png')"));
-await paste(`() => [new File(['x'], 'tool.bin', { type: 'application/octet-stream' })]`);
+await paste({ name: 'tool.bin', type: 'application/octet-stream', text: 'x' });
 await waitCalls("attachments.add", 2);
 await page.waitFor("document.querySelector('.notice-text')?.textContent.includes('tool.bin')", 3000);
 ok("what Python refuses is said in the status bar", (await notice()).includes("不是能附加的文件"));
-await paste(`() => [new File([new Uint8Array(65 * 1024 * 1024)], 'huge.iso')]`);
+await paste({ name: 'huge.iso', size: 65 * 1024 * 1024 });
 await page.waitFor("document.querySelector('.notice-text')?.textContent.includes('超过 64 MiB')", 3000);
 ok("a file over 64 MiB is refused before it is read: no call", (await calls("attachments.add")).length === 2);
 await js(`(() => { const dt = new DataTransfer(); dt.items.add(new File(['notes'], 'notes.txt', { type: 'text/plain' })); document.querySelector('.main').dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true })); })()`);
@@ -361,7 +374,7 @@ await setInput(".input", "");
 // ------------------------------------------------------------------------------------- 11. change engine
 // a scanned PDF joins the conversation (the fake reads a PDF named "scan…" as one without words), so the question has
 // a picture, a text file and a PDF that no engine can read
-await paste(`() => [new File(['%PDF-1.4'], 'scan.pdf', { type: 'application/pdf' })]`);
+await paste({ name: 'scan.pdf', type: 'application/pdf', text: '%PDF-1.4' });
 await page.waitFor("document.querySelector('.att-row')?.textContent.includes('scan.pdf')", 3000);
 await page.click(".input");
 await page.type("and a scan");
@@ -377,7 +390,8 @@ const menuTo = async (label) => {
 const rows = () => js("[...document.querySelectorAll('.dialog .carry-list li')].map(li => ({ name: li.querySelector('.carry-name').textContent, kind: li.querySelector('.carry-kind').textContent, how: li.querySelector('.carry-how').textContent, checked: li.querySelector('input').checked, disabled: li.querySelector('input').disabled, reason: li.querySelector('.carry-reason')?.textContent ?? '' }))");
 const confirmLabel = () => js("document.querySelector('.dialog .dialog-btns .btn:last-child').textContent.trim()");
 const tick = async (name) => {
-  const i = await js(`[...document.querySelectorAll('.dialog .carry-list li')].findIndex(li => li.querySelector('.carry-name').textContent === ${JSON.stringify(name)})`);
+  const i = await page.call((file) => [...document.querySelectorAll('.dialog .carry-list li')]
+    .findIndex(li => li.querySelector('.carry-name').textContent === file), name);
   await page.click(".dialog .carry-list li input", i);
 };
 
@@ -480,7 +494,7 @@ const sendsBefore = (await calls("session.send")).length;
 await page.click(".input");
 await paste(PNG);
 await page.waitFor("document.querySelectorAll('.att-row .att').length === 1", 3000);
-await paste(`() => [new File(['notes'], 'more.txt', { type: 'text/plain' })]`);
+await paste({ name: 'more.txt', type: 'text/plain', text: 'notes' });
 await page.waitFor("document.querySelectorAll('.att-row .att').length === 2", 3000);
 await page.waitFor("document.querySelector('.notice-text')?.textContent.includes('发送时会让你确认')", 3000);
 ok("past what a message usually holds the box still takes the file, and says by how much", (await notice()).startsWith("现在比一条消息通常带的量多 1 个文件"), await notice());
@@ -605,7 +619,10 @@ await page.click(".newbtn");
 await page.click(".input");
 await page.type("quick: late");
 await page.key("Enter");
-await page.waitFor(`document.querySelectorAll('.tab').length === ${tabsAtOpen + 1} && [...document.querySelectorAll('.tab')].at(-1).classList.contains('current')`, 3000);
+await page.waitForCall((count) => {
+  const tabs = [...document.querySelectorAll('.tab')];
+  return tabs.length === count && tabs.at(-1).classList.contains('current');
+}, [tabsAtOpen + 1], 3000);
 await page.click(".tab", 0);
 const stayedOn = await js("document.querySelector('.tab.current').textContent");
 await page.wait(1400); // Python's answer to session.new has come by now
@@ -617,7 +634,7 @@ await page.waitFor("!document.querySelector('.turnfoot.live') && !!document.quer
 await press("w", "KeyW", 87, CTRL);
 await waitCalls("session.close");
 ok("Ctrl+W closes the current conversation (session.close)", typeof (await lastCall("session.close")).id === "string", await lastCall("session.close"));
-await page.waitFor(`document.querySelectorAll('.tab').length === ${tabsAtOpen}`, 3000);
+await page.waitForCall((count) => document.querySelectorAll('.tab').length === count, [tabsAtOpen], 3000);
 ok("its neighbour is shown", await js("!!document.querySelector('.tab.current')"));
 
 // ------------------------------------------------------------------------------------- 13. shortcuts
@@ -694,11 +711,11 @@ await waitCalls("settings.set", 7);
 ok("the session limit too", isDeepStrictEqual(await lastCall("settings.set"), { key: "maxOpen", value: 5 }));
 await page.waitFor("document.querySelectorAll('.stepper span')[1].textContent === '5'", 2000);
 await clickText(".snav", "外部程序");
-ok("the 外部程序 page has only the Devin CLI, and no 浏览… (there is no such call)", await js("[...document.querySelectorAll('.settings-body .field-label')].map(e => e.textContent).join() === 'Devin 命令行' && ![...document.querySelectorAll('.settings-body .btn')].some(b => b.textContent.includes('浏览'))"));
-await page.click(".settings-body .segc button", 1); // Devin 命令行: 指定路径 starts from the one that was found
+ok("the 外部程序 page has CLI paths only, without model controls", await js("[...document.querySelectorAll('.program-path .field-label')].map(e => e.textContent).join() === 'Factory 命令行,Devin 命令行' && !document.querySelector('.programs :is(.switch, .mvis, .btn)')"));
+await page.click(".devin-program .segc button", 1); // Devin 命令行: 指定路径 starts from the one that was found
 await waitCalls("settings.set", 8);
 const devinInput = 'input[aria-label="Devin 命令行 路径"]';
-await page.waitFor(`document.querySelector('${devinInput}')?.value.endsWith('devin.exe')`, 2000);
+await page.waitForCall((selector) => document.querySelector(selector)?.value.endsWith('devin.exe'), [devinInput], 2000);
 await setInput(devinInput, "");
 await page.click(devinInput);
 await page.type("D:\\tools\\devin.exe");
@@ -720,9 +737,12 @@ ok("dragging the splitter saves the width once, when it is let go", (await calls
 
 // ------------------------------------------------------------------------------------- 14b. which models the menu offers
 const mvis = (source) => `.mvis[data-source="${source}"]`;
-const mvisCount = (source) => js(`document.querySelector('${mvis(source)} .mvis-count').textContent.replace(/\\s+/g, '')`);
+const mvisCount = (source) => page.call((selector) => document.querySelector(selector).textContent.replace(/\s+/g, ''), `${mvis(source)} .mvis-count`);
+const waitModelCounts = (...expected) => page.waitForCall((counts) => counts.every(([selector, value]) =>
+  document.querySelector(selector)?.textContent.replace(/\s+/g, '') === value),
+  [expected.map(([source, value]) => [`${mvis(source)} .mvis-count`, value])], 2000);
 const rowSwitch = async (source, label) => {
-  const i = await js(`[...document.querySelectorAll('${mvis(source)} .mvis-row')].findIndex(e => e.textContent.includes(${JSON.stringify(label)}))`);
+  const i = await page.findText(`${mvis(source)} .mvis-row`, label);
   if (i < 0) throw new Error(`no ${source} model "${label}"`);
   await page.click(`${mvis(source)} .mvis-row .switch`, i);
 };
@@ -739,7 +759,8 @@ await page.click(".snav", 1);
 ok("the provider's card counts the models Python listed (the disabled one is not one to choose)", (await mvisCount("api:gw")) === "4/4", await mvisCount("api:gw"));
 ok("the Devin card has its own list", (await mvisCount("devin")) === "3/3", await mvisCount("devin"));
 await page.click(`${mvis("devin")} .disclose`);
-ok("Devin's models sit under their makers, like the menu", await js(`[...document.querySelectorAll('${mvis("devin")} .mvis-maker')].map(e => e.textContent).join() === 'Cognition,Anthropic,OpenAI'`));
+ok("Devin's models sit under their makers, like the menu", await page.call((selector) =>
+  [...document.querySelectorAll(selector)].map(e => e.textContent).join() === 'Cognition,Anthropic,OpenAI', `${mvis("devin")} .mvis-maker`));
 await page.click(`${mvis("devin")} .disclose`);
 const using = await js("document.querySelectorAll('.controls .chip-v')[0].textContent");
 const hide = using === "Gemini 3 Pro" ? "GPT-5.4" : "Gemini 3 Pro";
@@ -747,7 +768,7 @@ await page.click(`${mvis("api:gw")} .disclose`);
 await rowSwitch("api:gw", hide);
 await waitCalls("models.setVisible");
 ok("a switch goes to Python (models.setVisible)", isDeepStrictEqual(await lastCall("models.setVisible"), { ids: [hide === "GPT-5.4" ? "api:gw:gpt-5.4" : "api:gw:gemini-3-pro"], visible: false }), await lastCall("models.setVisible"));
-await page.waitFor(`document.querySelector('${mvis("api:gw")} .mvis-count').textContent.replace(/\\s+/g, '') === '3/4'`, 2000);
+await waitModelCounts(["api:gw", "3/4"]);
 ok("the count follows Python's settings event", true);
 await page.key("Escape");
 ok("the model menu leaves it out", !(await menuItems()).includes(hide), await menuItems());
@@ -758,7 +779,7 @@ await page.click(`${mvis("devin")} .disclose`);
 await clickText(`${mvis("devin")} .btn`, "全部隐藏");
 await waitCalls("models.setVisible", 2);
 ok("hide all sends the ids of the whole list", isDeepStrictEqual(await lastCall("models.setVisible"), { ids: ["devin:swe-2-high", "devin:claude-opus-5-5-medium", "devin:gpt-6-sol-medium"], visible: false }), await lastCall("models.setVisible"));
-await page.waitFor(`document.querySelector('${mvis("devin")} .mvis-count').textContent.replace(/\\s+/g, '') === '0/3'`, 2000);
+await waitModelCounts(["devin", "0/3"]);
 await page.key("Escape");
 const usingNow = await js("document.querySelectorAll('.controls .chip-v')[0].textContent");
 const afterHideAll = await menuItems();
@@ -777,7 +798,7 @@ await clickText(`${mvis("api:gw")} .btn`, "全部显示");
 await page.click(`${mvis("devin")} .disclose`);
 await clickText(`${mvis("devin")} .btn`, "全部显示");
 await waitCalls("models.setVisible", 4);
-await page.waitFor(`document.querySelector('${mvis("api:gw")} .mvis-count').textContent.replace(/\\s+/g, '') === '4/4' && document.querySelector('${mvis("devin")} .mvis-count').textContent.replace(/\\s+/g, '') === '3/3'`, 2000);
+await waitModelCounts(["api:gw", "4/4"], ["devin", "3/3"]);
 ok("show all puts everything back", true);
 await page.key("Escape");
 ok("and the menu is whole again", await (async () => { const t = await menuItems(); return t.includes(hide) && t.includes("SWE-2") && !t.includes("没有显示的模型"); })());
@@ -909,18 +930,18 @@ await page.key("Escape");
 
 
 // ------------------------------------------------------------------------------------- 14c. pin, rename and archive
-const rowIndex = (text) => js(`[...document.querySelectorAll('.srow')].findIndex(r => r.textContent.includes(${JSON.stringify(text)}))`);
+const rowIndex = (text) => page.findText('.srow', text);
 // The saved row may be open here, so target its displayed id rather than its native id.
 const pinAt = await rowIndex("迁移脚本");
-const pinId = await js(`document.querySelectorAll('.srow')[${pinAt}].dataset.sessionId`);
-const pinSelector = `.srow[data-session-id="${pinId}"]`;
+const pinId = await page.call((i) => document.querySelectorAll('.srow')[i].dataset.sessionId, pinAt);
+const pinSelector = await page.call((id) => `.srow[data-session-id=${CSS.escape(id)}]`, pinId);
 await page.click(".srow", pinAt, { right: true });
 await clickText(".menu-item", "置顶");
-await page.waitFor(`!!document.querySelector('${pinSelector}.srow:first-child .srow-pin')`, 3000);
+await page.waitForCall((selector) => !!document.querySelector(selector), [`${pinSelector}.srow:first-child .srow-pin`], 3000);
 ok("the context menu pins the open or saved row at the head of its own project", isDeepStrictEqual(await lastCall("session.pin"), { projectId: "D:\\Work\\demo-project", id: pinId, pinned: true }));
 await page.click(`${pinSelector} .more`);
 await clickText(".menu-item", "取消置顶");
-await page.waitFor(`!document.querySelector('${pinSelector} .srow-pin')`, 3000);
+await page.waitForCall((selector) => !document.querySelector(selector), [`${pinSelector} .srow-pin`], 3000);
 ok("the more menu sends the explicit unpin flag", (await lastCall("session.pin")).pinned === false);
 await page.click(".srow", await rowIndex("旧的会话"), { right: true });
 await clickText(".menu-item", "重命名…");
@@ -966,10 +987,12 @@ await js(`__fake.failNext("session.send", "测试：第一条消息未发出。"
 await page.click(".input");
 await page.key("Enter");
 await page.waitFor("document.querySelector('.notice-text')?.textContent.includes('第一条消息未发出')", 3000);
-await page.waitFor(`document.querySelectorAll('.tab').length === ${tabsNow + 1} && !!document.querySelector('.tab.current') && document.querySelector('.input').value === 'still here'`, 3000);
-ok("a refused first send keeps the text editable without adding the draft tab to the project", await js(`!document.querySelector('.input').disabled && document.querySelectorAll('.srow').length === ${rowsNow}`));
+await page.waitForCall((count) => document.querySelectorAll('.tab').length === count &&
+  !!document.querySelector('.tab.current') && document.querySelector('.input').value === 'still here', [tabsNow + 1], 3000);
+ok("a refused first send keeps the text editable without adding the draft tab to the project", await page.call((count) =>
+  !document.querySelector('.input').disabled && document.querySelectorAll('.srow').length === count, rowsNow));
 await page.click(".tab.current .tab-x");
-await page.waitFor(`document.querySelectorAll('.tab').length === ${tabsNow}`, 3000);
+await page.waitForCall((count) => document.querySelectorAll('.tab').length === count, [tabsNow], 3000);
 
 // ------------------------------------------------------------------------------------- 16. the window
 const handles = await js("[...document.querySelectorAll('.rz')].map(e => e.dataset.edge + ':' + getComputedStyle(e).cursor).join()");
@@ -1021,10 +1044,10 @@ ok("Ctrl+Q runs the same quit", true);
 // ------------------------------------------------------------------------------------- 17. the clock
 await js(`__fake.addSaved("s-clock", __fake.OTHER, "时钟测试", Date.now() - 58000)`);
 await page.waitFor("[...document.querySelectorAll('.srow')].some(r => r.textContent.includes('时钟测试'))", 3000);
-const clockRow = "[...document.querySelectorAll('.srow')].find(r => r.textContent.includes('时钟测试')).querySelector('.ssub').textContent";
-ok("a row from 58 s ago reads 刚刚", (await js(clockRow)) === "刚刚", await js(clockRow));
+const clockText = () => [...document.querySelectorAll('.srow')].find(r => r.textContent.includes('时钟测试')).querySelector('.ssub').textContent;
+ok("a row from 58 s ago reads 刚刚", (await page.call(clockText)) === "刚刚", await page.call(clockText));
 // (a page that has been in the background for minutes may run its timers only once a minute)
-await page.waitFor(`${clockRow} === '1 分钟前'`, 75000);
+await page.waitFor("[...document.querySelectorAll('.srow')].find(r => r.textContent.includes('时钟测试')).querySelector('.ssub').textContent === '1 分钟前'", 75000);
 ok("…and 1 分钟前 within 30 s, with no new event from Python", true);
 
 const errors = page.errorTexts();
@@ -1036,7 +1059,7 @@ await checkAgentsTeam({ url: pageUrl, scripts, ok });
 // ------------------------------------------------------------------------------------- without Python
 const lonely = await openPage(`${index}?live=1`, { width: 1000, height: 700 });
 ok("?live=1 without a transport: the title bar and why it cannot connect", await lonely.eval("!!document.querySelector('.titlebar') && document.querySelector('.boot').textContent.includes('没有连接到 WittyCode 后台') && !document.querySelector('.sidebar')"));
-ok("no demo data there either", await lonely.eval(`(() => { const t = document.body.innerText; return !${JSON.stringify(MOCK)}.some((m) => t.includes(m)); })()`));
+ok("no demo data there either", (await lonely.call(mockText, MOCK)).length === 0);
 ok("and no outline: only Python asks for one (?frame=)", await lonely.eval("!document.querySelector('.frame-line')"));
 await lonely.close();
 const squareCorners = await openPage(`${index}?live=1&frame=square`, { width: 1000, height: 700 });

@@ -1,6 +1,9 @@
 """The page waits for a title before dispatching the first turn."""
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import pytest
 
 from desktop.core.session_state import SessionState
@@ -37,32 +40,38 @@ def test_new_session_titles_before_the_first_turn(qapp, loop, tmp_path, entry, m
             assert not await rig.exists(".srow.open")
 
             main = say("正在核对入库记录。")
-            rig.plan.script([*main[:-1], ("hold", "main"), main[-1]])
+            rig.plan.script([("hold", "main"), *main])
             rig.plan.fake.title_turn = [("hold", "title"), *say("库存导入去重")]
             await rig.send("导入库存时重复条目不应计数两次")
             await rig.wait_text(".statusbar", "正在生成会话名称…")
             await until(lambda: bool(rig.plan.fake.title_requests))
             conv = rig.core.order[-1]
+            ctl = conv.controller
             assert not rig.plan.requests and not conv.controller.transcript.turns
+            assert not await rig.exists(".srow")  # a draft still being named is not a sidebar row
             await rig.wait_text(".tab.current .tab-title", "新会话")
             rig.plan.release("title")
-            await rig.wait_text(".transcript", "正在核对入库记录。")
-            ctl = conv.controller
-            assert ctl.state is SessionState.RUNNING
+            await until(lambda: bool(rig.plan.requests))  # the turn started; the model has not said a word yet
+            assert ctl.state is SessionState.RUNNING and not conv.in_history
             try:
+                await rig.wait_text(".srow .stitle", "库存导入去重", timeout=4)
                 await rig.wait_text(".tab.current .tab-title", "库存导入去重", timeout=4)
-                await rig.wait_text(".srow.open .stitle", "库存导入去重", timeout=4)
             except AssertionError as error:
                 raise AssertionError(f"tab={await rig.text('.tab.current .tab-title')!r}; "
-                                     f"sidebar={await rig.text('.srow.open .stitle')!r}; "
+                                     f"sidebar={await rig.text('.srow .stitle')!r}; "
                                      f"title requests={len(rig.plan.fake.title_requests)}") from error
-            assert ctl.state is SessionState.RUNNING
+            assert await rig.count(".srow") == 1 and ctl.state is SessionState.RUNNING
+            if evidence := os.environ.get("WITTYCODE_TEST_EVIDENCE"):
+                await rig.shot(".srow.open", Path(evidence) / "titled-before-reply.png")
+            rig.plan.release("main")
+            await rig.wait_text(".transcript", "正在核对入库记录。")
+            await until(lambda: conv.in_history)
+            assert await rig.count(".srow") == 1  # the same row was promoted, not listed twice
             expected_model = "gpt-6-luna" if mode == "fusion" else "gpt-6.1-sol"
             (title_request,) = rig.plan.fake.title_requests
             assert title_request["model"] == rig.plan.requests[0]["model"] == expected_model
             if mode == "fusion":
                 assert rig.engine.sessions.load(ctl.session_id).title == "库存导入去重"
-            rig.plan.release("main")
             await until(lambda: ctl.state is SessionState.READY)
             await rig.wait_for(".srow.open.m-ready")  # closeTab uses the rendered running state for its confirmation.
             await rig.click(".tab.current .tab-x")
@@ -80,7 +89,7 @@ def test_new_session_titles_before_the_first_turn(qapp, loop, tmp_path, entry, m
     run(loop, scenario())
 
 
-def test_invalid_first_title_restores_draft_after_three_retries(qapp, loop, tmp_path):
+def test_invalid_first_title_restores_draft_after_three_attempts(qapp, loop, tmp_path):
     async def scenario():
         rig = await open_rig(tmp_path)
         try:
@@ -89,11 +98,11 @@ def test_invalid_first_title_restores_draft_after_three_retries(qapp, loop, tmp_
             rig.plan.fake.title_answer = "不是\n单行标题"
             question = "检查库存接口"
             await rig.send(question)
-            await until(lambda: len(rig.plan.fake.title_requests) == 4)
+            await until(lambda: len(rig.plan.fake.title_requests) == 3)
             await rig.wait_for(".preparing-turn", 0)
             await until(lambda: not rig.core.order[-1].naming)
             assert await rig.js("document.querySelector('.input').value") == question
-            assert not rig.plan.requests
+            assert not rig.plan.requests and not await rig.exists(".srow")  # a failed title buys no sidebar row
             await rig.wait_text(".tab.current .tab-title", "新会话")
             rig.plan.fake.title_answer = "库存接口检查"
             rig.plan.script(say("已检查库存接口。"))
@@ -101,7 +110,7 @@ def test_invalid_first_title_restores_draft_after_three_retries(qapp, loop, tmp_
             await rig.press("Enter")
             await rig.wait_text(".srow.open .stitle", "库存接口检查")
             await rig.wait_text(".transcript", "已检查库存接口。")
-            assert len(rig.plan.requests) == 1 and len(rig.plan.fake.title_requests) == 5
+            assert len(rig.plan.requests) == 1 and len(rig.plan.fake.title_requests) == 4
         finally:
             await rig.finish()
 

@@ -4,11 +4,12 @@ import type { ApiProvider, Engine, ModelChoice, Session } from "../types";
  *  that also runs the ChatGPT plan's (Bedrock's too: it signs its own requests with the user's AWS credentials). */
 export const engineOfSource = (source: string): Engine => (source === "devin" ? "devin" : source === "factory" ? "factory" : "chatgpt");
 
+export const GROK_SUBSCRIPTION_SOURCE = "api:grok-subscription";
 const ENGINE_NAMES: Record<Engine, string> = { devin: "Devin", chatgpt: "ChatGPT Plan", factory: "Factory" };
 
 /** What the page calls the place a model runs. An API provider's model runs in the own loop, but to the user it is
  *  "API" (the word on the model chip). */
-export const engineLabel = (source: string): string => (source.startsWith("api:") ? "API" : ENGINE_NAMES[engineOfSource(source)]);
+export const engineLabel = (source: string): string => (source === GROK_SUBSCRIPTION_SOURCE ? "Grok 订阅" : source.startsWith("api:") ? "API" : ENGINE_NAMES[engineOfSource(source)]);
 
 export function findModel(models: ModelChoice[], id: string): ModelChoice | undefined {
   return models.find((m) => m.id === id);
@@ -26,6 +27,7 @@ export function sourceLabel(source: string, providers: ApiProvider[]): string {
   if (source === "factory") return "Factory";
   if (source === "devin") return "Devin";
   if (source === "chatgpt") return "ChatGPT Plan";
+  if (source === GROK_SUBSCRIPTION_SOURCE) return "Grok 订阅";
   return providers.find((p) => `api:${p.id}` === source)?.name.replace(/[（(].*$/, "") ?? "API";
 }
 
@@ -35,17 +37,23 @@ export function envNameOf(hint: string): string | null {
   return m ? m[1]! : null;
 }
 
-/** What the environment-variable field shows for a stored reference: the bare name (`MIMO_API_KEY` for `${MIMO_API_KEY}`).
- *  Only the wrapper is taken off, so a half-typed or malformed name is shown as typed. */
-export function envVarText(hint: string): string {
-  return hint.trim().replace(/^\$\{/, "").replace(/\}$/, "");
+/** Names in a stored reference list. Reject the entire list if any of its slots is invalid. */
+export function envNamesOf(hint: string): string[] {
+  const names = hint.split(",").map(envNameOf);
+  return names.every((name): name is string => name !== null) ? names : [];
 }
 
-/** The reference to store for what was typed in that field: `${NAME}`; a pasted `${NAME}` is accepted too, and nothing
- *  typed stores nothing. Typing the name only is the point: the braces are easy to get wrong. */
+/** Show bare names for a stored comma-separated list. */
+export function envVarText(hint: string): string {
+  return hint.split(",").map((part) => part.trim().replace(/^\$\{/, "").replace(/\}$/, "")).join(", ");
+}
+
+/** Store bare names as `${NAME}` references. Pasted references are accepted too. */
 export function envHintOf(typed: string): string {
-  const name = envVarText(typed);
-  return name ? `\${${name}}` : "";
+  return typed.split(",").map((part) => {
+    const name = envNameOf(part) ?? part.trim();
+    return name ? `\${${name}}` : "";
+  }).join(",");
 }
 
 /** A saved literal key can be reused only at the same interface and Base URL (see provider_secrets.endpoint). */
@@ -56,5 +64,5 @@ export function sameProviderEndpoint(a: Pick<ApiProvider, "kind" | "baseUrl">, b
 
 /** The little tag on the model chip: where the model is billed. */
 export function sourceTag(source: string): string {
-  return source === "devin" || source === "chatgpt" || source === "factory" ? "订阅" : "API";
+  return source === "devin" || source === "chatgpt" || source === "factory" || source === GROK_SUBSCRIPTION_SOURCE ? "订阅" : "API";
 }

@@ -167,7 +167,15 @@ def test_slow_title_does_not_block_a_second_turn_or_overwrite_a_later_choice(tmp
     asyncio.run(scenario())
 
 
-def test_legacy_untitled_fusion_is_only_named_when_a_user_sends_again(tmp_path):
+def test_legacy_untitled_fusion_is_only_named_when_a_user_sends_again(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from desktop.core.fusion import title
+
+    deadline = Mock(wraps=asyncio.timeout)
+    monkeypatch.setattr(title, "asyncio", SimpleNamespace(timeout=deadline))
+
     async def scenario():
         core, plan, events, _, engine = await ready_core(tmp_path)
         try:
@@ -191,6 +199,7 @@ def test_legacy_untitled_fusion_is_only_named_when_a_user_sends_again(tmp_path):
             (request,) = plan.fake.title_requests
             assert request["input"][0]["content"][0]["text"] == title_prompt(current)
             assert first not in str(request["input"])
+            deadline.assert_called_once_with(12.0)  # An existing session keeps the short deadline; only a draft waits 30 s.
             saved = engine.sessions.load(old_id)
             assert saved.title == plan.fake.title_answer and saved.items[:len(old.items)] == old.items
         finally:
@@ -254,6 +263,11 @@ def test_guarded_devin_main_titles_with_the_same_native_model(tmp_path):
             await idle(core, cid)
             saved = engine.sessions.load(ctl.session_id)
             assert saved.title == "库存事务与去重" and len(saved.turns) == 1
+            archive = ctl._archive_binding.archive
+            (identity,) = archive.manifest["identities"]
+            assert (identity["backend"], identity["connection"], identity["native"]) == (
+                "fusion", "devin", saved.origin["fusionAcp"]["session"],
+            )  # Only the main session is archived; the naming session does not have an instance.
             assert [turn.status for turn in ctl.transcript.turns] == [TurnStatus.DONE]
             assert saved.turns[0].status == "done" and "ACP report." in str(saved.items)
             assert saved.title not in str(saved.items) and "[fusion-refuse]" not in str(saved.items)

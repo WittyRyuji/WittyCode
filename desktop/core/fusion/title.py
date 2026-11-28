@@ -3,13 +3,17 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hmac
 import logging
+import os
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from desktop.core import session_title
 from desktop.core.chatgpt.errors import ChatGPTError, RequestNotSent
 from desktop.core.chatgpt.responses import CallBegun, CallDone, Finished, Started, TextDelta, TextDone, build_request, user_message
+from desktop.core.fusion.backends import GUARDED
+from desktop.core.fusion.summary import seat_stream
 from desktop.core.fusion.registry import FusionError
 from desktop.core.harness import compact
 from desktop.core.harness.diagnostics import MAX_RECORDS
@@ -19,13 +23,34 @@ if TYPE_CHECKING:
     from desktop.core.chatgpt.controller import ChatGPTController
 
 log = logging.getLogger(__name__)
-TIMEOUT = 12.0
+LEGACY_TIMEOUT = 12.0
 ATTEMPT = "fusionTitleAttempt"
+
+
+class _FactoryCredentialSnapshot:
+    """An in-memory equality check for one title attempt, not a serializable credential fingerprint."""
+
+    __slots__ = ("__value",)
+
+    def __init__(self, value: str) -> None:
+        self.__value = value.encode()
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, _FactoryCredentialSnapshot) and hmac.compare_digest(self.__value, other.__value)
+
+    def __reduce_ex__(self, protocol: int) -> Any:
+        raise TypeError("Factory title credentials cannot be serialized.")
 
 
 def source(controller: ChatGPTController, model: str) -> Any:
     """Only compare in memory; never persist an account or provider configuration with the title."""
     manager = controller.manager
+    if model.startswith("factory:"):
+        factory = manager.factory
+        if factory is None:
+            return None
+        snapshot = _FactoryCredentialSnapshot(os.environ.get("FACTORY_API_KEY", ""))
+        return factory, factory.settings.factory_path, snapshot
     if model.startswith("devin:"):
         devin = manager.devin
         account = devin.cached_account() if devin is not None else {}
@@ -55,14 +80,10 @@ async def generate(controller: ChatGPTController, question: str, model: str, acc
     except FusionError:
         return
 
-    native = model.startswith("devin:")
+    native = model.startswith(GUARDED)
     request = build_request(model=model, instructions=instructions, items=items, tools=[],
                             reasoning=controller._summary_effort(), shape=controller.manager.shape)
-    if native:
-        from desktop.core.fusion.summary import AcpSummary
-        stream = AcpSummary(controller.manager, before_prompt=still_allowed).stream
-    else:
-        stream = controller.manager.stream
+    stream = seat_stream(controller, model, before_prompt=still_allowed)
 
     if not draft:
         # Existing sessions checkpoint the attempt; a draft must not become an archive just for naming.
@@ -76,8 +97,9 @@ async def generate(controller: ChatGPTController, question: str, model: str, acc
             return None
     text, finished, tool_call, requested = "", None, False, not native
     title = None
+    timeout = session_title.FIRST_TIMEOUT if draft else LEGACY_TIMEOUT
     try:
-        async with asyncio.timeout(TIMEOUT), contextlib.aclosing(stream(request)) as events:
+        async with asyncio.timeout(timeout), contextlib.aclosing(stream(request)) as events:
             async for event in events:
                 if isinstance(event, Started):
                     requested = True

@@ -17,7 +17,7 @@ from desktop.core.llm.backend import ApiBackend, api_failure, is_api_model, rout
 from desktop.core.llm.wire import ANTHROPIC, CHAT, RESPONSES
 from desktop.core.providers import ApiModelSpec, ProviderError, ProviderStore, _Key
 from tests.fake_responses import say
-from tests.llm_support import FakeApi, http_error
+from tests.llm_support import FakeApi, http_error, lines_of
 
 
 def settings_with(tmp_path: Path, base_url: str, **entry: Any) -> Path:
@@ -29,10 +29,10 @@ def settings_with(tmp_path: Path, base_url: str, **entry: Any) -> Path:
     return path
 
 
-def store_for(path: Path, environ: dict[str, str] | None = None, registry: dict[str, str] | None = None, run_command=None) -> ProviderStore:
+def store_for(path: Path, environ: dict[str, str] | None = None, registry: dict[str, str] | None = None) -> ProviderStore:
     return ProviderStore(
         models_file=path, sidecar=path.with_name("providers.json"), environ={"TEST_API_KEY": "sk-test-1"} if environ is None else environ,
-        registry_env=lambda: registry or {}, run_command=run_command,
+        registry_env=lambda: registry or {},
     )
 
 
@@ -181,6 +181,53 @@ def test_a_responses_model_with_a_level_asks_for_reasoning_and_its_encrypted_con
     asyncio.run(go())
 
 
+class WireTap:
+    """The ``HttpClient`` a wire-level test needs: keeps what would be POSTed and answers a canned event stream."""
+
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, str, dict[str, str], Any]] = []
+
+    async def stream_lines(self, method: str, url: str, *, headers=None, json_body=None, body=None, timeout=0.0):
+        self.sent.append((method, url, dict(headers or {}), json_body if json_body is not None else body))
+        async for line in lines_of(say("ok")):
+            yield line
+
+
+def test_the_official_responses_route_sends_instructions_as_the_first_developer_message(tmp_path):
+    """``POST https://api.openai.com/v1/responses`` with a GPT-6.2+ slug bills top-level instructions uncached."""
+
+    async def go() -> None:
+        tap = WireTap()
+        store = store_for(settings_with(tmp_path, "https://api.openai.com/v1", provider="openai", model="gpt-6.2-sol"))
+        request = request_for(model_id_of(store))
+        events = await ask(ApiBackend(store, http=tap), request)
+        assert isinstance(events[-1], Finished)
+        ((method, url, _headers, body),) = tap.sent
+        assert (method, url) == ("POST", "https://api.openai.com/v1/responses")
+        assert "instructions" not in body
+        assert body["input"] == [
+            {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "be brief"}]},
+            user_message("hi"),
+        ]
+        assert request["instructions"] == "be brief" and request["input"] == [user_message("hi")], "the loop's request is not changed"
+
+    asyncio.run(go())
+
+
+def test_a_compatible_gateway_model_keeps_top_level_instructions_on_the_wire(tmp_path):
+    async def go() -> None:
+        with FakeApi() as api:
+            api.script(list(say("ok")))
+            store = store_for(settings_with(tmp_path, api.base_url, provider="openai", model="gpt-6.2-sol"))
+            events = await ask(ApiBackend(store), request_for(model_id_of(store)))
+            assert isinstance(events[-1], Finished)
+            ((path, headers, body),) = api.posts
+            assert path == "/v1/responses" and body["model"] == "gpt-6.2-sol"
+            assert body["instructions"] == "be brief" and body["input"] == [user_message("hi")]
+
+    asyncio.run(go())
+
+
 def test_the_thoughts_another_api_wrote_are_not_sent_to_a_responses_endpoint_but_openais_own_are(tmp_path):
     from desktop.core.chatgpt.responses import for_responses
 
@@ -206,6 +253,34 @@ def test_the_thoughts_another_api_wrote_are_not_sent_to_a_responses_endpoint_but
 
 
 # ------------------------------------------------------------------------------------------------ the engine in front of it
+
+
+@pytest.mark.parametrize("provider, endpoint, turn", [
+    ("openai", "/v1/responses", say("ok")),
+    ("generic-chat-completion-api", "/v1/chat/completions", [
+        {"id": "c1", "choices": [{"index": 0, "delta": {"content": "ok"}, "finish_reason": "stop"}]}, "[DONE]",
+    ]),
+])
+def test_api_providers_do_not_receive_plan_session_routing(tmp_path, provider, endpoint, turn):
+    from tests.chatgpt_support import make_engine
+
+    async def go():
+        with FakeApi() as api:
+            api.script(turn)
+            store = store_for(settings_with(tmp_path, api.base_url, provider=provider))
+            engine = make_engine(tmp_path, None, signed_in=False, api=ApiBackend(store))
+            session_id = "a" * 32
+            request = build_request(model=model_id_of(store), instructions="Be brief.", items=[user_message("hi")],
+                                    tools=[], reasoning="off", conversation=session_id)
+            assert request["wc_session"] == session_id
+            events = [event async for event in engine.stream(request)]
+            assert isinstance(events[-1], Finished)
+            ((path, headers, body),) = api.posts
+            assert path == endpoint
+            assert "session_id" not in headers
+            assert not any(key.startswith("wc_") for key in body)
+
+    asyncio.run(go())
 
 
 def test_the_engine_knows_an_api_models_name_window_and_pictures_and_nothing_of_one_that_is_gone(tmp_path):
@@ -252,14 +327,6 @@ def test_a_key_set_after_the_application_started_works_at_once_and_a_missing_one
     assert store_for(path, environ={}, registry={"TEST_API_KEY": "from-registry"}).api_key(spec) == "from-registry"
     with pytest.raises(ProviderError, match="TEST_API_KEY"):
         store_for(path, environ={}).api_key(spec)
-
-
-def test_a_key_command_is_run_once_within_its_time_to_live(tmp_path):
-    path = settings_with(tmp_path, "https://a.example/v1", apiKey=None, apiKeyHelper="get-key", apiKeyHelperTtlMs=60_000)
-    calls: list[str] = []
-    store = store_for(path, run_command=lambda command: calls.append(command) or "helper-key")
-    spec = store.api_models()[0]
-    assert store.api_key(spec) == "helper-key" and store.api_key(spec) == "helper-key" and calls == ["get-key"]
 
 
 def test_a_provider_that_needs_no_key_sends_none(tmp_path):

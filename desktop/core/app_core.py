@@ -23,6 +23,7 @@ import dataclasses
 import itertools
 import logging
 import os
+import stat
 import subprocess
 import sys
 import time
@@ -51,16 +52,20 @@ from desktop.core.connector_auth import ConnectorStore
 from desktop.core.plugin_http import PluginError
 from desktop.core.skill_marketplace import SkillMarketplace
 from desktop.core.cache import Cache
+from desktop.core import storage_policy
+from desktop.core import storage_meter
 from desktop.core.conversation_history import ConversationHistory, prepend as prepend_history
+from desktop.core.fusion.backends import GUARDED, PREFIXES
 from desktop.core.catalog import API_PREFIX, Catalog, Target, build_catalog, settings_for_model
 from desktop.core.chatgpt.errors import ChatGPTError
 from desktop.core.hooks import Hooks
 from desktop.core.llm.backend import is_api_model
+from desktop.core.llm.grok import GrokError, GrokSubscription, PREFIX as GROK_PREFIX
 from desktop.core import files as filetools
 from desktop.core.handoff import AS_TEXT, CarryOption, attachment_text, build_handoff, carry_options, carry_overage, conversation_messages
 from desktop.core.harness import goal as goals
 from desktop.core import customization, language, session_title, sounds
-from desktop.core.harness import skills
+from desktop.core.harness import official_skill, skills
 from desktop.core.import_bridge import ImportBridge
 from desktop.core.chatgpt import side as chatgpt_side
 from desktop.core.devin import side as devin_side
@@ -75,6 +80,7 @@ from desktop.core.settings import (
     DEVIN_PERMISSIONS,
     FOLLOW_UPS,
     FONT_SCALES,
+    FUSION_SEAT_MODEL_LIMIT,
     LANGUAGES,
     COMPACT_AT_RANGE,
     MAX_OPEN_SESSIONS_RANGE,
@@ -82,6 +88,9 @@ from desktop.core.settings import (
     MAX_REMEMBERED_SESSIONS,
     MAX_SESSION_TITLE,
     MEMORY_ENGINES,
+    RECONNECT_INTERVAL_RANGE,
+    RECONNECT_LIMIT_RANGE,
+    STEP_BUDGET_RANGE,
     SIDEBAR_WIDTH_RANGE,
     CONVERSATION_WIDTH_RANGE,
     valid_inspector_width,
@@ -94,11 +103,13 @@ from desktop.core.settings import (
     save_settings,
 )
 from desktop.core.timefmt import format_relative
+from desktop.core.sidebar_order import move_relative, pin_mirror
 from desktop.core.transcript import Transcript, Turn, TurnStatus
 from desktop.core.speed import speed_of
 from desktop.core.usage import Tokens, UsageLedger
 from desktop.core.viewmodel import attachment_json, context_json, turn_json, usage_json
 from desktop.core.turn_delta import changed_blocks
+from desktop.core.turn_window import TurnWindow, view_window
 
 log = logging.getLogger("desktop.app")
 
@@ -139,6 +150,43 @@ def engine_label(engine: str, model: Mapping[str, Any] | None) -> str:
 def row_id(engine: str, native: str) -> str:
     """The sidebar row id of a saved session: the engine's own id behind the engine's prefix."""
     return ROW_PREFIXES.get(engine, "") + native
+
+
+def fusion_light_pool(settings: AppSettings) -> list[str]:
+    """The canonical L3 pool, tolerating older in-memory settings that only know the scalar mirror."""
+    lights = list(dict.fromkeys(item for item in getattr(settings, "fusion_lights", []) if isinstance(item, str) and item.strip()))
+    legacy = getattr(settings, "fusion_light", "")
+    if not lights and isinstance(legacy, str) and legacy.strip():
+        lights = [legacy.strip()]
+    return lights[:FUSION_SEAT_MODEL_LIMIT]
+
+
+def fusion_policy_of(settings: AppSettings) -> Any:
+    """Build the session policy with the L3 pool when freeze's Policy knows it.
+
+    Wiring contract for the runtime freeze: ``Policy`` may accept ``lights=<tuple>``. Until that field exists, only the
+    first pool entry is handed through the legacy scalar ``light``; no construction error is hidden or depended on.
+    """
+    from desktop.core.fusion.registry import Policy
+
+    lights = tuple(fusion_light_pool(settings))
+    values = {
+        "main": settings.fusion_main,
+        "workers": tuple(settings.fusion_workers),
+        "light": lights[0] if lights else "",
+        "max_calls": 0,
+        "max_tokens": 0,
+        "max_seconds": settings.fusion_max_seconds,
+        "preference": settings.fusion_preference,
+        "reasoning": settings.fusion_reasoning,
+        "max_seconds_adaptive": settings.fusion_max_seconds_adaptive,
+    }
+    names = {field.name for field in dataclasses.fields(Policy)}
+    if "lights" in names:
+        values["lights"] = lights
+    return Policy(**{name: value for name, value in values.items() if name in names})
+
+
 WINDOW_WAIT_STEPS = 20
 WINDOW_WAIT_STEP = 0.05
 """How long (steps x seconds) an engine change waits for the new session to report its context window."""
@@ -249,6 +297,7 @@ class Conversation:
     naming: bool = False
     sent_ids: list[str] = field(default_factory=list)
     sent_versions: dict[str, int] = field(default_factory=dict)
+    turn_window: TurnWindow = field(default_factory=view_window)
     meta: dict[str, Any] = field(default_factory=dict)
     drafts: list[Attachment] = field(default_factory=list)
     inflight: tuple[Any, str, tuple[Attachment, ...]] | None = None
@@ -277,6 +326,9 @@ class Conversation:
     preview: bool = False
     """The page shows the cached conversation while the real history is still being loaded."""
     cached_turns: list[dict[str, Any]] = field(default_factory=list)
+    cached_prefix: int = 0
+    cached_cursor: tuple[str, str] | None = None
+    cached_older_plan: dict[str, Any] | None = None
     cached_meta: dict[str, Any] = field(default_factory=dict)
     """Settings, token use and context size as they were when the session was last cached: shown until the live ones are known."""
     json_cache: dict[str, tuple[int, dict[str, Any]]] = field(default_factory=dict)
@@ -298,6 +350,7 @@ class Conversation:
     """The sub-agent whose run the page's side panel shows (its thread id): only that one is pushed to the page."""
     agent_sent_ids: list[str] = field(default_factory=list)
     agent_sent_versions: dict[str, int] = field(default_factory=dict)
+    agent_window: TurnWindow = field(default_factory=view_window)
 
     @property
     def engine(self) -> str:
@@ -388,8 +441,13 @@ class AppCore:
         self.factory = factory
         self.devin = devin
         self.chatgpt = chatgpt
+        self.grok: GrokSubscription | None = getattr(getattr(chatgpt, "api", None), "grok", None)
         if chatgpt is not None:
+            chatgpt.factory = factory
             chatgpt.devin = devin
+            chatgpt.archive_meter = self.archive_meter
+            """The shared usage meter the session archives write through (``chatgpt/archive_binding``):
+            the engines ask their manager for it, here the manager is this engine."""
         self.connections = ConnectionStore()
         self.connectors = ConnectorStore(self.connections.file.parent)
         self.skill_marketplace = SkillMarketplace(self.connections)
@@ -412,6 +470,9 @@ class AppCore:
                     engine.memory = memory
         # Skills and custom commands (harness/skills): the same hook for every engine, with or without the memory.
         self.hooks.on_prompt(skills.prompt_hook)
+        # The bundled numbered-reply skill (harness/official_skill): every engine's user-facing message, until the
+        # settings switch turns it off; internal delegation prompts are left to their own protocol.
+        self.hooks.on_prompt(official_skill.prompt_hook(lambda: self.settings.numbered_reply))
         # The language of the models' thinking (core/language): the own loop has it in its instructions.
         self.hooks.on_prompt(language.prompt_hook(lambda: self.settings.think_chinese, lambda: self.settings.answer_language, lambda: self.settings.thinking_language))
         self.hooks.on_prompt(customization.prompt_hook)
@@ -450,9 +511,12 @@ class AppCore:
         self.persist = persist
         self.offline = offline
         self.cache = cache if cache is not None else Cache(None)
+        self._archive_meter: storage_meter.ArchiveMeter | None = None
+        self._expert_catalog: Any = None
         self._index: dict[str, Any] = {}
         self._index_handle: asyncio.TimerHandle | None = None
         self._hydrated = False
+        self._paged_turns = False  # opt-in at app.init so a previously built desktop page still works
         self._preview: dict[str, Any] | None = None
         self._windows: dict[str, int] = {}
         """Context window of each model (page model id) as a live session last reported it: kept in the cache so that
@@ -486,6 +550,8 @@ class AppCore:
         # while it was open.
         self._spoken: dict[str, float] = {}
         self._tasks: set[asyncio.Future[Any]] = set()
+        self._profiles_source: Any = None  # Optional test source for a leaderboard batch.
+        self._provider_save_lock = asyncio.Lock()
         self._flush_handle: asyncio.TimerHandle | None = None
         self._sidebar_handle: asyncio.TimerHandle | None = None
         self._sidebar_reload: set[str] = set()
@@ -506,6 +572,8 @@ class AppCore:
         if chatgpt is not None:
             chatgpt.add_listener(self._on_event)
             chatgpt.add_account_listener(self._on_chatgpt_account)
+        if self.grok is not None:
+            self.grok.on_models_changed = self._schedule_models
 
     # ------------------------------------------------------------------ plumbing
 
@@ -602,22 +670,110 @@ class AppCore:
             "compactAuto": self.settings.chatgpt_compact,
             "compactAt": self.settings.chatgpt_compact_at,
             "maxSteps": self.settings.max_steps,
+            "reconnectInterval": self.settings.reconnect_interval,
+            "reconnectLimit": self.settings.reconnect_limit,
             "fusionMain": self.settings.fusion_main,
             "fusionWorkers": list(self.settings.fusion_workers),
-            "fusionLight": self.settings.fusion_light,
+            "fusionLights": fusion_light_pool(self.settings),
+            "fusionLight": fusion_light_pool(self.settings)[0] if fusion_light_pool(self.settings) else "",
             "fusionReasoning": dict(self.settings.fusion_reasoning),
             "fusionPreference": self.settings.fusion_preference,
             "fusionMaxCalls": self.settings.fusion_max_calls,
             "fusionMaxTokens": self.settings.fusion_max_tokens,
             "fusionMaxSeconds": self.settings.fusion_max_seconds,
+            "fusionMaxSecondsAdaptive": self.settings.fusion_max_seconds_adaptive,
+            "fusionStepsMin": self.settings.fusion_steps_min,
+            "fusionStepsMinAdaptive": self.settings.fusion_steps_min_adaptive,
+            "fusionStepsMax": self.settings.fusion_steps_max,
+            "fusionStepsMaxAdaptive": self.settings.fusion_steps_max_adaptive,
             "thinkChinese": self.settings.think_chinese,
             "answerLanguage": self.settings.answer_language,
             "thinkingLanguage": self.settings.thinking_language or ("zh-CN" if self.settings.think_chinese else "auto"),
+            "numberedReply": self.settings.numbered_reply,
             "soundEnabled": self.settings.sound_enabled,
             "soundQuestion": sounds.sound_path("question", self.settings.sound_question),
             "soundComplete": sounds.sound_path("complete", self.settings.sound_complete),
             "soundError": sounds.sound_path("error", self.settings.sound_error),
         }
+
+    def _storage_policy(self) -> storage_policy.StoragePolicy:
+        return storage_policy.StoragePolicy(
+            self.settings.storage_max_bytes,
+            dict(self.settings.storage_shares),
+            self.settings.storage_alert_at,
+            self.settings.storage_full_policy,
+            tuple(self.settings.storage_autoclean),
+        )
+
+    @staticmethod
+    def _managed_file_bytes(path: Path) -> int:
+        try:
+            info = path.lstat()
+        except OSError:
+            return 0
+        return info.st_size if stat.S_ISREG(info.st_mode) else 0
+
+    def session_archive_root(self) -> Path:
+        """The session archive root: ``<application data>/session`` (final spec §1) — beside the own
+        engine's root, the same folder ``ArchiveBinding`` opens (``manager.root.parent / 'session'``),
+        so the meter measures exactly what the bindings write. Without the own engine it stays beside
+        the settings file. Read-only to call."""
+        root = getattr(self.chatgpt, "root", None)
+        if root is not None:
+            return Path(root).parent / "session"
+        return default_settings_path().parent / "session"
+
+    def archive_meter(self) -> storage_meter.ArchiveMeter:
+        """The shared usage meter for the session archive — the object ``SessionArchive`` takes as
+        ``meter`` so its writes are gated and counted. The gate reads live settings, so a changed
+        policy applies to the next write, not the next launch."""
+        if self._archive_meter is None:
+            self._archive_meter = storage_meter.ArchiveMeter(self.session_archive_root(), gate=self._archive_gate)
+        return self._archive_meter
+
+    def _archive_gate(self, category: str, incoming: int,
+                      archive_usage: dict[str, int | None]) -> dict[str, Any]:
+        """The verdict the meter consults inside its serialized transaction: archive-side usage merged
+        with the application's own cache and shared memory index, judged by the current policy."""
+        usage = self._storage_usage(archive_usage=archive_usage)
+        return storage_policy.check_write(self._storage_policy(), usage, category, incoming)
+
+    def _storage_usage(self, archive_usage: dict[str, int | None] | None = None) -> dict[str, int | None]:
+        """Occupancy the application itself can state, per managed-data category; anything it does not
+        measure stays unknown — the page must never draw it as zero (``storage_policy.report``).
+
+        ``cache`` is the application's own cache folder (index.json and sessions/*.json) — ``None``
+        means there is no managed cache at all, a known zero, not an unmeasured figure; ``index``
+        the shared memory's rebuildable SQLite index plus the session archive's ``index.sqlite``
+        and WAL sidecars; ``history`` and ``dump`` are the session archive's metered bytes, per the
+        usage ledger — real counts for archive-managed writes only. Legacy history outside the
+        archive root is an explicit boundary: never scanned, never silently counted as zero."""
+        usage: dict[str, int | None] = {name: None for name in storage_policy.CATEGORIES}
+        if self.cache.enabled and self.cache.folder is not None:
+            total = sum(self._managed_file_bytes(path) for path in (self.cache.folder / "sessions").glob("*.json"))
+            usage["cache"] = total + self._managed_file_bytes(self.cache.folder / "index.json")
+        elif self.cache.folder is None:
+            usage["cache"] = 0
+        archive = archive_usage if archive_usage is not None else self.archive_meter().usage()
+        usage["history"], usage["dump"] = archive["history"], archive["dump"]
+        index_bytes = archive["index"] or 0
+        if self.memory is not None:
+            index = self.memory.store.index_path
+            index_bytes += sum(self._managed_file_bytes(index.with_name(index.name + suffix))
+                               for suffix in ("", "-wal", "-shm", "-journal"))
+        usage["index"] = index_bytes
+        return usage
+
+    def storage_view(self) -> dict[str, Any]:
+        """The Storage page: the split and cap, real occupancy where the application measures it,
+        and the metered archive's scope — root, boundary, unmetered entries, cleanup support."""
+        view = storage_policy.report(self._storage_policy(), self._storage_usage())
+        view["managed"] = {"archive": self.archive_meter().describe()}
+        return view
+
+    def check_capacity(self, category: str, incoming: int) -> dict[str, Any]:
+        """Pre-write gate for the archive layer — see ``storage_policy.check_write`` for the verdict shape."""
+        return storage_policy.check_write(self._storage_policy(), self._storage_usage(), category, incoming)
 
     def project_rows(self) -> list[dict[str, Any]]:
         return [
@@ -643,8 +799,18 @@ class AppCore:
     def _visible_saved(self, folder: str) -> list[SavedRow]:
         return [row for row in self._saved.get(normalize_folder(folder), []) if self._resolve_row(row.id) == row.id]
 
-    def _project_pins(self, folder: str) -> list[str]:
-        return self.settings.session_pins.get(folder_key(folder), []) if self.settings.session_pins else []
+    def _mirror_pins(self, folder: str, *, add: str = "", drop: str = "") -> None:
+        """Keep this project's legacy ``session_pins`` a mirror of the global pin list, in its order."""
+        key = folder_key(folder)
+        known = {row["key"] for row in self._rows_for(folder) if row["pinned"]} | set(self.settings.session_pins.get(key, ()))
+        if add:
+            known.add(add)
+        known.discard(drop)
+        mirror = pin_mirror(self.settings.pinned_sessions, known)
+        if mirror:
+            self.settings.session_pins[key] = mirror
+        else:
+            self.settings.session_pins.pop(key, None)
 
     def _rows_for(self, folder: str) -> list[dict[str, Any]]:
         open_here = [c for c in self.order if same_folder(c.project, folder)]
@@ -662,9 +828,10 @@ class AppCore:
                 continue
             rows.append((saved.id, saved.modified.timestamp(), saved.id))
         for conv in open_here:
-            if conv.in_history and conv.sidebar_key not in self.settings.archived_sessions:
-                rows.append((conv.sidebar_key, conv.sidebar_active_at, conv.cid))
-        pins = {key: i for i, key in enumerate(self._project_pins(folder))}
+            # A titled first draft already has its row: the first dispatch decides whether it stays or goes again.
+            if (conv.in_history or conv.draft_title) and conv.sidebar_key not in self.settings.archived_sessions:
+                rows.append((conv.sidebar_key or self._row_of(conv) or conv.cid, conv.sidebar_active_at, conv.cid))
+        pins = {key: i for i, key in enumerate(self.settings.pinned_sessions)}
         ranks = {key: i for i, key in enumerate(self.settings.session_order)}
 
         def rank(row: tuple[str, float, str]) -> tuple[int, float, str]:
@@ -688,9 +855,11 @@ class AppCore:
         conv.sidebar_key = key
         if previous in self.settings.session_order:
             self.settings.session_order = list(dict.fromkeys(key if item == previous else item for item in self.settings.session_order))
-        pins = self._project_pins(conv.project)
-        if previous in pins:
-            pins[:] = dict.fromkeys(key if item == previous else item for item in pins)
+        if previous in self.settings.pinned_sessions:
+            self.settings.pinned_sessions = list(dict.fromkeys(key if item == previous else item for item in self.settings.pinned_sessions))
+        for mirror in self.settings.session_pins.values():
+            if previous in mirror:
+                mirror[:] = dict.fromkeys(key if item == previous else item for item in mirror)
         if previous:
             self.settings.session_created.pop(previous, None)
         self.settings.session_created[key] = conv.created_at
@@ -744,16 +913,15 @@ class AppCore:
             raise AppError("只能置顶本项目列表中已保存的会话。")
         if row["pinned"] == pinned:
             return {"ok": True}
-        project_key, key = folder_key(folder), row["key"]
-        pins = self._project_pins(folder)
+        key, pins = row["key"], self.settings.pinned_sessions
         if pinned:
             if len(pins) >= MAX_REMEMBERED_SESSIONS:
-                raise AppError("这个项目的置顶会话已达到上限。")
-            self.settings.session_pins[project_key] = [key, *pins]
+                raise AppError("置顶会话已达到上限。")
+            pins.insert(0, key)  # the newest pin leads the zone
+            self._mirror_pins(folder, add=key)
         else:
             pins.remove(key)
-            if not pins:
-                self.settings.session_pins.pop(project_key)
+            self._mirror_pins(folder, drop=key)
             self._remember_session_order([key, *(item["key"] for item in rows if not item["pinned"])])
         self._save()
         if ident in self._by_cid:
@@ -768,18 +936,27 @@ class AppCore:
             raise AppError("会话顺序不合法。")
         rows = self._rows_for(folder)
         by_id = {row["id"]: row for row in rows}
-        if ident not in by_id or target not in by_id:
-            raise AppError("只能在同一个项目内拖动仍在列表中的会话。")
-        pinned = by_id[ident]["pinned"]
-        if pinned != by_id[target]["pinned"]:
-            raise AppError("只能在同一置顶分区内拖动会话。")
+        source = by_id.get(ident)
+        if source is None:
+            raise AppError("只能拖动仍在列表中的会话。")
         if ident == target:
             return {"ok": True}
-        keys = self._project_pins(folder) if pinned else [row["key"] for row in rows if not row["pinned"]]
-        source_key, target_key = by_id[ident]["key"], by_id[target]["key"]
-        keys.remove(source_key)
-        keys.insert(keys.index(target_key) + int(after), source_key)
-        if not pinned:
+        if source["pinned"]:
+            found = next(
+                ((other, row) for other in self.settings.projects for row in self._rows_for(other) if row["id"] == target), None
+            )
+            if found is None or not found[1]["pinned"]:
+                raise AppError("只能在同一置顶分区内拖动会话。")
+            move_relative(self.settings.pinned_sessions, source["key"], found[1]["key"], after)
+            self._mirror_pins(folder)
+            if not same_folder(found[0], folder):
+                self._mirror_pins(found[0])
+        else:
+            target_row = by_id.get(target)
+            if target_row is None or target_row["pinned"]:
+                raise AppError("只能在同一个项目内拖动仍在列表中的会话。")
+            keys = [row["key"] for row in rows if not row["pinned"]]
+            move_relative(keys, source["key"], target_row["key"], after)
             self._remember_session_order(keys)
         self._save()
         self._emit_sidebar()
@@ -803,8 +980,8 @@ class AppCore:
 
     def _saved_sessions_json(self) -> dict[str, Any]:
         sessions = {}
+        pins = set(self.settings.pinned_sessions)
         for folder in self.settings.projects:
-            pins = set(self._project_pins(folder))
             for saved in self._visible_saved(folder):
                 if saved.id not in self.settings.archived_sessions:
                     sessions[saved.id] = self._saved_json(saved, folder, pinned=saved.id in pins)
@@ -813,8 +990,8 @@ class AppCore:
     def _archived_json(self) -> list[dict[str, Any]]:
         """The archived conversations the engines still list, the one archived last first."""
         found: list[tuple[int, dict[str, Any]]] = []
+        pins = set(self.settings.pinned_sessions)
         for folder in self.settings.projects:
-            pins = set(self._project_pins(folder))
             for saved in self._visible_saved(folder):
                 stamp = self.settings.archived_sessions.get(saved.id)
                 if stamp is not None:
@@ -822,8 +999,17 @@ class AppCore:
         found.sort(key=lambda pair: pair[0], reverse=True)
         return [row for _, row in found]
 
+    def _pinned_ids(self) -> list[str]:
+        """The pinned rows' public ids (an open conversation's cid), in the zone's order; hidden ones stay out."""
+        if not self.settings.pinned_sessions:
+            return []
+        rank = {key: i for i, key in enumerate(self.settings.pinned_sessions)}
+        rows = [row for folder in self.settings.projects for row in self._rows_for(folder) if row["key"] in rank]
+        rows.sort(key=lambda row: rank[row["key"]])
+        return [row["id"] for row in rows]
+
     def _emit_sidebar(self) -> None:
-        self.emit("sidebar", {"projects": self.project_rows(), "sessions": self._saved_sessions_json(), "archived": self._archived_json()})
+        self.emit("sidebar", {"projects": self.project_rows(), "pinnedSessionIds": self._pinned_ids(), "sessions": self._saved_sessions_json(), "archived": self._archived_json()})
 
     def _schedule_sidebar(self, folder: str | Path, *, reload: bool = False) -> None:
         if not any(same_folder(folder, item) for item in self.settings.projects):
@@ -860,9 +1046,13 @@ class AppCore:
                             continue  # older ACPs can omit the flag; allocation alone says nothing about a live draft
                         self._admit_history(live)
                     rows.append(SavedRow(devin_row, item.id, "devin", item.title or "", self._latest(devin_row, item.modified_at), item.message_count or 0, created=_aware(item.created_at)))
-        if self.chatgpt is not None and (self.settings.chatgpt_enabled or self._has_api_models()):
+        own_loop = self.settings.chatgpt_enabled or self._has_api_models()
+        guarded = (self.devin is not None and self.settings.devin_enabled or self.factory is not None and self.settings.factory_enabled)
+        if self.chatgpt is not None and (own_loop or guarded):
             with contextlib.suppress(Exception):
                 for item in await self.chatgpt.list_sessions(folder, SESSION_LIST_LIMIT):
+                    if not own_loop and not item.fusion:
+                        continue  # A native Fusion seat uses the host's archive, not its standalone CLI index.
                     chatgpt_row = CHATGPT_ROW_PREFIX + item.id
                     stamp = datetime.fromtimestamp(item.modified_at, timezone.utc)
                     page_model = self.catalog.page_id("chatgpt", item.model) if item.model and self.catalog is not None else ""
@@ -890,9 +1080,7 @@ class AppCore:
 
     # ------------------------------------------------------------------ models and accounts
 
-    async def _load_models(self) -> None:
-        folder = self.settings.projects[0] if self.settings.projects else str(Path.home())
-
+    async def _load_models(self, *, startup: bool = False, refresh_profiles: bool = False) -> None:
         async def from_factory() -> list[Any]:
             if self.factory is None or not self.settings.factory_enabled:
                 return []
@@ -901,12 +1089,18 @@ class AppCore:
             return []
 
         async def from_devin() -> list[Any]:
-            if self.devin is None or not self.settings.devin_enabled:
-                return []
-            with contextlib.suppress(Exception):
-                account = await self.devin.account()
+            try:
+                # The startup account event and catalog must use the same sign-in check.
+                account = await self._refresh_accounts() if startup else None
+                if self.devin is None or not self.settings.devin_enabled:
+                    return []
+                if account is None:
+                    account = await self.devin.account()
                 if account.get("auth") == "signed-in":
-                    return list(await self.devin.list_models())
+                    # app.init also runs on page reload, when the engine may have an old in-memory catalog.
+                    return list(await self.devin.list_models(refresh=startup))
+            except Exception as error:
+                log.warning("could not refresh the Devin models: %s", error)
             return []
 
         async def from_chatgpt() -> list[Any]:
@@ -925,13 +1119,15 @@ class AppCore:
             if self.chatgpt is None or lister is None:
                 return []
             try:
-                return list(await asyncio.to_thread(lister))
+                return [spec for spec in await asyncio.to_thread(lister) if not spec.id.startswith(GROK_PREFIX)]
             except Exception as error:
                 log.warning("could not read the API providers' models: %s", error)
                 return []
 
         # Some take seconds (the Devin account and its process): asked together, not one after the other.
         factory_models, devin_models, chatgpt_models, api_models = await asyncio.gather(from_factory(), from_devin(), from_chatgpt(), from_providers())
+        if self.grok is not None:
+            api_models.extend(self.grok.specs())
         provider_of = getattr(self.providers, "provider_of", None)
         window_of = getattr(self.providers, "window_of", None)
         self.catalog = build_catalog(
@@ -948,9 +1144,14 @@ class AppCore:
         for conv in self.order:
             conv.dirty = True
         self._schedule_flush()
+        if refresh_profiles:
+            s = self.settings
+            models = [m["id"] for m in self.catalog.models]
+            models.extend((s.default_model, s.fusion_main, *s.fusion_workers, *fusion_light_pool(s)))
+            self._spawn(self._refresh_profiles(models), quiet=True)
 
-    def _schedule_models(self) -> None:
-        self._spawn(self._load_models(), quiet=True)
+    def _schedule_models(self, *, startup: bool = False, refresh_profiles: bool = False) -> None:
+        self._spawn(self._load_models(startup=startup, refresh_profiles=refresh_profiles), quiet=True)
 
     def _on_devin_account(self, account: Mapping[str, Any]) -> None:
         """The engine noticed a change of the account (a sign-in finished, a sign-out)."""
@@ -1009,12 +1210,13 @@ class AppCore:
             self.say(f"读取 API Provider 失败：{error_text(error)}")
             return []
 
-    async def _refresh_accounts(self) -> None:
-        """The slow part of the accounts (``devin auth status``) once the page is up."""
+    async def _refresh_accounts(self) -> dict[str, Any]:
+        """Publish the accounts once the page is up and return the Devin status for model discovery."""
         devin = await self._devin_account()
         # Read when it is sent, not while the slow one was awaited: the user may have dismissed the one-time note or
         # signed in meanwhile, and a late event with the old values would bring it all back.
         self.emit("accounts", {"devin": devin, "chatgpt": self._chatgpt_now()})
+        return devin
 
     # ------------------------------------------------------------------ the cache
 
@@ -1031,7 +1233,9 @@ class AppCore:
             self._saved[normalize_folder(folder)] = [row for row in map(_row_from_cache, items if isinstance(items, list) else ()) if row]
         models = self._index.get("models")
         if isinstance(models, list) and not self.catalog.models:
-            items = [m for m in models if isinstance(m, dict) and isinstance(m.get("id"), str)]
+            grok_ids = {spec.id for spec in self.grok.specs()} if self.grok is not None else set()
+            items = [m for m in models if isinstance(m, dict) and isinstance(mid := m.get("id"), str)
+                     and (not mid.startswith(GROK_PREFIX) or mid in grok_ids)]
             if items:
                 self.catalog = Catalog.from_items(items)
         windows = self._index.get("windows")
@@ -1189,6 +1393,14 @@ class AppCore:
         """The conversation as it was last time, at once; the real history replaces it when the engine has loaded it."""
         conv.preview = True
         conv.cached_turns = list(snapshot["turns"])
+        conv.cached_cursor = None
+        conv.cached_prefix = 0
+        conv.cached_older_plan = None
+        if isinstance(snapshot.get("offsets"), list) and isinstance(snapshot.get("stamp"), str) and isinstance(snapshot.get("key"), str):
+            conv.cached_cursor = snapshot["key"], snapshot["stamp"]
+            offset = snapshot.get("pageStart")
+            conv.cached_prefix = offset if type(offset) is int and offset > 0 else 0
+            conv.cached_older_plan = snapshot.get("olderPlan")
         conv.cached_meta = dict(snapshot.get("meta") or {})
         conv.sent_ids = ["preview"]  # whatever is sent next replaces the list instead of adding to it
         patch = {
@@ -1200,23 +1412,29 @@ class AppCore:
             **conv.cached_meta,
             "settings": self._shown_settings(conv),
             "fusion": self._shown_fusion(conv),
-            "pinned": conv.sidebar_key in self._project_pins(conv.project),
+            "pinned": conv.sidebar_key in self.settings.pinned_sessions,
         }
         self.emit("session", {"id": conv.cid, "patch": patch})
-        self.emit("turns", {"id": conv.cid, "turns": list(snapshot["turns"]), "all": True})
+        if self._paged_turns:
+            self._flush_window(conv, cached=True)
+        else:
+            self.emit("turns", {"id": conv.cid, "turns": conv.cached_turns, "all": True})
 
     # ------------------------------------------------------------------ init
 
     async def _m_app_init(self, params: dict[str, Any]) -> dict[str, Any]:
         self._close_video_preview()  # reloading the page may skip the old player's React cleanup
+        first_init = not self._hydrated
+        self._paged_turns = params.get("turnWindow") is True
         self._hydrate()
         for conv in self.order:  # a page that has just (re)started knows nothing of the open conversations yet
             conv.meta, conv.sent_ids, conv.sent_versions, conv.dirty = {}, [], {}, True
+            conv.turn_window.reset()
+            conv.agent_window.reset()
         self._schedule_flush()
         for folder in list(self.settings.projects):
             self._spawn(self._reload_project(folder), quiet=True)
-        self._schedule_models()
-        self._spawn(self._refresh_accounts(), quiet=True)
+        self._schedule_models(startup=True, refresh_profiles=first_init and not self.offline)
         devin = self._cached_devin() or {
             "cli": "found" if self.devin is not None else "missing",
             "auth": "checking" if self.devin is not None else "signed-out",
@@ -1233,6 +1451,7 @@ class AppCore:
             "version": 1,
             "memory": memory,
             "projects": self.project_rows(),
+            "pinnedSessionIds": self._pinned_ids(),
             "sessions": self._saved_sessions_json(),
             "archived": self._archived_json(),
             "tabs": [c.cid for c in self.order],
@@ -1378,7 +1597,7 @@ class AppCore:
             return
         turns = controller.transcript.turns
         turn = turns[-1] if turns else None
-        if turn is None or turn.status is not TurnStatus.DONE:
+        if turn is None or turn.status is not TurnStatus.DONE or getattr(turn, 'fusion_outcome', '') not in ('', 'verified'):
             return
         if previous_goal is not None:
             texts = [block.text for block in turn.blocks if block.kind == "text" and block.text]
@@ -1606,8 +1825,8 @@ class AppCore:
         handoff = getattr(controller, "handoff", None)
         plan = getattr(getattr(controller, "saved", None), "plan", {})
         pending_plan = ({"id": plan["id"], "text": plan["text"]}
-                        if isinstance(plan, dict) and plan.get("status") == "pending" and settings.get("mode") == "spec"
-                        and isinstance(plan.get("id"), str) and isinstance(plan.get("text"), str) else None)
+                        if controller.state is SessionState.READY and isinstance(plan, dict) and plan.get("status") == "pending"
+                        and settings.get("mode") == "spec" and isinstance(plan.get("id"), str) and isinstance(plan.get("text"), str) else None)
         if pending_plan is not None and isinstance(plan.get("warning"), str) and plan["warning"]:
             pending_plan["warning"] = plan["warning"]
         active = datetime.fromtimestamp(controller.active_at, timezone.utc)
@@ -1645,7 +1864,7 @@ class AppCore:
             "modifiedAt": int(controller.active_at * 1000),
             "engine": conv.engine,
             "nativeId": controller.session_id or "",
-            "pinned": conv.sidebar_key in self._project_pins(conv.project),
+            "pinned": conv.sidebar_key in self.settings.pinned_sessions,
             "settings": settings,
             "usage": usage,
             "usageModels": usage_models,
@@ -1683,34 +1902,43 @@ class AppCore:
         turns = transcript.turns
         # Keep the local history through connection failures as well as loading. An error turn is not loaded history.
         hold = conv.preview and (controller.state is SessionState.OPENING or not getattr(controller, "_history_loaded", True))
-        if hold and not conv.sent_ids:  # a reloaded page needs the local history again, even while still offline
-            self.emit("turns", {"id": conv.cid, "turns": conv.cached_turns, "all": True})
-            conv.sent_ids = ["preview"]
-        if conv.preview and not hold:
+        promoting_preview = conv.preview and not hold
+        if promoting_preview:
             conv.preview = False
             conv.cached_turns = []
-        ids = [turn.id for turn in turns]
-        replace = ids[: len(conv.sent_ids)] != conv.sent_ids
-        if replace:
-            conv.sent_versions = {}
-        changed = [t for t in turns if conv.sent_versions.get(t.id) != t.version]
-        if (changed or replace) and not hold and conv.switch_task is None:
-            built = []
-            for turn in changed:
-                previous = conv.json_cache.get(turn.id) if not replace else None
-                if previous is not None and previous[0] != conv.sent_versions.get(turn.id):
-                    previous = None  # A cache write may have rebuilt this turn before the page received it.
-                entry = (turn.version, turn_json(turn, self._thumb))
-                conv.json_cache[turn.id] = entry
-                built.append(changed_blocks(entry[1], previous[1] if previous is not None else None))
-            payload = {"id": conv.cid, "turns": built, "all": replace}
-            conv.sent_ids = ids
-            for turn in changed:
-                conv.sent_versions[turn.id] = turn.version
+            conv.cached_cursor = None
+            conv.cached_prefix = 0
+            conv.cached_older_plan = None
+        if getattr(self, "_paged_turns", False):
+            if hold or conv.switch_task is None:
+                self._flush_window(conv, cached=hold, preserve_expansion=promoting_preview)
+        elif hold:
+            if not conv.sent_ids:  # a reloaded legacy page also needs the preview again
+                self.emit("turns", {"id": conv.cid, "turns": conv.cached_turns, "all": True})
+                conv.sent_ids = ["preview"]
+        elif conv.switch_task is None:
+            ids = [turn.id for turn in turns]
+            replace = ids[: len(conv.sent_ids)] != conv.sent_ids
             if replace:
-                conv.json_cache = {i: conv.json_cache[i] for i in ids if i in conv.json_cache}
-            self.emit("turns", payload)
-            self._mark_cache_dirty(conv)
+                conv.sent_versions = {}
+            changed = [t for t in turns if conv.sent_versions.get(t.id) != t.version]
+            if changed or replace:
+                built = []
+                for turn in changed:
+                    previous = conv.json_cache.get(turn.id) if not replace else None
+                    if previous is not None and previous[0] != conv.sent_versions.get(turn.id):
+                        previous = None  # A cache write may have rebuilt this turn before the page received it.
+                    entry = (turn.version, turn_json(turn, self._thumb))
+                    conv.json_cache[turn.id] = entry
+                    built.append(changed_blocks(entry[1], previous[1] if previous is not None else None, legacy=True))
+                payload = {"id": conv.cid, "turns": built, "all": replace}
+                conv.sent_ids = ids
+                for turn in changed:
+                    conv.sent_versions[turn.id] = turn.version
+                if replace:
+                    conv.json_cache = {i: conv.json_cache[i] for i in ids if i in conv.json_cache}
+                self.emit("turns", payload)
+                self._mark_cache_dirty(conv)
         meta = self._session_meta(conv)
         self._note_run(conv)
         patch = {key: value for key, value in meta.items() if conv.meta.get(key, _MISSING) != value}
@@ -1725,30 +1953,114 @@ class AppCore:
         self._flush_agent(conv)
         self._settle_inflight(conv)
 
-    def _settle_inflight(self, conv: Conversation) -> None:
-        """A message with attachments whose turn failed goes back into the composer: retrying is one Enter away."""
+    def _window_turn(self, conv: Conversation, turn: Any) -> dict[str, Any]:
+        if isinstance(turn, dict):  # self-contained cache preview
+            return turn
+        entry = conv.json_cache.get(turn.id)
+        if entry is None or entry[0] != turn.version:
+            entry = (turn.version, turn_json(turn, self._thumb))
+            conv.json_cache[turn.id] = entry
+        return entry[1]
+
+    def _flush_window(self, conv: Conversation, *, cached: bool, preserve_expansion: bool = False) -> None:
+        source = conv.cached_turns if cached else conv.controller.transcript.turns
+        window = conv.turn_window
+        # A different source can reuse the same ids and versions (preview, history restore, engine handoff).
+        if not cached and window.source is not source:
+            conv.json_cache.clear()
+        payload = window.sync(source, lambda turn: self._window_turn(conv, turn),
+                              earlier_on_disk=conv.cached_prefix if cached else 0, preserve_expansion=preserve_expansion)
+        if payload is None:
+            return
+        if payload["all"] or payload.get("trim"):
+            plan = None
+            for i in range(window.start - 1, -1, -1):
+                turn = source[i]
+                if cached:
+                    plan = turn.get("plan")
+                elif turn.plan is not None:
+                    plan = {"id": turn.plan.id, "steps": [{"text": step.text, "state": step.status} for step in turn.plan.steps]}
+                if plan is not None:
+                    break
+            payload["history"]["olderPlan"] = conv.cached_older_plan if cached and plan is None else plan
+        self.emit("turns", {"id": conv.cid, **payload})
+        if not cached:
+            self._mark_cache_dirty(conv)
+
+    async def _m_session_olderTurns(self, params: dict[str, Any]) -> dict[str, bool]:
+        conv = self._conversation(params["id"])
+        if not self._paged_turns:
+            return {"loaded": False}
+        agent_id = params.get("agentId")
+        if agent_id is not None:
+            agent = (getattr(conv.controller, "agents", None) or {}).get(agent_id) if agent_id == conv.watching else None
+            if agent is None:
+                return {"loaded": False}
+            payload = conv.agent_window.older(agent.transcript.turns, lambda turn: turn_json(turn, self._thumb),
+                                              generation=params.get("generation"), before=params.get("before"))
+            if payload is not None:
+                self.emit("agentTurns", {"id": conv.cid, "agentId": agent_id, **payload})
+        else:
+            source = conv.cached_turns if conv.preview else conv.controller.transcript.turns
+            window = conv.turn_window
+            generation, before = params.get("generation"), params.get("before")
+            render = lambda turn: self._window_turn(conv, turn)
+            payload = window.older(source, render, generation=generation, before=before)
+            if payload is None and conv.preview and conv.cached_cursor is not None and conv.cached_prefix > 0 and window.accepts(source, generation, before):
+                offset = conv.cached_prefix
+                page = await asyncio.to_thread(self.cache.load_session_page, *conv.cached_cursor, offset)
+                if (page is not None and conv.preview and self._by_cid.get(conv.cid) is conv
+                        and conv.cached_prefix == offset and window.accepts(source, generation, before)):
+                    payload = window.prepend_disk(source, page, render)
+                    conv.cached_prefix = window.earlier_on_disk
+            if payload is not None:
+                self.emit("turns", {"id": conv.cid, **payload})
+        return {"loaded": payload is not None}
+
+    @staticmethod
+    def _failed_queue_turn(conv: Conversation) -> Turn | None:
+        controller = conv.controller
+        turns = controller.transcript.turns
+        if (conv.ran and controller.state is SessionState.READY and turns
+                and turns[-1].status is TurnStatus.FAILED):
+            return turns[-1]
+        return None
+
+    def _take_inflight(self, conv: Conversation, finished: Turn | None) -> tuple[str, Sequence[Attachment]] | None:
         pending = conv.inflight
         if pending is None:
-            return
+            return None
         turn, text, attachments = pending
-        if turn.running:
-            return
+        if turn.running or (finished is not None and turn is not finished):
+            return None
         conv.inflight = None
         submitted = getattr(conv.controller, "prompt_submitted", None)
         if submitted is not None and submitted(turn):
-            return  # an error stopping an accepted native turn is not a failed delivery
+            return None  # an error stopping an accepted native turn is not a failed delivery
+        if getattr(conv.controller, "_unsent_prompt", None) == turn.id:
+            conv.unsent_turns.add(turn.id)
         if turn.id not in conv.unsent_turns and (not attachments or turn.status is not TurnStatus.FAILED):
+            return None
+        return text, attachments
+
+    def _settle_inflight(self, conv: Conversation, *, failed: Turn | None = None) -> None:
+        # Both the page flush and the queue callback may run first. Consume both sources before emitting a
+        # single restore: the page prepends each event, so two separate events cannot express this order.
+        failed = failed or self._failed_queue_turn(conv)
+        pending = self._take_inflight(conv, failed)
+        queued = self._take_queue(conv) if failed is not None and conv.queue else []
+        items = ([pending] if pending is not None else []) + queued
+        if not items:
             return
-        if not attachments:
-            self._restore(conv, [(text, ())], "这条消息没有发出，已放回输入框，可以重试。")
-            return
-        # All of them go back, whatever was put into the composer meanwhile: the notice promises a retry that is one
-        # Enter away, so no attachment may stay behind. When the lot is more than a message usually holds the user is
-        # told by how much; the send asks them (``_m_session_send``) rather than refusing or dropping one.
-        conv.drafts = [*attachments, *conv.drafts]
-        over = overage([*self._carried_attachments(conv), *conv.drafts])
-        self.emit("restore", {"id": conv.cid, "text": text, "attachments": [self._attachment_view(a) for a in conv.drafts]})
-        self.say(RETRY_NOTICE if not over.over else f"{RETRY_OVER_NOTICE}加上输入框里原有的附件，{over.describe()}，重试时会让你确认。")
+        notice = ("上一轮没有成功：排队的消息没有发出，已放回输入框。" if queued else
+                  "这条消息没有发出，已放回输入框，可以重试。" if not pending[1] else "")
+        self._restore(conv, items, notice)
+        if any(attached for _, attached in items):
+            over = overage([*self._carried_attachments(conv), *conv.drafts])
+            if over.over:
+                self.say(f"{RETRY_OVER_NOTICE}加上输入框里原有的附件，{over.describe()}，重试时会让你确认。")
+            elif pending is not None and pending[1] and not queued:
+                self.say(RETRY_NOTICE)
 
     def _attachment_view(self, attachment: Attachment) -> dict[str, Any]:
         return attachment_json(attachment, self._thumb)
@@ -1758,7 +2070,7 @@ class AppCore:
     async def _m_project_add(self, params: dict[str, Any]) -> dict[str, Any]:
         folder = params.get("path")
         if not folder:
-            start = self.settings.projects[-1] if self.settings.projects else str(Path.home())
+            start = self.settings.projects[0] if self.settings.projects else str(Path.home())
             folder = await self.platform.pick_folder(start)
             if not folder:
                 return {"added": False}
@@ -1767,7 +2079,7 @@ class AppCore:
         if not self.settings.add_project(folder):
             raise AppError("这个文件夹已经在项目列表里了。")
         self._save()
-        added = self.settings.projects[-1]
+        added = self.settings.projects[0]
         self._spawn(self._reload_project(added), quiet=True)
         self._emit_sidebar()
         return {"added": True, "id": added}
@@ -1784,6 +2096,29 @@ class AppCore:
     async def _m_project_refresh(self, params: dict[str, Any]) -> None:
         folders = [params["id"]] if params.get("id") else list(self.settings.projects)
         await asyncio.gather(*(self._reload_project(f) for f in folders), return_exceptions=True)
+
+    async def _m_project_reorder(self, params: dict[str, Any]) -> dict[str, Any]:
+        ident, target, after = params.get("id"), params.get("targetId"), params.get("after", False)
+        if not isinstance(ident, str) or not isinstance(target, str) or not isinstance(after, bool):
+            raise AppError("项目顺序不合法。")
+        try:
+            source_key, target_key = folder_key(ident), folder_key(target)
+        except (OSError, RuntimeError, ValueError):
+            raise AppError("项目顺序不合法。") from None
+        keys: dict[str, str] = {}
+        for item in self.settings.projects:
+            try:
+                keys.setdefault(folder_key(item), item)
+            except (OSError, RuntimeError, ValueError):
+                continue
+        source, mark = keys.get(source_key), keys.get(target_key)
+        if source is None or mark is None:
+            raise AppError("只能拖动列表中的项目。")
+        if source != mark:
+            move_relative(self.settings.projects, source, mark, after)
+            self._save()
+            self._emit_sidebar()
+        return {"ok": True}
 
     async def _m_project_reveal(self, params: dict[str, Any]) -> None:
         self.platform.reveal(params["id"])
@@ -1899,16 +2234,14 @@ class AppCore:
         policy = None
         page_model = params.get("modelId") or (base or self.defaults())["model"]
         if fusion:
-            from desktop.core.fusion.registry import FusionError, Policy
+            from desktop.core.fusion.registry import FusionError
             try:
-                policy = Policy(self.settings.fusion_main, tuple(self.settings.fusion_workers), self.settings.fusion_light,
-                                0, 0, self.settings.fusion_max_seconds, self.settings.fusion_preference,
-                                self.settings.fusion_reasoning)
+                policy = fusion_policy_of(self.settings)
             except FusionError as error:
                 raise AppError("请先在设置中配置 Fusion 的主模型、工作模型和轻量模型。") from error
             page_model = policy.main
             target = self.catalog.target(page_model)
-            if self.chatgpt is None or self.chatgpt.model_info(page_model if page_model.startswith("devin:") else target.model) is None:
+            if self.chatgpt is None or self.chatgpt.model_info(page_model if page_model.startswith(GUARDED) else target.model) is None:
                 raise AppError("Fusion 主模型当前不可用；不会自动替换成其他模型。")
         settings = self._open_settings(page_model, base)
         if policy is not None:
@@ -1932,7 +2265,7 @@ class AppCore:
         self._select_next = True
         self._opening_meta = settings
         try:
-            if policy is not None and page_model.startswith("devin:"):
+            if policy is not None and page_model.startswith(GUARDED):
                 controller = await self.chatgpt.open_new(folder, model=page_model, reasoning=settings.get("reasoning", ""),
                                                          autonomy=settings.get("autonomy", "code"), mode=settings.get("mode", "auto"))
             else:
@@ -2026,7 +2359,8 @@ class AppCore:
         Its token ledger is used whatever its age: only the part after the ledger's last figure is added."""
         if not self.cache.enabled:
             return None, None
-        snapshot = await asyncio.to_thread(self.cache.load_session, row_id)
+        load = self.cache.load_session_preview if self._paged_turns else self.cache.load_session
+        snapshot = await asyncio.to_thread(load, row_id)
         if not snapshot:
             return None, None
         if not snapshot.get("turns"):
@@ -2134,6 +2468,9 @@ class AppCore:
             conv.switch_task.cancel()
         elif conv.controller.busy:
             self._spawn(conv.controller.interrupt())
+        elif cancel := getattr(conv.controller, 'cancel_waiting_fusion', None):
+            if cancel() and conv.goal is not None:
+                self._stop_goal(conv, '目标已取消，未标记完成。')
 
     async def _m_session_reconnect(self, params: dict[str, Any]) -> None:
         conv = self._conversation(params["id"])
@@ -2256,7 +2593,10 @@ class AppCore:
         if getattr(controller, "stop_hook_blocked", False):
             self._stop_goal(conv, "目标先停下了：Stop Hook 未通过；模型回合已保留，但目标未标记完成。")
             return
-        if turn is None or turn.status is not TurnStatus.DONE:
+        fusion_outcome = getattr(turn, 'fusion_outcome', '')
+        if fusion_outcome in ('waiting_user', 'unverified'):
+            return  # Checkpoint recovery owns the next turn. An engine finish is not acceptance.
+        if turn is None or turn.status is not TurnStatus.DONE or fusion_outcome == 'cancelled':
             why = "这一轮出错了。" if turn is not None and turn.status is TurnStatus.FAILED else "这一轮被停止了。"
             self._stop_goal(conv, "目标先停下了：" + why)
             return
@@ -2328,6 +2668,7 @@ class AppCore:
             if conv.engine == OWN_ENGINE and conv.controller.saved.title == conv.draft_title:
                 conv.controller.saved.title = ""
             conv.draft_title = ""
+            self._schedule_sidebar(conv.project)  # its row leaves again with the title it only borrowed
 
     def _needs_first_title(self, conv: Conversation) -> bool:
         # Factory's title is provided by the native conversation, never by another account.
@@ -2354,7 +2695,7 @@ class AppCore:
         conv.naming = True
         self._flush(conv)
         try:
-            for attempt in range(session_title.FIRST_RETRIES + 1):
+            for attempt in range(1, session_title.FIRST_MAX_ATTEMPTS + 1):
                 if not allowed():
                     break
                 reason = ""
@@ -2362,7 +2703,8 @@ class AppCore:
                     if own:
                         title = await generate(controller, question, model, account, allowed, draft=True) if account is not None else None
                     else:
-                        title = session_title.clean(await devin_side.ask(self.devin, conv.project, prompt, timeout=12), first=True)
+                        answer = await devin_side.ask(self.devin, conv.project, prompt, timeout=session_title.FIRST_TIMEOUT)
+                        title = session_title.clean(answer, first=True)
                 except ChatGPTError as error:
                     title = None
                     reason = " " + chatgpt_error_text(error)
@@ -2373,9 +2715,10 @@ class AppCore:
                     if own:
                         controller.saved.title = title  # Carry it in the first dispatch checkpoint, not in a draft archive.
                     self._flush(conv)  # Publish the title before dispatching the first main prompt.
+                    self._emit_sidebar()  # The named draft is a sidebar row at once, not after the reply.
                     return
-                if attempt == session_title.FIRST_RETRIES:
-                    raise AppError(f"自动命名重试 {session_title.FIRST_RETRIES} 次后仍未成功，首条消息没有发出。{reason}")
+                if attempt == session_title.FIRST_MAX_ATTEMPTS:
+                    raise AppError(f"自动命名尝试 {attempt} 次后仍未成功，首条消息没有发出。{reason}")
                 await asyncio.sleep(0.2)
             raise AppError("会话已变化，首条消息没有发出。")
         finally:
@@ -2518,9 +2861,11 @@ class AppCore:
             if pending is not None:
                 self._set_pending_model(conv, pending)
             raise AppError("现在不能发送：会话没有就绪。")
+        if getattr(controller, 'fusion_resume_waiting', False):
+            return  # The local choice/authorization card is not a model turn or an inflight message.
         self._start_title(conv, text)
         conv.drafts = [a for a in conv.drafts if a.id not in wanted]
-        if attachments or not conv.in_history:
+        if attachments or not conv.in_history or conv.engine == "devin" or getattr(controller, "_fusion", None) is not None:
             conv.inflight = (controller.transcript.turns[-1], text, tuple(attachments))
 
     async def _m_session_approvePlan(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -2653,6 +2998,7 @@ class AppCore:
                     "fusionModel": getattr(record, "model", None),
                     "fusionRole": getattr(record, "role", None),
                     "fusionIdentity": getattr(record, "identity", None) or None,
+                    "unstartedTransfer": bool(record and record.transferred_from and not record.started_at),
                     "startedAt": int(agent.started_at_s * 1000),
                     "finishedAt": int(agent.finished_at_s * 1000) if agent.finished_at_s else None,
                 }
@@ -2669,6 +3015,11 @@ class AppCore:
             conv.watching = None
             return
         turns = agent.transcript.turns
+        if self._paged_turns:
+            payload = conv.agent_window.sync(turns, lambda turn: turn_json(turn, self._thumb))
+            if payload is not None:
+                self.emit("agentTurns", {"id": conv.cid, "agentId": agent_id, **payload})
+            return
         ids = [turn.id for turn in turns]
         replace = ids[: len(conv.agent_sent_ids)] != conv.agent_sent_ids
         if replace:
@@ -2694,13 +3045,15 @@ class AppCore:
                 except Exception as error:
                     raise AppError("专家上下文无法恢复，原记录仍保留；不会自动创建新的专家。") from error
         conv.watching = agent_id
-        conv.agent_sent_ids, conv.agent_sent_versions = ["fresh"], {}  # the first push is the whole run, replacing the panel's
+        conv.agent_sent_ids, conv.agent_sent_versions = ["fresh"], {}  # legacy panel requires an initial replacement
+        conv.agent_window.reset()
         self._flush_agent(conv)
         return {"ok": True}
 
     async def _m_agents_unwatch(self, params: dict[str, Any]) -> dict[str, Any]:
         conv = self._conversation(params["id"])
         conv.watching = None
+        conv.agent_window.reset()
         return {"ok": True}
 
     def _queued_json(self, conv: Conversation) -> list[dict[str, Any]]:
@@ -2718,12 +3071,16 @@ class AppCore:
         conv.dirty = True
         self._schedule_flush()
 
-    def _unqueue_all(self, conv: Conversation, notice: str = "") -> None:
-        """The queued messages go back into the composer (withdrawn, or the session never got ready / could not go on)."""
+    @staticmethod
+    def _take_queue(conv: Conversation) -> list[tuple[str, Sequence[Attachment]]]:
         items, conv.queue = [(m.text, m.attachments) for m in conv.queue], []
         if conv.queue_task is not None and conv.queue_task is not asyncio.current_task():
             conv.queue_task.cancel()
-        if items:
+        return items
+
+    def _unqueue_all(self, conv: Conversation, notice: str = "") -> None:
+        """The queued messages go back into the composer (withdrawn, or the session never got ready / could not go on)."""
+        if items := self._take_queue(conv):
             self._restore(conv, items, notice)
 
     def _return_steers(self, conv: Conversation) -> None:
@@ -2737,6 +3094,11 @@ class AppCore:
         """Send the next queued message, if the session can take one now."""
         controller = conv.controller
         if conv.switch_task is not None or conv.switching or not conv.queue or controller.state is not SessionState.READY or conv.cid not in self._by_cid:
+            return
+        if failed := self._failed_queue_turn(conv):
+            self._settle_inflight(conv, failed=failed)
+            return
+        if getattr(controller, 'fusion_resume_waiting', False):
             return
         plan = getattr(getattr(controller, "saved", None), "plan", {})
         if isinstance(plan, dict) and plan.get("status") == "pending":
@@ -2794,10 +3156,11 @@ class AppCore:
             self._discard_draft_title(conv)
             self._unqueue_all(conv, "会话没有就绪，排队消息已放回输入框。")
             return
-        self._start_title(conv, head.text)
         conv.queue.pop(0)
-        if head.attachments or not conv.in_history:
-            conv.inflight = (controller.transcript.turns[-1], head.text, head.attachments)
+        if not getattr(controller, 'fusion_resume_waiting', False):
+            self._start_title(conv, head.text)
+            if head.attachments or not conv.in_history or conv.engine == "devin" or fusion is not None:
+                conv.inflight = (controller.transcript.turns[-1], head.text, head.attachments)
         conv.dirty = True
         self._schedule_flush()
 
@@ -2811,16 +3174,14 @@ class AppCore:
             conv.ran = True
         elif state is SessionState.READY:
             previous_goal = conv.goal
-            turns = controller.transcript.turns
-            failed = conv.ran and bool(turns) and turns[-1].status is TurnStatus.FAILED
+            failed = self._failed_queue_turn(conv)
             ended = conv.ran
             if conv.ran:
                 self._curate(conv)
             conv.ran = False
-            if conv.queue and failed:
-                # A turn that failed would most likely fail the next one the same way; nothing is sent behind its back.
-                self._unqueue_all(conv, "上一轮没有成功：排队的消息没有发出，已放回输入框。")
-            elif conv.queue:
+            if failed is not None:
+                self._settle_inflight(conv, failed=failed)
+            if conv.queue:
                 self._pump(conv)
             elif ended:
                 self._advance_goal(conv)
@@ -3533,7 +3894,7 @@ class AppCore:
         return restored
 
     def _fusion_selection(self, conv: Conversation) -> tuple[Any, Any, Any]:
-        from desktop.core.fusion.registry import FusionError, FusionRegistry, Policy
+        from desktop.core.fusion.registry import FusionError, FusionRegistry
         retained = self._retained_fusion(conv)
         restored = ({}, {})
         try:
@@ -3544,11 +3905,36 @@ class AppCore:
                 policy = registry.policy
                 restored = self._fusion_series(retained, registry.agents)
             else:
-                policy = Policy(self.settings.fusion_main, tuple(self.settings.fusion_workers), self.settings.fusion_light,
-                                0, 0, self.settings.fusion_max_seconds, self.settings.fusion_preference, self.settings.fusion_reasoning)
+                policy = fusion_policy_of(self.settings)
         except FusionError as error:
             raise AppError("Fusion 配置不可用；请检查设置或保留的专家配置，原会话未改变。") from error
         return policy, retained, restored
+
+    # ------------------------------------------------------------------ model profiles (public leaderboard)
+
+    async def _refresh_profiles(self, models: Sequence[str], *, added: Mapping[str, str] | None = None) -> None:
+        from desktop.core.fusion import aa_catalog, profiles
+
+        # Each startup or addition gets its own source; models in that batch share one download.
+        fetch = self._profiles_source if self._profiles_source is not None else aa_catalog.source()
+        native_ids = added
+
+        def lookup(model: str) -> Any:
+            nonlocal native_ids
+            if model.startswith(API_PREFIX):
+                if native_ids is None:
+                    lister = getattr(self.providers, "api_models", None)
+                    native_ids = {spec.id: spec.native for spec in lister()} if lister is not None else {}
+                model = native_ids.get(model, model)
+            return fetch(model)
+
+        selected = [model for model in models if model.startswith(PREFIXES)]
+        root = default_settings_path().parent
+        refresh = asyncio.to_thread(profiles.refresh, root, selected, lookup, include_saved=added is None)
+        if added is None:
+            await asyncio.gather(refresh, asyncio.to_thread(profiles.refresh_frontiercode, root, selected))
+        else:
+            await refresh
 
     async def _refresh_fusion_settings(self, conv: Conversation) -> None:
         """Adopt the global preset at a new-turn boundary, never in a running model/tool step."""
@@ -3695,6 +4081,58 @@ class AppCore:
             raise AppError(f"{held.describe()}：要这样带过去，请在清单里确认。")
         return chosen
 
+    def _archive_sid_of(self, controller: Any) -> str | None:
+        """The logical-session sid this runtime was bound to, if any — only its own bound state counts; an id the
+        page or another party passes in is never taken as an identity. A native Devin session reopened from
+        history has lost the in-memory sid, so the archive's own index answers for it, by the session id its
+        endpoint returned: only an ordinary Devin instance counts, a missing index means "never archived"
+        (nothing is created), and an unreadable one raises so the switch rolls back instead of forking a second sid."""
+        binding = getattr(controller, "_archive_binding", None)
+        if binding is not None:
+            return binding.archive.sid
+        sid = getattr(controller, "_archive_sid", None)
+        if isinstance(sid, str) and sid:
+            return sid
+        origin = getattr(getattr(controller, "saved", None), "origin", None)
+        if isinstance(origin, dict):
+            return origin.get("sessionArchive")
+        native = getattr(controller, "session_id", None)
+        if getattr(controller, "engine", "") != "devin" or not isinstance(native, str) or not native:
+            return None
+        from desktop.core.session_archive import INDEX_NAME, resolve_local
+
+        root = self.session_archive_root()
+        if not (root / INDEX_NAME).is_file():
+            return None
+        owner = resolve_local(root, "devin", native)
+        return owner["sid"] if owner is not None and owner["backend"] == "devin" else None
+
+    def _adopt_archive(self, old: Any, new: Any) -> None:
+        """Hand the trusted logical-session sid to the freshly opened controller, so an engine switch stays one
+        archive: a GPT/harness segment rebinds through ``ArchiveBinding.restore``; a native Devin session enters
+        with the session id its endpoint actually returned (re-entering the same native id resumes its ``iid``).
+        Let this run only inside the switch's guard: a failure rolls the switch back — it must never graft a
+        wrong identity or invent a second sid beside the trusted one."""
+        sid = self._archive_sid_of(old)
+        if sid is None:
+            return
+        if new.engine == "devin":
+            from desktop.core.session_archive import SessionArchive
+
+            archive = SessionArchive.open(self.session_archive_root(), sid, meter=self.archive_meter())
+            archive.enter("devin", "devin", new.session_id)
+            new._archive, new._archive_sid = archive, sid
+            return
+        if new.engine != "chatgpt":
+            return
+        from desktop.core.chatgpt.archive_binding import ArchiveBinding
+        from desktop.core.chatgpt.controller import ARCHIVE_ORIGIN
+
+        binding = ArchiveBinding.restore(new.manager, sid, new.session_id)
+        new._archive_adopt(binding)
+        new.saved.origin[ARCHIVE_ORIGIN] = sid
+        new._archive_pending = False
+
     async def _switch_engine(
         self, conv: Conversation, page_model: str, carry_ids: Sequence[str] | None = None, over_ok: bool = False,
         *, fusion_policy: Any = None, fusion_retained: Any = None,
@@ -3783,6 +4221,9 @@ class AppCore:
                 )
             if controller.state is not SessionState.READY:
                 raise AppError(controller.last_error or "没有切换成功：新的会话没有启动。")
+            if controller.engine != "devin":
+                # A GPT/harness segment's sid must join ``saved.origin`` before the compatibility snapshot below.
+                self._adopt_archive(old, controller)
             if handoff is not None and not window and not summary:
                 window = await self._window_of(controller, page_model)
                 if window and getattr(controller, "handoff", None) is handoff and controller.state is SessionState.READY:
@@ -3805,6 +4246,10 @@ class AppCore:
                     # Preserve even an empty native segment: its previous turns are in the engine-neutral archive.
                     await asyncio.to_thread(self.chatgpt.sessions.save, controller._snapshot())
                     controller._checkpoint_written = True
+            if controller.engine == "devin":
+                # A Devin ``enter`` writes the archive's timeline and current at once: last, after every other
+                # fallible write, so a failed checkpoint never leaves the archive switched to a lost segment.
+                self._adopt_archive(old, controller)
         except BaseException as error:
             self._rollback_switch(conv, old, controller)
             transcript.restore(before)  # a failed open writes its error into the shared transcript
@@ -3915,7 +4360,7 @@ class AppCore:
         result = await self._import_call("commit", params)
         projects = result.pop("projects", [])
         added = False
-        for folder in projects:
+        for folder in reversed(projects):  # new projects lead the list: keep the import's own order there
             added = self.settings.add_project(folder) or added
         if added:
             self._save()
@@ -4065,6 +4510,144 @@ class AppCore:
         if self.memory is not None:
             self.emit("memory", await asyncio.to_thread(self.memory.state))
 
+    # ------------------------------------------------------------------ Fusion expert catalog
+
+    def expert_catalog(self) -> Any:
+        """The lazily opened controlled catalog shared by the settings UI and, once wired, the runtime freeze.
+
+        The root follows the actual settings file (tests point it at their own temporary profile); simply opening a
+        conversation or the application never creates or scans it.
+        """
+        if self._expert_catalog is None:
+            from desktop.core.fusion.expert_catalog import ExpertCatalog
+            self._expert_catalog = ExpertCatalog(default_settings_path().parent / "fusion-experts")
+        return self._expert_catalog
+
+    @staticmethod
+    def _expert_json(summary: Any) -> dict[str, Any]:
+        return {
+            "stableId": summary.stable_id,
+            "name": summary.name,
+            "workType": summary.work_type,
+            "tags": list(summary.tags),
+            "enabled": summary.enabled,
+            "version": summary.version,
+            "mdPath": summary.md_path,
+            "contentHash": summary.content_hash,
+            "bodyTokens": summary.body_tokens,
+            "role": summary.role,
+            "created": summary.created,
+            "updated": summary.updated,
+            "builtin": summary.builtin,
+        }
+
+    def _experts_view(self) -> dict[str, Any]:
+        from desktop.core.fusion.expert_catalog import WORK_TYPE_LABELS, WORK_TYPES
+        snapshot = self.expert_catalog().snapshot()
+        return {
+            "revision": snapshot.revision,
+            "experts": [self._expert_json(entry) for entry in snapshot.entries],
+            "workTypes": [{"id": work_type, "label": WORK_TYPE_LABELS[work_type]} for work_type in WORK_TYPES],
+        }
+
+    @staticmethod
+    def _expert_error(error: Exception) -> AppError:
+        from desktop.core.fusion.expert_catalog import ExpertConflictError, ExpertStorageError, ProtectedExpertError, UnknownExpertError
+        if isinstance(error, ExpertConflictError):
+            return AppError("这个专家已有新版本，本次未保存。请刷新后再编辑。")
+        if isinstance(error, ProtectedExpertError):
+            return AppError("内置专家标识受保护，只能修改显示名、描述和角色提示词。")
+        if isinstance(error, UnknownExpertError):
+            return AppError("没有找到这个专家，可能已经在别处被删除。")
+        if isinstance(error, ExpertStorageError):
+            return AppError("专家目录无法安全读写，本次更改没有保存。")
+        return AppError(f"专家设置不合法：{error}")
+
+    async def _experts_call(self, operation: Callable[[], Any]) -> dict[str, Any]:
+        from desktop.core.fusion.expert_catalog import ExpertCatalogError
+        try:
+            await asyncio.to_thread(operation)
+        except (ExpertCatalogError, ValueError) as error:
+            raise self._expert_error(error) from error
+        return await asyncio.to_thread(self._experts_view)
+
+    async def _m_experts_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        from desktop.core.fusion.expert_catalog import ExpertCatalogError
+        try:
+            return await asyncio.to_thread(self._experts_view)
+        except (ExpertCatalogError, ValueError) as error:
+            raise self._expert_error(error) from error
+
+    async def _m_experts_get(self, params: dict[str, Any]) -> dict[str, Any]:
+        stable_id = params.get("stableId")
+        if not isinstance(stable_id, str) or not stable_id.strip():
+            raise AppError("专家标识不合法。")
+
+        def read() -> dict[str, Any]:
+            summary = self.expert_catalog().get(stable_id)
+            if summary is None:
+                raise UnknownExpertError("No visible expert matches this stable id.")
+            resolved = self.expert_catalog().resolve_version(summary.stable_id, summary.version)
+            return {"expert": self._expert_json(resolved.summary), "markdown": resolved.markdown,
+                    "description": resolved.identity.description, "body": resolved.identity.editable_body}
+
+        from desktop.core.fusion.expert_catalog import ExpertCatalogError, UnknownExpertError
+        try:
+            return await asyncio.to_thread(read)
+        except (ExpertCatalogError, ValueError) as error:
+            raise self._expert_error(error) from error
+
+    async def _m_experts_create(self, params: dict[str, Any]) -> dict[str, Any]:
+        required = ("stableId", "name", "workType", "markdown")
+        if any(not isinstance(params.get(key), str) for key in required) or not isinstance(params.get("enabled", True), bool):
+            raise AppError("专家设置不合法。")
+        tags = params.get("tags", "")
+        if not isinstance(tags, (str, list)) or (isinstance(tags, list) and not all(isinstance(item, str) for item in tags)):
+            raise AppError("专家标签不合法。")
+        return await self._experts_call(lambda: self.expert_catalog().create(
+            stable_id=params["stableId"], name=params["name"], work_type=params["workType"],
+            markdown=params["markdown"], tags=tags, enabled=params.get("enabled", True)))
+
+    async def _m_experts_update(self, params: dict[str, Any]) -> dict[str, Any]:
+        stable_id = params.get("stableId")
+        if not isinstance(stable_id, str) or not stable_id.strip():
+            raise AppError("专家标识不合法。")
+        allowed = {"stableId", "name", "workType", "tags", "enabled", "markdown", "expectedVersion"}
+        if set(params) - allowed:
+            raise AppError("专家设置不合法。")
+        edits: dict[str, Any] = {}
+        if "expectedVersion" in params:
+            if type(params["expectedVersion"]) is not int or params["expectedVersion"] < 0:
+                raise AppError("专家版本不合法。")
+            edits["expected_version"] = params["expectedVersion"]
+        for key in ("name", "workType", "markdown"):
+            if key in params:
+                if not isinstance(params[key], str):
+                    raise AppError("专家设置不合法。")
+                edits[{"workType": "work_type"}.get(key, key)] = params[key]
+        if "tags" in params:
+            tags = params["tags"]
+            if not isinstance(tags, (str, list)) or (isinstance(tags, list) and not all(isinstance(item, str) for item in tags)):
+                raise AppError("专家标签不合法。")
+            edits["tags"] = tags
+        if "enabled" in params:
+            if not isinstance(params["enabled"], bool):
+                raise AppError("专家设置不合法。")
+            edits["enabled"] = params["enabled"]
+        return await self._experts_call(lambda: self.expert_catalog().update(stable_id, **edits))
+
+    async def _m_experts_setEnabled(self, params: dict[str, Any]) -> dict[str, Any]:
+        stable_id, enabled = params.get("stableId"), params.get("enabled")
+        if not isinstance(stable_id, str) or not stable_id.strip() or not isinstance(enabled, bool):
+            raise AppError("专家启停设置不合法。")
+        return await self._experts_call(lambda: self.expert_catalog().set_enabled(stable_id, enabled))
+
+    async def _m_experts_delete(self, params: dict[str, Any]) -> dict[str, Any]:
+        stable_id = params.get("stableId")
+        if not isinstance(stable_id, str) or not stable_id.strip():
+            raise AppError("专家标识不合法。")
+        return await self._experts_call(lambda: self.expert_catalog().delete(stable_id))
+
     # ------------------------------------------------------------------ application settings
 
     async def _m_settings_set(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -4092,10 +4675,23 @@ class AppCore:
             s.chatgpt_compact_at = value
         elif key == "maxSteps" and _is_int(value) and MAX_STEPS_RANGE[0] <= value <= MAX_STEPS_RANGE[1]:
             s.max_steps = value
-        elif key in ("fusionMain", "fusionLight") and isinstance(value, str) and len(value) <= 512 and (not value or value.startswith(("chatgpt:", "api:", "devin:"))):
-            setattr(s, "fusion_main" if key == "fusionMain" else "fusion_light", value)
-        elif key == "fusionWorkers" and isinstance(value, list) and len(value) <= 1 and all(isinstance(item, str) and len(item) <= 512 and item.startswith(("chatgpt:", "api:", "devin:")) for item in value):
-            s.fusion_workers = list(dict.fromkeys(value))
+        elif key == "reconnectInterval" and _is_int(value) and RECONNECT_INTERVAL_RANGE[0] <= value <= RECONNECT_INTERVAL_RANGE[1]:
+            s.reconnect_interval = value
+        elif key == "reconnectLimit" and _is_int(value) and RECONNECT_LIMIT_RANGE[0] <= value <= RECONNECT_LIMIT_RANGE[1]:
+            s.reconnect_limit = value
+        elif key == "fusionMain" and isinstance(value, str) and len(value) <= 512 and (not value or value.startswith(PREFIXES)):
+            s.fusion_main = value
+        elif key == "fusionLight" and isinstance(value, str) and len(value) <= 512 and (not value or value.startswith(PREFIXES)):
+            # Legacy single-choice bridge: it replaces the whole L3 pool, and the scalar mirror stays the first item.
+            s.fusion_lights = [value] if value else []
+            s.fusion_light = value
+        elif key in ("fusionWorkers", "fusionLights") and isinstance(value, list) and len(value) <= FUSION_SEAT_MODEL_LIMIT and all(isinstance(item, str) and len(item) <= 512 and item.startswith(PREFIXES) for item in value):
+            chosen = list(dict.fromkeys(value))
+            if key == "fusionWorkers":
+                s.fusion_workers = chosen
+            else:
+                s.fusion_lights = chosen
+                s.fusion_light = chosen[0] if chosen else ""
         elif key == "fusionReasoning":
             from desktop.core.fusion.reasoning import reasoning_map, reasoning_model
             try:
@@ -4116,8 +4712,27 @@ class AppCore:
             s.fusion_max_calls = value
         elif key == "fusionMaxTokens" and _is_int(value) and 1 <= value <= 2**53 - 1:
             s.fusion_max_tokens = value
-        elif key == "fusionMaxSeconds" and _is_int(value) and 1 <= value <= 86_400:
-            s.fusion_max_seconds = value
+        elif key == "fusionMaxSeconds":
+            pair = {"seconds": value, "adaptive": False} if _is_int(value) else value
+            if not (isinstance(pair, Mapping) and set(pair) == {"seconds", "adaptive"} and type(pair["adaptive"]) is bool
+                    and _is_int(pair["seconds"]) and 1 <= pair["seconds"] <= 86_400):
+                raise AppError("这个设置的值不合法。")
+            s.fusion_max_seconds, s.fusion_max_seconds_adaptive = pair["seconds"], pair["adaptive"]
+        elif key == "fusionSteps":
+            pair = value if isinstance(value, Mapping) else {}
+            low, high = pair.get("min"), pair.get("max")
+            low_adaptive, high_adaptive = pair.get("minAdaptive"), pair.get("maxAdaptive")
+            valid = (set(pair) == {"min", "minAdaptive", "max", "maxAdaptive"}
+                     and _is_int(low) and _is_int(high)
+                     and STEP_BUDGET_RANGE[0] <= low <= STEP_BUDGET_RANGE[1]
+                     and STEP_BUDGET_RANGE[0] <= high <= STEP_BUDGET_RANGE[1]
+                     and type(low_adaptive) is bool and type(high_adaptive) is bool
+                     # A disabled input never counts as inverted; a both-manual inversion is refused whole.
+                     and (low_adaptive or high_adaptive or low <= high))
+            if not valid:
+                raise AppError("这个设置的值不合法。")
+            s.fusion_steps_min, s.fusion_steps_min_adaptive = low, low_adaptive
+            s.fusion_steps_max, s.fusion_steps_max_adaptive = high, high_adaptive
         elif key == "thinkChinese" and isinstance(value, bool):
             s.think_chinese = value
             s.thinking_language = "zh-CN" if value else "auto"
@@ -4127,6 +4742,8 @@ class AppCore:
             else:
                 s.thinking_language = value
                 s.think_chinese = value == "zh-CN"
+        elif key == "numberedReply" and isinstance(value, bool):
+            s.numbered_reply = value
         elif key == "soundEnabled" and isinstance(value, bool):
             s.sound_enabled = value
             if not value:
@@ -4157,6 +4774,33 @@ class AppCore:
         view = self.settings_view()
         self.emit("settings", {"settings": view})
         return view
+
+    async def _m_storage_get(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self.storage_view()
+
+    async def _m_storage_set(self, params: dict[str, Any]) -> dict[str, Any]:
+        key, value = params.get("key"), params.get("value")
+        s = self.settings
+        if key == "maxBytes" and _is_int(value) and storage_policy.MAX_BYTES_RANGE[0] <= value <= storage_policy.MAX_BYTES_RANGE[1]:
+            s.storage_max_bytes = value
+        elif key == "shares":
+            shares = storage_policy.shares_from(value)
+            if shares is None:
+                raise AppError("各类占比必须合计 100%。")
+            s.storage_shares = shares
+        elif key == "alertAt" and _is_int(value) and storage_policy.ALERT_RANGE[0] <= value <= storage_policy.ALERT_RANGE[1]:
+            s.storage_alert_at = value
+        elif key == "fullPolicy" and value in storage_policy.FULL_POLICIES:
+            s.storage_full_policy = value
+        elif key == "autoclean":
+            picks = storage_policy.autoclean_from(value)
+            if picks is None:
+                raise AppError("这个设置的值不合法。")
+            s.storage_autoclean = picks
+        else:
+            raise AppError("这个设置的值不合法。")
+        self._save()
+        return self.storage_view()
 
     async def _m_sounds_pick(self, params: dict[str, Any]) -> dict[str, Any]:
         kind = params.get("kind")
@@ -4358,11 +5002,15 @@ class AppCore:
     async def _m_factory_account(self, params: dict[str, Any]) -> dict[str, Any]:
         if self.factory is None:
             return {"cli": "missing", "cliPath": "", "enabled": False, "path": self.settings.factory_path}
-        return {**await self.factory.account(), "path": self.settings.factory_path}
+        account = await self.factory.account()
+        if params.get("refresh") is True and account["enabled"]:
+            self._schedule_models()
+        return {**account, "path": self.settings.factory_path}
 
     async def _m_factory_configure(self, params: dict[str, Any]) -> dict[str, Any]:
-        path, enabled = params.get("path"), params.get("enabled")
-        if not isinstance(path, str) or not isinstance(enabled, bool):
+        path = params.get("path", self.settings.factory_path)
+        enabled = params.get("enabled", self.settings.factory_enabled)
+        if not ({"path", "enabled"} & params.keys()) or not isinstance(path, str) or not isinstance(enabled, bool):
             raise AppError("Factory 路径或启用状态不合法。")
         self.settings.factory_path, self.settings.factory_enabled = path.strip(), enabled
         self._save()
@@ -4431,14 +5079,60 @@ class AppCore:
         self.emit("accounts", {"chatgpt": account})
         return account
 
+    def _grok_subscription(self) -> GrokSubscription:
+        if self.grok is None:
+            raise AppError("Grok 订阅登录在这个版本里不可用。")
+        return self.grok
+
+    async def _m_grok_account(self, params: dict[str, Any]) -> dict[str, Any] | None:
+        return self.grok.account() if self.grok is not None else None
+
+    async def _m_grok_login(self, params: dict[str, Any]) -> dict[str, Any]:
+        account = self._grok_subscription()
+        account.login()
+        return account.account()
+
+    async def _m_grok_reopen(self, params: dict[str, Any]) -> dict[str, Any]:
+        account = self._grok_subscription()
+        account.reopen()
+        return account.account()
+
+    async def _m_grok_cancelLogin(self, params: dict[str, Any]) -> dict[str, Any]:
+        account = self._grok_subscription()
+        await account.cancel_login()
+        return account.account()
+
+    async def _m_grok_logout(self, params: dict[str, Any]) -> dict[str, Any]:
+        account = self._grok_subscription()
+        try:
+            await account.logout()
+        except GrokError as error:
+            raise AppError(error.message) from None
+        return account.account()
+
     def _providers(self) -> Any:
         if self.providers is None:
             raise AppError("API Provider 功能不可用。")
         return self.providers
 
+    def _save_provider(self, draft: dict[str, Any]) -> tuple[dict[str, Any], dict[str, str]]:
+        store = self._providers()
+        lister = None if self.offline else getattr(store, "api_models", None)
+        before = {(spec.provider_id, spec.native) for spec in lister()} if lister is not None else set()
+        saved = store.save(draft)
+        provider = saved["id"]
+        if lister is None or all((provider, row["id"]) in before for row in saved["models"]):
+            return saved, {}
+        added = {spec.id: spec.native for spec in lister()
+                 if spec.provider_id == provider and (provider, spec.native) not in before}
+        return saved, added
+
     async def _m_providers_save(self, params: dict[str, Any]) -> dict[str, Any]:
-        saved = await asyncio.to_thread(self._providers().save, params["draft"])
+        async with self._provider_save_lock:
+            saved, added = await asyncio.to_thread(self._save_provider, params["draft"])
         self._schedule_models()
+        if added:
+            self._spawn(self._refresh_profiles(list(added), added=added), quiet=True)
         return saved
 
     async def _m_providers_remove(self, params: dict[str, Any]) -> None:
@@ -4492,11 +5186,25 @@ class AppCore:
 
     async def shutdown(self) -> None:
         """Close every session (consumers are cancelled first) and stop talking to the page."""
-        self._write_snapshots_now()
         self._shutting_down = True
+        stop_devin = getattr(self.devin, "stop_starting", None)
+        if stop_devin is not None:
+            stop_devin()
+        try:
+            await self._stop_consumers()
+        finally:
+            await self._close_engines()
+
+    async def _stop_consumers(self) -> None:
+        try:
+            self._write_snapshots_now()
+        except Exception:
+            log.exception("could not save session snapshots during shutdown")
         self._close_video_preview()
         for flow in list(self.connectors.flows.values()):
             flow.cancel()
+        if self.grok is not None:
+            await self.grok.cancel_login()
         await asyncio.to_thread(self.skill_marketplace.close)
         if self.memory is not None:
             self.memory.flush_runs()
@@ -4506,13 +5214,19 @@ class AppCore:
         for task in list(self._tasks):
             task.cancel()
         if self._tasks:
-            await asyncio.gather(*list(self._tasks), return_exceptions=True)
-        if self.factory is not None:
-            await self.factory.close_all()
-        if self.devin is not None:
-            await self.devin.close_all()
-        if self.chatgpt is not None:
-            await self.chatgpt.close_all()
+            _, pending = await asyncio.wait(list(self._tasks), timeout=10)
+            if pending:
+                log.warning("%d application tasks did not finish during shutdown", len(pending))
+
+    async def _close_engines(self) -> None:
+        async def close(engine: Any) -> None:
+            try:
+                async with asyncio.timeout(30):
+                    await engine.close_all()
+            except Exception:
+                log.exception("%s did not cleanly shut down", type(engine).__name__)
+
+        await asyncio.gather(*(close(engine) for engine in (self.factory, self.devin, self.chatgpt) if engine is not None))
 
 
 _MISSING = object()

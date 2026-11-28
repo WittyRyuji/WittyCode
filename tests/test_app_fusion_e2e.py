@@ -3,19 +3,42 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import shutil
+import subprocess
 import threading
+from pathlib import Path
 
 import pytest
 from PySide6.QtCore import QRect, Qt
 
 from desktop.core.cache import Cache
 from desktop.core.session_state import SessionState
+from tests import e2e_support
 from tests.e2e_support import open_rig
 from tests.fake_responses import call, fail, say
 from tests.fakes import until
-from tests.ui_support import run
+from tests.ui_support import run, wait_for
 
 pytestmark = pytest.mark.ui
+
+FRONTEND = Path(__file__).resolve().parents[1] / "frontend"
+
+
+def build_page(tmp_path: Path) -> Path:
+    """Build this worktree's page into the test's disposable directory, never the shared app bundle."""
+    node = shutil.which("node")
+    assert node and (FRONTEND / "node_modules" / "vite").is_dir(), "install the pinned Node and frontend dependencies first"
+    env_dir, out_dir = tmp_path / "page-env", tmp_path / "page"
+    env_dir.mkdir()
+    subprocess.run(
+        [node, "--input-type=module", "-e", """
+          import { build } from 'vite';
+          await build({configLoader: 'runner', envDir: process.argv[1], build: {outDir: process.argv[2], emptyOutDir: false}});
+        """, str(env_dir), str(out_dir)],
+        cwd=FRONTEND, check=True, timeout=90,
+    )
+    return out_dir / "index.html"
 
 
 async def select_fusion(rig):
@@ -28,7 +51,126 @@ async def select_fusion(rig):
     await rig.click_text(".menu-item", "Fusion")
 
 
-def test_configure_and_start_fusion_with_a_local_fake(qapp, loop, tmp_path):
+def test_factory_catalog_model_can_be_picked_for_each_seat(qapp, loop, tmp_path, monkeypatch):
+    from tests.fusion_backend_support import factory_peer
+
+    async def scenario():
+        rig = await open_rig(tmp_path, factory_engine=factory_peer(tmp_path, monkeypatch))
+        try:
+            await select_fusion(rig)
+            await rig.wait_text(".settings-body h2", "Fusion")
+            for role in ("main", "worker", "light"):
+                row = f'.fusion-model-row[data-role="{role}"]'
+                await rig.click(row + " .fusion-model-picker .selectbox")
+                option = row + " .fusion-model-picker .menu-item:enabled"
+                await rig.wait_text(option, "Factory Wire")  # The catalog arrives asynchronously on the page.
+                await rig.click_text(option, "Factory Wire")
+                await rig.wait_for(row + '[data-model="factory:demo-wire"]')
+            s = rig.core.settings
+            assert (s.fusion_main, s.fusion_workers, s.fusion_light) == ("factory:demo-wire", ["factory:demo-wire"], "factory:demo-wire")
+            if evidence := os.environ.get("WITTYCODE_TEST_EVIDENCE"):
+                await rig.shot(".settings-body", Path(evidence) / "factory-seats.png")
+            assert not rig.plan.requests and not rig.plan.fake.title_requests
+        finally:
+            await rig.finish()
+    run(loop, scenario())
+
+
+def test_fusion_settings_multi_pools_and_expert_editor_use_real_bridge(qapp, loop, tmp_path):
+    async def scenario():
+        rig = await open_rig(tmp_path)
+        try:
+            await select_fusion(rig)
+            await rig.wait_text(".settings-body h2", "Fusion")
+            await wait_for(lambda: rig.js(
+                "document.querySelector('.settings').getAnimations({subtree: true})"
+                ".every(a => a.playState !== 'running' && a.playState !== 'pending')"), 30, "settings animation")
+
+            async def choose(picker: str, name: str) -> None:
+                await rig.click(picker + " .selectbox")
+                menu_item = picker + " .menu-item"
+                ready = (
+                    "(function(){"
+                    f"const item=[...document.querySelectorAll({json.dumps(menu_item)})].find(e=>e.textContent.includes({json.dumps(name)}));"
+                    "const menu=item&&item.closest('.menu');"
+                    "const visible=e=>getComputedStyle(e).visibility==='visible'&&e.getBoundingClientRect().width>0&&e.getBoundingClientRect().height>0;"
+                    "return menu&&!item.disabled&&visible(menu)&&visible(item)"
+                    "&&menu.getAnimations({subtree:true}).every(a=>a.playState!=='running'&&a.playState!=='pending');"
+                    "})()"
+                )
+                await wait_for(lambda: rig.js(ready), 30, f"{name} menu item")
+                await rig.click_text(menu_item, name)
+
+            sol, luna = "chatgpt:gpt-6.1-sol", "chatgpt:gpt-6-luna"
+            for role, name in (("main", "GPT-6.1-Sol"), ("worker", "GPT-6-Luna"), ("light", "GPT-6-Luna")):
+                row = f'.fusion-model-row[data-role="{role}"]'
+                await choose(row + " .fusion-model-picker", name)
+                await rig.wait_for(row + f'[data-model="{sol if role == "main" else luna}"]')
+
+            for role, model, expected in (
+                ("worker", "GPT-6.1-Sol", [luna, sol]),
+                ("light", "GPT-6.1-Sol", [luna, sol]),
+            ):
+                await choose(f'[data-pool="{role}"] .fusion-model-add', model)
+                actual = (lambda role=role: rig.core.settings.fusion_workers if role == "worker" else rig.core.settings.fusion_lights)
+                await until(lambda actual=actual, expected=expected: actual() == expected)
+            await rig.wait_for(".fusion-model-row", 5)
+            assert rig.core.settings.fusion_light == luna  # the legacy scalar remains the first L3 model
+
+            async def enabled_button(label):
+                return await rig.js(f"[...document.querySelectorAll('.expert-catalog button')].some(e => e.textContent.includes({json.dumps(label)}) && !e.disabled)")
+
+            await rig.wait_text(".expert-catalog", "修订")
+            await wait_for(lambda: enabled_button("新建专家"), 10, "the enabled new-expert button after the initial catalog load")
+            await rig.click_text(".expert-catalog button", "新建专家")
+            await rig.wait_for('input[aria-label="专家稳定标识"]:enabled')
+            await rig.click('input[aria-label="专家稳定标识"]')
+            await rig.type("review-ui")
+            await rig.click('input[aria-label="专家显示名"]')
+            await rig.type("界面检查")
+            await rig.click('input[aria-label="专家 Tags"]')
+            await rig.type("security api")
+            await rig.js("(function(){var e=document.querySelector('textarea[aria-label=\"专家 Markdown 指令\"]'); e.focus(); e.setSelectionRange(e.value.length, e.value.length);})()")
+            await rig.type("只读检查界面证据。")
+            await wait_for(lambda: enabled_button("创建专家"), 10, "the enabled create button")
+            await rig.click_text(".expert-editor button", "创建专家")
+            await until(lambda: rig.core.expert_catalog().get("review-ui") is not None)
+            entry = rig.core.expert_catalog().get("review-ui")
+            assert (entry.version, entry.enabled, entry.tags) == (1, True, ("security", "api"))
+            await rig.wait_text(".expert-tag-chips", "security")
+            await rig.wait_text(".connection-result", "专家已创建")
+            await rig.wait_text(".expert-editor .pstate", "v1 · 启用")
+            await rig.wait_for('input[aria-label="专家显示名"]:enabled')
+
+            await rig.click('input[aria-label="专家显示名"]')
+            await rig.js("document.querySelector('input[aria-label=\"专家显示名\"]').select()")
+            await rig.type("界面复核")
+            assert await rig.js("document.querySelector('input[aria-label=\"专家显示名\"]').value") == "界面复核"
+            await wait_for(lambda: enabled_button("保存新版本"), 10, "the enabled save button with the edited name")
+            await rig.click_text(".expert-editor button", "保存新版本")
+            await until(lambda: rig.core.expert_catalog().get("review-ui").version == 2)
+            assert rig.core.expert_catalog().get("review-ui").name == "界面复核"
+            await rig.wait_text(".connection-result", "已保存版本 2")
+            await rig.wait_text(".expert-editor .pstate", "v2 · 启用")
+
+            await wait_for(lambda: enabled_button("停用"), 10, "the enabled disable button after the save finishes")
+            await rig.click_text(".expert-editor button", "停用")
+            await until(lambda: rig.core.expert_catalog().get("review-ui").version == 3)
+            assert not rig.core.expert_catalog().get("review-ui").enabled
+            await rig.wait_text(".connection-result", "专家已停用")
+            await rig.wait_text(".expert-editor .pstate", "v3 · 停用")
+            await wait_for(lambda: enabled_button("启用"), 10, "the enabled enable button after disabling finishes")
+
+            if evidence := os.environ.get("WITTYCODE_TEST_EVIDENCE"):
+                await rig.shot(".expert-editor", Path(evidence) / "fusion-expert-settings.png")
+            assert not rig.plan.requests and not rig.plan.fake.title_requests
+        finally:
+            await rig.finish()
+    run(loop, scenario())
+
+
+def test_configure_and_start_fusion_with_a_local_fake(qapp, loop, tmp_path, monkeypatch):
+    monkeypatch.setattr(e2e_support, "PAGE_FILE", build_page(tmp_path))
     async def scenario():
         rig = await open_rig(tmp_path)
         try:
@@ -58,10 +200,34 @@ def test_configure_and_start_fusion_with_a_local_fake(qapp, loop, tmp_path):
             assert "各模型思考等级" not in await rig.text(".settings-body")
             assert not await rig.exists('input[aria-label="专家调用次数"]')
             assert not await rig.exists('input[aria-label="Token 预算"]')
-            await rig.click('input[aria-label="成本与效率倾向"]')
-            await rig.press("End")
+            slider = 'input[aria-label="成本与质量倾向"]'
+            pref = json.loads(await rig.js("""JSON.stringify((() => {
+                const el = document.querySelector('input[aria-label="成本与质量倾向"]');
+                return { step: el.step, min: el.min, max: el.max, text: document.querySelector('.fusion-preference').innerText };
+            })())"""))
+            assert (pref["min"], pref["max"], pref["step"]) == ("0", "100", "1")
+            assert "0 · 成本优先" in pref["text"] and "100 · 质量优先" in pref["text"]
+            assert "×" not in pref["text"], "the retired cost/quality weights must not be shown as model-order semantics"
+            assert "参与派工与审核时的偏好判断" in await rig.text(".settings-body")
+            assert "不承诺价格、结果质量、费用上限或账单金额" in await rig.text(".settings-body")
+
+            await rig.click(slider)
+            await rig.press(Qt.Key.Key_Home)
+            await until(lambda: rig.core.settings.fusion_preference == 0)
+            assert await rig.js("document.querySelector('input[aria-label=\"成本与质量倾向\"]').getAttribute('aria-valuetext')") == "0：成本优先"
+            await rig.press(Qt.Key.Key_End)
             await until(lambda: rig.core.settings.fusion_preference == 100)
-            await rig.wait_text(".fusion-preference-weights", "效率 ×1.50")
+            assert await rig.js("document.querySelector('input[aria-label=\"成本与质量倾向\"]').getAttribute('aria-valuetext')") == "100：质量优先"
+
+            for expected in range(99, 70, -1):
+                await rig.press(Qt.Key.Key_Left)
+                await until(lambda expected=expected: rig.core.settings.fusion_preference == expected)
+            await rig.press(Qt.Key.Key_Right)
+            await until(lambda: rig.core.settings.fusion_preference == 72)
+            assert await rig.js("document.querySelector('input[aria-label=\"成本与质量倾向\"]').getAttribute('aria-valuetext')") == "72；0 为成本优先，100 为质量优先"
+            await rig.wait_text(".fusion-preference-weights", "当前 72")
+            await rig.press(Qt.Key.Key_End)
+            await until(lambda: rig.core.settings.fusion_preference == 100)
             assert rig.window.grab().save(str(tmp_path / "fusion-settings.png"))
             await rig.click('.settings-body button[aria-label="关闭"]')
             await select_fusion(rig)
@@ -73,9 +239,10 @@ def test_configure_and_start_fusion_with_a_local_fake(qapp, loop, tmp_path):
             await rig.send("请检查模块")
             await rig.wait_text(".chip-model .chip-v", "Fusion")
             await rig.wait_text(".transcript", "主代理已检查报告")
-            await rig.wait_text(".tab-title", "会话主题摘要")
-            await rig.wait_text(".srow.open .stitle", "会话主题摘要")
-            assert "会话主题摘要" not in await rig.text(".transcript")
+            title = await rig.text(".srow.open .stitle")
+            assert title.strip() and title != "新会话"
+            assert await rig.text(".tab-title") == title
+            assert title not in await rig.text(".transcript")
             await rig.wait_for(".agent-history-toggle")
             await rig.click(".agent-history-toggle")
             await rig.wait_text(".agent-chip", "src")
@@ -111,12 +278,12 @@ def test_configure_and_start_fusion_with_a_local_fake(qapp, loop, tmp_path):
             assert len(rig.plan.requests) == 3 and any(view.record.status == "retired" for view in main.agents.values())
             assert not await rig.exists(".fusion-budget")
             assert (main._fusion.registry.policy.max_calls, main._fusion.registry.policy.max_tokens, main._fusion.registry.policy.preference) == (0, 0, 100)
-            assert "cost x0.50" in rig.plan.requests[0]["instructions"] and "efficiency x1.50" in rig.plan.requests[0]["instructions"]
+            assert "cost x0.50" in rig.plan.requests[0]["instructions"] and "quality x1.50" in rig.plan.requests[0]["instructions"]
             assert len(rig.plan.requests) == 3
             await rig.click(".tab.current .tab-x")
-            await rig.wait_text(".srow:not(.open) .stitle", "会话主题摘要")
-            await rig.click_text(".srow:not(.open)", "会话主题摘要")
-            await rig.wait_text(".tab-title", "会话主题摘要")
+            await rig.wait_text(".srow:not(.open) .stitle", title)
+            await rig.click_text(".srow:not(.open)", title)
+            await rig.wait_text(".tab-title", title)
             await rig.wait_text(".transcript", "主代理已检查报告")
             assert len(rig.plan.fake.title_requests) == 1
         finally:
@@ -305,6 +472,94 @@ def test_fusion_model_menus_respect_visibility_and_include_devin(qapp, loop, tmp
             await until(lambda: rig.core.settings.fusion_workers == ["devin:swe-2-high"])
             assert not harness.requests("session/prompt")
             assert rig.window.grab().save(str(tmp_path / "fusion-models.png"))
+        finally:
+            await rig.finish()
+    run(loop, scenario())
+
+
+def test_the_step_band_saves_as_one_group_in_fusion_settings(qapp, loop, tmp_path):
+    from desktop.core.app_core import AppError
+
+    async def scenario():
+        rig = await open_rig(tmp_path)
+        try:
+            await rig.press(Qt.Key.Key_Comma, Qt.KeyboardModifier.ControlModifier)
+            await rig.wait_for(".settings")
+            await rig.click_text(".snav", "Fusion")
+            steps = '[role="group"][aria-label="委派步数范围"]'
+            seconds = '[role="group"][aria-label="单个专家最长运行秒数"]'
+            button = steps + " .step-save"
+            await rig.wait_for(button, 1)
+            await rig.wait_for(seconds + " .step-save", 1)
+            box = steps + ' input[aria-label="委派最小步数 Adaptive"]'
+            low = steps + ' input[aria-label="委派最小步数"]'
+            hi_box = steps + ' input[aria-label="委派最大步数 Adaptive"]'
+            high = steps + ' input[aria-label="委派最大步数"]'
+            state = f"JSON.stringify([document.querySelector({json.dumps(box)}).checked," \
+                    f"document.querySelector({json.dumps(hi_box)}).checked," \
+                    f"document.querySelector({json.dumps(low)}).disabled, document.querySelector({json.dumps(low)}).value," \
+                    f"document.querySelector({json.dumps(high)}).disabled, document.querySelector({json.dumps(high)}).value])"
+            assert json.loads(await rig.js(state)) == [True, True, True, "16", True, "32"], "both sides adaptive, inputs off, base numbers"
+            adaptive_bg = await rig.js(f"getComputedStyle(document.querySelector({json.dumps(low)})).backgroundColor")
+            if evidence := os.environ.get("WITTYCODE_TEST_EVIDENCE"):
+                await rig.js(f"document.querySelector({json.dumps(steps)}).scrollIntoView()")
+                await rig.shot(".settings", Path(evidence) / "fusion-step-budget.png")
+            # Unchecking lets the user type; checking again remembers the typed number.
+            await rig.click(box)
+            assert json.loads(await rig.js(state))[:3] == [False, True, False], "each side's Adaptive is independent"
+            manual_bg = await rig.js(f"getComputedStyle(document.querySelector({json.dumps(low)})).backgroundColor")
+            assert manual_bg != adaptive_bg, "a manual number box is visibly different from the adaptive grey"
+            await rig.click(low)
+            await rig.press(Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
+            await rig.type("60")
+            await rig.click(box)
+            await rig.click(box)
+            assert await rig.js(f'document.querySelector({json.dumps(low)}).value') == "60", "the typed number is remembered"
+            # A both-manual inversion disables the save; a manual floor beside an adaptive ceiling does not.
+            await rig.click(hi_box)
+            await rig.click(high)
+            await rig.press(Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
+            await rig.type("30")
+            assert await rig.js(f'document.querySelector({json.dumps(button)}).disabled')
+            await rig.click(hi_box)  # back to adaptive: no inversion, save works again
+            assert not await rig.js(f'document.querySelector({json.dumps(button)}).disabled')
+            await rig.click(hi_box)
+            await rig.click(high)
+            await rig.press(Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
+            await rig.type("90")
+            # The grid lines both rows up; the save key sits under the number column at the same x, width and height.
+            rect = await rig.js(
+                "JSON.stringify((function(){"
+                f"var n=document.querySelector({json.dumps(low)}),h=document.querySelector({json.dumps(high)}),"
+                f"c=document.querySelector({json.dumps(box)}),k=document.querySelector({json.dumps(hi_box)}),"
+                f"b=document.querySelector({json.dumps(button)});"
+                "var rn=n.getBoundingClientRect(),rh=h.getBoundingClientRect(),rc=c.getBoundingClientRect(),"
+                "rk=k.getBoundingClientRect(),rb=b.getBoundingClientRect();"
+                "return [rn.x,rh.x,rc.x,rk.x,rb.x,rn.width,rb.width,rn.height,rb.height];})())")
+            nx, hx, cx, kx, bx, nw, bw, nh, bh = json.loads(rect)
+            assert abs(nx - hx) <= 1 and abs(cx - kx) <= 1, "the two Adaptive rows line up"
+            assert abs(bx - nx) <= 1 and abs(bw - nw) <= 1 and abs(bh - nh) <= 1, "the save key matches the number box"
+            # Both saves can be enabled at once; applying one group must not commit the other's draft.
+            await rig.click(seconds + ' input[aria-label="最长秒数 Adaptive"]')
+            await rig.wait_for(seconds + " .step-save:enabled", 1)
+            await rig.click(button)
+            await until(lambda: rig.core.settings.fusion_steps_min == 60 and not rig.core.settings.fusion_steps_min_adaptive
+                        and rig.core.settings.fusion_steps_max == 90 and not rig.core.settings.fusion_steps_max_adaptive)
+            assert rig.core.settings.fusion_max_seconds_adaptive
+            await rig.click(seconds + " .step-save:enabled")
+            await until(lambda: not rig.core.settings.fusion_max_seconds_adaptive)
+            # The backend refuses a crafted bad group on its own and keeps the last valid one.
+            for value in ({"min": 91, "minAdaptive": False, "max": 90, "maxAdaptive": False},
+                          {"min": 5, "minAdaptive": False, "max": 15}):
+                with pytest.raises(AppError):
+                    await rig.core.call("settings.set", {"key": "fusionSteps", "value": value})
+            assert (rig.core.settings.fusion_steps_min, rig.core.settings.fusion_steps_max) == (60, 90)
+            await rig.press("Escape")
+            await rig.press(Qt.Key.Key_Comma, Qt.KeyboardModifier.ControlModifier)
+            await rig.wait_for(".settings")
+            await rig.click_text(".snav", "Fusion")
+            await rig.wait_for(button, 1)
+            assert json.loads(await rig.js(state)) == [False, False, False, "60", False, "90"]
         finally:
             await rig.finish()
     run(loop, scenario())

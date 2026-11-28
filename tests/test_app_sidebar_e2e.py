@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+from pathlib import Path
 
 import pytest
 
 from desktop.core.cache import Cache
 from desktop.core.session_state import SessionState
+from tests.app_support import save_conversation
 from tests.devin_support import make_engine as make_devin
 from tests.e2e_support import open_rig
 from tests.test_app_cache_preview import local_snapshot
@@ -110,6 +114,97 @@ def test_local_messages_settings_and_usage_are_visible_before_devin_connects_and
             await rig.wait_for(".boot", 0)
             await rig.wait_text(".text-block", "An answer available offline")
             assert await rig.text(".block.user .body") == "A question from last time", "reloading the page while offline keeps the preview too"
+        finally:
+            await rig.finish()
+
+    run(loop, scenario())
+
+
+async def session_titles(rig, project_id: str) -> list[str]:
+    """The ordinary sidebar rows of one project, in shown order (``.proj`` is found by id: paths do not
+    survive a CSS attribute selector)."""
+    raw = await rig.js(
+        "JSON.stringify((() => {const p = [...document.querySelectorAll('.proj')].find("
+        f"p => p.dataset.projectId === {json.dumps(project_id)});"
+        "return p ? [...p.querySelectorAll('.slist .stitle')].map(e => e.textContent.trim()) : [];})())"
+    )
+    return json.loads(raw)
+
+
+def test_two_projects_share_one_pinned_strip_above_them(qapp, loop, tmp_path):
+    async def scenario():
+        rig = await open_rig(tmp_path, saved=[("new", "Newer", 5), ("mid", "Middle", 20), ("old", "Older", 60)])
+        try:
+            await rig.wait_for(".srow", 3)
+            proj = str(rig.project)
+            other_dir = tmp_path / "other"
+            other_dir.mkdir()
+            save_conversation(rig.engine, other_dir, "x1", "X1", minutes_ago=30)
+            save_conversation(rig.engine, other_dir, "x2", "X2", minutes_ago=10)
+            await rig.core.call("project.add", {"path": str(other_dir)})
+            await rig.core.call("project.refresh")
+            other = str(other_dir.resolve())
+            await rig.wait_for('.srow[data-session-id="cg:x2"]')
+            assert await rig.texts(".side-scroll .proj .pname") == ["other", "proj"], "a newly added project opens the list"
+
+            await rig.click('.srow[data-session-id="cg:mid"]', right=True)
+            await rig.wait_for(".menu-item")
+            await rig.click_text(".menu-item", "置顶")
+            await rig.wait_for('.side-pinned .srow[data-session-id="cg:mid"]')
+            await rig.click('.srow[data-session-id="cg:x1"] .more')
+            await rig.wait_for(".menu-item")
+            await rig.click_text(".menu-item", "置顶")
+            await rig.wait_for('.side-pinned .srow[data-session-id="cg:x1"]')
+            assert await rig.texts(".side-pinned .srow .stitle") == ["X1", "Middle"], "the newest pin leads one strip above the projects"
+            assert await session_titles(rig, proj) == ["Newer", "Older"]
+            assert await session_titles(rig, other) == ["X2"]
+            for row in ("cg:mid", "cg:x1"):
+                assert await rig.count(f'.srow[data-session-id="{row}"]') == 1, "a pinned row shows only at the top"
+
+            toggle = await rig.js(
+                "[...document.querySelectorAll('.side-scroll .proj')].findIndex(p => p.dataset.projectId === " + json.dumps(other) + ")"
+            )
+            await rig.click(".proj-toggle", toggle)
+            await rig.wait_for(".proj .slist", 1)
+            assert await rig.texts(".side-pinned .srow .stitle") == ["X1", "Middle"], "a folded project keeps its pinned rows"
+            await rig.click(".proj-toggle", toggle)
+            await rig.wait_for(".proj .slist", 2)
+
+            await rig.js(
+                "(() => {"
+                "const projs = [...document.querySelectorAll('.proj')];"
+                f"const source = projs.find(p => p.dataset.projectId === {json.dumps(other)}).querySelector('.phead-row');"
+                f"const target = projs.find(p => p.dataset.projectId === {json.dumps(proj)});"
+                "const dt = new DataTransfer();"
+                "source.dispatchEvent(new DragEvent('dragstart', {bubbles: true, dataTransfer: dt}));"
+                "const r = target.getBoundingClientRect();"
+                "for (const type of ['dragover', 'drop']) target.dispatchEvent(new DragEvent(type, {bubbles: true, cancelable: true, dataTransfer: dt, clientY: r.bottom - 2}));"
+                "source.dispatchEvent(new DragEvent('dragend', {bubbles: true, dataTransfer: dt}));"
+                "})()"
+            )
+            await wait_for(lambda: rig.js("document.querySelector('.side-scroll .proj').dataset.projectId === " + json.dumps(proj)), 10, "the dragged project")
+            assert await rig.texts(".side-scroll .proj .pname") == ["proj", "other"]
+            assert rig.core.settings.projects == [proj, other]
+            assert await rig.texts(".side-pinned .srow .stitle") == ["X1", "Middle"], "a project drag leaves the pinned strip alone"
+
+            save_conversation(rig.engine, other_dir, "x3", "X3", minutes_ago=1)
+            await rig.click('.side-head-actions [aria-label="刷新会话列表"]')
+            await rig.wait_for('.srow[data-session-id="cg:x3"]')
+            assert await rig.texts(".side-scroll .proj .pname") == ["proj", "other"]
+            assert await rig.texts(".side-pinned .srow .stitle") == ["X1", "Middle"]
+            assert await session_titles(rig, other) == ["X3", "X2"]
+
+            if evidence := os.environ.get("WITTYCODE_TEST_EVIDENCE"):
+                await rig.js("[...document.querySelectorAll('.ppath')].forEach(e => e.textContent = 'C:\\\\Projects\\\\demo')")
+                await rig.shot(".sidebar", Path(evidence) / "two-projects-pins-qt.png")
+
+            await rig.click('.side-pinned .srow[data-session-id="cg:mid"]', right=True)
+            await rig.wait_for(".menu-item")
+            await rig.click_text(".menu-item", "取消置顶")
+            await wait_for(lambda: rig.js("document.querySelectorAll('.side-pinned .srow').length === 1"), 10, "one pin left")
+            assert await rig.texts(".side-pinned .srow .stitle") == ["X1"]
+            assert await session_titles(rig, proj) == ["Middle", "Newer", "Older"], "unpinning returns the row to the head of its own project"
+            assert rig.core.settings.pinned_sessions == ["cg:x1"]
         finally:
             await rig.finish()
 

@@ -6,6 +6,7 @@ fake (``tests/app_support``)."""
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -13,8 +14,9 @@ from desktop.core.app_core import AppError
 from desktop.core.cache import Cache
 from desktop.core.devin.controller import DevinController
 from desktop.core.devin.errors import DevinError
+from desktop.core.devin.models import DevinModel
 from desktop.core.session_state import SessionState
-from tests.app_support import make_core, ready_core
+from tests.app_support import make_core, ready_core, without_numbered_reply
 from tests.devin_support import make_engine
 from tests.fakes import until
 from tests.fake_responses import say
@@ -72,6 +74,7 @@ def test_the_devin_models_are_in_the_catalog_under_their_own_prefix(tmp_path):
         swe = models["devin:swe-2-high"]
         assert (swe["label"], swe["efforts"], swe["defaultEffort"], swe["window"], swe["note"], swe["group"]) == (
             "SWE-2", ["medium", "high", "max"], "high", 262000, "Free", "Cognition")
+        assert models["devin:glm-5-2"]["label"] == "GLM-5.2"
         assert models["devin:glm-5-2"]["noImages"] is True and "noImages" not in swe
         assert models["devin:adaptive"]["efforts"] == []
         target = core.catalog.target("devin:claude-opus-5-5-medium")
@@ -84,6 +87,33 @@ def test_the_devin_models_are_in_the_catalog_under_their_own_prefix(tmp_path):
         cached = Catalog.from_items(events.last("models")["models"])
         assert cached.engine_of("devin:swe-2-high") == "devin" and cached.page_id("devin", "swe-2-high") == "devin:swe-2-high"
         await core.shutdown()
+
+    run(scenario())
+
+
+def test_startup_refreshes_devin_even_with_a_warm_model_cache(tmp_path):
+    async def scenario():
+        harness = make_engine(tmp_path)
+        engine = harness.engine
+        await engine.account()  # warm credentials too, so the account check does not invalidate the old list
+        account = engine.account = AsyncMock(wraps=engine.account)
+        engine._models = [DevinModel("swe-2-high", "SWE-2")]
+        cache = Cache(tmp_path / "catalog-cache")
+        cache.save_index({"models": [{"id": "devin:swe-2-high", "label": "SWE-2", "source": "devin"}]})
+        core, _, events, _, _ = make_core(tmp_path, plan=False, projects=False, devin_engine=engine, cache=cache)
+        engine.settings = core.settings
+        try:
+            init = await core.call("app.init")
+            assert [m["id"] for m in init["models"]] == ["devin:swe-2-high"]
+            await until(lambda: events.of("models"))
+            assert events.last("accounts")["devin"]["auth"] == "signed-in"
+            assert "devin:glm-5-2" in [m["id"] for m in events.last("models")["models"]]
+            account.assert_awaited_once()
+            assert len(harness.requests("session/new")) == len(harness.requests("session/delete")) == 1
+            assert not harness.requests("session/prompt")
+        finally:
+            await core.shutdown()
+        assert "devin:glm-5-2" in [m["id"] for m in cache.load_index()["models"]]
 
     run(scenario())
 
@@ -276,7 +306,7 @@ def test_a_devin_session_opens_runs_and_reports_its_settings_and_total(tmp_path)
         # (the level is the one the user's defaults ask for, when the model offers it: Opus offers "medium")
         assert patch["settings"] == {"model": "devin:claude-opus-5-5-medium", "reasoning": "medium", "autonomy": "code", "mode": "auto"}
         assert (await core.call("session.send", {"id": cid, "text": "hello"}))["ok"]
-        await until(lambda: meta(events, cid).get("mark") == "ready" and answer_of(events, cid) == "echo: hello")
+        await until(lambda: meta(events, cid).get("mark") == "ready" and without_numbered_reply(answer_of(events, cid)) == "echo: hello")
         # the figures of the prompt: input without the cache, output, the cache read; and the context of the last call
         await until(lambda: (meta(events, cid).get("usage") or {}).get("input") == 900)
         assert meta(events, cid)["usage"] == {"input": 900, "output": 12, "cacheWrite": None, "cacheRead": 300}
@@ -429,7 +459,7 @@ def test_stop_ends_the_turn_and_a_waiting_message_goes_on(tmp_path):
         assert await core.call("session.send", {"id": cid, "text": "after that", "how": "queue"}) == {"ok": True, "queued": True}
         await until(lambda: [m["text"] for m in meta(events, cid).get("queued") or []] == ["after that"])
         await core.call("session.stop", {"id": cid})
-        await until(lambda: answer_of(events, cid) == "echo: after that")  # (the queue is still sent after a stop)
+        await until(lambda: without_numbered_reply(answer_of(events, cid)) == "echo: after that")
         await until(lambda: meta(events, cid).get("mark") == "ready" and not meta(events, cid).get("queued"))
         statuses = [t["status"] for payload in events.of("turns") if payload["id"] == cid for t in payload["turns"]]
         assert "interrupted" in statuses
@@ -447,7 +477,7 @@ def test_enter_can_steer_the_running_turn_and_it_is_one_turn_with_the_message_in
         assert await core.call("session.send", {"id": cid, "text": "go ahead", "how": "steer"}) == {"ok": True, "steered": True}
         await until(lambda: meta(events, cid).get("mark") == "ready")
         turns = core._by_cid[cid].controller.transcript.turns
-        assert len(turns) == 1 and answer_of(events, cid).endswith("got: go ahead")
+        assert len(turns) == 1 and without_numbered_reply(answer_of(events, cid)).endswith("got: go ahead")
         blocks = last_turn_blocks(events, cid)
         assert [b["text"] for b in blocks if b["kind"] == "user" and b.get("steer")] == ["go ahead"]
         await core.shutdown()
@@ -537,11 +567,12 @@ def test_a_chatgpt_plan_conversation_moves_to_devin_with_its_earlier_text_and_ba
         assert result == {"ok": True} and core._by_cid[cid].engine == "chatgpt"
         assert len(plan.requests) == 1, "selection does not request a summary"
         await core.call("session.send", {"id": cid, "text": "and 3+3?"})
-        await until(lambda: meta(events, cid).get("mark") == "ready" and answer_of(events, cid).endswith("and 3+3?"))
+        await until(lambda: meta(events, cid).get("mark") == "ready" and without_numbered_reply(answer_of(events, cid)).endswith("and 3+3?"))
         assert core._by_cid[cid].engine == "devin" and meta(events, cid)["engine"] == "devin"
         assert any("已换到 SWE-2（Devin）" in p["text"] for p in events.of("notice"))
         (sent,) = harness.requests("session/prompt")
-        assert "what is 2+2" in sent["prompt"][0]["text"] and "It is four." in sent["prompt"][0]["text"] and sent["prompt"][0]["text"].endswith("and 3+3?")
+        prompt = without_numbered_reply(sent["prompt"][0]["text"])
+        assert "what is 2+2" in prompt and "It is four." in prompt and prompt.endswith("and 3+3?")
         assert meta(events, cid)["handoff"] is None
         # and back to ChatGPT Plan
         assert await core.call("session.choose", {"id": cid, "field": "model", "value": "chatgpt:gpt-6.1-sol"}) == {"ok": True}

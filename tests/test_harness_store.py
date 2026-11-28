@@ -53,6 +53,45 @@ def test_a_session_comes_back_exactly_as_saved(tmp_path):
     assert loaded.messages == 1
 
 
+def test_fusion_resume_metadata_is_optional_and_round_trips(tmp_path):
+    store = SessionStore(tmp_path)
+    saved = session()
+    path = tmp_path / 'sessions' / 's1.json'
+    store.save(saved)
+    legacy = json.loads(path.read_text(encoding='utf-8'))
+    assert not {'fusionTask', 'fusionKind', 'fusionResumeSource'} & legacy['turns'][0].keys()
+    assert store.load('s1').turns[0].fusion_kind == ''
+
+    turn = saved.turns[0]
+    turn.fusion_task, turn.fusion_kind, turn.fusion_resume_source = 'task-1', 'complex', 'manual'
+    turn.fusion_plan = 'plan-1'
+    store.save(saved)
+    assert store.load('s1').turns == saved.turns
+
+
+def test_turn_feedback_is_optional_archive_metadata(tmp_path):
+    store = SessionStore(tmp_path)
+    saved = session()
+    path = tmp_path / "sessions" / "s1.json"
+    store.save(saved)
+    legacy = json.loads(path.read_text(encoding="utf-8"))
+    assert not {"opening", "dispatches"} & legacy["turns"][0].keys()
+    old_turn = store.load("s1").turns[0]
+    assert old_turn.opening == "" and old_turn.dispatches == []
+
+    saved.turns[0].opening = "I’ll verify the stock totals."
+    saved.turns[0].dispatches = ["Coder-Inventory", "Runner-Inventory"]
+    store.save(saved)
+    new = json.loads(path.read_text(encoding="utf-8"))
+    assert new["items"] == legacy["items"]
+    assert store.load("s1") == saved
+
+    new["turns"][0].update(opening=42, dispatches=[None, "Runner-Inventory", "", "Runner-Inventory"])
+    path.write_text(json.dumps(new), encoding="utf-8")
+    turn = store.load("s1").turns[0]
+    assert turn.opening == "" and turn.dispatches == ["Runner-Inventory"]
+
+
 def test_an_unknown_session_is_none(tmp_path):
     assert SessionStore(tmp_path).load("nope") is None
 

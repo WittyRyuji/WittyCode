@@ -18,8 +18,10 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from desktop.core import storage_policy
 from desktop.core.fusion.gates import GATES
 from desktop.core.fusion.reasoning import reasoning_map
+from desktop.core.sidebar_order import merge_pins
 
 log = logging.getLogger("desktop.settings")
 
@@ -52,6 +54,16 @@ MAX_OPEN_SESSIONS_RANGE = (1, 16)
 DEFAULT_MAX_OPEN_SESSIONS = 4
 DEFAULT_MAX_STEPS = 80
 MAX_STEPS_RANGE = (1, 2**53 - 1)  # positive integers that survive the JSON/JavaScript bridge exactly
+RECONNECT_INTERVAL_RANGE = (1, 3600)
+RECONNECT_LIMIT_RANGE = (0, 5)
+DEFAULT_RECONNECT_INTERVAL = 30
+DEFAULT_RECONNECT_LIMIT = RECONNECT_LIMIT_RANGE[1]
+STEP_BUDGET_RANGE = (1, 1000)
+"""Bounds of one delegation's step budget; the global per-turn cap still applies on top of it."""
+STEP_BUDGET_DEFAULT = (16, 32)
+"""Remembered manual floor/ceiling before the user picks their own; both sides start adaptive."""
+FUSION_SEAT_MODEL_LIMIT = 32
+"""A guardrail for a settings file or bridge message, not a product target: real model menus are much smaller."""
 MAX_REMEMBERED_SESSIONS = 5000
 """Archived and renamed conversations kept in the settings file; a file with more is cut here."""
 MAX_SESSION_TITLE = 120
@@ -111,15 +123,28 @@ class AppSettings:
     """The percent of the window at which that happens (``COMPACT_AT_RANGE``)."""
     max_steps: int = DEFAULT_MAX_STEPS
     """Model decision steps allowed in one turn of the own loop; read again between steps."""
+    reconnect_interval: int = DEFAULT_RECONNECT_INTERVAL
+    reconnect_limit: int = DEFAULT_RECONNECT_LIMIT
+    """Automatic HTTP 502 retries in the own loop; zero disables them."""
     fusion_main: str = ""
     fusion_workers: list[str] = field(default_factory=list)
+    fusion_lights: list[str] = field(default_factory=list)
+    """L3 lightweight model pool, in the user's choice order."""
     fusion_light: str = ""
+    """Legacy scalar mirror of the first L3 model; kept written so an older build does not lose the setting."""
     fusion_reasoning: dict[str, str] = field(default_factory=dict)
     """Role:page-model-id -> effort for new Fusion sessions; legacy per-model keys remain readable."""
     fusion_preference: int = 50
     fusion_max_calls: int = 8  # Legacy defaults are kept for settings compatibility, not applied to new sessions.
     fusion_max_tokens: int = 500_000
-    fusion_max_seconds: int = 900
+    fusion_max_seconds: int = 900  # Remembered manual limit, not an adaptive ceiling.
+    fusion_max_seconds_adaptive: bool = True
+    fusion_steps_min: int = STEP_BUDGET_DEFAULT[0]
+    """Manual floor for a delegation's step budget, remembered while its Adaptive box is checked."""
+    fusion_steps_min_adaptive: bool = True
+    fusion_steps_max: int = STEP_BUDGET_DEFAULT[1]
+    """Manual ceiling for a delegation's step budget; an adaptive side ignores its stored number."""
+    fusion_steps_max_adaptive: bool = True
     fusion_gates: dict[str, bool] = field(default_factory=dict)
     fusion_drive_shared: bool = False
     fusion_drive_warm: float = 0.5
@@ -132,11 +157,24 @@ class AppSettings:
     """Legacy fallback for thinking_language when no explicit language has been saved."""
     answer_language: str = "auto"
     thinking_language: str = ""
+    numbered_reply: bool = True
+    """The bundled official skill ``numbered-reply`` (``desktop/assets/skills``): every engine's user-facing answer leads
+    with the conclusion and numbers each matter; off stops the injection, nothing else."""
     sound_enabled: bool = True
     sound_question: str = ""
     sound_complete: str = ""
     sound_error: str = ""
     """Local PCM WAV or MP3 paths; empty means the corresponding bundled sound (resolved for display by ``core/sounds``)."""
+    storage_max_bytes: int = storage_policy.DEFAULT_MAX_BYTES
+    """The Storage page's Max: the global cap on application-managed data, see ``core/storage_policy``."""
+    storage_shares: dict[str, float] = field(default_factory=lambda: dict(storage_policy.DEFAULT_SHARES))
+    """Category -> percent of the cap; the split must total 100 and no category borrows another's headroom."""
+    storage_alert_at: int = storage_policy.DEFAULT_ALERT_AT
+    """Percent of total occupancy at which the page warns (independent of the split)."""
+    storage_full_policy: str = "stop"
+    """``stop``: refuse new writes at the cap; ``autoclean``: the writer may drop the oldest eligible objects first."""
+    storage_autoclean: list[str] = field(default_factory=lambda: list(storage_policy.DEFAULT_AUTOCLEAN))
+    """Categories auto-clean may touch: cache and the rebuildable index by default; history and dumps need explicit picks."""
     mode: str = "auto"
     projects: list[str] = field(default_factory=list)
     max_open_sessions: int = DEFAULT_MAX_OPEN_SESSIONS
@@ -157,7 +195,11 @@ class AppSettings:
     session_order: list[str] = field(default_factory=list)
     """Sidebar row ids after dragging or promoting a sent/finished conversation; newly discovered sessions precede these."""
     session_pins: dict[str, list[str]] = field(default_factory=dict)
-    """Canonical project folder -> ordered native row ids. Archiving hides a pinned row without losing its pin."""
+    """Canonical project folder -> ordered native row ids. Archiving hides a pinned row without losing its pin.
+    A mirror of ``pinned_sessions`` per project: kept written so a file read by an older build loses nothing."""
+    pinned_sessions: list[str] = field(default_factory=list)
+    """The pinned rows' native ids in the pin zone's order, across projects: project folds, reorders and
+    removals never change it. A file written before this field has its per-project ``session_pins`` merged in."""
     session_created: dict[str, float] = field(default_factory=dict)
     """Stable creation times, including old rows without one and conversations that changed engine."""
 
@@ -165,7 +207,7 @@ class AppSettings:
         normalized = normalize_folder(folder)
         if any(same_folder(normalized, existing) for existing in self.projects):
             return False
-        self.projects.append(normalized)
+        self.projects.insert(0, normalized)
         return True
 
     def remove_project(self, folder: str | Path) -> bool:
@@ -249,6 +291,10 @@ def settings_from_dict(raw: object) -> AppSettings:
             return value
         return getattr(defaults, name)
 
+    def integer(name: str, bounds: tuple[int, int]) -> int:
+        value = raw.get(name)
+        return value if type(value) is int and bounds[0] <= value <= bounds[1] else getattr(defaults, name)
+
     projects: list[str] = []
     raw_projects = raw.get("projects")
     if isinstance(raw_projects, list):
@@ -325,12 +371,36 @@ def settings_from_dict(raw: object) -> AppSettings:
         fusion_reasoning = {}
     raw_gates = raw.get("fusion_gates")
     fusion_gates = {name: raw_gates[name] for name in GATES if isinstance(raw_gates.get(name), bool)} if isinstance(raw_gates, dict) else {}
+    seconds = raw.get("fusion_max_seconds")
+    has_seconds = type(seconds) is int and 1 <= seconds <= 86_400
+    adaptive = raw.get("fusion_max_seconds_adaptive")
+    # Old files with a valid explicit timeout keep that limit; loading does not rewrite them.
+    seconds_adaptive = adaptive if type(adaptive) is bool else not has_seconds
+    steps_min, steps_max = raw.get("fusion_steps_min"), raw.get("fusion_steps_max")
+    min_adaptive, max_adaptive = raw.get("fusion_steps_min_adaptive"), raw.get("fusion_steps_max_adaptive")
+    # The group stands or falls together: a half-saved or both-manual-inverted range must not clamp a delegation sideways.
+    if not (type(steps_min) is int and type(steps_max) is int and type(min_adaptive) is bool and type(max_adaptive) is bool
+            and STEP_BUDGET_RANGE[0] <= steps_min <= STEP_BUDGET_RANGE[1]
+            and STEP_BUDGET_RANGE[0] <= steps_max <= STEP_BUDGET_RANGE[1]
+            and (min_adaptive or max_adaptive or steps_min <= steps_max)):
+        steps_min, steps_max, min_adaptive, max_adaptive = STEP_BUDGET_DEFAULT[0], STEP_BUDGET_DEFAULT[1], True, True
 
     def fusion_float(name: str, low: float, high: float) -> float:
         value = raw.get(name)
         if type(value) in (int, float) and low <= value <= high:
             return float(value)
         return getattr(defaults, name)
+
+    def model_pool(name: str) -> list[str]:
+        values = raw.get(name)
+        if not isinstance(values, list):
+            return []
+        return list(dict.fromkeys(item.strip() for item in values if isinstance(item, str) and item.strip()))[:FUSION_SEAT_MODEL_LIMIT]
+
+    # New files keep the first L3 model in the legacy scalar too. If the two disagree, the scalar goes first:
+    # that is the value an older build would have kept using, so loading must not drop it.
+    legacy_light = text("fusion_light")
+    fusion_lights = list(dict.fromkeys(([legacy_light] if legacy_light else []) + model_pool("fusion_lights")))[:FUSION_SEAT_MODEL_LIMIT]
 
     splitter = raw.get("splitter_sizes")
     if not (
@@ -387,6 +457,27 @@ def settings_from_dict(raw: object) -> AppSettings:
             ordered = list(dict.fromkeys([*pins.get(key, ()), *valid]))[:MAX_REMEMBERED_SESSIONS]
             if ordered:
                 pins[key] = ordered
+    raw_pinned = raw.get("pinned_sessions")
+    mirrored = {item for keys in pins.values() for item in keys}
+    seen: set[str] = set()
+    valid_pinned: list[str] = []
+    for item in raw_pinned if isinstance(raw_pinned, list) else ():
+        if not (isinstance(item, str) and item.startswith(("cg:", "dv:", "fy:")) and item[3:].strip()) or item in seen:
+            continue
+        seen.add(item)
+        # The field alone caps at MAX; a verified mirror member past it keeps its global slot, not a re-appended tail.
+        if len(seen) <= MAX_REMEMBERED_SESSIONS or item in mirrored:
+            valid_pinned.append(item)
+
+    def pin_folder_key(folder: str) -> str:
+        try:
+            return os.path.normcase(os.path.normpath(folder))  # stored spelling only: do not resolve an old project on load
+        except (OSError, RuntimeError, ValueError):
+            return ""  # never a legacy pin key: the folder's pins are taken as leftovers below
+
+    # Each input keeps its own legal cap — the merged zone may top MAX when several projects each had a full list.
+    pinned_sessions = merge_pins(valid_pinned, pins, projects, pin_folder_key)
+    storage = storage_policy.policy_from(raw)
     created: dict[str, float] = {}
     raw_created = raw.get("session_created")
     if isinstance(raw_created, dict):
@@ -421,14 +512,22 @@ def settings_from_dict(raw: object) -> AppSettings:
         chatgpt_compact=chatgpt_compact,
         chatgpt_compact_at=compact_at,
         max_steps=max_steps,
+        reconnect_interval=integer("reconnect_interval", RECONNECT_INTERVAL_RANGE),
+        reconnect_limit=integer("reconnect_limit", RECONNECT_LIMIT_RANGE),
         fusion_main=text("fusion_main"),
-        fusion_workers=list(dict.fromkeys(item for item in raw.get("fusion_workers", []) if isinstance(item, str) and item.strip()))[:1] if isinstance(raw.get("fusion_workers"), list) else [],
-        fusion_light=text("fusion_light"),
+        fusion_workers=model_pool("fusion_workers"),
+        fusion_lights=fusion_lights,
+        fusion_light=fusion_lights[0] if fusion_lights else "",
         fusion_reasoning=fusion_reasoning,
         fusion_preference=raw.get("fusion_preference") if isinstance(raw.get("fusion_preference"), int) and not isinstance(raw.get("fusion_preference"), bool) and 0 <= raw["fusion_preference"] <= 100 else defaults.fusion_preference,
         fusion_max_calls=raw.get("fusion_max_calls") if isinstance(raw.get("fusion_max_calls"), int) and not isinstance(raw.get("fusion_max_calls"), bool) and 1 <= raw["fusion_max_calls"] <= 1000 else defaults.fusion_max_calls,
         fusion_max_tokens=raw.get("fusion_max_tokens") if isinstance(raw.get("fusion_max_tokens"), int) and not isinstance(raw.get("fusion_max_tokens"), bool) and 1 <= raw["fusion_max_tokens"] <= 2**53 - 1 else defaults.fusion_max_tokens,
-        fusion_max_seconds=raw.get("fusion_max_seconds") if isinstance(raw.get("fusion_max_seconds"), int) and not isinstance(raw.get("fusion_max_seconds"), bool) and 1 <= raw["fusion_max_seconds"] <= 86_400 else defaults.fusion_max_seconds,
+        fusion_max_seconds=seconds if has_seconds else defaults.fusion_max_seconds,
+        fusion_max_seconds_adaptive=seconds_adaptive,
+        fusion_steps_min=steps_min,
+        fusion_steps_min_adaptive=min_adaptive,
+        fusion_steps_max=steps_max,
+        fusion_steps_max_adaptive=max_adaptive,
         fusion_gates=fusion_gates,
         fusion_drive_shared=raw.get("fusion_drive_shared") if isinstance(raw.get("fusion_drive_shared"), bool) else defaults.fusion_drive_shared,
         fusion_drive_warm=fusion_float("fusion_drive_warm", 0, 1),
@@ -440,10 +539,16 @@ def settings_from_dict(raw: object) -> AppSettings:
         think_chinese=think_chinese,
         answer_language=text("answer_language", LANGUAGES),
         thinking_language=text("thinking_language", ("", *LANGUAGES)),
+        numbered_reply=raw.get("numbered_reply") if isinstance(raw.get("numbered_reply"), bool) else defaults.numbered_reply,
         sound_enabled=raw.get("sound_enabled") if isinstance(raw.get("sound_enabled"), bool) else defaults.sound_enabled,
         sound_question=text("sound_question").strip(),
         sound_complete=text("sound_complete").strip(),
         sound_error=text("sound_error").strip(),
+        storage_max_bytes=storage.max_bytes,
+        storage_shares=storage.shares,
+        storage_alert_at=storage.alert_at,
+        storage_full_policy=storage.full_policy,
+        storage_autoclean=list(storage.autoclean),
         mode=text("mode", MODES),
         projects=projects,
         max_open_sessions=max_open,
@@ -456,12 +561,19 @@ def settings_from_dict(raw: object) -> AppSettings:
         session_links=links,
         session_order=order,
         session_pins=pins,
+        pinned_sessions=pinned_sessions,
         session_created=created,
     )
 
 
 def settings_to_dict(settings: AppSettings) -> dict[str, Any]:
-    return {"version": SETTINGS_VERSION, **asdict(settings)}
+    data = {"version": SETTINGS_VERSION, **asdict(settings)}
+    lights = list(dict.fromkeys(item for item in data.get("fusion_lights", []) if isinstance(item, str) and item.strip()))
+    if not lights and isinstance(data.get("fusion_light"), str) and data["fusion_light"].strip():
+        lights = [data["fusion_light"].strip()]
+    data["fusion_lights"] = lights[:FUSION_SEAT_MODEL_LIMIT]
+    data["fusion_light"] = data["fusion_lights"][0] if data["fusion_lights"] else ""
+    return data
 
 
 def load_settings(path: Path | None = None) -> AppSettings:

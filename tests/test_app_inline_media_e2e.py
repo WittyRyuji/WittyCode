@@ -48,7 +48,7 @@ def test_inline_images_and_missing_refs_use_the_message_project(qapp, loop, tmp_
             root, other = rig.project, tmp_path / "another"
             (root / "outputs").mkdir()
             (other / "outputs").mkdir(parents=True)
-            (root / "outputs" / "result one.png").write_bytes(png(width=3))
+            (root / "outputs" / "result one.png").write_bytes(png(width=1200, height=800))
             (other / "outputs" / "result one.png").write_bytes(png(width=7))
             (root / "outputs" / "loop.gif").write_bytes(gif())
             (tmp_path / "outside.png").write_bytes(png())
@@ -60,7 +60,7 @@ def test_inline_images_and_missing_refs_use_the_message_project(qapp, loop, tmp_
                            "![Outside](../outside.png)\n\n![Remote](https://example.invalid/remote.png)\n\n"
                            "See `notes.md`."), hold=False)
             await rig.send("Show the local pictures")
-            await natural_width(rig, ".inline-picture img[alt='PNG']", 3)
+            await natural_width(rig, ".inline-picture img[alt='PNG']", 1200)
             await natural_width(rig, ".inline-picture img[alt='GIF']", 2)
             assert await rig.js("document.querySelector('.inline-picture img[alt=GIF]').src.startsWith('data:image/png;base64,')")
             await rig.wait_for(".inline-gif-toggle", 1)
@@ -69,6 +69,34 @@ def test_inline_images_and_missing_refs_use_the_message_project(qapp, loop, tmp_
             assert sorted((m, p["id"], p["path"]) for m, p in calls) == [
                 ("files.inlineImage", first, f"outputs/{name}") for name in ("loop.gif", "missing.png", "result one.png")
             ]
+
+            # Clicking the picture itself opens the shared lightbox on the already decoded bytes, larger than inline.
+            inline_box = json.loads(await rig.js("JSON.stringify(document.querySelector(\".inline-picture img[alt='PNG']\").getBoundingClientRect())"))
+            before = list(calls)
+            await rig.click(".inline-picture img[alt='PNG']")
+            await rig.wait_for(".lightbox img", 1)
+            shown = json.loads(await rig.js("""(() => {
+                const img = document.querySelector('.lightbox img'), box = img.getBoundingClientRect();
+                return JSON.stringify([img.src.startsWith('data:image/png;base64,'), img.naturalWidth, box.width, box.height]);
+            })()"""))
+            assert shown[0] and shown[1] == 1200 and shown[2] > inline_box["width"] and shown[3] > inline_box["height"]
+            caption = await rig.text(".lightbox figcaption")
+            assert "PNG" in caption and "1200×800" in caption
+            if evidence := os.environ.get("WITTYCODE_TEST_EVIDENCE"):
+                await rig.shot(".lightbox figure", Path(evidence) / "inline-picture-lightbox.png")
+            await rig.click(".lightbox img")
+            await rig.wait_for(".lightbox img", 1)  # the picture itself does not dismiss it
+            await rig.press("Escape")
+            await rig.wait_for(".lightbox", 0)
+
+            # Keyboard activation is the same; both media surfaces zoom (the GIF keeps its own play button).
+            assert await rig.count(".inline-zoom") == 2
+            await rig.js("document.querySelector('.inline-zoom').focus()")
+            await rig.press("Enter")
+            await rig.wait_for(".lightbox", 1)
+            await rig.click(".lb-close")
+            await rig.wait_for(".lightbox", 0)
+            assert calls == before
 
             await rig.click(".text-block code.pathref")
             await rig.wait_text(".fp-doc", "Plain file")
@@ -85,7 +113,7 @@ def test_inline_images_and_missing_refs_use_the_message_project(qapp, loop, tmp_
             await natural_width(rig, ".inline-picture img[alt='PNG']", 7)
             assert [(p["id"], p["path"]) for method, p in calls if method == "files.inlineImage"][-1] == (second, "outputs/result one.png")
             await rig.click(".tab", 0)
-            await natural_width(rig, ".inline-picture img[alt='PNG']", 3)
+            await natural_width(rig, ".inline-picture img[alt='PNG']", 1200)
         finally:
             await rig.finish()
     run(loop, scenario())
@@ -144,7 +172,7 @@ async def painted_media(rig, expected, filename=None):
 def test_gif_is_a_centered_still_until_started_then_removes_play_button(qapp, loop, tmp_path, activation):
     async def scenario():
         rig = await open_rig(tmp_path, size=(1320, 900))
-        image, button = ".inline-gif img", ".inline-gif button"
+        image, button = ".inline-gif img", ".inline-gif-toggle"
         first, second = (36, 156, 146), (224, 112, 55)
         try:
             (rig.project / "motion.gif").write_bytes(gif(180, 96))
@@ -183,7 +211,12 @@ def test_gif_is_a_centered_still_until_started_then_removes_play_button(qapp, lo
             await painted_media(rig, {image: second}, f"inline-gif-{activation}-playing.png")
             await painted_media(rig, {image: first})
 
+            # The playing picture's surface shares the zoom button: it opens the lightbox, the animation keeps playing.
             await rig.click(image)
+            await rig.wait_for(".lightbox img", 1)
+            assert await rig.js(f"document.querySelector('.lightbox img').src") == animation
+            await rig.press("Escape")
+            await rig.wait_for(".lightbox", 0)
             assert await rig.count(button) == 0
             assert await rig.js(f"document.querySelector('{image}').src") == animation
             await painted_media(rig, {image: second})

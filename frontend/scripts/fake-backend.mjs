@@ -259,7 +259,7 @@ function fakeBackend(config) {
     models: [...GW_MODELS],
     providers: [clone(GATEWAY)],
     defaults: { model: "", reasoning: "", autonomy: "code", mode: "auto" },
-    settings: { maxOpen: 4, maxSteps: 80, devinPath: "", hiddenModels: [], theme: "dark", fontScale: "md", sidebarWidth: 300, memoryEnabled: true, memoryRecall: true, memoryCapture: true, memoryCurate: true, memoryEngines: ["devin", "chatgpt", "factory"], compactAuto: true, compactAt: 85, answerLanguage: "auto", thinkingLanguage: "zh-CN", thinkChinese: true, lastProject: "" },
+    settings: { maxOpen: 4, maxSteps: 80, devinPath: "", hiddenModels: [], theme: "dark", fontScale: "md", sidebarWidth: 300, memoryEnabled: true, memoryRecall: true, memoryCapture: true, memoryCurate: true, memoryEngines: ["devin", "chatgpt", "factory"], compactAuto: true, compactAt: 85, answerLanguage: "auto", thinkingLanguage: "zh-CN", thinkChinese: true, numberedReply: true, lastProject: "" },
     devin: { cli: "found", auth: "checking", enabled: true },
     chatgpt: clone(CHATGPT_OUT),
     rules: {},
@@ -989,6 +989,8 @@ function fakeBackend(config) {
       else if (p.key === "fontScale" && ["sm", "md", "lg"].includes(v)) s.fontScale = v;
       else if (p.key === "maxOpen" && Number.isInteger(v) && v >= 1 && v <= 16) s.maxOpen = v;
       else if (p.key === "maxSteps" && Number.isSafeInteger(v) && v >= 1) s.maxSteps = v;
+      else if (p.key === "reconnectInterval" && Number.isInteger(v) && v >= 1 && v <= 3600) s.reconnectInterval = v;
+      else if (p.key === "reconnectLimit" && Number.isInteger(v) && v >= 0 && v <= 5) s.reconnectLimit = v;
       else if (p.key === "sidebarWidth" && Number.isInteger(v) && v >= 220 && v <= 440) s.sidebarWidth = v;
       else if (p.key === "inspectorWidth" && Number.isInteger(v) && (v === 0 || v >= 340 && v <= 4000)) s.inspectorWidth = v;
       else if (p.key === "devinPath" && typeof v === "string") s.devinPath = v.trim();
@@ -1001,6 +1003,7 @@ function fakeBackend(config) {
       else if (p.key === "compactAt" && Number.isInteger(v) && v >= 50 && v <= 95) s.compactAt = v;
       else if (["answerLanguage", "thinkingLanguage"].includes(p.key) && ["auto", "zh-CN", "en"].includes(v)) { s[p.key] = v; if (p.key === "thinkingLanguage") s.thinkChinese = v === "zh-CN"; }
       else if (p.key === "thinkChinese" && typeof v === "boolean") { s.thinkChinese = v; s.thinkingLanguage = v ? "zh-CN" : "auto"; }
+      else if (p.key === "numberedReply" && typeof v === "boolean") s.numberedReply = v;
       else throw new Error("这个设置的值不合法。");
       emit("settings", { settings: { ...s } });
       return { ...s };
@@ -1083,7 +1086,7 @@ function fakeBackend(config) {
     },
     "connections.test": () => ({ ok: true, text: "连接成功 · 1 个工具", tools: ["echo"] }),
     "factory.account": () => clone(S.factory),
-    "factory.configure": (p) => (S.factory = { ...S.factory, path: p.path, enabled: p.enabled }),
+    "factory.configure": (p) => (S.factory = { ...S.factory, ...p }),
     "devin.account": () => S.devin,
     "devin.login": async () => {
       await sleep(200);

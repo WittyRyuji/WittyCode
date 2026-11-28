@@ -194,8 +194,9 @@ def _git(root: Path, *args: str) -> str:
     """Git in ``root`` with nobody's configuration: no hooks or templates of the machine, no signing, no line-end
     conversion, and the identity the arguments give."""
     env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull, "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0"}
+    # A deep workspace can put Git's object paths over the Windows path limit.
     try:
-        done = subprocess.run(["git", *args], cwd=root, env=env, capture_output=True, timeout=GIT_SECONDS, creationflags=_CREATE_NO_WINDOW)
+        done = subprocess.run(["git", "-c", "core.longpaths=true", *args], cwd=root, env=env, capture_output=True, timeout=GIT_SECONDS, creationflags=_CREATE_NO_WINDOW)
     except (OSError, subprocess.TimeoutExpired) as error:
         raise TaskError(f"git {args[0]} could not run in {root}: {error}") from error
     if done.returncode:

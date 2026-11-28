@@ -64,10 +64,21 @@ class GuardedFake(Fake):
         call = {"toolCallId": name + ":0#1", "title": "Private MCP call", "kind": "other", "rawInput": arguments}
         if os.environ.get("FAKE_FUSION_BRIDGE_NOTICE") != "id-only":
             call["_meta"] = {"cognition.ai/inferenceToolName": name}
-        self.update(sid, {"sessionUpdate": "tool_call", **call})
-        answer = await self.ask("session/request_permission", {"sessionId": sid, "toolCall": call, "options": [
-            {"optionId": "always", "kind": "allow_always"}, {"optionId": "once", "kind": "allow_once"},
-        ]})
+        if os.environ.get("FAKE_FUSION_STAGED") == "1":
+            # A pending wrapper call is reported first; a later update completes its input.
+            pending = {"sessionUpdate": "tool_call", "toolCallId": call["toolCallId"], "title": call["title"],
+                       "kind": "other", "status": "pending"}
+            if "_meta" in call:
+                pending["_meta"] = call["_meta"]
+            self.update(sid, pending)
+            self.update(sid, {"sessionUpdate": "tool_call_update", "toolCallId": call["toolCallId"],
+                              "status": "in_progress", "rawInput": arguments})
+        else:
+            self.update(sid, {"sessionUpdate": "tool_call", **call})
+        # The real CLI repeats only the call id and approval meta here, never the raw input.
+        answer = await self.ask("session/request_permission", {"sessionId": sid, "options": [
+            {"optionId": "always", "kind": "allow_always"}, {"optionId": "once", "kind": "allow_once"}],
+            "toolCall": {"toolCallId": call["toolCallId"], "_meta": {"cognition.ai/permissionRule": "MCP"}}})
         assert answer == {"outcome": {"outcome": "selected", "optionId": "once"}}, answer
         assert await self.run_hook(sid, "PreToolUse", tool_name=name, tool_input=arguments) == (0, {})
 
@@ -100,6 +111,23 @@ class GuardedFake(Fake):
                 code, result = await self.run_hook(sid, "PreToolUse", tool_name=PREFIX + "read_file", tool_input={})
                 assert code == 2 and result["decision"] == "block"
             action = "summary" if summary else match[1] if match else "report"
+            if action in ("shell-results", "shell-repeat"):
+                target = {"server_name": SERVER, "tool_name": "shell"}
+                # The model flattened command; Devin forwards only the nested arguments object.
+                flattened = {**target, "command": "echo unexpected > unexpected.txt"}
+                empty = flattened.get("arguments", {})
+                inputs = ([empty] * 3 if action == "shell-repeat"
+                          else [empty, {"command": "exit 7"}, {"command": "echo wrapped-shell-ok"}])
+                replies = []
+                for arguments in inputs:
+                    await self.approve_tool(sid, MCP_CALL, {**target, "arguments": arguments})
+                    reply = await self.mcp(sid, "tools/call", {"name": "shell", "arguments": arguments})
+                    replies.append(reply["result"])
+                (HOME / "shell-replies.json").write_text(json.dumps(replies), encoding="utf-8")
+                if action == "shell-repeat":
+                    await asyncio.wait_for(turn["cancel"].wait(), 10)
+                    stop = "cancelled"
+                    return
             tool, arguments = "", {}
             if action == "write":
                 tool, arguments = "create_file", {"file_path": "marker.txt", "content": "guarded ACP write"}
@@ -118,7 +146,10 @@ class GuardedFake(Fake):
                 tool, arguments = "delegate_task", {"scope": "src", "model": "devin:swe-2-high", "role": "worker", "task": "[fusion-shell] Create the marker with a command."}
             elif action == "delegate-acp-slow":
                 tool, arguments = "delegate_task", {"scope": "src", "model": "devin:swe-2-high", "role": "worker", "task": "[fusion-slow] Wait for cancellation."}
-            elif action in ("read", "truncated-tools"):
+            elif action == "recheck" and "Continue only this incomplete check." in current:
+                tool, arguments = "submit_report", {"status": "done", "summary": "Count confirmed.",
+                                                     "evidence": ["evidence.txt: Counted 7 units."]}
+            elif action in ("read", "recheck", "truncated-tools"):
                 tool, arguments = "read_file", {"file_path": "evidence.txt"}
             elif action == "plan":
                 tool, arguments = "submit_plan", {"plan": "Inspect the module, implement the change, and run tests."}
@@ -149,6 +180,10 @@ class GuardedFake(Fake):
             elif action == "slow":
                 await turn["cancel"].wait()
                 stop = "cancelled"
+            elif action == "unresolved":
+                # A pending wrapper call that never completes its input; the turn must not pass unverified.
+                self.update(sid, {"sessionUpdate": "tool_call", "toolCallId": MCP_CALL + ":0#9", "title": "Private MCP call",
+                                  "kind": "other", "status": "pending", "_meta": {"cognition.ai/inferenceToolName": MCP_CALL}})
             if tool:
                 if os.environ.get("FAKE_FUSION_MCP_WRAPPERS") == "1":
                     await self.approve_tool(sid, MCP_LIST, {"server_name": SERVER})

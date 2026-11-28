@@ -11,11 +11,13 @@ const WHO = { devin: "Devin", chatgpt: "ChatGPT Plan", factory: "Factory" } as c
 
 export function PermissionCard({ sessionId, prompt }: { sessionId: string; prompt: PermissionPrompt }) {
   const answer = useStore((s) => s.answerPermission);
+  const stop = useStore((s) => s.stop);
+  const recovery = prompt.id.startsWith("fusion-tool-");
   return (
     <section className="prompt perm" role="alertdialog" aria-label="需要你的确认">
       <div className="phead">
         <AlertTriangle size={16} className="picon" />
-        需要你的确认
+        {recovery ? "Fusion 续作需要你授权" : "需要你的确认"}
       </div>
       {prompt.actions.map((a, i) => (
         <div key={i} className="action">
@@ -39,6 +41,7 @@ export function PermissionCard({ sessionId, prompt }: { sessionId: string; promp
             {o.label}
           </button>
         ))}
+        {recovery && <button type="button" className="btn" onClick={() => stop(sessionId)}>取消原任务</button>}
       </div>
     </section>
   );
@@ -46,6 +49,7 @@ export function PermissionCard({ sessionId, prompt }: { sessionId: string; promp
 
 export function QuestionCard({ sessionId, prompt }: { sessionId: string; prompt: QuestionPrompt }) {
   const answer = useStore((s) => s.answerQuestion);
+  const stop = useStore((s) => s.stop);
   const who = useStore((s) => {
     if (prompt.who) return prompt.who;
     const session = s.sessions[sessionId];
@@ -57,6 +61,7 @@ export function QuestionCard({ sessionId, prompt }: { sessionId: string; prompt:
   const [picked, setPicked] = useState<Record<number, string[]>>({});
   const [other, setOther] = useState<Record<number, string>>({});
   const [tried, setTried] = useState(false);
+  const choosingTask = prompt.optionsOnly && prompt.id.startsWith("fusion-resume-");
 
   const value = (i: number) => [...(picked[i] ?? []), ...(other[i]?.trim() ? [other[i]!.trim()] : [])];
   const missing = (i: number) => value(i).length === 0;
@@ -74,11 +79,20 @@ export function QuestionCard({ sessionId, prompt }: { sessionId: string; prompt:
     answer(sessionId, prompt.id, prompt.questions.map((q, i) => (q.multiSelect ? value(i) : value(i).join("、"))));
   };
 
+  // A plain Enter in the own-answer box is the 提交回答 button. An Enter that confirms an IME composition (isComposing,
+  // or the keyCode 229 Chromium gives keys it handed to the input method), an auto-repeat, or one with modifiers is not.
+  const otherKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key !== "Enter" || e.repeat || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
+    e.preventDefault();
+    e.stopPropagation();
+    submit();
+  };
+
   return (
     <section className="prompt ask" aria-label={`${who} 的提问`}>
       <div className="phead">
         <HelpCircle size={16} className="picon" />
-        {who} 想先问你几个问题
+        {prompt.optionsOnly ? `${who} 续作需要你确认` : `${who} 想先问你几个问题`}
       </div>
       {prompt.questions.map((q, i) => (
         <div key={i} className={`q${tried && missing(i) ? " missing" : ""}`}>
@@ -95,20 +109,24 @@ export function QuestionCard({ sessionId, prompt }: { sessionId: string; prompt:
               </label>
             );
           })}
-          <label className="opt other">
-            <span className="otherlabel">其他：</span>
-            <input type="text" className="otherinput selectable" placeholder="自己写一个答案" value={other[i] ?? ""} onChange={(e) => setOther((o) => ({ ...o, [i]: e.target.value }))} />
-          </label>
+          {!prompt.optionsOnly && (
+            <label className="opt other">
+              <span className="otherlabel">其他：</span>
+              <input type="text" className="otherinput selectable" placeholder="自己写一个答案" value={other[i] ?? ""} onChange={(e) => setOther((o) => ({ ...o, [i]: e.target.value }))} onKeyDown={otherKey} />
+            </label>
+          )}
           {tried && missing(i) && <div className="qerr">请回答这个问题。</div>}
         </div>
       ))}
       <div className="pbtns">
-        <button type="button" className="btn primary" onClick={submit}>
-          提交回答
-        </button>
-        <button type="button" className="btn" onClick={() => answer(sessionId, prompt.id, null)}>
-          跳过
-        </button>
+        {(!choosingTask || prompt.questions.some((q) => q.options.length > 0)) && (
+          <button type="button" className="btn primary" onClick={submit}>提交回答</button>
+        )}
+        {prompt.optionsOnly && !choosingTask ? (
+          <button type="button" className="btn" onClick={() => stop(sessionId)}>取消原任务</button>
+        ) : (
+          <button type="button" className="btn" onClick={() => answer(sessionId, prompt.id, null)}>{choosingTask ? "取消续作" : "跳过"}</button>
+        )}
       </div>
     </section>
   );

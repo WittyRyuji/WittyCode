@@ -4,11 +4,18 @@ import { messageOf } from "../../lib/errors";
 import { INLINE_IMAGE_DATA } from "../../lib/inlineMedia";
 import { useStore } from "../../store";
 import { MediaPreview, videoWidth, VIDEO_FRAME } from "../MediaPreview";
+import { useImageMenu } from "../ImageMenu";
 
 type Props = { sessionId: string; path: string; label: string };
 const errorText = (message: string) => <span className="inline-media-error" role="status">{message}</span>;
 const unreadable = "这张图片不能在正文中预览。";
 let posterQueue = Promise.resolve();
+
+/** The decoded byte count of a `data:` URI's base64 payload, for the lightbox's caption line. */
+function dataBytes(url: string): number {
+  const b64 = url.slice(url.indexOf(",") + 1);
+  return Math.floor(b64.length / 4) * 3 - (b64.endsWith("==") ? 2 : b64.endsWith("=") ? 1 : 0);
+}
 
 function useVisibleMedia<T>(load: (node: HTMLSpanElement) => Promise<T>, serial = false) {
   const box = useRef<HTMLSpanElement>(null);
@@ -45,6 +52,7 @@ function useVisibleMedia<T>(load: (node: HTMLSpanElement) => Promise<T>, serial 
 
 export function InlinePicture({ sessionId, path, label }: Props) {
   const read = useStore((s) => s.inlineImage);
+  const openLightbox = useStore((s) => s.openLightbox);
   const load = useCallback(async () => {
     const image = await read(sessionId, path);
     if (!INLINE_IMAGE_DATA.test(image.url) || (image.animation &&
@@ -56,16 +64,24 @@ export function InlinePicture({ sessionId, path, label }: Props) {
   const { box, result, setResult } = useVisibleMedia(load);
   const [started, setStarted] = useState(false);
   const image = result && "data" in result ? result.data : undefined;
+  const { show, menu } = useImageMenu();
   const picture = image && <img src={(started && image.animation) || image.url} alt={label} draggable={false}
-    onError={() => setResult({ error: unreadable })} />;
+    onContextMenu={show} onError={() => setResult({ error: unreadable })} />;
+  const surface = image && <button type="button" className="inline-zoom" title={`查看大图：${label}`} onClick={(e) => {
+    const img = e.currentTarget.querySelector("img");
+    const url = image.animation ?? image.url;
+    openLightbox({ id: `inline:${path}`, kind: "image", name: label, url, size: dataBytes(url),
+      width: img?.naturalWidth, height: img?.naturalHeight });
+  }}>{picture}</button>;
   const action = `播放 GIF：${label}`;
   return <span className="inline-media inline-picture" ref={box} title={path}>
+    {menu}
     {image?.animation ? <span className="inline-gif">
-      {picture}
+      {surface}
       {!started && <button type="button" className="inline-gif-toggle" aria-label={action} title={action} onClick={() => setStarted(true)}>
         <Play size={19} aria-hidden="true" />
       </button>}
-    </span> : picture ?? <><span className="inline-media-label">{label}</span>{result && "error" in result && errorText(result.error)}</>}
+    </span> : surface ?? <><span className="inline-media-label">{label}</span>{result && "error" in result && errorText(result.error)}</>}
   </span>;
 }
 

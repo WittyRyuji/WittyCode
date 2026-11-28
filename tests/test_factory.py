@@ -36,6 +36,83 @@ def test_factory_is_optional_and_native_flags_are_not_acp():
     assert settings.factory_enabled and settings.factory_path == "droid.exe" and settings.factory_autonomy == "medium"
 
 
+@pytest.mark.parametrize("exists", [False, True])
+def test_explicit_binary_never_falls_through(tmp_path, exists, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    binary = tmp_path / "chosen.exe"
+    if exists:
+        binary.touch()
+    engine = FactoryEngine(AppSettings(factory_path=binary.name), tmp_path / "index",
+                           locate=lambda _: pytest.fail("explicit path must be authoritative"))
+    assert engine.binary() == (str(binary) if exists else None)
+
+
+def test_windows_binary_discovery_order_without_changing_path(tmp_path, monkeypatch):
+    from desktop.core import factory
+
+    monkeypatch.setattr(factory.sys, "platform", "win32")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "apps"))
+    monkeypatch.setattr(factory, "_registered_path_dirs", lambda: iter([tmp_path / "user", tmp_path / "machine"]))
+    process = tmp_path / "path" / "droid.exe"
+    monkeypatch.setattr(factory.shutil, "which", lambda name: str(process) if name == "droid" and process.is_file() else None)
+    install = tmp_path / "apps" / "Factory"
+    def bundled(version):
+        return install / ("app-" + version) / "resources" / "bin" / "droid.exe"
+
+    # A partially installed newer desktop version must not hide older usable binaries.
+    bundled("2.0.0").parent.mkdir(parents=True)
+    candidates = [process, tmp_path / "user/droid.exe", tmp_path / "machine/droid.exe",
+                  tmp_path / "home/bin/droid.exe", bundled("1.12.0"), bundled("1.12.0-beta"), bundled("1.9.0")]
+    for path in candidates:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+    original = os.environ.get("PATH")
+    engine = FactoryEngine(AppSettings(), tmp_path / "index")
+    for path in candidates:
+        assert engine.binary() == str(path)
+        path.unlink()
+    assert engine.binary() is None
+    assert os.environ.get("PATH") == original
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_redetect_refreshes_the_catalog_only_when_enabled(tmp_path, monkeypatch, enabled):
+    async def scenario():
+        engine, settings, _ = engine_for(tmp_path)
+        settings.factory_enabled = enabled
+        binary = tmp_path / "droid.exe"
+        settings.factory_path = str(binary)
+        client = engine.client
+
+        def installed_client(*args, **kwargs):
+            if not engine.binary():
+                raise RuntimeError("CLI not installed yet")
+            return client(*args, **kwargs)
+
+        monkeypatch.setattr(engine, "client", installed_client)
+        events = Events()
+        core = AppCore(settings, FakePlatform(), factory=engine, persist=False, emit=events)
+        try:
+            await core.call("app.init")
+            await until(lambda: bool(events.of("models")))
+            assert core.catalog.find("factory:demo-model") is None
+            binary.touch()
+            assert (await core.call("factory.account"))["cli"] == "found"
+            assert core.catalog.find("factory:demo-model") is None
+            if not enabled:
+                monkeypatch.setattr(core, "_schedule_models", lambda: pytest.fail("disabled Factory should not refresh models"))
+            assert await core.call("factory.account", {"refresh": True}) == {
+                "cli": "found", "cliPath": str(binary.resolve()), "enabled": enabled, "path": str(binary),
+            }
+            if enabled:
+                await until(lambda: bool(core.catalog.find("factory:demo-model")), timeout=10)
+        finally:
+            await core.shutdown()
+
+    asyncio.run(scenario())
+
+
 def test_native_wire_streams_and_restores_after_an_application_restart(tmp_path):
     async def scenario():
         engine, settings, project = engine_for(tmp_path)

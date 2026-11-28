@@ -39,25 +39,44 @@ import type {
   SessionSettings,
   Speed,
   ThemeChoice,
-  Turn,
+  TurnHistory,
   TurnUpdate,
   Usage,
 } from "./types";
 import type { TestResult } from "./bridge";
+
+export interface GrokAccount {
+  auth: "signed-out" | "signing-in" | "signed-in";
+  /** The short code the user enters in the xAI browser page, never the OAuth device/access/refresh token. */
+  code: string;
+  canOpen: boolean;
+  error: string;
+}
 
 /** AppCore.settings_view(). `devinPath` is what the user set ("" = find it). */
 export interface SettingsView {
   maxOpen: number;
   /** own-loop steps per turn; missing on an older sender: 80 */
   maxSteps?: number;
+  /** HTTP 502 retry interval in seconds and retry count; older senders omit these. */
+  reconnectInterval?: number;
+  reconnectLimit?: number;
   fusionMain?: string;
   fusionWorkers?: string[];
+  /** L3 lightweight model pool; older senders only have the first one in `fusionLight`. */
+  fusionLights?: string[];
   fusionLight?: string;
   fusionReasoning?: Record<string, string>;
   fusionPreference?: number;
   fusionMaxCalls?: number;
   fusionMaxTokens?: number;
   fusionMaxSeconds?: number;
+  fusionMaxSecondsAdaptive?: boolean;
+  /** per-delegation step band shared by all experts; each side is adaptive or the remembered number; missing on an older sender: 16/adaptive, 32/adaptive */
+  fusionStepsMin?: number;
+  fusionStepsMinAdaptive?: boolean;
+  fusionStepsMax?: number;
+  fusionStepsMaxAdaptive?: boolean;
   devinPath: string;
   /** page model ids the user left out of the conversation's model menu */
   hiddenModels: string[];
@@ -85,6 +104,8 @@ export interface SettingsView {
   thinkChinese?: boolean;
   answerLanguage?: Language;
   thinkingLanguage?: Language;
+  /** the bundled numbered-reply skill injected into user-facing messages; missing on an older sender: on */
+  numberedReply?: boolean;
   soundEnabled?: boolean;
   /** Resolved paths, including bundled defaults (never an ambiguous empty selection). */
   soundQuestion?: string;
@@ -95,11 +116,39 @@ export interface SettingsView {
 }
 export type FollowUp = "queue" | "steer";
 export type Language = "auto" | "zh-CN" | "en";
-export type FusionSettingKey = "fusionMain" | "fusionWorkers" | "fusionLight" | "fusionReasoning" | "fusionPreference" | "fusionMaxSeconds";
-export type SettingKey = "theme" | "fontScale" | "followUp" | "maxOpen" | "maxSteps" | "sidebarWidth" | "conversationWidth" | "inspectorWidth" | "devinPath" | "memoryEnabled" | "memoryRecall" | "memoryCapture" | "memoryCurate" | "memoryEngines" | "compactAuto" | "compactAt" | "thinkChinese" | "answerLanguage" | "thinkingLanguage" | "soundEnabled" | SoundKey | FusionSettingKey;
+export type FusionSettingKey = "fusionMain" | "fusionWorkers" | "fusionLights" | "fusionLight" | "fusionReasoning" | "fusionPreference" | "fusionMaxSeconds" | "fusionSteps";
+export type SettingKey = "theme" | "fontScale" | "followUp" | "maxOpen" | "maxSteps" | "reconnectInterval" | "reconnectLimit" | "sidebarWidth" | "conversationWidth" | "inspectorWidth" | "devinPath" | "memoryEnabled" | "memoryRecall" | "memoryCapture" | "memoryCurate" | "memoryEngines" | "compactAuto" | "compactAt" | "thinkChinese" | "answerLanguage" | "thinkingLanguage" | "numberedReply" | "soundEnabled" | SoundKey | FusionSettingKey;
 export type SoundKind = "question" | "complete" | "error";
 export type SoundKey = "soundQuestion" | "soundComplete" | "soundError";
-export type SettingValue = string | number | boolean | string[] | Record<string, string>;
+export type SettingValue = string | number | boolean | string[] | Record<string, string> | Record<string, number | boolean>;
+
+/** AppCore.storage_view(): the managed-data split, the global cap, and real occupancy where the
+ *  application measures it. `used`/`total.used` is `null` for what is not measured — an unknown is
+ *  never drawn as zero. `budget` is `maxBytes × share`, floored. */
+export interface StorageCategoryView {
+  id: string;
+  label: string;
+  /** percent of the cap */
+  share: number;
+  budget: number;
+  used: number | null;
+  known: boolean;
+  /** over its own share; a category never borrows another's headroom */
+  over: boolean;
+}
+export interface StorageView {
+  maxBytes: number;
+  /** percent of total occupancy at which the page warns */
+  alertAt: number;
+  /** "stop" refuses new writes at the cap; "autoclean" lets the writer drop the oldest eligible objects first */
+  fullPolicy: "stop" | "autoclean";
+  shares: Record<string, number>;
+  /** categories auto-clean may touch; history and dumps only appear when the user picked them */
+  autoclean: string[];
+  categories: StorageCategoryView[];
+  total: { used: number | null; known: boolean; alerted: boolean };
+}
+export type StorageSettingKey = "maxBytes" | "shares" | "alertAt" | "fullPolicy" | "autoclean";
 
 /** What `memory.list` can be narrowed by (all optional). `query`: words to look for; `status` "all" lists forgotten notes too. */
 export interface MemoryFilter {
@@ -190,6 +239,8 @@ export interface InitResult {
   memory: MemoryState | null;
   projects: Project[];
   sessions: Record<string, SavedRow>;
+  /** the pinned strip, in order: visible row ids across projects; missing on an older sender */
+  pinnedSessionIds?: string[];
   /** the saved conversations the user archived, the one archived last first */
   archived?: SavedRow[];
   /** the open conversations, in tab order */
@@ -308,6 +359,36 @@ export interface VideoState {
 }
 export type VideoUpdate = { token: string } & (VideoState & { released?: false } | { released: true });
 
+export interface ExpertSummary {
+  stableId: string;
+  name: string;
+  workType: string;
+  tags: string[];
+  enabled: boolean;
+  version: number;
+  mdPath: string;
+  contentHash: string;
+  bodyTokens: number;
+  role: string;
+  created: number;
+  updated: number;
+  builtin: boolean;
+}
+export interface ExpertCatalogView {
+  revision: number;
+  experts: ExpertSummary[];
+  workTypes: { id: string; label: string }[];
+}
+export interface ExpertDetail { expert: ExpertSummary; markdown: string; description: string; body: string }
+export interface ExpertDraft {
+  stableId?: string;
+  name: string;
+  workType: string;
+  tags: string;
+  enabled: boolean;
+  markdown: string;
+}
+
 export interface Calls {
   "connectors.list": { params: None; result: ConnectorView[] };
   "connectors.configure": { params: { provider: ConnectorId; config: Partial<ConnectorConfig> }; result: ConnectorView[] };
@@ -324,18 +405,21 @@ export interface Calls {
   "connections.import": { params: { preview: string; confirmed: boolean }; result: { ok: boolean; count: number } };
   "connections.update": { params: { projectId?: string; id: string; enabled?: boolean; config?: Record<string, unknown>; confirmed?: boolean }; result: { ok: boolean } };
   "connections.test": { params: { projectId?: string; id: string }; result: { ok: boolean; text: string; tools: string[] } };
-  "factory.account": { params: None; result: FactoryState };
-  "factory.configure": { params: { path: string; enabled: boolean }; result: FactoryState };
-  "app.init": { params: None; result: InitResult };
+  "factory.account": { params: { refresh?: boolean }; result: FactoryState };
+  "factory.configure": { params: { path: string; enabled?: boolean } | { path?: string; enabled: boolean }; result: FactoryState };
+  "app.init": { params: { turnWindow?: boolean }; result: InitResult };
   /** no path: Python asks with the folder dialog; `added` false when the user cancelled */
   "project.add": { params: { path?: string }; result: { added: boolean; id?: string } };
   "project.remove": { params: { id: string }; result: null };
   /** no id: every project */
   "project.refresh": { params: { id?: string }; result: null };
   "project.reveal": { params: { id: string }; result: null };
+  /** move `id` next to `targetId` in the project list (after it when `after`) */
+  "project.reorder": { params: { id: string; targetId: string; after: boolean }; result: { ok: boolean } };
   /** `fromId`: the conversation whose project to use when there is no `projectId` */
   "session.new": { params: { projectId?: string; modelId?: string; fromId?: string; settings?: SessionSettings; fusion?: boolean }; result: { id: string | null } };
   "session.openSaved": { params: { id: string; projectId: string; title?: string }; result: { id: string | null } };
+  "session.olderTurns": { params: { id: string; agentId?: string; generation: number; before: string }; result: { loaded: boolean } };
   "session.reorder": { params: { projectId: string; id: string; targetId: string; after: boolean }; result: { ok: boolean } };
   "session.pin": { params: { projectId: string; id: string; pinned: boolean }; result: { ok: boolean } };
   "session.close": { params: { id: string }; result: null };
@@ -368,6 +452,12 @@ export interface Calls {
   "session.answerPermission": { params: { id: string; promptId: string; value: string; agentId?: string }; result: { ok: boolean } };
   "session.answerQuestion": { params: { id: string; promptId: string; answers: QuestionAnswer[] | null; agentId?: string }; result: { ok: boolean } };
   "session.approvePlan": { params: { id: string; planId: string }; result: { ok: boolean } };
+  "experts.list": { params: None; result: ExpertCatalogView };
+  "experts.get": { params: { stableId: string }; result: ExpertDetail };
+  "experts.create": { params: Required<ExpertDraft>; result: ExpertCatalogView };
+  "experts.update": { params: Partial<ExpertDraft> & { stableId: string; expectedVersion?: number }; result: ExpertCatalogView };
+  "experts.setEnabled": { params: { stableId: string; enabled: boolean }; result: ExpertCatalogView };
+  "experts.delete": { params: { stableId: string }; result: ExpertCatalogView };
   "fusion.transferExpert": { params: { id: string; agentId: string; model: string; role: "worker" | "light" }; result: { ok: boolean; agentId: string } };
   "fusion.resumeExpert": { params: { id: string; agentId: string }; result: { ok: boolean } };
   "fusion.updateBudget": { params: { id: string; maxCalls: number; maxTokens: number; acceptUnknown: boolean }; result: { ok: boolean } };
@@ -406,6 +496,8 @@ export interface Calls {
   /** the whole picture as a data: URI, for the big view; null when Python no longer has it */
   "attachments.full": { params: { id?: string; attachmentId: string }; result: { url: string | null } };
   "settings.set": { params: { key: SettingKey; value: SettingValue }; result: SettingsView };
+  "storage.get": { params: None; result: StorageView };
+  "storage.set": { params: { key: StorageSettingKey; value: SettingValue }; result: StorageView };
   "customization.read": { params: { projectId: string }; result: RulesDocument };
   "customization.save": { params: { projectId: string; text: string; revision: string }; result: RulesDocument };
   "sounds.pick": { params: { kind: SoundKind }; result: SettingsView };
@@ -459,6 +551,11 @@ export interface Calls {
   "chatgpt.setEnabled": { params: { on: boolean }; result: ChatGPTAccount };
   /** the one-time "You're using your ChatGPT plan" note was seen */
   "chatgpt.welcomed": { params: None; result: ChatGPTAccount };
+  "grok.account": { params: None; result: GrokAccount | null };
+  "grok.login": { params: None; result: GrokAccount };
+  "grok.reopen": { params: None; result: GrokAccount };
+  "grok.cancelLogin": { params: None; result: GrokAccount };
+  "grok.logout": { params: None; result: GrokAccount };
   "providers.save": { params: { draft: ProviderDraft }; result: ApiProvider };
   "providers.remove": { params: { id: string }; result: null };
   "providers.test": { params: { draft: ProviderDraft }; result: TestResult };
@@ -478,6 +575,17 @@ export interface Calls {
 }
 export type Method = keyof Calls;
 
+/** `all` replaces the display window; `prepend` adds a self-contained older page; other events update or append. */
+interface TurnEvent {
+  id: string;
+  turns: TurnUpdate[];
+  all: boolean;
+  prepend?: boolean;
+  /** Drop this many already displayed turns from the top before appending to the default window. */
+  trim?: number;
+  history?: TurnHistory;
+}
+
 export interface Events {
   /** Throttled JPEG frames and playback state (milliseconds); delivered directly to the video component. */
   "files.video": VideoUpdate;
@@ -485,16 +593,16 @@ export interface Events {
   notice: { text: string };
   /** the open conversations in tab order; `select`: show this one (a conversation the page just opened) */
   tabs: { tabs: string[]; select: string | null };
-  /** every project with its rows (saved sessions and open conversations, newest first) and all saved rows */
-  sidebar: { projects: Project[]; sessions: Record<string, SavedRow>; archived?: SavedRow[] };
+  /** every project with its rows (saved sessions and open conversations, newest first) and all saved rows.
+   *  `pinnedSessionIds`: the pinned strip in order, of visible row ids; `project.sessionIds` still lists every
+   *  member — the page leaves the pinned ones out of the project groups. Missing on an older sender. */
+  sidebar: { projects: Project[]; sessions: Record<string, SavedRow>; archived?: SavedRow[]; pinnedSessionIds?: string[] };
   models: { models: ModelChoice[]; defaults: SessionSettings };
   defaults: { defaults: SessionSettings };
   /** merge `patch` into the conversation `id` */
   session: { id: string; patch: Partial<ConversationMeta> };
-  /** the run of the sub-agent that is open in the side panel: all of it (`all`), or the turns that changed */
-  agentTurns: { id: string; agentId: string; turns: Turn[]; all: boolean };
-  /** `all`: these are all of its turns; otherwise the ones that changed (new ones come last) */
-  turns: { id: string; turns: TurnUpdate[]; all: boolean };
+  agentTurns: TurnEvent & { agentId: string };
+  turns: TurnEvent;
   /** a message with attachments whose turn failed goes back into the composer */
   restore: { id: string; text: string; attachments: AttachmentView[] };
   settings: { settings: SettingsView };

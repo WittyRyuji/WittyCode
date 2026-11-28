@@ -3,7 +3,7 @@ import { AlertTriangle, ArrowLeft, Check, ChevronRight, Copy, Loader2, Plus, Tra
 import { useStore } from "../store";
 import { bridge } from "../bridge-instance";
 import { KIND_INFO, PRESETS, REASONING, type Preset } from "../lib/vocab";
-import { envHintOf, envNameOf, envVarText, sameProviderEndpoint } from "../lib/models";
+import { envHintOf, envNamesOf, envVarText, sameProviderEndpoint } from "../lib/models";
 import { LIVE } from "../mode";
 import { API_EFFORTS, contextProblem, imagesAfterKindChange, imagesByDefault, modelSpecification, withRemoteFigures } from "../lib/providerDefaults";
 import { messageOf } from "../lib/errors";
@@ -15,7 +15,6 @@ import type { MenuItem } from "./ui";
 
 const KEY_MODES: { id: KeyMode; label: string }[] = [
   { id: "env", label: "环境变量" },
-  { id: "command", label: "命令获取" },
   { id: "none", label: "不需要" },
   { id: "protected", label: "直接输入（不推荐）" },
 ];
@@ -23,7 +22,7 @@ const KEY_MODES: { id: KeyMode; label: string }[] = [
 /** The variable a provider at this address conventionally uses, so switching to "环境变量" starts from a sensible name. */
 const suggestedVariable = (baseUrl: string) => {
   const p = PRESETS.find((x) => x.envName && x.baseUrl && x.baseUrl === baseUrl);
-  return p?.envName ? `\${${p.envName}}` : "${}";
+  return p?.envName ?? "";
 };
 
 /** What is known about the variable the user named, and what to do when it is not there. */
@@ -73,6 +72,15 @@ const BEDROCK_METHODS = [
 const ROW_EFFORTS = REASONING.filter((r) => API_EFFORTS.some((value) => value === r.value));
 
 let rowCounter = 0;
+type KeyRow = { id: number; name: string; storedIndex?: number };
+type EditableModel = ApiModel & { envKey?: string };
+type EditorDraft = Omit<ProviderDraft, "models"> & { models: EditableModel[] };
+const keyRow = (name = "", storedIndex?: number): KeyRow => ({ id: ++rowCounter, name, storedIndex });
+const initialKeys = (existing?: ProviderDraft): KeyRow[] => existing?.keyMode === "protected" && existing.availableKeys?.length
+  ? existing.availableKeys.map(({ name }, index) => keyRow(name, index))
+  : [keyRow()];
+const keyLabel = (name: string, index: number) => name.trim() || `密钥 ${index + 1}`;
+const keyIndex = (model: ApiModel, count: number) => (model.selectedKeyIndex ?? 0) < count ? (model.selectedKeyIndex ?? 0) : 0;
 const blankModel = (id: string, kind: ApiKind): ApiModel => ({ id, displayName: "", reasoning: "", images: imagesByDefault(kind) });
 
 /** What the server's list says about a model fills the figures its row leaves empty; what the user typed stays. */
@@ -81,8 +89,14 @@ const withFigures = (m: ApiModel, found: Map<string, RemoteModel>): ApiModel => 
   return withRemoteFigures(m, f);
 };
 
-function draftFrom(editId: string, existing: ProviderDraft | undefined): ProviderDraft {
-  if (existing) return existing;
+function draftFrom(editId: string, existing: ProviderDraft | undefined): EditorDraft {
+  if (existing) {
+    if (existing.keyMode !== "env") return existing;
+    const names = envNamesOf(existing.keyHint);
+    return { ...existing, keyHint: envVarText(existing.keyHint), models: existing.models.map((m) => ({
+      ...m, envKey: names[m.selectedKeyIndex ?? 0],
+    })) };
+  }
   const presetId = editId.startsWith("new:") ? editId.slice(4) : "custom";
   const p: Preset = PRESETS.find((x) => x.id === presetId) ?? PRESETS[PRESETS.length - 1]!;
   return {
@@ -91,7 +105,7 @@ function draftFrom(editId: string, existing: ProviderDraft | undefined): Provide
     kind: p.kind,
     baseUrl: p.baseUrl,
     keyMode: p.keyMode,
-    keyHint: p.envName ? `\${${p.envName}}` : "",
+    keyHint: p.envName ?? "",
     bearer: p.bearer || undefined,
     models: p.models
       ? p.models.map((m) => ({ id: m.id, displayName: m.displayName ?? "", contextWindow: m.contextWindow, reasoning: "", images: m.images }))
@@ -109,8 +123,7 @@ function validate(d: ProviderDraft): Record<string, string> {
     if (!d.baseUrl.trim()) e.baseUrl = "必填。";
     else if (!/^https?:\/\/\S+$/.test(d.baseUrl.trim())) e.baseUrl = "要以 http:// 或 https:// 开头。";
   }
-  if (d.keyMode === "env" && !envNameOf(d.keyHint)) e.key = "只写变量名，例如 OPENROUTER_API_KEY（字母、数字、下划线，不以数字开头）。这里填的是变量名，不是密钥本身。";
-  if (d.keyMode === "command" && !d.keyHint.trim()) e.key = "填一条会输出密钥的命令。";
+  if (d.keyMode === "env" && !envNamesOf(envHintOf(d.keyHint)).length) e.key = "只写变量名，不是密钥本身。变量名由字母、数字、下划线组成，不能以数字开头；多个用逗号分隔。";
   if (d.models.length === 0 || d.models.every((m) => !m.id.trim())) e.models = "至少要有一个模型 ID。";
   else if (new Set(d.models.map((m) => m.id.trim()).filter(Boolean)).size < d.models.filter((m) => m.id.trim()).length) e.models = "有重复的模型 ID。";
   if (!e.models) {
@@ -133,61 +146,87 @@ function validate(d: ProviderDraft): Record<string, string> {
 export function ProviderEditor({ editId }: { editId: string }) {
   const existing = useStore((s) => s.providers.find((p) => p.id === editId));
   const { setProviderEdit, saveProvider, removeProvider, say } = useStore.getState();
-  const [d, setD] = useState<ProviderDraft>(() => draftFrom(editId, existing ? { ...existing, status: undefined } : undefined));
-  const [envState, setEnvState] = useState<EnvState | null>(null);
+  const [d, setD] = useState<EditorDraft>(() => draftFrom(editId, existing ? { ...existing, status: undefined } : undefined));
+  const [envStates, setEnvStates] = useState<Record<string, EnvState>>({});
   const [recheck, setRecheck] = useState(0);
-  const envName = d.keyMode === "env" ? envNameOf(d.keyHint) : null;
+  const envNames = useMemo(() => d.keyMode === "env" ? envNamesOf(envHintOf(d.keyHint)) : [], [d.keyMode, d.keyHint]);
   useEffect(() => {
-    setEnvState(null);
-    if (!envName) return;
+    setEnvStates({});
+    if (!envNames.length) return;
     let live = true;
     bridge.providers
-      .envStatus([envName])
-      .then((r) => live && setEnvState(r[envName] ?? "unset"))
+      .envStatus([...new Set(envNames)])
+      .then((r) => live && setEnvStates(r))
       .catch((error) => say(messageOf(error)));
     return () => {
       live = false;
     };
-  }, [envName, recheck, say]);
+  }, [envNames, recheck, say]);
   const [tried, setTried] = useState(false);
   const [test, setTest] = useState<{ busy: boolean; ok?: boolean; text?: string }>({ busy: false });
   const [suggest, setSuggest] = useState<RemoteModel[] | null>(null);
   const [advanced, setAdvanced] = useState(hasAdvancedProviderOptions(existing));
   const [saving, setSaving] = useState(false);
   const [keyProblem, setKeyProblem] = useState("");
-  const keyInput = useRef<HTMLInputElement>(null);
+  const [keyRows, setKeyRows] = useState(() => initialKeys(existing));
+  const keyInputs = useRef(new Map<number, HTMLInputElement>());
   const connectionRevision = useRef(0);
   const isNew = !existing;
   const sameEndpoint = !!existing && sameProviderEndpoint(d, existing);
   const keepKey = sameEndpoint && existing?.keyMode === d.keyMode;
+  const keyLabels = d.keyMode === "env" ? envNames : d.keyMode === "protected" ? keyRows.map((row, i) => keyLabel(row.name, i)) : [];
+  const hasKeyChoice = keyLabels.length > 1;
+  const selection = (model: EditableModel) => d.keyMode === "env" ? Math.max(0, envNames.indexOf(model.envKey ?? "")) : keyIndex(model, keyLabels.length);
   const errors = useMemo(() => validate(d), [d]);
   const shown = (k: string) => (tried ? errors[k] : undefined);
   const resetConnection = (clearKey = false) => {
-    if (clearKey && keyInput.current) keyInput.current.value = "";
+    if (clearKey) keyInputs.current.forEach((input) => { input.value = ""; });
     connectionRevision.current++;
     setKeyProblem("");
     setTest({ busy: false });
     setSuggest(null);
   };
   const requestDraft = (): ProviderDraft | null => {
+    if (d.keyMode === "env" && !envNames.length) {
+      setTried(true);
+      return null;
+    }
+    const draft = { ...d, keyHint: d.keyMode === "env" ? envHintOf(d.keyHint) : d.keyHint,
+      models: d.models.map((model) => {
+        const { envKey: _, ...m } = model;
+        return { ...m, selectedKeyIndex: selection(model) || undefined };
+      }) };
     if (d.keyMode === "protected") {
-      const value = keyInput.current?.value.trim();
-      if (value) return { ...d, newApiKey: LIVE ? value : "demo-key" };
-      if (!keepKey) {
-        setKeyProblem(existing?.keyMode === "protected" ? "接口类型或 Base URL 已更改，请为新接口重新输入 API Key。" : "请输入 API Key。");
+      const newApiKeys = keyRows.map(({ id, name, storedIndex }) => {
+        const value = keyInputs.current.get(id)?.value.trim();
+        return { name: name.trim(), key: value ? (LIVE ? value : "demo-key") : undefined, storedIndex: keepKey ? storedIndex : undefined };
+      });
+      if (newApiKeys.some(({ key, storedIndex }) => !key && storedIndex === undefined)) {
+        setKeyProblem(existing?.keyMode === "protected" && !sameEndpoint
+          ? "接口类型或 Base URL 已更改，请为新接口重新输入 API Key。"
+          : "请输入 API Key，或删除空行。");
         return null;
       }
+      return { ...draft, newApiKeys };
     } else if (d.keyMode === "inline" && !keepKey) {
       setKeyProblem("接口类型或 Base URL 已更改，请选择其他密钥来源。");
       return null;
     }
-    return d;
+    return draft;
   };
   const set = <K extends keyof ProviderDraft>(k: K, v: ProviderDraft[K]) => {
     if (["baseUrl", "keyHint", "bearer", "headers"].includes(k)) resetConnection(k === "baseUrl");
     setD((x) => ({ ...x, [k]: v }));
   };
-  const setModel = (i: number, patch: Partial<ApiModel>) => setD((x) => ({ ...x, models: x.models.map((m, j) => (j === i ? { ...m, ...patch } : m)) }));
+  const setModel = (i: number, patch: Partial<EditableModel>) => setD((x) => ({ ...x, models: x.models.map((m, j) => (j === i ? { ...m, ...patch } : m)) }));
+  const removeKey = (index: number) => {
+    resetConnection();
+    setKeyRows((rows) => rows.filter((_, i) => i !== index));
+    setD((x) => ({ ...x, models: x.models.map((m) => {
+      const selected = keyIndex(m, keyRows.length);
+      return { ...m, selectedKeyIndex: selected === index ? 0 : selected > index ? selected - 1 : selected };
+    }) }));
+  };
 
   const presetItems: MenuItem[] = PRESETS.map((p) => ({
     id: p.id,
@@ -195,6 +234,7 @@ export function ProviderEditor({ editId }: { editId: string }) {
     description: p.local ? "本机服务，不需要密钥" : p.baseUrl.replace(/^https?:\/\//, "") || undefined,
     onSelect: () => {
       resetConnection(true);
+      setKeyRows(initialKeys());
       setD(draftFrom(`new:${p.id}`, undefined));
     },
   }));
@@ -209,7 +249,7 @@ export function ProviderEditor({ editId }: { editId: string }) {
       setD((x) => ({
         ...x,
         kind: k,
-        models: x.models.map((m) => ({ ...m, images: imagesAfterKindChange(m.images, x.kind, k) })),
+        models: x.models.map((m) => ({ ...m, images: imagesAfterKindChange(m.images, x.kind, k), selectedKeyIndex: k === "bedrock-converse" ? undefined : m.selectedKeyIndex })),
         bearer: k === "anthropic" ? x.bearer : undefined,
         reasoningArgs: k === "bedrock-converse" ? undefined : x.reasoningArgs,
         reasoningArgsMixed: k === "bedrock-converse" ? undefined : x.reasoningArgsMixed,
@@ -269,10 +309,10 @@ export function ProviderEditor({ editId }: { editId: string }) {
     const draft = requestDraft();
     if (!draft || Object.keys(errors).length) return;
     setSaving(true);
-    const ok = await saveProvider({ ...draft, name: d.name.trim(), baseUrl: d.baseUrl.trim(), models: d.models.filter((m) => m.id.trim()).map((m) => ({ ...m, id: m.id.trim() })) });
+    const ok = await saveProvider({ ...draft, name: d.name.trim(), baseUrl: d.baseUrl.trim(), models: draft.models.filter((m) => m.id.trim()).map((m) => ({ ...m, id: m.id.trim() })) });
     setSaving(false);
     if (ok) {
-      if (keyInput.current) keyInput.current.value = "";
+      keyInputs.current.forEach((input) => { input.value = ""; });
       setProviderEdit(null);
     }
   };
@@ -343,7 +383,15 @@ export function ProviderEditor({ editId }: { editId: string }) {
               onChange={(m) => {
                 if (m === d.keyMode) return;
                 resetConnection(true);
-                setD((x) => ({ ...x, keyMode: m, keyHint: m === "env" ? suggestedVariable(x.baseUrl) : "" }));
+                const hint = m === "env"
+                  ? (existing?.keyMode === "env" && sameEndpoint ? envVarText(existing.keyHint) : suggestedVariable(d.baseUrl))
+                  : "";
+                if (m === "protected") setKeyRows(initialKeys(existing));
+                const savedModels = sameEndpoint && existing?.keyMode === m ? draftFrom(editId, existing).models : [];
+                setD((x) => ({ ...x, keyMode: m, keyHint: hint, models: x.models.map((model) => {
+                  const saved = savedModels.find((row) => row.id === model.id);
+                  return { ...model, selectedKeyIndex: saved?.selectedKeyIndex, envKey: saved?.envKey };
+                }) }));
               }}
             />
             {d.keyMode === "protected" && (
@@ -353,28 +401,36 @@ export function ProviderEditor({ editId }: { editId: string }) {
                   <div><b>不推荐直接输入。</b>优先用环境变量。保存时由当前 Windows 用户加密；换用户或电脑后可能需要重新输入。请只为你信任的接口提供密钥，远程服务建议使用 HTTPS。{!LIVE && "演示页请勿输入真实密钥。"}</div>
                 </div>
                 <Stack label="API Key" error={keyProblem} hint={keepKey
-                  ? "已保存加密密钥。留空保留，输入新密钥可替换；更改接口类型或 Base URL 后必须重新输入。"
-                  : "填写此接口的 API Key。保存前可以测试连接或获取模型列表。"}>
-                  <TextInput label="API Key" type="password" inputRef={keyInput} mono invalid={!!keyProblem} onChange={() => resetConnection()} />
+                  ? "已保存的密钥留空保留，输入新值可替换。更改接口类型或 Base URL 后必须重新输入。"
+                  : "可按名称区分同一接口的多个密钥。名称仅用于显示，不要把密钥填进名称。"}>
+                  {keyRows.map((row, i) => (
+                    <div key={row.id} className="hrow">
+                      <TextInput label={`密钥名称 ${i + 1}`} value={row.name} placeholder={`密钥 ${i + 1}（名称可选）`} onChange={(name) => setKeyRows((rows) => rows.map((x) => x.id === row.id ? { ...x, name } : x))} />
+                      <TextInput label={i === 0 ? "API Key" : `API Key ${i + 1}`} type="password" mono
+                        placeholder={keepKey && row.storedIndex !== undefined ? "已保存，留空保留" : "输入 API Key"}
+                        inputRef={(input) => { if (input) keyInputs.current.set(row.id, input); else keyInputs.current.delete(row.id); }}
+                        onChange={() => resetConnection()} />
+                      <button type="button" className="icon-btn sm" aria-label={`删除密钥 ${i + 1}`} title="删除密钥" disabled={keyRows.length === 1} onClick={() => removeKey(i)}>
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                  ))}
+                  <div className="pe-btns">
+                    <button type="button" className="btn small" onClick={() => { resetConnection(); setKeyRows((rows) => [...rows, keyRow()]); }}>
+                      <Plus size={13} /> 添加 Key
+                    </button>
+                  </div>
                 </Stack>
               </>
             )}
             {d.keyMode === "env" && (
               <>
-                <Stack label="环境变量" error={shown("key")} hint="只写变量名，不用加 ${}。密钥放在这个环境变量里，配置文件里只记变量名，不记密钥。">
-                  <TextInput label="环境变量" mono value={envVarText(d.keyHint)} onChange={(v) => set("keyHint", envHintOf(v))} placeholder="OPENROUTER_API_KEY" invalid={!!shown("key")} />
+                <Stack label="环境变量" error={shown("key")} hint="只写变量名，多个用逗号分隔，不用加 ${}。配置文件只记变量名，不记密钥。">
+                  <TextInput label="环境变量" mono value={d.keyHint}
+                    onChange={(v) => set("keyHint", v.replace(/(^|,)(\s*)\$\{([A-Za-z_][A-Za-z0-9_]*)\}(?=\s*(?:,|$))/g, "$1$2$3"))}
+                    placeholder="OPENROUTER_API_KEY, OPENROUTER_API_KEY_2" invalid={!!shown("key")} />
                 </Stack>
-                {envName && <EnvLine name={envName} state={envState} onRecheck={() => setRecheck((n) => n + 1)} />}
-              </>
-            )}
-            {d.keyMode === "command" && (
-              <>
-                <Stack label="命令" error={shown("key")} hint="命令输出的内容就是密钥，WittyCode 在请求时运行它并缓存。适合发短期令牌的网关。">
-                  <TextInput label="命令" mono value={d.keyHint} onChange={(v) => set("keyHint", v)} placeholder="C:\tools\mint-gateway-token.cmd" invalid={!!shown("key")} />
-                </Stack>
-                <Stack label="刷新间隔（毫秒）" hint="默认 300000（5 分钟）；收到 401 时会立刻再取一次。">
-                  <TextInput label="刷新间隔" type="number" mono value={String(d.keyTtlMs ?? "")} onChange={(v) => set("keyTtlMs", v ? Number(v) : undefined)} placeholder="300000" width={160} />
-                </Stack>
+                {[...new Set(envNames)].map((name) => <EnvLine key={name} name={name} state={Object.hasOwn(envStates, name) ? envStates[name]! : null} onRecheck={() => setRecheck((n) => n + 1)} />)}
               </>
             )}
             {d.keyMode === "none" && <p className="pe-note">本机服务（Ollama、LM Studio）或靠别的方式认证的网关。有的服务要求密钥非空：用「环境变量」，随便设一个占位值。</p>}
@@ -393,13 +449,15 @@ export function ProviderEditor({ editId }: { editId: string }) {
       <section className="pe-sec">
         <h4>模型</h4>
         {shown("models") && <div className="stack-err">{shown("models")}</div>}
-        <div className="mtable" role="table">
+        {hasKeyChoice && <p className="pe-note">每个模型可单独选择密钥；测试连接和获取模型列表使用第一把。</p>}
+        <div className={`mtable${hasKeyChoice ? " with-keys" : ""}`} role="table">
           <div className="mrow mhead" role="row">
             <span>模型 ID</span>
             <span>显示名</span>
             <span>上下文窗口</span>
             <span>最大输出</span>
             <span>推理</span>
+            {hasKeyChoice && <span>API Key</span>}
             <span>图片</span>
             <span />
           </div>
@@ -419,6 +477,15 @@ export function ProviderEditor({ editId }: { editId: string }) {
                   ...ROW_EFFORTS.map((r) => ({ id: r.value, label: r.label, description: `默认 ${r.label}；实际支持以服务商为准`, checked: m.reasoning === r.value, onSelect: () => setModel(i, { reasoning: r.value }) })),
                 ]}
               />
+              {hasKeyChoice && <Select
+                ariaLabel={`模型 ${m.id || i + 1} 的 API Key`}
+                value={keyLabels[selection(m)] ?? ""}
+                minWidth={160}
+                items={keyLabels.map((label, index) => ({
+                  id: String(index), label, checked: index === selection(m),
+                  onSelect: () => setModel(i, d.keyMode === "env" ? { envKey: label } : { selectedKeyIndex: index }),
+                }))}
+              />}
               <Switch on={m.images} onChange={(v) => setModel(i, { images: v })} label="支持图片" />
               <button type="button" className="icon-btn sm" aria-label="删除这个模型" title="删除这个模型" onClick={() => set("models", d.models.filter((_, j) => j !== i))}>
                 <Trash2 size={14} />

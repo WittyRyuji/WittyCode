@@ -8,6 +8,7 @@ import threading
 import pytest
 
 from desktop.core.fusion.acp import AcpRun
+from desktop.core.context_envelope import strip as strip_context
 from desktop.core.fusion.drive.fingerprint import fingerprint
 from desktop.core.fusion.drive.retention import Retention
 from desktop.core.fusion.drive.store import Drive, DriveError
@@ -61,7 +62,7 @@ def test_delegation_retains_task_and_report_for_both_agents(tmp_path):
                 runtime = main._fusion
                 expert = next(iter(main.agents.values()))
                 assert expert.record.status == "done"
-                assert any(item.get("output") == HEADER + TASK["task"] for item in expert.controller.saved.items)
+                assert any(strip_context(item.get("output") or "") == HEADER + TASK["task"] for item in expert.controller.saved.items)
                 records = await asyncio.to_thread(lambda: _records(Drive(root, project, runtime.owner)))
                 brief, report = records["brief"], records["report"]
                 assert brief.pointers == (brief_pointer,)

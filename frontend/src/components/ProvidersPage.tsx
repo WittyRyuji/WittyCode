@@ -3,12 +3,13 @@ import { ExternalLink, KeyRound, Loader2, Plus } from "lucide-react";
 import { useStore } from "../store";
 import { bridge } from "../bridge-instance";
 import { KIND_INFO, PRESETS } from "../lib/vocab";
-import { envNameOf, envVarText } from "../lib/models";
+import { envNamesOf, envVarText } from "../lib/models";
 import { messageOf } from "../lib/errors";
 import { CHATGPT_USAGE_URL, chatgptState } from "../lib/chatgpt";
 import type { ApiProvider, DevinAccount, EnvState } from "../types";
 import { Switch } from "./formkit";
 import { FactorySettings } from "./FactorySettings";
+import { GrokCard } from "./GrokCard";
 import { ModelVisibility } from "./ModelVisibility";
 
 function Card({ title, state, tone, children, actions }: { title: string; state: string; tone: "ok" | "warn" | "off" | "busy"; children?: ReactNode; actions?: ReactNode }) {
@@ -198,19 +199,17 @@ const ENV_TEXT: Record<EnvState, string> = { set: "已设置", pending: "重启�
 
 function ProviderRow({ p, env }: { p: ApiProvider; env?: EnvState }) {
   const { setProviderEdit, testProvider } = useStore.getState();
-  const name = p.keyMode === "env" ? envNameOf(p.keyHint) : null;
+  const count = p.availableKeys?.length ?? 0;
   const keyText =
     p.keyMode === "env"
-      ? `环境变量 ${envVarText(p.keyHint)}${name && env ? `（${ENV_TEXT[env]}）` : ""}`
+      ? `环境变量 ${envVarText(p.keyHint)}${env ? `（${ENV_TEXT[env]}）` : ""}`
       : p.keyMode === "inline"
         ? "旧密钥明文在 models.json 里，建议改用环境变量"
         : p.keyMode === "protected"
-          ? "已保存加密 API Key（推荐改用环境变量）"
-          : p.keyMode === "command"
-            ? "命令获取密钥"
-            : p.kind === "bedrock-converse"
-              ? "AWS 凭据"
-              : "不需要密钥";
+          ? `已保存加密 API Key${count > 1 ? ` · ${count} 个` : ""}（推荐改用环境变量）`
+          : p.kind === "bedrock-converse"
+            ? "AWS 凭据"
+            : "不需要密钥";
   const keyBad = p.keyMode === "inline" || (p.keyMode === "env" && env === "unset");
   const busy = p.status?.text === "正在测试…";
   return (
@@ -248,7 +247,12 @@ export function ProvidersPage() {
   const setProviderEdit = useStore((s) => s.setProviderEdit);
   const say = useStore((s) => s.say);
   const [envs, setEnvs] = useState<Record<string, EnvState>>({});
-  const names = useMemo(() => providers.map((p) => (p.keyMode === "env" ? envNameOf(p.keyHint) : null)).filter((n): n is string => !!n), [providers]);
+  const names = useMemo(() => [...new Set(providers.flatMap((p) => p.keyMode === "env" ? envNamesOf(p.keyHint) : []))], [providers]);
+  const providerEnv = (p: ApiProvider): EnvState | undefined => {
+    if (p.keyMode !== "env") return undefined;
+    const states = envNamesOf(p.keyHint).map((name) => envs[name]);
+    return (["unset", "pending", "set"] as const).find((state) => state === "set" ? states.length && states.every((s) => s === state) : states.includes(state));
+  };
   useEffect(() => {
     let live = true;
     bridge.providers
@@ -264,6 +268,7 @@ export function ProvidersPage() {
     <div className="providers">
       <ChatGPTCard />
       <DevinCard />
+      <GrokCard />
       <FactorySettings />
       <section className="pcard">
         <header className="pcard-head">
@@ -292,7 +297,7 @@ export function ProvidersPage() {
         ) : (
           <div className="provs">
             {providers.map((p) => (
-              <ProviderRow key={p.id} p={p} env={p.keyMode === "env" ? envs[envNameOf(p.keyHint) ?? ""] : undefined} />
+              <ProviderRow key={p.id} p={p} env={providerEnv(p)} />
             ))}
           </div>
         )}

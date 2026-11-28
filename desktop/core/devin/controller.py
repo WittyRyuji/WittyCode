@@ -71,6 +71,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("desktop.devin")
 
+ACP_WARM_SECONDS = 300.0
 NEW_SESSION_SECONDS = 120.0
 LOAD_SECONDS = 120.0
 CONFIG_SECONDS = 20.0
@@ -135,6 +136,11 @@ class DevinController:
     _usage_model: str = ""
     """The selected model of a live turn; unknown if it was changed mid-turn or is historical."""
     _client: Any = None
+    _parked: bool = False
+    _transport_gate: asyncio.Lock = field(default_factory=asyncio.Lock)
+    _idle_timer: asyncio.TimerHandle | None = None
+    _wake_task: asyncio.Task[Any] | None = None
+    _unsent_prompt: str = ""
     _turn: Turn | None = None
     _turn_done: asyncio.Event | None = None
     _handoff_turn: Turn | None = None
@@ -159,6 +165,13 @@ class DevinController:
     _close_requested: bool = False
     _close_task: asyncio.Task[None] | None = None
     _opening: asyncio.Future[None] | None = None
+    _archive: Any = None
+    """The session archive this native session entered when an engine switch handed a logical-session sid over
+    (``session_archive``): ``None`` until then — a Devin session never invents a sid of its own, and a failed bind
+    leaves it unset so nothing unarchived is claimed."""
+    _archive_sid: str | None = None
+    """The logical-session sid this native session was bound under, kept even when the archive itself failed to
+    open — the next switch still carries the same identity."""
 
     # ------------------------------------------------------------------ plumbing
 
@@ -170,6 +183,11 @@ class DevinController:
             self._listeners.remove(callback)
 
     def _notify(self, kind: str) -> None:
+        if kind == "state":
+            if self.state is SessionState.READY:
+                self._arm_idle()
+            else:
+                self._cancel_idle()
         for callback in list(self._listeners):
             try:
                 callback(self, kind)
@@ -183,8 +201,96 @@ class DevinController:
     def _spawn(self, coroutine: Any) -> asyncio.Task[Any]:
         task = asyncio.ensure_future(coroutine)
         self._background.add(task)
-        task.add_done_callback(self._background.discard)
+        task.add_done_callback(self._background_done)
         return task
+
+    def _background_done(self, task: asyncio.Task[Any]) -> None:
+        self._background.discard(task)
+        self._arm_idle()
+
+    def _cancel_idle(self) -> None:
+        if self._idle_timer is not None:
+            self._idle_timer.cancel()
+            self._idle_timer = None
+
+    def _idle_ready(self) -> bool:
+        # A UI stop timeout can say READY while its original RPC still waits in _background.
+        return (self.state is SessionState.READY and not self._close_requested and not self.manager._closing
+                and not self._background and not self._pending and not self._parked and self._client is not None
+                and self.history_ready and self.manager.can_park)
+
+    def _arm_idle(self) -> None:
+        if self._idle_timer is None and self._idle_ready():
+            self._idle_timer = asyncio.get_running_loop().call_later(ACP_WARM_SECONDS, self._idle_due)
+
+    def _idle_due(self) -> None:
+        self._idle_timer = None
+        if self._idle_ready():
+            self.manager._spawn(self._park())
+
+    async def _park(self) -> None:
+        async with self._transport_gate:
+            if not self._idle_ready():
+                return
+            client = self._client
+            self._parked = True  # A racing send waits on this gate before reloading.
+            try:
+                if client.running and self.session_id:
+                    await client.request("session/close", {"sessionId": self.session_id}, timeout=CLOSE_SECONDS)
+            except DevinError:
+                if client.running:
+                    log.warning("Devin did not confirm idle session close; keeping its connection")
+                    self._parked = False
+                    self._arm_idle()
+                    return
+            self._client = None
+            self.manager._detach(self)
+        await self.manager.release_idle()
+
+    async def _wake(self) -> None:
+        if not self._parked:
+            return
+        async with self._transport_gate:
+            if not self._parked:
+                return
+            if self._close_requested:
+                raise DevinError("会话正在关闭。")
+            kept = self.requested_model, self._model, self.reasoning, self.autonomy
+            async with self.manager.keep_connection():
+                client = await self.manager.connection()
+                try:
+                    if not self.manager.can_park:
+                        raise DevinError("当前 Devin 不支持恢复原生会话。")
+                    await self.manager.ensure_signed_in()
+                    loaded = await self._load(client, show=False, strict=True)
+                    assert loaded is not None
+                    options = loaded.get("configOptions")
+                    _, model, effort, autonomy = kept
+                    if model and current_value(options, "model") != model:
+                        options = await self._set_option(client, "model", model, options)
+                    if model and current_value(options, "model") != model:
+                        raise DevinError("Devin 未确认原模型，未发送消息。")
+                    if effort and thought_levels(options)[1] != effort:
+                        options = await self._set_option(client, "thought_level", effort, options)
+                        if thought_levels(options)[1] != effort:
+                            raise DevinError("Devin 未确认原推理档位，未发送消息。")
+                    if current_value(options, "mode") != mode_of(autonomy):
+                        await client.request("session/set_mode", {"sessionId": self.session_id, "modeId": mode_of(autonomy)},
+                                             timeout=CONFIG_SECONDS)
+                    if not client.running or self._close_requested:
+                        raise DevinError("Devin 连接未就绪。")
+                    self.requested_model, self._model, self.reasoning, self.autonomy = kept
+                    self.transcript.model = self._model
+                    self._usage_model = self.model
+                    self._parked = False
+                except BaseException:
+                    self.requested_model, self._model, self.reasoning, self.autonomy = kept
+                    self.transcript.model = self._model
+                    self.manager._detach(self)
+                    self._client = None
+                    if self.session_id and client.running:
+                        await self._forget(client, self.session_id)
+                    raise
 
     @property
     def busy(self) -> bool:
@@ -339,7 +445,7 @@ class DevinController:
         self.state = SessionState.READY
         self._notify("state")
 
-    async def _load(self, client: Any, *, show: bool) -> Mapping[str, Any] | None:
+    async def _load(self, client: Any, *, show: bool, strict: bool = False) -> Mapping[str, Any] | None:
         """``session/load``. ``show``: its replay becomes the transcript's history (otherwise it is only swallowed: the
         transcript has the history already). ``None``: it failed (the session is DEAD, with the reason)."""
         replay = Replay(self.transcript if show else Transcript())
@@ -355,6 +461,8 @@ class DevinController:
         except asyncio.CancelledError:
             raise
         except Exception as error:
+            if strict:
+                raise
             if not self._close_requested:
                 self._give_up(friendly_failure(error))
             return None
@@ -459,6 +567,7 @@ class DevinController:
     async def close(self) -> None:
         if self._close_task is None:
             self._close_requested = True
+            self._cancel_idle()
             self._close_task = asyncio.ensure_future(self._do_close())
         await asyncio.shield(self._close_task)
 
@@ -467,7 +576,7 @@ class DevinController:
         if opening is not None and not opening.done():
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(asyncio.shield(opening), OPEN_CLOSE_WAIT_SECONDS)
-        client, session_id = self._client, self.session_id
+        client, session_id = (None if self._parked else self._client), self.session_id
         running = self._turn is not None
         self._expire_pending()
         # After an engine handoff the shared transcript may already belong to the destination's first turn.
@@ -495,7 +604,7 @@ class DevinController:
 
     def _connection_lost(self, error: BaseException) -> None:
         """The ``devin acp`` process is gone: DEAD, with a way back (``reconnect``)."""
-        if self._close_requested or self.state in (SessionState.CLOSED, SessionState.DEAD):
+        if self._close_requested or self._parked or self.state in (SessionState.CLOSED, SessionState.DEAD):
             return
         self._client = None
         self._keep_possible_delivery()
@@ -561,6 +670,19 @@ class DevinController:
         mode: Any = None,
     ) -> bool:
         """Apply new settings now (``mode`` is ignored: Devin's own modes are the permission levels)."""
+        self._cancel_idle()
+        try:
+            await self._wake()
+            async with self._transport_gate:
+                return await self._update_settings(model=model, reasoning=reasoning, autonomy=autonomy)
+        except DevinError as error:
+            self.transcript.add_notice(f"设置更新失败：{friendly_failure(error)}")
+            self._changed()
+            return False
+        finally:
+            self._arm_idle()
+
+    async def _update_settings(self, *, model: str | None, reasoning: Any, autonomy: Any) -> bool:
         client = self._client
         if not self.session_id or client is None or self.state not in (SessionState.READY, SessionState.RUNNING):
             return False
@@ -617,8 +739,10 @@ class DevinController:
         attachments = tuple(attachments)
         if attachments and not text:
             text = DEFAULT_PROMPT
-        if not text or self.state is not SessionState.READY or not self.session_id or self._client is None:
+        if (not text or self.state is not SessionState.READY or not self.session_id
+                or (self._client is None and not self._parked) or self._close_requested):
             return False
+        self._cancel_idle()
         self.used_at = self.active_at = time.time()
         self.state = SessionState.RUNNING
         summary = getattr(self, "_switch_summary", False)
@@ -653,6 +777,27 @@ class DevinController:
 
     async def _run_prompt(self, turn: Turn, sent: str, attachments: Sequence[Attachment], steer: UserBlock | None) -> None:
         """One ``session/prompt``: it is answered when the turn is over (all prompts sent to a turn are answered together)."""
+        if self._parked:
+            self._wake_task = asyncio.current_task()
+            try:
+                if turn.stopping:
+                    raise asyncio.CancelledError
+                await self._wake()
+            except (Exception, asyncio.CancelledError) as error:
+                if self._turn is turn and not self._close_requested:
+                    self._unsent_prompt = turn.id
+                    if isinstance(error, asyncio.CancelledError):
+                        self.transcript.abort_turn("已停止恢复，消息没有发出。")
+                    else:
+                        self.transcript.fail_turn(f"恢复 Devin 会话失败，消息没有发出：{friendly_failure(error)}")
+                    self._end_turn(turn)
+                if isinstance(error, asyncio.CancelledError):
+                    raise
+                return
+            finally:
+                self._wake_task = None
+        if self._turn is not turn or self._close_requested:
+            return
         client = self._client
         self._outstanding += 1
         failure: BaseException | None = None
@@ -779,7 +924,7 @@ class DevinController:
         if attachments and not text:
             text = DEFAULT_PROMPT
         turn = self._turn
-        if self.state is not SessionState.RUNNING or turn is None or self._client is None or not self.session_id:
+        if self.state is not SessionState.RUNNING or turn is None or self._parked or self._client is None or not self.session_id:
             return SteerOutcome(False, over=True)
         if not text:
             return SteerOutcome(False, message="没有内容")
@@ -809,6 +954,11 @@ class DevinController:
             return
         self.transcript.mark_stopping()
         self._changed()
+        if self._parked:
+            if (wake := self._wake_task) is not None:
+                wake.cancel()
+                await asyncio.gather(wake, return_exceptions=True)
+            return  # No prompt has been sent on this connection.
         self._expire_pending()  # a question waiting for the user is answered "cancelled" and the turn can end
         if client is not None and self.session_id:
             try:

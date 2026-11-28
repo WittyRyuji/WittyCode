@@ -249,12 +249,13 @@ def test_request_metadata_beyond_awss_limits_fails_the_model_and_names_the_key(t
     assert store.bedrock_plan(store.api_models()[0]).metadata == {}, "a wire that sends no tags is not failed by them"
 
 
-def test_a_credentials_command_that_prints_json_signs_the_request(tmp_path):
+def test_a_credentials_command_that_prints_json_signs_the_request(tmp_path, monkeypatch):
     output = json.dumps({"Credentials": {"AccessKeyId": "AKIDCMD", "SecretAccessKey": "S", "SessionToken": "T"}})
     with FakeApi() as api:
         api.script(answer("ok"))
         record = entry(base=api.base_url.removesuffix("/v1"), authMethod="credentials-command", awsCredentialExport="print-creds")
-        store = store_for(write_settings(tmp_path, record), {}, run_command=lambda command: output if command == "print-creds" else "")
+        store = store_for(write_settings(tmp_path, record), {})
+        monkeypatch.setattr(store, "_run_aws_command", lambda command, *_: output if command == "print-creds" else "")
         run(ask(ApiBackend(store), request_for(store)))
     assert api.posts[0][1]["authorization"].startswith("AWS4-HMAC-SHA256 Credential=AKIDCMD/")
 

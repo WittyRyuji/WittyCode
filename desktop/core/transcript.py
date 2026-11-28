@@ -319,6 +319,7 @@ class QuestionPrompt:
     version: int = 0
     who: str = ""
     """The actual asker, captured when asked rather than inferred from a later model selection."""
+    options_only: bool = False
     kind: ClassVar[str] = "question"
 
 
@@ -364,6 +365,12 @@ class Turn:
     group_of: dict[str, ActivityBlock] = field(default_factory=dict, repr=False)
     plan: PlanSnapshot | None = None
     """Latest accepted plan in event order, independent of historical tool row positions; empty steps explicitly clear it."""
+    fusion_opening: str = ""
+    fusion_dispatches: list[str] = field(default_factory=list)
+    """Fusion's opening and confirmed starts are display metadata, not conversation text."""
+    fusion_outcome: str = ''
+    recovery_prompts: list[Prompt] = field(default_factory=list)
+    """Projection of durable Fusion requests, which are not expired with a model turn."""
 
     @property
     def running(self) -> bool:
@@ -423,7 +430,19 @@ class Transcript:
         return found[1] if found else None
 
     def pending_prompts(self) -> list[Prompt]:
-        return [prompt for _, prompt in self._prompts.values() if prompt.status is PromptStatus.PENDING]
+        recovery = self.turns[-1].recovery_prompts if self.turns else []
+        return [prompt for _, prompt in self._prompts.values() if prompt.status is PromptStatus.PENDING] + recovery
+
+    def set_recovery_prompts(self, prompts: list[Prompt]) -> None:
+        if not self.turns:
+            return
+        target = self.turns[-1]
+        if len(self.turns) > 1 and (prior := self.turns[-2]).recovery_prompts:
+            prior.recovery_prompts = []
+            self._touch(prior)
+        if [p.id for p in target.recovery_prompts] != [p.id for p in prompts]:
+            target.recovery_prompts = prompts
+            self._touch(target)
 
     # ---------------------------------------------------------------- helpers
 
@@ -649,7 +668,7 @@ class Transcript:
     # ---------------------------------------------------------------- live API
 
     def start_turn(
-        self, text: str, attachments: Iterable[Attachment] = (), handoff: tuple[int, bool] | None = None
+        self, text: str, attachments: Iterable[Attachment] = (), handoff: tuple[int, bool] | None = None, *, system_notice: bool = False
     ) -> Turn:
         previous = self.active_turn
         if previous is not None:
@@ -663,7 +682,10 @@ class Transcript:
             except Exception:
                 turn.out_base = None
         turn.out_trusted = turn.out_base is not None or first
-        turn.blocks.append(UserBlock(id=self.new_id("b"), text=text, attachments=self._own(attachments), handoff=handoff))
+        if system_notice:
+            turn.blocks.append(NoticeBlock(id=self.new_id("b"), text=text))
+        else:
+            turn.blocks.append(UserBlock(id=self.new_id("b"), text=text, attachments=self._own(attachments), handoff=handoff))
         self.turns.append(turn)
         self._touch(turn)
         return turn
@@ -767,6 +789,14 @@ class Transcript:
         self.turns.append(turn)
         self._touch(turn, block)
         return block
+
+    def set_turn_opening(self, turn: Turn, text: str) -> None:
+        turn.fusion_opening = text
+        self._touch(turn)
+
+    def add_turn_dispatch(self, turn: Turn, label: str) -> None:
+        turn.fusion_dispatches.append(label)
+        self._touch(turn)
 
     def add_notice(self, text: str) -> NoticeBlock:
         block = NoticeBlock(id=self.new_id("b"), text=text)
@@ -1035,6 +1065,18 @@ class Transcript:
         block = ErrorBlock(id=self.new_id("b"), message=message, recoverable=recoverable)
         self._append_block(turn, block)
         return block
+
+    def history_builder(self) -> Transcript:
+        """An isolated set of mutable lookup tables, with ids reserved from this transcript's counter."""
+        builder = Transcript(clock=self._clock)
+        builder._counter = self._counter
+        return builder
+
+    def adopt_history(self, builder: Transcript, turns: Sequence[Turn]) -> None:
+        self._attachments.update(builder._attachments)
+        self._items.update(builder._items)
+        self._prompts.update(builder._prompts)
+        self.add_history_turns(turns)
 
     def add_history_turns(self, turns: Sequence[Turn]) -> int:
         """Put turns rebuilt from another engine's saved history (``new_history_turn`` ...) before the others."""

@@ -32,6 +32,9 @@ class PromptEvent:
     first: bool = False
     """The first message of a new conversation (it is still the first when an earlier try of it failed). Context meant for
     the start of a conversation is given only then; after that the model asks for what it needs."""
+    internal: bool = False
+    """Sent to an internal session (a Fusion expert's delegation), not to one the user is talking with: hooks meant only
+    for the user's own messages leave these to their own protocol."""
 
 
 @dataclass(frozen=True, slots=True)

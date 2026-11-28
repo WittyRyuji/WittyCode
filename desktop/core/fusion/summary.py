@@ -19,12 +19,12 @@ class AcpSummary(AcpRun):
 
     acp_args = ("--agent-type", "summarizer")
     tool_free = True
+    persist_session = False
 
     def __init__(self, manager, *, before_prompt=None):
         self.before_prompt = before_prompt
         host = SimpleNamespace(manager=manager, session_id="summary-" + uuid.uuid4().hex,
-                               saved=SimpleNamespace(origin={}, items=[], turns=[]), _turn=None,
-                               _save_now=lambda **_: None)
+                               saved=SimpleNamespace(origin={}))
         super().__init__(host)
         self.tools = SimpleNamespace(declarations=lambda: [])
         self.answer = ""
@@ -91,7 +91,11 @@ class AcpSummary(AcpRun):
             await self.close()
 
 
-def summary_stream(manager):
-    def stream(request):
-        return AcpSummary(manager).stream(request)
-    return stream
+def seat_stream(controller, model, *, before_prompt=None):
+    """Tool-free requests belong to the selected seat even when it has no Responses transport."""
+    if model.startswith("factory:"):
+        from desktop.core.fusion.factory_seat import summary
+        return lambda request: summary(controller, request, before_prompt)
+    if model.startswith("devin:"):
+        return lambda request: AcpSummary(controller.manager, before_prompt=before_prompt).stream(request)
+    return controller.manager.stream

@@ -179,7 +179,9 @@ def test_syntax_error_is_reported_before_anything_runs(ctx):
 @windows_only
 def test_tables_are_printed_before_exit(ctx):
     result = shell(ctx, "Get-Location")
-    assert "Path" in result.output and str(ctx.project.resolve()) in result.output
+    # PowerShell truncates a wide table to the console width when stdout is redirected, so a long tmp path is cut.
+    # The cwd itself is asserted by the tests below, which print `.Path` as plain text.
+    assert result.output.startswith("Path\n----\n") and result.output.rstrip().endswith("Exit code: 0")
 
 
 @windows_only

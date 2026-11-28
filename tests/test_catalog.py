@@ -3,9 +3,8 @@ the engines' models and the API providers'."""
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 from desktop.core.catalog import Catalog, Target, build_catalog
+from desktop.core.providers import ApiModelSpec, _NO_KEY
 
 
 def test_an_api_models_id_is_translated_by_its_prefix_when_the_list_does_not_know_it():
@@ -36,7 +35,7 @@ def test_chatgpt_plan_models_have_their_own_prefix_source_and_engine():
         chatgpt_models=[ChatGPTModel("gpt-6.1-sol", "GPT-6.1-Sol", ("low", "high"), "low", 400000), ChatGPTModel("text-only", "Text only", supports_images=False)],
     )
     sol = catalog.find("chatgpt:gpt-6.1-sol")
-    assert sol == {"id": "chatgpt:gpt-6.1-sol", "label": "GPT-6.1-Sol", "source": "chatgpt", "efforts": ["low", "high"], "defaultEffort": "low", "window": 400000}
+    assert sol == {"id": "chatgpt:gpt-6.1-sol", "label": "GPT-6.1-Sol", "source": "chatgpt", "fusionBackend": "plan", "efforts": ["low", "high"], "defaultEffort": "low", "window": 400000}
     assert catalog.find("chatgpt:text-only")["noImages"] is True
     assert catalog.target("chatgpt:gpt-6.1-sol") == Target("chatgpt", "gpt-6.1-sol")
     assert catalog.page_id("chatgpt", "gpt-6.1-sol") == "chatgpt:gpt-6.1-sol"
@@ -60,16 +59,18 @@ def test_an_id_of_an_engine_this_version_does_not_have_runs_nowhere():
 # ------------------------------------------------------------------------------------------------ the API providers' models
 
 
-def spec(model_id: str = "api:p1:custom:Deep-0", **over) -> SimpleNamespace:
-    base = dict(id=model_id, display="Deep", provider_id="p1", window=1_024_000, reasoning="", images=True)
-    return SimpleNamespace(**{**base, **over})
+def spec(model_id: str = "api:p1:custom:Deep-0", **over) -> ApiModelSpec:
+    base = dict(id=model_id, native="deep", display="Deep", provider_id="p1", provider_name="Provider",
+                kind="openai", base_url="https://example.invalid/v1", window=1_024_000, max_output=None,
+                reasoning="", images=True, bearer=False, headers=(), extra_args={}, key=_NO_KEY)
+    return ApiModelSpec(**{**base, **over})
 
 
 def test_an_api_providers_model_is_run_by_the_own_loop_and_its_figures_are_the_users():
     catalog = build_catalog(api_models=[spec(reasoning="high", window=64_000), spec("api:p1:custom:Plain-0", display="Plain", images=False, window=None)])
     deep = catalog.find("api:p1:custom:Deep-0")
     assert deep == {
-        "id": "api:p1:custom:Deep-0", "label": "Deep", "source": "api:p1", "engine": "chatgpt",
+        "id": "api:p1:custom:Deep-0", "label": "Deep", "source": "api:p1", "engine": "chatgpt", "fusionBackend": "api",
         "efforts": ["off", "minimal", "low", "medium", "high", "xhigh", "max"], "defaultEffort": "high", "window": 64_000,
     }
     plain = catalog.find("api:p1:custom:Plain-0")
@@ -80,6 +81,8 @@ def test_an_api_providers_model_is_run_by_the_own_loop_and_its_figures_are_the_u
 
 def test_a_cached_list_keeps_who_runs_what():
     catalog = build_catalog(api_models=[spec()])
-    again = Catalog.from_items(catalog.models)
+    old = [{k: v for k, v in row.items() if k != "fusionBackend"} for row in catalog.models]
+    again = Catalog.from_items(old)
+    assert again.models == catalog.models
     assert again.target("api:p1:custom:Deep-0") == Target("chatgpt", "api:p1:custom:Deep-0")
     assert again.page_id("chatgpt", "api:p1:custom:Deep-0") == "api:p1:custom:Deep-0"

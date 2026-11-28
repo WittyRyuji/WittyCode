@@ -13,11 +13,11 @@ for (const live of [false, true]) for (const theme of ["light", "dark"]) {
   const init = live ? fakeBackendScripts({ initDelay: 0, accountDelay: 0, connectionErrors }).scripts : [];
   const page = await openPage(`${index}?scene=done&settings=connections&theme=${theme}&review=0`, { init, width: theme === "light" ? 1500 : 900, height: 950 });
   const clickText = async (selector, text) => {
-    const at = await page.eval(`[...document.querySelectorAll(${JSON.stringify(selector)})].findIndex(e => e.textContent.includes(${JSON.stringify(text)}))`);
+    const at = await page.findText(selector, text);
     assert(at >= 0, `missing ${selector}: ${text}`);
     await page.click(selector, at);
   };
-  const fill = (selector, value) => page.eval(`(() => { const e = document.querySelector(${JSON.stringify(selector)}); const p = e instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype; Object.getOwnPropertyDescriptor(p, 'value').set.call(e, ${JSON.stringify(value)}); e.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  const fill = (selector, value) => page.setInput(selector, value);
   try {
     if (live) {
       await page.waitFor("!!document.querySelector('.sidebar')", 6000);
@@ -91,14 +91,11 @@ for (const live of [false, true]) for (const theme of ["light", "dark"]) {
     assert(await page.eval("[...document.querySelectorAll('.connection-toolbar, .connection-import, .connection-row')].every(e => e.scrollWidth <= e.clientWidth + 1)"));
     await page.shot(resolve(`shots/connections-${live ? "live" : "design"}-${theme}.png`));
     await clickText(".snav", "账号与模型");
-    await page.waitFor("!!document.querySelector('.factory-card') && !document.querySelector('#factory-path').disabled", 3000);
-    assert(await page.eval("document.querySelector('.factory-card').textContent.includes('Factory CLI（可选）') && document.querySelector('.factory-card').textContent.includes('不依赖 Factory SDK')"));
-    await fill("#factory-path", "droid.exe");
-    await clickText(".factory-card .btn", "保存路径");
-    await page.waitFor("!document.querySelector('.factory-card .btn').disabled", 3000);
+    await page.waitFor("document.querySelector('.factory-card .switch')?.disabled === false", 3000);
+    assert(await page.eval("document.querySelector('.factory-card').textContent.includes('Factory CLI（可选）') && document.querySelector('.factory-card').textContent.includes('不依赖 Factory SDK') && !document.querySelector('.factory-card input')"));
     await page.click('.factory-card .switch[aria-label="启用 Factory CLI"]');
     await page.waitFor("document.querySelector('.factory-card .switch').getAttribute('aria-checked') === 'true'", 3000);
-    if (live) assert.deepEqual(await page.eval("__fake.callsOf('factory.configure').at(-1)"), { path: "droid.exe", enabled: true });
+    if (live) assert.deepEqual(await page.eval("__fake.callsOf('factory.configure').at(-1)"), { enabled: true });
     assert.equal(page.consoleErrors().length, 0);
     assert.equal(page.cspViolations().length, 0);
     console.log(`PASS Connections and optional Factory UI: ${live ? "real QWebChannel" : "design"}, ${theme}, consent, edit, MCP test and switches`);
@@ -142,23 +139,24 @@ for (const theme of ["light", "dark"]) {
   const connectionItems = ["Zeta", "alpha", "Beta"].map((name) => ({ id: `order-${name}`, kind: "skill", name, source: `C:/Users/me/.agents/skills/${name}/SKILL.md`, project: "", config: { path: `C:/Users/me/.agents/skills/${name}/SKILL.md` }, enabled: true, imported: false }));
   const { scripts } = fakeBackendScripts({ initDelay: 0, accountDelay: 0, connectionItems });
   const page = await openPage(`${index}?live=1&theme=${theme}`, { init: scripts, width: theme === "light" ? 1500 : 900, height: 950 });
-  const clickText = async (selector, text) => page.click(selector, await page.eval(`[...document.querySelectorAll(${JSON.stringify(selector)})].findIndex(e => e.textContent.trim() === ${JSON.stringify(text)})`));
+  const clickText = async (selector, text) => page.click(selector, await page.findText(selector, text, { exact: true }));
   try {
     await page.waitFor("!!document.querySelector('.sidebar')", 6000);
     await page.key(",", { code: "Comma", vk: 188, modifiers: 2 });
     await clickText(".snav", "外观");
     await clickText(".segc button", theme === "light" ? "浅色" : "深色");
-    await page.waitFor(`document.documentElement.dataset.theme === '${theme}'`, 3000);
+    await page.waitForCall((name) => document.documentElement.dataset.theme === name, [theme], 3000);
     await clickText(".snav", "插件");
     await page.click('.connection-tabs [data-kind=skill]');
-    await page.waitFor("document.querySelectorAll('.connection-row').length === 3", 6000);
-    assert.deepEqual(await page.eval("[...document.querySelectorAll('.connection-info b')].map(e => e.textContent)"), ["alpha", "Beta", "Zeta"], "sorting must not depend on discovery order or case");
+    await page.waitFor("document.querySelectorAll('.connection-row').length === 4", 6000);
+    assert.deepEqual(await page.eval("[...document.querySelectorAll('.connection-info b')].map(e => e.textContent)"), ["numbered-reply", "alpha", "Beta", "Zeta"], "the built-in skill stays first and sorting must not depend on discovery order or case");
     await page.eval("window.__orderRows = [...document.querySelectorAll('.connection-row')]; true");
     for (const enabled of [false, true, false, true]) {
       await page.click('.connection-row .switch', 1);
-      await page.waitFor(`!document.querySelector('.connection-row .switch').disabled && document.querySelectorAll('.connection-row .switch')[1].getAttribute('aria-checked') === '${enabled}'`, 3000);
-      assert(await page.eval("document.querySelectorAll('.connection-row').length === 3 && __orderRows.every((e, i) => e === document.querySelectorAll('.connection-row')[i])"), "switches keep the same DOM rows in the same order");
-      assert.equal(await page.eval("document.querySelector('.connection-tabs [aria-selected=true] .num').textContent"), "3");
+      await page.waitForCall((on) => !document.querySelector('.connection-row .switch').disabled &&
+        document.querySelectorAll('.connection-row .switch')[1].getAttribute('aria-checked') === String(on), [enabled], 3000);
+      assert(await page.eval("document.querySelectorAll('.connection-row').length === 4 && __orderRows.every((e, i) => e === document.querySelectorAll('.connection-row')[i])"), "switches keep the same DOM rows in the same order");
+      assert.equal(await page.eval("document.querySelector('.connection-tabs [aria-selected=true] .num').textContent"), "4");
     }
     await clickText(".snav", "外观");
     assert.deepEqual(await page.eval("[...document.querySelectorAll('.settings-scroll .field-label')].map(e => e.textContent)"), ["主题", "文字大小"]);

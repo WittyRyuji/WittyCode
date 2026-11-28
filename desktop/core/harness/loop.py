@@ -13,8 +13,8 @@ Invariants worth knowing:
 - A step is one request. A turn ends when a step brings no tool call and nothing the user said meanwhile is waiting
   (``Observer.take_steer``), or at the configured step budget (default ``MAX_STEPS``).
 - A request that fails before any of its answer arrived, in a way that may pass (the connection broke, the server is busy or
-  overloaded: ``errors.is_transient``), is sent again after a pause that grows (``RETRY_DELAYS``, or the server's own
-  ``Retry-After``), and the user is told. Nothing of the failed attempt is in the history, so the repeat is the same request.
+  overloaded: ``errors.is_transient``), is sent again after a pause (fixed for HTTP 502, otherwise ``RETRY_DELAYS`` or
+  the server's ``Retry-After``), and the user is told. Nothing of the failed attempt is in the history, so the repeat is the same request.
 - A tool never raises into the loop: its failure is its result, which the model reads and reacts to.
 - Whatever the model wrote as the arguments of a call is checked here (valid JSON, an object); the tool checks the rest.
 """
@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import json
 import logging
 import random
@@ -53,12 +54,13 @@ from desktop.core.chatgpt.responses import (
 
 from desktop.core.harness.compact import estimate_item, estimate_items, estimate_text, fixed_tokens, is_overflow
 from desktop.core.harness.history import prune_tool_images, replayable
+from desktop.core.settings import DEFAULT_RECONNECT_INTERVAL, DEFAULT_RECONNECT_LIMIT
 
 log = logging.getLogger("desktop.harness")
 
 MAX_STEPS = 80
 RETRY_DELAYS = (1.5, 4.0, 10.0, 25.0)
-"""Seconds to wait before each repeat of a request that failed in a way that may pass; four repeats at most."""
+"""Default backoff and retry limit for transient failures other than HTTP 502."""
 RETRY_LONGEST = 60.0
 """The longest pause a server's ``Retry-After`` is obeyed for (a turn that waits longer is better stopped and said so)."""
 OUTPUT_LIMIT = 60_000
@@ -159,7 +161,7 @@ class Observer:
         """Ask the user about ``call``: ``proceed_once``, ``proceed_always`` or anything else for no."""
         return "cancel"
 
-    def call_running(self, call: Call) -> None: ...
+    def call_running(self, call: Call) -> Awaitable[None] | None: ...
 
     def call_done(self, call: Call, outcome: Outcome) -> None: ...
 
@@ -204,6 +206,16 @@ class Observer:
 
     def steer_given(self, steer: Steer) -> None:
         """The model will see this at its next request."""
+
+    def begin_step(self) -> None:
+        """A new model request starts; any per-request answer staging resets (item ids repeat between responses)."""
+
+    def hold_answer(self) -> bool:
+        """Keep the staged final answer out of the transcript: a continuation supersedes it. Whether one was held."""
+        return False
+
+    def release_answer(self) -> None:
+        """Publish the staged final answer, if any: the turn settled without a continuation."""
 
     def notice(self, text: str) -> None: ...
 
@@ -311,12 +323,16 @@ class AgentLoop:
         measured: tuple[int, int] | None = None,
         floor: int = 0,
         retry_delays: Sequence[float] | None = None,
+        reconnect_interval: int = DEFAULT_RECONNECT_INTERVAL,
+        reconnect_limit: int = DEFAULT_RECONNECT_LIMIT,
         pause: Callable[[float], Awaitable[object]] | None = None,
         jitter: Callable[[], float] | None = None,
         max_continuations: int = 0,
     ) -> None:
         self.stream = stream
         self._retry_delays = tuple(RETRY_DELAYS if retry_delays is None else retry_delays)
+        self._reconnect_interval = reconnect_interval
+        self._reconnect_limit = reconnect_limit
         self._pause = pause or asyncio.sleep
         self._jitter = jitter or random.random
         self.tools = tools
@@ -371,11 +387,13 @@ class AgentLoop:
         step = steps_used
         recovered_empty = False
         # A callable lets the app apply a saved change to an already running turn, without interrupting a request or tool.
+        self.completed_steps = step
         while step < (self.max_steps() if callable(self.max_steps) else self.max_steps):
             step += 1
             self._deliver_steers(history)
             await self._prepare(history)
             calls, incomplete = await self._step(history)
+            self.completed_steps = step
             if not calls:
                 if self.observer.has_steer():
                     continue
@@ -428,6 +446,9 @@ class AgentLoop:
             try:
                 return await self._read(history, self._request(history))
             except Exception as error:  # (a stop is a CancelledError and passes)
+                defer_retry = getattr(self.observer, 'defer_retry', None)
+                if defer_retry is not None and defer_retry(error):
+                    raise  # Fusion persists this wait outside the active execution budget.
                 network = getattr(error, "code", None) in ("network", "stream", "stream_idle", "timeout")
                 if network and (self._events or self._acknowledged or getattr(error, "code", None) in ("stream", "stream_idle")) and self._continuations < self._max_continuations:
                     self._continuations += 1
@@ -451,14 +472,16 @@ class AgentLoop:
                     shortened = True
                 elif self._acknowledged and getattr(error, "code", None) in ("network", "stream", "stream_idle", "timeout"):
                     raise  # no blind resend after an accepted request goes silent; an explicit busy refusal can retry
-                elif repeats < len(self._retry_delays) and is_transient(error) and self.observer.retry_allowed():
-                    delay = self._retry_pause(repeats, error)
-                    repeats += 1
-                    log.warning("the request failed (%s); asking again in %.1f s (%d of %d)", error, delay, repeats, len(self._retry_delays))
-                    self.observer.notice(f"{self._why(error)}，{delay:.0f} 秒后自动重试（第 {repeats}/{len(self._retry_delays)} 次）。")
-                    await self._pause(delay)
                 else:
-                    raise
+                    reconnect = getattr(error, "status", None) == 502
+                    limit = self._reconnect_limit if reconnect else len(self._retry_delays)
+                    if repeats >= limit or not is_transient(error) or not self.observer.retry_allowed():
+                        raise
+                    delay = self._reconnect_interval if reconnect else self._retry_pause(repeats, error)
+                    repeats += 1
+                    log.warning("the request failed (%s); asking again in %.1f s (%d of %d)", error, delay, repeats, limit)
+                    self.observer.notice(f"{self._why(error)}，{delay:.0f} 秒后自动重试（第 {repeats}/{limit} 次）。")
+                    await self._pause(delay)
 
     def _retry_pause(self, repeats: int, error: BaseException) -> float:
         base = self._retry_delays[repeats]
@@ -623,6 +646,14 @@ class AgentLoop:
                     for position in range(index, len(calls)):
                         await commit(position, calls[position], Outcome(message, True, cancelled=True))
                     break
+                ending = getattr(self.tools, "finish_call", None)
+                if len(calls) > 1 and ending is not None and (reason := ending(calls[index])):
+                    # Accepting a bundled submission would drop the rest of the step; the other calls still ran.
+                    await commit(index, calls[index], Outcome(
+                        f"Not submitted: the {reason} must be the only call of its step, not bundled with other calls. "
+                        f"The other calls of this step will be processed normally; submit the {reason} alone once their results are in.", True))
+                    index += 1
+                    continue
                 if getattr(self.tools, "strict_context", False):
                     check = getattr(self.observer, "before_tools", None)
                     if check is None or not await check():
@@ -643,7 +674,9 @@ class AgentLoop:
                 index = end
         except BaseException:
             for task in tasks:
-                task.cancel()
+                # A cancelled gather has already signalled its children. Don't interrupt their durable stop cleanup.
+                if not task.done() and not task.cancelling():
+                    task.cancel()
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
             # Keep completed concurrent reads, and pair every unfinished call without executing it again. A failed
@@ -706,12 +739,16 @@ class AgentLoop:
         if verdict.verdict == ASK:
             self.observer.working("waiting_for_tool_confirmation")
             answer = await self.observer.ask(call, verdict)
+            if answer == 'deferred':
+                return Outcome('Not executed. This exact action is waiting for a durable user decision. Continue other authorized work.', True)
             if answer not in ("proceed_once", "proceed_always"):
                 return Outcome(DECLINED, True, cancelled=True)
             if answer == "proceed_always":
                 self.tools.remember(call)
         self.observer.working("running_tool")
-        self.observer.call_running(call)
+        checkpoint = self.observer.call_running(call)
+        if inspect.isawaitable(checkpoint):
+            await checkpoint
         try:
             return await self.tools.run(call)
         except asyncio.CancelledError:

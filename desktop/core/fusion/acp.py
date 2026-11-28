@@ -10,6 +10,7 @@ import contextlib
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import secrets
@@ -19,20 +20,19 @@ from dataclasses import replace
 from typing import Any
 
 from desktop.core.chatgpt.errors import ChatGPTError
-from desktop.core.devin.items import native_name
+from desktop.core.devin.items import call_status, native_name
 from desktop.core.devin.models import current_value
 from desktop.core.devin.policy import CANCELLED
 from desktop.core.engine_errors import EngineRpcError
-from desktop.core.fusion.acp_server import ADDRESS, AUTH, MCP_CALL, MCP_LIST, MCP_WRAPPERS, PREFIX, SERVER, private_mcp_name
-from desktop.core.fusion.tools import CHOOSE_MAP, RATE_RECORDS, READ_RECORD, SUBMIT_REPORT, SUBMIT_ROUTE, UPDATE_MAP
+from desktop.core.fusion.acp_server import (ADDRESS, AUTH, MCP_CALL, MCP_LIST, MCP_WRAPPERS, NATIVE_IO, PREFIX, SERVER,
+                                            private_mcp_name, tool_label)
+from desktop.core.fusion.tools import CHOOSE_MAP, RATE_RECORDS, READ_MAP, READ_RECORD, SUBMIT_REPORT, SUBMIT_ROUTE, UPDATE_MAP
 from desktop.core.harness.loop import AgentLoop, Call, TurnEnd
 from desktop.core.memory.launch import PACKAGE_ROOT, console_python
 
+log = logging.getLogger(__name__)
+ACP_WARM_SECONDS = 300.0
 GUARD_SECONDS = 15.0
-NATIVE_IO = ("read", "write", "edit", "multi_edit", "apply_patch", "notebook_read", "notebook_edit", "grep", "glob",
-             "find_file_by_name", "exec", "get_output",
-             "write_to_process", "kill_shell", "webfetch", "fetch", "web_search", "ask_user_question", "todo_write", "exit_plan_mode",
-             "skill", "run_subagent", "read_subagent", "request_scope", "mcp_list_servers", "mcp_read_resource")
 IMPORTS = ("agents_standard", "cursor", "windsurf", "claude", "copilot", "codex", "kiro", "opencode", "zed", "cloud")
 
 
@@ -50,9 +50,15 @@ def guard_config(*, tool_free: bool = False) -> dict[str, Any]:
                       for event in ("SessionStart", "PreToolUse")}}
 
 
+def _ended(update: Any) -> bool:
+    """A terminal tool status: a finished call may neither wait for input nor grant a target."""
+    return update.get("status") == "cancelled" or call_status(update.get("status")) is not None
+
+
 class AcpRun:
     acp_args: tuple[str, ...] = ()
     tool_free = False
+    persist_session = True
 
     def __init__(self, host: Any) -> None:
         self.host = host
@@ -78,8 +84,14 @@ class AcpRun:
         self._item = ""
         self._connections: set[asyncio.Task[Any]] = set()
         self._cancel: asyncio.Task[Any] | None = None
+        self._idle_timer: asyncio.TimerHandle | None = None
+        self._closing_task: asyncio.Task[None] | None = None
+        self._can_park = False
+        self._prompt_turn_id = ""
         self._usage: dict[str, Any] = {}
         self._replies: dict[str, tuple[str, Any]] = {}
+        self._seen: dict[str, tuple[str, str]] = {}  # call id -> (wire name, verified private target), per turn
+        self._pending: dict[str, str] = {}  # call id -> recognized wrapper still missing its input, per turn
 
     async def _http(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         task = asyncio.current_task()
@@ -156,7 +168,7 @@ class AcpRun:
             self.steps += 1
             if not await self.watcher.before_tools():
                 await self.watcher._refresh_fusion_context(self.history)
-                self.host._save_now(required=True)
+                await self.host._save_durable(required=True)
                 return {"isError": True, "content": [{"type": "text", "text": "Not run: the session rules changed. Review the current instructions before retrying:\n" + self.host.saved.prompt.get("current", "")}]}
             ident = uuid.uuid4().hex
             call = Call(ident, ident, name, json.dumps(args), args)
@@ -167,7 +179,7 @@ class AcpRun:
             self.watcher.history_grew([item])
             try:
                 await self.loop._run_calls(self.history, [call])
-                self.host._save_now(required=True)  # Retain the result before it is returned to ACP.
+                await self.host._save_durable(required=True)  # Retain the result before it is returned to ACP.
             except Exception:
                 self.violation = "The Fusion tool or evidence checkpoint failed; the ACP turn was stopped."
                 self._stop()
@@ -180,7 +192,8 @@ class AcpRun:
             content.extend({"type": "image", "data": image["data"], "mimeType": image["media_type"]}
                            for image in result.get("wc_images", ()))
             reply = {"content": content}
-            if (name in (READ_RECORD, SUBMIT_REPORT, SUBMIT_ROUTE, RATE_RECORDS, CHOOSE_MAP, UPDATE_MAP)
+            # Some other tools use error status to carry a Fusion pause or handoff, not a failed execution.
+            if (name in ("shell", READ_RECORD, SUBMIT_REPORT, SUBMIT_ROUTE, RATE_RECORDS, READ_MAP, CHOOSE_MAP, UPDATE_MAP)
                     and self.host.saved.tools.get(ident, {}).get("status") == "error"):
                 reply["isError"] = True
             self._replies[invocation] = (signature, reply)
@@ -204,15 +217,41 @@ class AcpRun:
         self.watcher.history_grew([item])
         self._block = self._text = ""
 
-    def _allows_tool(self, name: Any, arguments: Any) -> bool:
-        if self.tool_free or self.tools is None:
-            return False
-        target = private_mcp_name(name, arguments)
-        return target == MCP_LIST or (target.startswith(PREFIX) and self.tools.known(target.removeprefix(PREFIX)))
+    def _allows_target(self, target: str) -> bool:
+        return (not self.tool_free and self.tools is not None
+                and (target == MCP_LIST or (target.startswith(PREFIX) and self.tools.known(target.removeprefix(PREFIX)))))
 
-    def _is_bridge_tool(self, update: Any) -> bool:
-        # Some Devin tool notifications encode the name only in the tool-call ID.
-        return isinstance(update, dict) and self._allows_tool(native_name(update), update.get("rawInput"))
+    def _allows_tool(self, name: Any, arguments: Any) -> bool:
+        return self._allows_target(private_mcp_name(name, arguments))
+
+    def _check_tool_call(self, update: Any, name: str = "") -> None:
+        name = native_name(update) or name
+        raw = update.get("rawInput")
+        call_id = update.get("toolCallId")
+        call_id = call_id if isinstance(call_id, str) and 0 < len(call_id) <= 200 else ""
+        # A fresh report for this id may not inherit an earlier verification or wait.
+        self._seen.pop(call_id, None)
+        self._pending.pop(call_id, None)
+        target = private_mcp_name(name, raw)
+        if self._allows_target(target):
+            if call_id and not _ended(update) and len(self._seen) < 512:
+                self._seen[call_id] = (name, target)  # A finished first report is verified but grants nothing.
+            return
+        if (call_id and name in MCP_WRAPPERS and raw is None and not self.tool_free
+                and not _ended(update) and len(self._pending) < 256):
+            self._pending[call_id] = name  # Only an unfinished recognized wrapper call may wait for a later input.
+            return
+        if target.startswith(PREFIX):
+            self.violation = f"The ACP model called unregistered Fusion tool {tool_label(name)} over the guarded bridge."
+        elif not name:
+            self.violation = ("[ACP_TOOL_UNNAMED] Devin ACP did not report a tool name; "
+                              "WittyCode stopped the turn because it could not verify the guarded bridge target.")
+        elif name not in NATIVE_IO and name not in MCP_WRAPPERS:
+            self.violation = ("[ACP_TOOL_UNSUPPORTED] Devin ACP reported an unsupported tool outside the guarded bridge; "
+                              "WittyCode stopped the turn.")
+        else:
+            self.violation = f"The ACP model attempted tool {tool_label(name)} outside the guarded bridge."
+        self._stop()
 
     def _notify(self, method: str, params: Any) -> None:
         if not self.active or not isinstance(params, dict) or params.get("sessionId") != self.session:
@@ -229,21 +268,36 @@ class AcpRun:
         kind = update.get("sessionUpdate")
         if kind in ("agent_message_chunk", "agent_thought_chunk"):
             text = update.get("content", {}).get("text", "")
-            if not isinstance(text, str):
-                return
-            block = "text" if kind == "agent_message_chunk" else "thinking"
-            if block != self._block:
-                self._flush()
-                self._block, self._item = block, uuid.uuid4().hex
-            self._text += text
-            if block == "text":
-                self.reported = self.reported or bool(text.strip())
-                self.watcher.text_delta(self._item, text)
-            else:
-                self.watcher.thinking_delta(self._item, text)
-        elif kind == "tool_call" and not self._is_bridge_tool(update):
-            self.violation = "The ACP model attempted a native tool or an unknown tool outside the guarded bridge."
-            self._stop()
+            self.append_chunk("text" if kind == "agent_message_chunk" else "thinking", text)
+        elif kind == "tool_call":
+            call_id = update.get("toolCallId")
+            pending = self._pending.get(call_id) if isinstance(call_id, str) else None
+            self._check_tool_call(update, name=pending or "")
+        elif kind == "tool_call_update":
+            call_id = update.get("toolCallId")
+            if isinstance(call_id, str):
+                raw = update.get("rawInput")
+                if call_id in self._pending:
+                    name = self._pending[call_id]
+                    named = native_name(update) or name
+                    if isinstance(raw, dict):
+                        self._check_tool_call(update, name=name)
+                    elif named != name or raw is not None or update.get("status") == "completed":
+                        # A waiting call may only complete its input; a contradictory or unverifiable end is refused.
+                        self._pending.pop(call_id, None)
+                        self.violation = f"The ACP model ended unverified tool call {tool_label(name)} with a contradictory update."
+                        self._stop()
+                elif call_id in self._seen:
+                    wire, target = self._seen[call_id]
+                    named = native_name(update) or wire
+                    if named != wire or (raw is not None and (not isinstance(raw, dict) or private_mcp_name(named, raw) != target)):
+                        # A verified call may neither re-identify nor change its input afterwards.
+                        self._seen.pop(call_id, None)
+                        self.violation = f"The ACP model reported a contradictory update for tool {tool_label(wire)}."
+                        self._stop()
+                if _ended(update):
+                    self._seen.pop(call_id, None)
+                    self._pending.pop(call_id, None)
         elif kind == "usage_update":
             from desktop.core.context import ContextState
             used, size = update.get("used"), update.get("size")
@@ -251,10 +305,41 @@ class AcpRun:
                 self.host.context = ContextState(used=used, window=size, model=self.host.model)
                 self.host._notify("context")
 
+    def append_chunk(self, block: str, text: str) -> None:
+        if not isinstance(text, str):
+            return
+        if block != self._block:
+            self._flush()
+            self._block, self._item = block, uuid.uuid4().hex
+        self._text += text
+        if block == "text":
+            self.reported = self.reported or bool(text.strip())
+            self.watcher.text_delta(self._item, text)
+        else:
+            self.watcher.thinking_delta(self._item, text)
+
+    def _permission_target(self, call: Any) -> bool:
+        # Devin permission requests repeat only the call id and approval meta, never the raw input; the earlier
+        # tool_call update already carried the verified target. Meta text is never a substitute for it.
+        if not isinstance(call, dict):
+            return False
+        call_id = call.get("toolCallId")
+        call_id = call_id if isinstance(call_id, str) and 0 < len(call_id) <= 200 else ""
+        self._pending.pop(call_id, None)  # A permission answer settles the call, allowed or denied.
+        recorded = self._seen.pop(call_id, None) if call_id else None
+        named = native_name(call)
+        if "rawInput" not in call:
+            # A sparse request spends the record once; an asserted name must be the same verified identity.
+            return (recorded is not None and (not named or named == recorded[0])
+                    and self._allows_target(recorded[1]))
+        # An explicit input is judged on its own and must match this call's verified (name, target), never the cache.
+        target = private_mcp_name(named, call.get("rawInput"))
+        return self._allows_target(target) and (recorded is None or (named, target) == recorded)
+
     async def _request(self, method: str, params: Any, request_id: Any) -> Any:
         if (method == "session/request_permission" and self.active and not self.violation and not self.boundary
                 and isinstance(params, dict) and params.get("sessionId") == self.session
-                and self._is_bridge_tool(params.get("toolCall"))):
+                and self._permission_target(params.get("toolCall"))):
             once = next((option.get("optionId") for option in params.get("options", []) if option.get("kind") == "allow_once"), None)
             if once is not None:
                 return {"outcome": {"outcome": "selected", "optionId": once}}
@@ -279,9 +364,32 @@ class AcpRun:
         }
         return bool(native) and all(turn.status == "failed" and turn.error in safe_errors for turn in native)
 
+    def arm_idle(self) -> None:
+        if (self.persist_session and self._can_park and self._idle_timer is None and self.client is not None
+                and self.client.running and not self.active and not self.host._close_requested):
+            self._idle_timer = asyncio.get_running_loop().call_later(ACP_WARM_SECONDS, self._idle_due)
+
+    def _cancel_idle(self) -> None:
+        if self._idle_timer is not None:
+            self._idle_timer.cancel()
+            self._idle_timer = None
+
+    def _idle_due(self) -> None:
+        self._idle_timer = None
+        if not self.active and not self.host.busy and not self.host._close_requested:
+            self._start_close()
+
+    def _exited(self, client: Any, error: BaseException) -> None:
+        if self.client is client and not self.active:
+            log.warning("Fusion ACP disconnected (pid %s); releasing its bridge", client.pid)
+            self._start_close()
+
     async def _open(self) -> None:
+        self._cancel_idle()
+        if self._closing_task is not None:
+            await asyncio.shield(self._closing_task)
         engine = getattr(self.host.manager, "devin", None)
-        if engine is None or not engine.settings.devin_enabled:
+        if engine is None or not engine.settings.devin_enabled or getattr(engine, "_closing", False):
             raise ChatGPTError("Devin ACP 当前不可用；未选择替代模型。", code="fusion_acp")
         if self.client is not None and self.client.running:
             return
@@ -311,11 +419,17 @@ class AcpRun:
         self.bridge_seen.clear()
         options = {"acp_args": self.acp_args} if self.acp_args else {}
         self.account = engine.cached_account().get("email")
-        self.client = engine._client_factory(binary, env=env, cwd=root, on_notification=self._notify,
-                                             on_request=self._request, on_exit=lambda error: None, **options)
-        await self.client.start()
-        await self.client.request("initialize", {"protocolVersion": 1, "clientCapabilities": {"fs": {"readTextFile": False, "writeTextFile": False}, "terminal": False},
-                                                  "clientInfo": {"name": "wittycode-fusion", "version": "1"}}, timeout=30)
+        if getattr(engine, "_closing", False):
+            raise ChatGPTError("应用正在退出，未启动 ACP。", code="fusion_acp")
+        client = self.client = engine._client_factory(binary, env=env, cwd=root, on_notification=self._notify,
+                                                      on_request=self._request,
+                                                      on_exit=lambda error: self._exited(client, error) if self.persist_session else None,
+                                                      **options)
+        await client.start()
+        initialized = await client.request("initialize", {"protocolVersion": 1, "clientCapabilities": {"fs": {"readTextFile": False, "writeTextFile": False}, "terminal": False},
+                                                          "clientInfo": {"name": "wittycode-fusion", "version": "1"}}, timeout=30)
+        caps = initialized.get("agentCapabilities", {}) if isinstance(initialized, dict) else {}
+        self._can_park = isinstance(caps, dict) and caps.get("loadSession") is True
         # The private address/credential are inherited from the ACP process, never sent in persistable MCP config.
         bridge_env = {key: env[key] for key in ("PYTHONPATH", "PYTHONUTF8", "PYTHONIOENCODING")}
         # A public generation defeats the CLI's cached MCP description: each process must prove live bridge access.
@@ -343,11 +457,14 @@ class AcpRun:
         self.session = ident or result.get("sessionId", "")
         if not self.session:
             raise ChatGPTError("ACP 没有返回原生会话，未自动重试。", code="fusion_acp")
-        self.host.saved.origin["fusionAcp"] = {"session": self.session, "upto": saved.get("upto", 0) if ident else 0,
-                                               "promptAttempted": bool(ident) and not never_prompted}
-        if previous_empty:
-            self.host.saved.origin["fusionAcp"]["previousEmptySession"] = previous_empty
-        self.host._save_now(required=True)
+        if self.persist_session:
+            self.host.saved.origin["fusionAcp"] = {"session": self.session, "upto": saved.get("upto", 0) if ident else 0,
+                                                   "promptAttempted": bool(ident) and not never_prompted}
+            if previous_empty:
+                self.host.saved.origin["fusionAcp"]["previousEmptySession"] = previous_empty
+            # Bind the real native session id before any retained-text write.
+            self.host._archive_before_handoff()
+            await self.host._save_durable(required=True)
         try:
             await asyncio.wait_for(asyncio.gather(self.guard_seen.wait(), self.bridge_seen.wait()), GUARD_SECONDS)
         except asyncio.TimeoutError:
@@ -364,8 +481,16 @@ class AcpRun:
         self.loop = AgentLoop(None, tools, watcher, model=self.host.model, reasoning=None, instructions=instructions)
         self.steps, self.boundary, self.violation = steps_used, "", ""
         self.reported = False
+        watcher.begin_step()  # A new prompt: per-request answer staging resets (item ids are per run).
         self._usage.clear()
+        self._seen.clear()
+        self._pending.clear()
         requested = False
+        turn = self.host._turn
+        previous = self.host.saved.origin.get("fusionAcp", {})
+        resuming = (isinstance(previous, dict) and bool(previous.get("session"))
+                    and (self.client is None or not self.client.running
+                         or self._closing_task is not None and not self._closing_task.done()))
         fusion = self.host._fusion or getattr(self.host._fusion_parent, "_fusion", None)
         if fusion is not None and fusion.registry.policy.max_tokens:
             raise ChatGPTError("旧会话的 Token 上限无法约束 ACP；请新建无固定 Token 上限的 Fusion 会话。", code="fusion_acp")
@@ -408,9 +533,14 @@ class AcpRun:
                 required = schema.get("required", [])
                 optional = [key for key in schema.get("properties", {}) if key not in required]
                 index.append([declaration["name"], required, optional])
+            shell_example = ""
+            if any(name == "shell" for name, _, _ in index):
+                wrapper = {"server_name": SERVER, "tool_name": "shell", "arguments": {"command": "git --version"}}
+                shell_example = f"{MCP_CALL} example: {json.dumps(wrapper)}\n"
             prompt = (instructions + f"\n\nAll filesystem access, commands, questions, plans and delegation MUST use the {SERVER} MCP tools. "
-                      f"Use {MCP_CALL} with server_name={SERVER}, the tool_name from the index below, and its arguments. "
-                      f"If exposed directly, use {PREFIX}<tool_name>. You do not need to list the tools before calling them. "
+                      f"Use {MCP_CALL} with server_name={SERVER} and the tool_name from the index below. "
+                      "Put all tool-specific parameters inside the arguments object, not alongside server_name or tool_name.\n"
+                      f"{shell_example}If exposed directly, use {PREFIX}<tool_name>. You do not need to list the tools before calling them. "
                       f"If you need details, {MCP_LIST} with server_name={SERVER} can show schemas. "
                       "If that list is truncated, use the index below; do not call native get_output or read any Devin output file. "
                       "WittyCode's read_output accepts only WittyCode output references, not Devin's. "
@@ -420,12 +550,17 @@ class AcpRun:
             if self.host._turn is not None and self.host._turn.user_block is not None and self.host._turn.user_block.text.strip() == "/compact":
                 prompt = "/compact"
             saved["promptAttempted"] = True
-            self.host._save_now(required=True)  # Persist uncertainty before a request could reach the native agent.
+            await self.host._save_durable(required=True)  # Persist uncertainty before a request could reach the native agent.
             self.host._check_fusion_title_source(native_account=self.account)
             self.active = True
             requested = True
+            if turn is not None:
+                self._prompt_turn_id = turn.id
             result = await self.client.request("session/prompt", {"sessionId": self.session, "prompt": prompt_blocks(prompt, attachments)}, timeout=None)
             self._flush()
+            if not self.violation and self._pending:
+                pending = ", ".join(sorted({tool_label(name) for name in self._pending.values()}))
+                self.violation = f"The ACP turn ended with unverified tool calls ({pending})."
             if self.violation:
                 raise ChatGPTError(self.violation, code="fusion_acp_guard")
             if result.get("stopReason") not in ("end_turn", "cancelled"):
@@ -433,11 +568,13 @@ class AcpRun:
             if result.get("stopReason") == "cancelled" and not self.boundary:
                 raise ChatGPTError("ACP 回合中断，未自动重放。", code="fusion_acp")
             if not self.reported and not self.boundary:
-                raise ChatGPTError("ACP 没有返回报告，未自动重放。", code="fusion_acp")
+                raise ChatGPTError("ACP 没有返回报告。", code="fusion_acp_no_report")
             saved["upto"] = len(self.host.saved.items)
-            self.host._save_now(required=True)
+            await self.host._save_durable(required=True)
             return TurnEnd(self.boundary or "done", steps=self.steps)
         except BaseException:
+            if resuming and not requested and turn is not None and self._prompt_turn_id != turn.id:
+                self.host._unsent_prompt = turn.id
             await self.close()
             raise
         finally:
@@ -458,28 +595,45 @@ class AcpRun:
                 fusion._checkpoint()
             self.watcher = None
 
+    def _start_close(self) -> asyncio.Task[None]:
+        self._cancel_idle()
+        if self._closing_task is None or self._closing_task.done():
+            self._closing_task = asyncio.create_task(self._close_transport())
+            self._closing_task.add_done_callback(self._closed)
+        return self._closing_task
+
+    @staticmethod
+    def _closed(task: asyncio.Task[None]) -> None:
+        if not task.cancelled() and (error := task.exception()) is not None:
+            log.error("Fusion ACP transport cleanup failed", exc_info=error)
+
     async def close(self) -> None:
+        await asyncio.shield(self._start_close())
+
+    async def _close_transport(self) -> None:
         self.active = False
         for task in list(self._connections):
             task.cancel()
         if self._connections:
             await asyncio.gather(*list(self._connections), return_exceptions=True)
-        if self.client is not None:
-            if self.session and self.client.running:
-                with contextlib.suppress(Exception):
-                    await self.client.notify("session/cancel", {"sessionId": self.session})
-                with contextlib.suppress(Exception):
-                    await self.client.request("session/close", {"sessionId": self.session}, timeout=5)
-            await self.client.close()
-            self.client = None
-        if self._cancel is not None:
-            with contextlib.suppress(Exception):
-                await self._cancel
-        if self.server is not None:
-            self.server.close()
-            await self.server.wait_closed()
-            self.server = None
-        for task in list(self._connections):
-            task.cancel()
-        if self._connections:
-            await asyncio.gather(*list(self._connections), return_exceptions=True)
+        try:
+            if self.client is not None:
+                if self.session and self.client.running:
+                    with contextlib.suppress(Exception):
+                        await asyncio.wait_for(self.client.notify("session/cancel", {"sessionId": self.session}), 2)
+                    with contextlib.suppress(Exception):
+                        await self.client.request("session/close", {"sessionId": self.session}, timeout=5)
+                await self.client.close()
+                self.client = None
+        finally:
+            if self.server is not None:
+                self.server.close()
+                await self.server.wait_closed()
+                self.server = None
+            if self._cancel is not None:
+                await asyncio.gather(self._cancel, return_exceptions=True)
+                self._cancel = None
+            for task in list(self._connections):
+                task.cancel()
+            if self._connections:
+                await asyncio.gather(*list(self._connections), return_exceptions=True)

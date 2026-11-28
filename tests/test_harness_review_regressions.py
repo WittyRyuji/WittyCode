@@ -14,7 +14,7 @@ from desktop.core.harness.permissions import decide
 from desktop.core.harness.store import SavedTurn
 from desktop.core.harness.tools import ToolContext, ToolRegistry
 from tests.chatgpt_support import finish_turn
-from tests.fake_responses import FakeResponses
+from tests.fake_responses import FakeResponses, say
 from tests.test_chatgpt_controller import opened
 
 
@@ -99,6 +99,10 @@ def test_a_prefix_summary_keeps_the_running_turns_empty_reasoning_choice(tmp_pat
         with FakeResponses() as fake:
             engine, ctl = await opened(tmp_path, fake)
             try:
+                fake.script(say("Previous answer."))
+                ctl.send_prompt("Previous question")
+                await finish_turn(ctl)
+                history = compact.view_of(ctl.saved.items, ctl.saved.compaction)
                 await ctl._ensure_tools()
                 ctl.saved.prompt = {"instructions": "stable", "current": "stable"}
                 owner = ctl.transcript.start_turn("summary")
@@ -109,7 +113,7 @@ def test_a_prefix_summary_keeps_the_running_turns_empty_reasoning_choice(tmp_pat
                     received.append(kwargs["prefix_request"])
                     return None
                 monkeypatch.setattr(compact, "compact", fake_compact)
-                await ctl._compact(owner, [user_message("previous")], 100, False)
+                await ctl._compact(owner, history, compact.estimate_items(history), False)
                 assert not received[0].get("reasoning", {}).get("effort")
             finally:
                 ctl._turn = None
@@ -122,6 +126,10 @@ def test_an_expired_summary_does_not_charge_or_change_the_next_turn(tmp_path, mo
         with FakeResponses() as fake:
             engine, ctl = await opened(tmp_path, fake)
             try:
+                fake.script(say("Previous answer."))
+                ctl.send_prompt("Previous question")
+                await finish_turn(ctl)
+                history = compact.view_of(ctl.saved.items, ctl.saved.compaction)
                 owner = ctl.transcript.start_turn("summary")
                 ctl._turn, ctl._turn_model = owner, ctl.model
                 before = ctl.usage
@@ -132,7 +140,7 @@ def test_an_expired_summary_does_not_charge_or_change_the_next_turn(tmp_path, mo
                     kwargs["on_usage"](Usage(input_tokens=100, output_tokens=10))
                     return None
                 monkeypatch.setattr(compact, "compact", fake_compact)
-                await ctl._compact(owner, [user_message("previous")], 100, False)
+                await ctl._compact(owner, history, compact.estimate_items(history), False)
                 assert ctl.usage == before
                 assert ctl.transcript.working_state == "executing_tool"
             finally:

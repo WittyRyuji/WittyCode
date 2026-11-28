@@ -1,5 +1,5 @@
 import type { ApiProvider, ChatGPTAccount, DevinAccount, Engine, ModelChoice } from "../types";
-import { engineLabel, engineOfSource } from "../lib/models.ts"; // (with the extension: scripts/unit.mjs runs this file in Node)
+import { engineLabel, engineOfSource, GROK_SUBSCRIPTION_SOURCE } from "../lib/models.ts"; // (with the extension: scripts/unit.mjs runs this file in Node)
 import type { MenuItem } from "./ui";
 
 export interface ModelMenuInput {
@@ -119,7 +119,13 @@ export function buildModelMenu(i: ModelMenuInput): MenuItem[] {
     if (allHidden("factory")) items.push(noneShown("factory"));
   }
 
-  const listed = new Set(i.providers.map((p) => `api:${p.id}`));
+  if (available.some((m) => m.source === GROK_SUBSCRIPTION_SOURCE)) {
+    items.push({ id: "h-grok-subscription", heading: true, label: "GROK 订阅", description: "OAuth · WittyCode Harness" });
+    items.push(...usable.filter((m) => m.source === GROK_SUBSCRIPTION_SOURCE).map(modelItem));
+    if (allHidden(GROK_SUBSCRIPTION_SOURCE)) items.push(noneShown(GROK_SUBSCRIPTION_SOURCE));
+  }
+
+  const listed = new Set([GROK_SUBSCRIPTION_SOURCE, ...i.providers.map((p) => `api:${p.id}`)]);
   for (const p of i.providers) {
     const source = `api:${p.id}`;
     const own = usable.filter((m) => m.source === source);

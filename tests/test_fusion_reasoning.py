@@ -10,23 +10,24 @@ from desktop.core.app_core import AppError
 from desktop.core.fusion.registry import FusionError, Policy
 from desktop.core.fusion.reasoning import configured_effort
 from desktop.core.llm.backend import ApiBackend
+from desktop.core.providers import ProviderStore
 from desktop.core.settings import load_settings, settings_from_dict, settings_to_dict
 from tests.app_support import MODEL, OTHER_MODEL, ready_core
 from tests.chatgpt_support import finish_turn
 from tests.fake_responses import call, say
 from tests.llm_support import FakeApi
-from tests.test_llm_backend import model_id_of, settings_with, store_for
+from tests.test_llm_backend import model_id_of, settings_with
 from tests.test_reasoning_args import answer
 
 
 INVALID_MAPS = [None, [], "high", True, {MODEL: ""}, {MODEL: False}, {MODEL: {}},
-                {"factory:demo": "high"}, {"router:" + MODEL: "high"}, {"worker:factory:demo": "high"},
+                {"unsupported:demo": "high"}, {"router:" + MODEL: "high"}, {"worker:unsupported:demo": "high"},
                 {"main:" + MODEL: ""}, {MODEL: "a" * 65}, {"api:" + "a" * 513: "low"},
                 {f"chatgpt:demo-{index}": "low" for index in range(257)}]
 
 
-def test_global_worker_setting_is_single_while_existing_session_pools_remain_readable(tmp_path):
-    assert settings_from_dict({"fusion_workers": [MODEL, OTHER_MODEL]}).fusion_workers == [MODEL]
+def test_global_and_saved_worker_pools_preserve_order_and_reject_oversized_updates(tmp_path):
+    assert settings_from_dict({"fusion_workers": [MODEL, OTHER_MODEL, MODEL]}).fusion_workers == [MODEL, OTHER_MODEL]
     assert settings_from_dict({"fusion_workers": []}).fusion_workers == []
     policy = Policy(MODEL, (MODEL, OTHER_MODEL), OTHER_MODEL, 0)
     assert Policy.from_json(policy.to_json()).workers == (MODEL, OTHER_MODEL)
@@ -34,12 +35,12 @@ def test_global_worker_setting_is_single_while_existing_session_pools_remain_rea
     async def go():
         core, _, _, _, _ = await ready_core(tmp_path)
         try:
-            for selected in ([MODEL], [MODEL], [OTHER_MODEL]):
+            for selected in ([MODEL], [OTHER_MODEL], [OTHER_MODEL, MODEL]):
                 await core.call("settings.set", {"key": "fusionWorkers", "value": selected})
                 assert core.settings.fusion_workers == selected
             with pytest.raises(AppError):
-                await core.call("settings.set", {"key": "fusionWorkers", "value": [MODEL, OTHER_MODEL]})
-            assert core.settings.fusion_workers == [OTHER_MODEL]
+                await core.call("settings.set", {"key": "fusionWorkers", "value": [f"chatgpt:demo-{n}" for n in range(33)]})
+            assert core.settings.fusion_workers == [OTHER_MODEL, MODEL]
         finally:
             await core.shutdown()
     asyncio.run(go())
@@ -98,8 +99,9 @@ def test_setting_validates_supported_levels_before_saving_and_can_clear(tmp_path
 def test_main_workers_and_light_use_their_snapshot_on_requests_and_after_reopening(tmp_path):
     async def go():
         with FakeApi() as api:
-            store = store_for(settings_with(tmp_path, api.base_url, apiKey=None, reasoningEffort="high",
-                                           reasoningArgs={"off": {"thinking": {"type": "disabled"}}}))
+            path = settings_with(tmp_path, api.base_url, reasoningEffort="high", reasoningArgs={"off": {"thinking": {"type": "disabled"}}})
+            store = ProviderStore(models_file=path, sidecar=tmp_path / "providers.json",
+                                  environ={"TEST_API_KEY": "test-fixture"}, registry_env=lambda: {})
             api_id = model_id_of(store)
             core, service, _, _, engine = await ready_core(tmp_path, providers=store)
             engine.api = ApiBackend(store)

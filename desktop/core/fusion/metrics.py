@@ -222,6 +222,77 @@ def retained_tasks(raw: Any) -> list[dict]:
     return entries
 
 
+_UNIT_GROUP = {'resolve': 'planning', 'facts': 'planning', 'proposal': 'planning', 'worker': 'execution',
+               'runner': 'review', 'review': 'review', 'repair': 'alignment', 'finding': 'alignment',
+               'diagnosis': 'exception', 'supplement': 'exception', 'resume': 'exception'}
+_TOKEN_PARTS = ('input', 'output', 'cacheRead')  # Same disjoint counters as Tokens.to_json(), not prompt sizes.
+
+
+def unit_attempt_kind(stage, prior_pause):
+    if prior_pause == 'repair':
+        return 'repair'
+    if prior_pause == 'missing evidence':
+        return 'supplement'
+    return 'resume' if prior_pause else stage
+
+
+def frozen_summary(plans: Mapping) -> dict:
+    """Fold committed events, never mutate them. A diagnostic/freeze has no model cost of its own.
+
+    Generation accounts for identifiable *bound* planning requests only, not Main's turn, debate,
+    or an estimate of the prose length. A guarded native prompt supplies at most one metering record.
+    Unmetered legacy attempts remain events; their old total cannot reconstruct a component split.
+    """
+    groups = {name: {'events': 0, 'kinds': {}, 'calls': 0, 'unknownUsageEvents': 0,
+                     'tokens': dict.fromkeys(_TOKEN_PARTS, 0), 'knownTokens': dict.fromkeys(_TOKEN_PARTS, 0)}
+              for name in ('planning', 'exception', 'alignment', 'review', 'execution')}
+    zero = {'calls': 0, 'usage': dict.fromkeys(_TOKEN_PARTS, 0)}
+
+    def add(kind, meter=None):
+        group = groups[_UNIT_GROUP[kind]]
+        group['events'] += 1
+        group['kinds'][kind] = group['kinds'].get(kind, 0) + 1
+        meter = meter if isinstance(meter, Mapping) else {}
+        calls, usage = meter.get('calls'), meter.get('usage')
+        group['calls'] = _total_tokens(group['calls'], calls if _count(calls) else None)
+        unknown = False
+        known = meter.get('knownUsage', usage)
+        for part in _TOKEN_PARTS:
+            n = usage.get(part) if isinstance(usage, Mapping) else None
+            subtotal = known.get(part) if isinstance(known, Mapping) else None
+            if _count(subtotal):
+                group['knownTokens'][part] += subtotal
+            if not _count(n):
+                n, unknown = None, True
+            group['tokens'][part] = _total_tokens(group['tokens'][part], n)
+        group['unknownUsageEvents'] += int(unknown)
+
+    units = 0
+    for plan in plans.values():
+        add('resolve', zero)
+        planning = plan.get('planningUsage')
+        planning = planning if isinstance(planning, Mapping) else {}
+        add('facts', planning.get('facts'))
+        if 'proposal' in planning:
+            add('proposal', planning['proposal'])
+        for case in plan['cases'].values():
+            units += 1
+            prior, last_handoff = '', None
+            for h in case.get('history', ()):
+                kind = h.get('meterKind')
+                if not isinstance(kind, str) or kind not in _UNIT_GROUP:
+                    kind = unit_attempt_kind(h['stage'], prior)
+                add(kind, h.get('meter'))
+                prior = h.get('reason', '')
+                if isinstance(h.get('handoff'), Mapping):
+                    last_handoff = h['handoff']
+                    add('finding' if last_handoff.get('diagnostic') == 'U03' else 'diagnosis', zero)
+            # An undispatched refusal has no attempt row. Otherwise the cursor mirrors the last handoff.
+            if isinstance(case.get('handoff'), Mapping) and case['handoff'] != last_handoff:
+                add('diagnosis', zero)
+    return {'plans': len(plans), 'units': units, 'groups': groups}
+
+
 def summary(tasks: Sequence[Mapping]) -> dict:
     """Cost of all valid tasks per accepted task, with small-task costs broken out.
 

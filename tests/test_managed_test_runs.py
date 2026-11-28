@@ -69,6 +69,22 @@ def test_cli_keeps_explicit_evidence_but_removes_scratch(tmp_path, monkeypatch, 
     assert (old / "history.json").read_text() == "keep"
 
 
+@pytest.mark.parametrize("command, expected", [
+    (["python", "-m", "pytest", "tests"], ["python", "-m", "pytest", "-n", "16", "tests"]),
+    ([sys.executable, "-B", "-m", "pytest", "-q"], [sys.executable, "-B", "-m", "pytest", "-n", "16", "-q"]),
+    (["python", "-m", "pytest", "-n", "0"], ["python", "-m", "pytest", "-n", "16", "-n", "0"]),
+    (["python", "-c", "pass", "-m", "pytest"], ["python", "-c", "pass", "-m", "pytest"]),
+    (["node", "--test", "sample.mjs"], ["node", "--test", "sample.mjs"]),
+])
+def test_cli_defaults_only_python_pytest_to_16_workers(tmp_path, monkeypatch, command, expected):
+    monkeypatch.chdir(project(tmp_path))
+    invoked = []
+    monkeypatch.setattr(test_runs.subprocess, "run", lambda argv, **kwargs: invoked.append(argv))
+
+    assert test_runs.main(["--", *command]) == 0
+    assert invoked == [expected]
+
+
 def test_interrupt_cleans_only_its_run_while_another_thread_is_active(tmp_path):
     root = project(tmp_path)
     with test_runs.ManagedTestRun(root) as parent, ThreadPoolExecutor(max_workers=1) as pool:

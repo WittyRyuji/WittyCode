@@ -11,6 +11,7 @@ import pytest
 
 from desktop.core.app_core import AppError
 from desktop.core.cache import Cache
+from desktop.core.context_envelope import strip as strip_context
 from desktop.core.fusion.registry import FusionRegistry, Policy
 from desktop.core.session_state import SessionLimitError, SessionState
 from tests.app_support import MODEL, OTHER_MODEL, make_core, ready_core, save_conversation
@@ -875,6 +876,8 @@ def test_changing_engine_continues_the_same_conversation_with_the_text_handed_ov
         await core.call("session.send", {"id": cid, "text": "and then?"})
         await until(lambda: harness.requests("session/prompt"), 10)
         text = prompt_blocks(harness)[0]["text"]
+        assert '<skill name="numbered-reply" official="wittycode">' in text, "the wire prompt carries the bundled official skill"
+        text = strip_context(text)
         assert "What does context.py do?" in text and "It reads the context size." in text and text.endswith("and then?")
         await until(lambda: any(p["turns"] for p in events.of("turns")))
         user = last_turn(events)["blocks"][0]

@@ -67,7 +67,7 @@ def test_first_refusal_does_not_list_or_name_and_can_be_retried(tmp_path):
             assert (await core.call("session.send", {"id": cid, "text": "first attempt"}))["ok"]
             await until(lambda: len(plan.requests) == 1)
             await core.call("project.refresh", {"id": str(project)})
-            assert project_ids(core) == ["cg:known"], "a pending checkpoint is not a project row in its own window"
+            assert project_ids(core) == [cid, "cg:known"], "the named draft is a sidebar row before the first dispatch"
             plan.release("refuse")
             await idle(core, cid)
             await until(lambda: events.of("restore"))

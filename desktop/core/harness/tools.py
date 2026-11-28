@@ -32,9 +32,12 @@ import time
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from desktop.core.diffs import FileDiff
+
+if TYPE_CHECKING:
+    from desktop.core.harness.shell import ShellWatch
 
 log = logging.getLogger("desktop.harness.tools")
 
@@ -121,6 +124,11 @@ class ToolContext:
     read_encodings: dict[str, str] = field(default_factory=dict)
     """Content fingerprints read or written by this conversation; shared by per-call context copies."""
     supports_images: bool = False
+    history_recall: Any = None
+    """The runtime recall adapter (``harness.recall_tool.bind_history`` installs it): ``declared`` is the
+    session's tool contract, while ``enabled`` says whether the archive can be read now."""
+    shell_watch: ShellWatch | None = None
+    """Per-command monitor installed only by a Harness with an enclosing Runner deadline."""
 
 
 @dataclass

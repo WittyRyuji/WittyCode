@@ -28,7 +28,7 @@ WittyCode 是 Windows 上的编程代理桌面应用。可以用 ChatGPT 账号�
 
 **Windows 10/11 x64 · Alpha。** [GitHub Releases](https://github.com/WittyRyuji/WittyCode/releases) 有发布包时，下载 `WittyCode-<版本>-win-x64.zip` 和对应的 `.sha256`，核对校验值后解压，运行 `WittyCode.exe`。包内包含 Python 和运行依赖，暂未做代码签名。应用不提供自动更新，新版本需要手动下载。
 
-**从源码运行**需要 Python **3.11.9** 和 Node.js **24.20.0**。本文功能以开发源码为准，`main` 和已打标签的下载包不一定都包含；克隆后可用 `git switch dev` 切换到开发分支。
+**从源码运行**需要 Python **3.11.9** 和 Node.js **24.22.3**。本文功能以开发源码为准，`main` 和已打标签的下载包不一定都包含；克隆后可用 `git switch dev` 切换到开发分支。
 
 ```powershell
 git clone https://github.com/WittyRyuji/WittyCode.git

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { LIVE } from "../mode";
 import { liveCall } from "../liveBridge";
+import { settingsFields } from "../liveReducer";
 import { useStore } from "../store";
 import { messageOf } from "../lib/errors";
 import type { ConnectionEntry, ConnectionPreview, ConnectionScan } from "../protocol";
@@ -18,6 +19,7 @@ const DEMO: ConnectionEntry[] = [
 
 export function ConnectionsPage() {
   const projects = useStore((s) => s.projects);
+  const numberedReply = useStore((s) => s.numberedReply);
   const [projectId, setProject] = useState("");
   const [kind, setKind] = useState<typeof KINDS[number][0]>("connectors");
   const [adding, setAdding] = useState(false);
@@ -71,6 +73,14 @@ export function ConnectionsPage() {
     } catch (e) { setError(messageOf(e)); }
     finally { setBusy(false); }
   };
+  const toggleNumberedReply = async (on: boolean) => {
+    setBusy(true); setError("");
+    try {
+      if (LIVE) useStore.setState(settingsFields(await liveCall("settings.set", { key: "numberedReply", value: on })));
+      else useStore.setState({ numberedReply: on });
+    } catch (e) { setError(messageOf(e)); }
+    finally { setBusy(false); }
+  };
   const test = async (entry: ConnectionEntry) => {
     setBusy(true); setError(""); setResult("");
     try {
@@ -85,7 +95,7 @@ export function ConnectionsPage() {
   const builtinHooks = scan.builtinHooks ?? [];
   return (
     <div className="connections">
-      <div className="connection-tabs" role="tablist" aria-label="插件内容">{KINDS.map(([id, label]) => <button type="button" role="tab" data-kind={id} aria-selected={id === kind} key={id} onClick={() => { setKind(id); setAdding(false); setPreview(null); setEditing(null); setConfirmed(false); setResult(""); }}>{label}{id !== "marketplace" && <span className="num">{id === "connectors" ? 2 : scan.items.filter((e) => e.kind === id).length + (id === "hook" ? builtinHooks.length : 0)}</span>}</button>)}</div>
+      <div className="connection-tabs" role="tablist" aria-label="插件内容">{KINDS.map(([id, label]) => <button type="button" role="tab" data-kind={id} aria-selected={id === kind} key={id} onClick={() => { setKind(id); setAdding(false); setPreview(null); setEditing(null); setConfirmed(false); setResult(""); }}>{label}{id !== "marketplace" && <span className="num">{id === "connectors" ? 2 : scan.items.filter((e) => e.kind === id).length + (id === "hook" ? builtinHooks.length : 0) + (id === "skill" ? 1 : 0)}</span>}</button>)}</div>
       {kind === "connectors" && <ConnectorCards />}
       {kind === "marketplace" && <SkillStore onInstalled={() => void load()} />}
       {local && <>
@@ -103,7 +113,11 @@ export function ConnectionsPage() {
           <div className="connection-info"><b>{hook.name}</b><span className="connection-state">WittyCode 官方内置 · 始终启用，不可停用</span><p>{hook.description}</p></div>
           <div className="connection-actions"><Switch on disabled label={`${hook.name}：始终启用`} onChange={() => {}} /></div>
         </section>)}
-        {entries.length === 0 && <p className="snote">{kind === "hook" ? "没有发现外部 Hook。" : "没有发现这类连接。"}可以粘贴本地配置路径后预览导入。</p>}{entries.map((entry) => <section key={entry.id} className="connection-row" data-kind={entry.kind} data-connection={entry.id}><div className="connection-info"><b>{entry.name}</b><span className="connection-state">{entry.changed ? "来源已变化 · 需要重新导入确认" : entry.imported ? entry.enabled ? "已导入 · 已启用" : "已导入 · 已停用" : entry.kind === "skill" ? "已发现" : "已发现 · 尚未信任"}</span><div className="connection-source selectable">{entry.source}</div></div><div className="connection-actions">{!entry.imported && entry.kind !== "skill" && <button type="button" className="btn small" disabled={busy} onClick={() => void openPreview(entry.source)}>导入…</button>}<button type="button" className="btn small" disabled={busy} onClick={() => { if (entry.kind === "plugin") { void openPreview(entry.source); return; } setEditing(entry); setDraft(JSON.stringify(entry.config, null, 2)); setConfirmed(false); setPreview(null); }}>编辑</button>{entry.kind === "mcp" && <button type="button" className="btn small" disabled={busy || !entry.enabled || !entry.imported || entry.changed} onClick={() => void test(entry)}>测试连接</button>}<Switch on={entry.enabled && !entry.changed} label={`${entry.enabled ? "停用" : "启用"} ${entry.name}`} disabled={busy} onChange={(enabled) => void update(entry, enabled)} /></div></section>)}
+        {kind === "skill" && <section className="connection-row connection-builtin" data-kind="skill" data-builtin-skill="numbered-reply">
+          <div className="connection-info"><b>numbered-reply</b><span className="connection-state">WittyCode 官方内置 · {numberedReply ? "已启用" : "已停用"}</span><p>结论先行、逐项编号的回复格式，对所有引擎面向用户的消息生效；关闭后不再注入。</p></div>
+          <div className="connection-actions"><Switch on={numberedReply} label={`numbered-reply：${numberedReply ? "停用" : "启用"}`} disabled={busy} onChange={(on) => void toggleNumberedReply(on)} /></div>
+        </section>}
+        {entries.length === 0 && <p className="snote">{kind === "hook" ? "没有发现外部 Hook。" : kind === "skill" ? "没有发现外部技能。" : "没有发现这类连接。"}可以粘贴本地配置路径后预览导入。</p>}{entries.map((entry) => <section key={entry.id} className="connection-row" data-kind={entry.kind} data-connection={entry.id}><div className="connection-info"><b>{entry.name}</b><span className="connection-state">{entry.changed ? "来源已变化 · 需要重新导入确认" : entry.imported ? entry.enabled ? "已导入 · 已启用" : "已导入 · 已停用" : entry.kind === "skill" ? "已发现" : "已发现 · 尚未信任"}</span><div className="connection-source selectable">{entry.source}</div></div><div className="connection-actions">{!entry.imported && entry.kind !== "skill" && <button type="button" className="btn small" disabled={busy} onClick={() => void openPreview(entry.source)}>导入…</button>}<button type="button" className="btn small" disabled={busy} onClick={() => { if (entry.kind === "plugin") { void openPreview(entry.source); return; } setEditing(entry); setDraft(JSON.stringify(entry.config, null, 2)); setConfirmed(false); setPreview(null); }}>编辑</button>{entry.kind === "mcp" && <button type="button" className="btn small" disabled={busy || !entry.enabled || !entry.imported || entry.changed} onClick={() => void test(entry)}>测试连接</button>}<Switch on={entry.enabled && !entry.changed} label={`${entry.enabled ? "停用" : "启用"} ${entry.name}`} disabled={busy} onChange={(enabled) => void update(entry, enabled)} /></div></section>)}
       </div>
       <p className="page-note">不修改其他客户端的配置。外部 Hooks 用于 WittyHarness；MCP 支持 stdio／Streamable HTTP，对新开或重连会话生效。</p>
       </>}

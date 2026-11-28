@@ -4,6 +4,8 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from desktop.core.fusion.backends import backend_for
+
 
 ROLES = ("main", "worker", "light")
 
@@ -15,7 +17,7 @@ def reasoning_model(key: str) -> str:
 
 def reasoning_map(value: Any) -> dict[str, str]:
     if not isinstance(value, Mapping) or len(value) > 256 or any(
-        not isinstance(key, str) or not reasoning_model(key).startswith(("chatgpt:", "api:", "devin:"))
+        not isinstance(key, str) or backend_for(reasoning_model(key)) is None
         or len(reasoning_model(key)) > 512
         or not isinstance(effort, str) or not effort.strip() or len(effort) > 64
         for key, effort in value.items()

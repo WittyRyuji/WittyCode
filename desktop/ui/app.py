@@ -108,10 +108,12 @@ def make_chatgpt(settings: AppSettings, open_url: Any, providers: Any = None) ->
     try:
         from desktop.core.chatgpt.engine import ChatGPTEngine
         from desktop.core.llm.backend import ApiBackend
+        from desktop.core.llm.grok import GrokSubscription
     except ImportError:
         return None
-    api = ApiBackend(providers) if providers is not None else None
-    return ChatGPTEngine(settings, default_settings_path().parent / "chatgpt", open_browser=open_url, api=api)
+    root = default_settings_path().parent
+    api = ApiBackend(providers, grok_subscription=GrokSubscription(root / "grok-subscription.bin", open_browser=open_url)) if providers is not None else None
+    return ChatGPTEngine(settings, root / "chatgpt", open_browser=open_url, api=api)
 
 
 def make_factory(settings: AppSettings) -> Any:

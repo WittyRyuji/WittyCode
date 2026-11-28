@@ -51,7 +51,9 @@ def test_todays_flow_records_the_expert_and_the_main_agent(tmp_path):
 def test_a_routed_and_verified_task_records_route_identities_and_acceptance(tmp_path):
     async def go():
         async with _fusion(tmp_path, active=(*ROUTE_GATES, "acceptance")) as (main, fake):
-            await _turn(main, fake, _route(), _delegate(), _report(), _delegate("Runner", call_id="verify"), _report(),
+            (main.project / "inventory.txt").write_text("Two boxes.", encoding="utf-8")
+            await _turn(main, fake, _route(), _delegate(), _report(), _delegate("Runner", call_id="verify"),
+                        call("read_file", {"file_path": "inventory.txt"}), _report(evidence=["inventory.txt: Two boxes."]),
                         say("Verified."))
             task, = _tasks(main)
             assert task["destination"] == "coder" and task["accepted"] is True and task["runner_first_pass"] is True
@@ -70,14 +72,15 @@ def test_failed_checks_and_an_unverified_turn_are_counted_as_such(tmp_path):
         async with _fusion(tmp_path, active=(*ROUTE_GATES, "acceptance")) as (main, fake):
             await _turn(main, fake, _route(verification="runner_and_sampler"), _delegate(), _report(),
                         _delegate("Runner", call_id="verify"), _report("concerns"),
-                        _delegate("QualitySampler", call_id="sample"), _report("concerns"), say("Both checks found problems."))
+                        _delegate("QualitySampler", call_id="sample"), _report("concerns"), say("Both checks found problems."),
+                        say("There is no passing check."))
             task, = _tasks(main)
             assert task["runner_first_pass"] is False and task["sampler_blocking"] is True
-            assert task["accepted"] is True  # The required checks ran; what they found is the main agent's to judge.
+            assert task["accepted"] is False  # A completed check reporting concerns is not a pass.
             assert main._fusion.metrics_summary()["runner_first_pass_rate"] == 0.0
             await _turn(main, fake, _route(), _delegate(call_id="again"), _report(), say("First answer."), say("Final answer."))
-            assert [item["accepted"] for item in _tasks(main)] == [True, False]
-            assert main._fusion.metrics_summary()["accepted"] == 1
+            assert [item["accepted"] for item in _tasks(main)] == [False, False]
+            assert main._fusion.metrics_summary()["accepted"] == 0
     asyncio.run(go())
 
 

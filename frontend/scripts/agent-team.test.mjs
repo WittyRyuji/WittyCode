@@ -18,6 +18,11 @@ test("team shows active experts above newest-first history without mutating the 
   assert.equal(new Set([...active, ...history]).size, input.length);
 });
 
+test("old unstarted transfers stay in history even if the saved record says pending", () => {
+  const transfer = { ...agent("transfer", "pending", 0), unstartedTransfer: true };
+  assert.deepEqual(groupAgents([transfer]), { active: [], history: [transfer] });
+});
+
 test("a reused historical expert returns to the active team and completed work moves back", () => {
   const a = agent("owner", "done", 1, 2);
   assert.equal(groupAgents([a]).active.length, 0);

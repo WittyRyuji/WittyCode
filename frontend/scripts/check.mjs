@@ -26,15 +26,16 @@ async function checkDirectProviderKey() {
   const edit = '.provs .prov:last-child .prov-actions .btn:last-child';
   const primary = '.pe .segc button:last-child';
   const fakeKey = 'demo-' + 'typed-key-not-for-storage';
-  const setInput = (selector, text) => editor.eval(`(() => { const e = document.querySelector(${JSON.stringify(selector)}); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(e, ${JSON.stringify(text)}); e.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  const setInput = (selector, text) => editor.setInput(selector, text);
   const clickText = async (selector, text) => {
-    const n = await editor.eval(`[...document.querySelectorAll(${JSON.stringify(selector)})].findIndex(e => e.textContent.trim() === ${JSON.stringify(text)})`);
+    const n = await editor.findText(selector, text, { exact: true });
     if (n < 0) throw new Error(`No Provider button: ${text}`);
     await editor.click(selector, n);
   };
   try {
     await editor.waitFor("document.querySelector('.pe .segc .on')", 3000);
-    ok("direct entry is opt-in; the OpenAI preset still defaults to env", await editor.eval(`document.querySelector('.pe .segc .on').textContent === '环境变量' && !document.querySelector(${JSON.stringify(password)})`));
+    ok("direct entry is opt-in; the OpenAI preset still defaults to env", await editor.call((selector) =>
+    document.querySelector('.pe .segc .on').textContent === '环境变量' && !document.querySelector(selector), password));
     await editor.click(primary);
     ok("direct entry warns and uses a password field", await editor.eval("document.querySelector('.pe-warn').textContent.includes('不推荐') && document.querySelector('.pe input[type=password]').value === ''"));
     const selectedEvidence = process.argv.includes("--provider-key") && process.env.WITTYCODE_TEST_EVIDENCE;
@@ -43,7 +44,7 @@ async function checkDirectProviderKey() {
     ok("a new direct-entry provider requires a key", await editor.eval("document.querySelector('.stack-err')?.textContent.includes('输入 API Key')"));
     await editor.click(password);
     await editor.type(fakeKey);
-    ok("the typed secret is not serialized in the input markup", await editor.eval(`!document.querySelector('.pe').outerHTML.includes(${JSON.stringify(fakeKey)})`));
+    ok("the typed secret is not serialized in the input markup", await editor.call((value) => !document.querySelector('.pe').outerHTML.includes(value), fakeKey));
     await clickText(".pe-foot .btn", "测试连接");
     await editor.waitFor("document.querySelector('.test-res.ok')", 4000);
     await clickText(".pe-btns .btn", "从服务端获取列表");
@@ -51,7 +52,9 @@ async function checkDirectProviderKey() {
     ok("unsaved direct entry can test and fetch models", true);
     await editor.click(save);
     await editor.waitFor("!document.querySelector('.pe')", 3000);
-    ok("the provider list shows only the encrypted key status", await editor.eval(`document.querySelector('.provs .prov:last-child .prov-meta').textContent.includes('已保存加密 API Key') && !document.body.textContent.includes(${JSON.stringify(fakeKey)})`));
+    ok("the provider list shows only the encrypted key status", await editor.call((value) =>
+      document.querySelector('.provs .prov:last-child .prov-meta').textContent.includes('已保存加密 API Key') &&
+      !document.body.textContent.includes(value), fakeKey));
     await editor.click(edit);
     ok("reopening leaves the field empty and explains how to retain or replace it", await editor.eval("document.querySelector('.pe input[type=password]').value === '' && document.querySelector('.pe').textContent.includes('留空保留')"));
     await editor.click(save);
@@ -87,11 +90,13 @@ if (process.argv.includes("--provider-key")) process.exit(failed ? 1 : 0);
 let page = await openPage(`${index}?scene=ask&theme=light&review=0`);
 
 /** Every element the selector matches is on a line of its own: each one below the one before it, all starting at the same left edge. */
-const oneLineEach = (selector) =>
-  `(() => { const r = [...document.querySelectorAll(${JSON.stringify(selector)})].map(e => e.getBoundingClientRect()); return r.length > 1 && r.every((b, i) => i === 0 || (b.top >= r[i - 1].bottom - 1 && Math.abs(b.left - r[0].left) < 1)); })()`;
+const oneLineEach = (selector) => {
+  const rows = [...document.querySelectorAll(selector)].map((e) => e.getBoundingClientRect());
+  return rows.length > 1 && rows.every((row, i) => i === 0 || (row.top >= rows[i - 1].bottom - 1 && Math.abs(row.left - rows[0].left) < 1));
+};
 
 // question card: the options one per line; submitting with nothing chosen is refused, then answer and submit
-ok("a question's options are one per line", await page.eval(oneLineEach(".prompt.ask .opt")));
+ok("a question's options are one per line", await page.call(oneLineEach, ".prompt.ask .opt"));
 await page.click(".prompt.ask .btn.primary");
 ok("empty submit is refused", await page.eval("document.querySelectorAll('.q.missing').length === 2"));
 await page.click(".prompt.ask .opt input[type=radio]", 1);
@@ -135,7 +140,8 @@ const tabsAtStart = await page.eval("document.querySelectorAll('.tab').length");
 const rowsAtStart = await page.eval("document.querySelectorAll('.srow').length");
 await page.click(".newbtn");
 await page.waitFor("document.querySelector('.emptypage')", 3000);
-ok("新会话 shows the first message box: no tab was added and none is current", await page.eval(`document.querySelectorAll('.tab').length === ${tabsAtStart} && !document.querySelector('.tab.current')`));
+ok("新会话 shows the first message box: no tab was added and none is current", await page.call((count) =>
+  document.querySelectorAll('.tab').length === count && !document.querySelector('.tab.current'), tabsAtStart));
 ok("it can be typed in at once, with the project chosen on the line under the box", await page.eval("!document.querySelector('.input').disabled && [...document.querySelectorAll('.controls .chip-k')].map(e => e.textContent).join(',') === '模式' && document.querySelector('.hint .chip-k').textContent === '项目'"));
 ok("and the send button waits for a message", await page.eval("document.querySelector('.send').disabled"));
 await page.eval(`(() => {
@@ -143,27 +149,29 @@ await page.eval(`(() => {
   data.items.add(new File(['draft only'], 'draft.txt', { type: 'text/plain' }));
   document.querySelector('.input').dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }));
 })()`);
-await page.waitFor(`document.querySelectorAll('.tab').length === ${tabsAtStart + 1} && !!document.querySelector('.att-row .att')`, 3000);
+await page.waitForCall((count) => document.querySelectorAll('.tab').length === count && !!document.querySelector('.att-row .att'), [tabsAtStart + 1], 3000);
 await page.click(".input");
 await page.type("still editable");
-ok("an attachment-only draft has an editable tab but no sidebar row", await page.eval(`document.querySelector('.input').value === 'still editable' && document.querySelectorAll('.srow').length === ${rowsAtStart}`));
+ok("an attachment-only draft has an editable tab but no sidebar row", await page.call((count) =>
+  document.querySelector('.input').value === 'still editable' && document.querySelectorAll('.srow').length === count, rowsAtStart));
 await page.click(".tab.current .tab-x");
-await page.waitFor(`document.querySelectorAll('.tab').length === ${tabsAtStart}`);
+await page.waitForCall((count) => document.querySelectorAll('.tab').length === count, [tabsAtStart]);
 await page.click(".newbtn");
 await page.click(".chip-suggest", 0);
 ok("a suggestion fills the message box", await page.eval("document.querySelector('.input').value.length > 0 && !document.querySelector('.send').disabled"));
 await page.click(".input");
 await page.key("Enter");
-await page.waitFor(`document.querySelectorAll('.tab').length === ${tabsAtStart + 1} && !!document.querySelector('.tab.current') && document.querySelectorAll('.block.user').length === 1`, 5000);
-await page.waitFor(`document.querySelectorAll('.srow').length === ${rowsAtStart + 1} && !!document.querySelector('.srow.current.open')`, 3000);
+await page.waitForCall((count) => document.querySelectorAll('.tab').length === count &&
+  !!document.querySelector('.tab.current') && document.querySelectorAll('.block.user').length === 1, [tabsAtStart + 1], 5000);
+await page.waitForCall((count) => document.querySelectorAll('.srow').length === count &&
+  !!document.querySelector('.srow.current.open'), [rowsAtStart + 1], 3000);
 ok("the first send adds a tab with the message and admits a project row", true);
 await page.click(".newbtn");
 ok("and the first message box is empty again for the next one", await page.eval("document.querySelector('.input').value === ''"));
 
 // commands typed with a slash: the menu lists them, one that cannot run says why and keeps the text, /plan flips the mode
-const setDraft = (value) =>
-  page.eval(`(() => { const e = document.querySelector('.input'); Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(e, ${JSON.stringify(value)}); e.dispatchEvent(new Event('input', { bubbles: true })); })()`);
-const modeChip = "document.querySelector('.chip-mode .chip-v')?.textContent";
+const setDraft = (value) => page.setInput(".input", value);
+const modeChip = () => document.querySelector('.chip-mode .chip-v')?.textContent;
 await page.click(".input");
 await page.type("/");
 ok("a slash opens the command menu: the page's own, then the user's skills and commands", await page.eval("[...document.querySelectorAll('.slash-item .sl-name')].map(e => e.textContent).join(',') === '/compact,/plan,/goal,/summarize-diff,/code-review'"));
@@ -190,15 +198,17 @@ await page.key("Enter");
 ok("Enter on a skill only writes its name and waits for the rest of the message", await page.eval("document.querySelector('.input').value === '/summarize-diff ' && !document.querySelector('.slash-menu')"));
 await setDraft("/pl");
 await page.key("Enter");
-ok("Enter on the lit command runs it: the box is empty and the mode is Plan", await page.eval(`document.querySelector('.input').value === '' && ${modeChip} === 'Plan' && document.querySelector('.notice-text')?.textContent.includes('已切到 Plan')`));
+ok("Enter on the lit command runs it: the box is empty and the mode is Plan", (await page.call(modeChip)) === 'Plan' &&
+  await page.eval("document.querySelector('.input').value === '' && document.querySelector('.notice-text')?.textContent.includes('已切到 Plan')"));
 await setDraft("/plan");
 await page.click(".send");
-ok("the send button runs a command too: back to Auto", await page.eval(`document.querySelector('.input').value === '' && ${modeChip} === 'Auto'`));
-ok("and no conversation was started by any of this", await page.eval(`document.querySelectorAll('.tab').length === ${tabsAtStart + 1}`));
+ok("the send button runs a command too: back to Auto", (await page.call(modeChip)) === 'Auto' &&
+  await page.eval("document.querySelector('.input').value === ''"));
+ok("and no conversation was started by any of this", await page.call((count) => document.querySelectorAll('.tab').length === count, tabsAtStart + 1));
 
 // a session's menu: rename and archive (the saved row is only hidden; the archived list brings it back)
 const pickMenu = async (text) => {
-  const i = await page.eval(`[...document.querySelectorAll('.menu-item')].findIndex(e => e.textContent.includes(${JSON.stringify(text)}))`);
+  const i = await page.findText('.menu-item', text);
   if (i < 0) throw new Error(`no menu item "${text}"`);
   await page.click(".menu-item", i);
 };
@@ -208,7 +218,7 @@ await page.click(".srow:not(.open)", 0, { right: true });
 ok("the session menu includes 置顶 without losing rename, copy ID or archive", await page.eval("[...document.querySelectorAll('.menu-label')].map(e => e.textContent).join('|') === '打开|置顶|重命名…|复制会话 ID|归档'"));
 await pickMenu("重命名…");
 await page.waitFor("!!document.querySelector('.dialog input')", 2000);
-ok("重命名… asks for the name, with the present one filled in", await page.eval(`document.querySelector('.dialog input').value === ${JSON.stringify(title0)}`));
+ok("重命名… asks for the name, with the present one filled in", await page.call((name) => document.querySelector('.dialog input').value === name, title0));
 await page.eval("document.querySelector('.dialog input').select()");
 await page.type("改过的名字");
 await page.key("Enter");
@@ -216,18 +226,18 @@ await page.waitFor("[...document.querySelectorAll('.srow .stitle')].some(e => e.
 ok("the new name is shown in the list, and the dialog is gone", await page.eval("!document.querySelector('.dialog')"));
 await page.click(".srow:not(.open)", 0, { right: true });
 await pickMenu("归档");
-await page.waitFor(`document.querySelectorAll('.srow').length === ${rows0 - 1}`, 2000);
+await page.waitForCall((count) => document.querySelectorAll('.srow').length === count, [rows0 - 1], 2000);
 ok("归档 takes the row out of its project and adds 已归档 · 1 at the bottom", await page.eval("document.querySelector('.archived .pname')?.textContent === '已归档 · 1'"));
 await page.click(".archived .proj-toggle");
 ok("the archived list shows it by its new name, with a button to bring it back", await page.eval("document.querySelector('.archived-row .stitle')?.textContent === '改过的名字' && !!document.querySelector('.archived-row [aria-label=\"取消归档\"]')"));
 await page.click(".archived-row .more");
-await page.waitFor(`document.querySelectorAll('.srow').length === ${rows0}`, 2000);
+await page.waitForCall((count) => document.querySelectorAll('.srow').length === count, [rows0], 2000);
 ok("取消归档 puts the row back and the archived list is gone", await page.eval("!document.querySelector('.archived')"));
 ok("nothing was blocked by the Content-Security-Policy", page.cspViolations().length === 0);
 await page.close();
 
 const clickText = async (selector, text) => {
-  const i = await page.eval(`[...document.querySelectorAll(${JSON.stringify(selector)})].findIndex(e => e.textContent.includes(${JSON.stringify(text)}))`);
+  const i = await page.findText(selector, text);
   if (i < 0) throw new Error(`no ${selector} containing "${text}"`);
   await page.click(selector, i);
 };
@@ -281,7 +291,7 @@ ok("the TPS tooltip says in its first line that the figure is an estimate", awai
 // settings: the button, the pages, and a change that takes effect at once
 await page.click(".foot-btn", 1);
 ok("the settings button opens the settings", await page.eval("!!document.querySelector('.settings')"));
-ok("settings include Fusion, customization and plugins, and keep About last", await page.eval("[...document.querySelectorAll('.snav')].map(e => e.textContent.trim()).join(',') === '外观,账号与模型,会话,Fusion,自定义,共享记忆5,外部程序,项目,插件,关于'"));
+ok("settings include Fusion, customization, plugins and storage, and keep About last", await page.eval("[...document.querySelectorAll('.snav')].map(e => e.textContent.trim()).join(',') === '外观,账号与模型,会话,Fusion,自定义,共享记忆5,外部程序,项目,插件,存储,关于'"));
 await page.click(".snav", 2);
 ok("the session page includes model / reasoning / permission / mode defaults", await page.eval("document.querySelectorAll('.sessions-columns > section:first-child .field').length === 4"));
 await page.click(".snav", 0);
@@ -304,12 +314,12 @@ await page.click(".settings-body .field .switch", 0);
 ok("with the compaction switched off the percent is not offered, only the session limit", await page.eval("document.querySelector('.settings-body .field .switch').getAttribute('aria-checked') === 'false' && [...document.querySelectorAll('.stepper span')].map(e => e.textContent).join() === '5'"));
 await page.click(".settings-body .field .switch", 0);
 await clickText(".snav", "外部程序");
-ok("the 外部程序 page has only the Devin CLI, found automatically", await page.eval("[...document.querySelectorAll('.settings-body .field-label')].map(e => e.textContent).join() === 'Devin 命令行' && [...document.querySelectorAll('.settings-body .pathbox')].some(p => p.textContent.toLowerCase().endsWith('devin.exe'))"));
-await page.click(".settings-body .segc button", 1);
+ok("the 外部程序 page shows the automatically detected Devin path", await page.eval("document.querySelector('.devin-program .pathbox').textContent.toLowerCase().endsWith('devin.exe')"));
+await page.click(".devin-program .segc button", 1);
 const devinPath = 'input[aria-label="Devin 命令行 路径"]';
-await page.waitFor(`!!document.querySelector('${devinPath}')`, 2000);
+await page.waitForCall((selector) => !!document.querySelector(selector), [devinPath], 2000);
 await page.click(devinPath);
-await page.eval(`(() => { const e = document.querySelector('${devinPath}'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(e, 'D:\\\\tools\\\\devin.exe'); e.dispatchEvent(new Event('input', { bubbles: true })); e.blur(); })()`);
+await page.setInput(devinPath, 'D:\\tools\\devin.exe', { blur: true });
 ok("指定路径 takes your own path when you leave the field", await page.eval("[...document.querySelectorAll('.settings-body .pathbox')].some(p => p.textContent === 'D:\\\\tools\\\\devin.exe')"));
 await page.key("Escape");
 ok("Esc closes the settings", await page.eval("!document.querySelector('.settings')"));
@@ -364,8 +374,7 @@ await page.key("Enter");
 ok("/goal there runs too", await page.eval("document.querySelector('.input').value === '' && document.querySelector('.notice-text')?.textContent.includes('make it pass')"));
 await page.close();
 
-const setValue = (selector, value) =>
-  page.eval(`(() => { const e = document.querySelector(${JSON.stringify(selector)}); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(e, ${JSON.stringify(value)}); e.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+const setValue = (selector, value) => page.setInput(selector, value);
 const openSettings = async (nav) => {
   await page.eval("document.activeElement && document.activeElement.blur()");
   await page.eval("document.body.dispatchEvent(new KeyboardEvent('keydown', { key: ',', ctrlKey: true, bubbles: true }))");
@@ -383,7 +392,7 @@ await page.mouse("mouseMoved", 5, 5, { button: "none", clickCount: 0 });
 const tabsBefore = await page.eval("document.querySelectorAll('.tab').length");
 await page.click(".controls .chip", 0);
 ok("the model menu has WittyCode, ChatGPT Plan, Devin and API groups", await page.eval("(() => { const h = [...document.querySelectorAll('.menu-head > span:first-child')].map(e => e.textContent); return h[0] === 'WittyCode' && h[1] === 'CHATGPT PLAN' && h[2] === 'DEVIN' && h.length >= 4 && h.slice(3).every(x => x.startsWith('API · ')); })()"));
-ok("Devin's models are offered without repeating a handover explanation on every row", await page.eval("(() => { const t = document.querySelector('.menu').textContent; return !t.includes('之前的文字会交接') && ['SWE-2', 'Claude Opus 5.5', 'GPT-6 Sol', 'GLM-5.2 High'].every(n => t.includes(n)); })()"));
+ok("Devin's models are offered without repeating a handover explanation on every row", await page.eval("(() => { const menu = document.querySelector('.menu'); const labels = [...menu.querySelectorAll('.menu-item .menu-label')].map(e => e.textContent); return !menu.textContent.includes('之前的文字会交接') && ['SWE-2', 'Claude Opus 5.5', 'GPT-6 Sol', 'GLM-5.2'].every(n => labels.includes(n)) && !labels.includes('GLM-5.2 High'); })()"));
 ok("adding a provider and managing accounts stay visible at the bottom", await page.eval("(() => { const p = document.querySelector('.menu-pinned').getBoundingClientRect(); const m = document.querySelector('.menu').getBoundingClientRect(); return p.bottom <= m.bottom + 1 && p.top >= m.top && [...document.querySelectorAll('.menu-pinned .menu-label')].map(e => e.textContent).join() === '添加 API Provider…,管理账号与模型…'; })()"));
 ok("the plan's own models carry no such note", await page.eval("![...document.querySelectorAll('.menu-item')].some(e => e.textContent.includes('GPT-6-Astra') && e.textContent.includes('交接'))"));
 await clickText(".menu-item", "SWE-2");
@@ -420,7 +429,11 @@ ok("while Devin's own models stay available", await page.eval("[...document.quer
 await page.click(".scroller"); // closes the menu without Esc, which would also stop the turn
 await page.waitFor("document.querySelector('.prompt.perm')", 10000); // Devin's Code level asks before it edits
 ok("Devin's 写代码 level asks for approval before the edit", true);
-ok("the approval's answers are one per line, as wide as the card, the label at the left", await page.eval(`${oneLineEach(".prompt.perm .pbtns .btn")} && (() => { const card = document.querySelector('.prompt.perm .pbtns').getBoundingClientRect(); return [...document.querySelectorAll('.prompt.perm .pbtns .btn')].every(b => Math.abs(b.getBoundingClientRect().width - card.width) < 1 && getComputedStyle(b).justifyContent === 'flex-start'); })()`));
+ok("the approval's answers are one per line, as wide as the card, the label at the left",
+  await page.call(oneLineEach, ".prompt.perm .pbtns .btn") && await page.call(() => {
+    const card = document.querySelector('.prompt.perm .pbtns').getBoundingClientRect();
+    return [...document.querySelectorAll('.prompt.perm .pbtns .btn')].every(b => Math.abs(b.getBoundingClientRect().width - card.width) < 1 && ['flex-start', 'flow-start', 'start'].includes(getComputedStyle(b).justifyContent));
+  }));
 await page.click(".prompt.perm .btn.primary");
 await page.waitFor(READY, 12000);
 await page.hover(".usage");
@@ -433,7 +446,8 @@ const firstCarried = await page.eval("Number(document.querySelector('.block.engi
 await page.click(".controls .chip", 0);
 await clickText(".menu-item", "GPT-6-Astra");
 ok("changing back adds a second divider, from Devin to ChatGPT Plan", await page.eval("(() => { const d = [...document.querySelectorAll('.block.engine-switch')]; return d.length === 2 && d[1].textContent.includes('SWE-2') && d[1].textContent.includes('GPT-6-Astra'); })()"));
-ok("it carries the whole conversation so far, including the Devin turn", await page.eval(`Number([...document.querySelectorAll('.block.engine-switch')][1].textContent.match(/之前 (\\d+) 条/)[1]) > ${firstCarried}`));
+ok("it carries the whole conversation so far, including the Devin turn", await page.call((before) =>
+  Number([...document.querySelectorAll('.block.engine-switch')][1].textContent.match(/之前 (\d+) 条/)[1]) > before, firstCarried));
 ok("the permission scale is the own loop's again", (await menu(2)) === "询问,写代码,完全访问");
 await page.click(".controls .chip", 0);
 await clickText(".menu-item", "GPT-6.1-Sol");
@@ -469,7 +483,9 @@ await page.close();
 
 // accounts and models: WittyCode's own engine, Devin and the API providers, no other program's
 page = await openPage(`${index}?scene=done&settings=providers&theme=dark&review=0`);
-ok("the page has the own-loop providers, Devin and an optional Factory CLI card", await page.eval("document.querySelectorAll('.providers .pcard').length === 4 && document.querySelector('.factory-card').textContent.includes('Factory CLI（可选）')"));
+await page.waitFor("!!document.querySelector('.grok-card')", 3000);
+ok("the page has the own-loop providers, Grok subscription, Devin and optional Factory CLI", await page.eval("document.querySelectorAll('.providers .pcard').length === 5 && document.querySelector('.factory-card').textContent.includes('Factory CLI（可选）')"));
+ok("Grok subscription discloses the OAuth client, Harness path and separate API Key billing", await page.eval("(() => { const text = document.querySelector('.grok-card').textContent; return ['实验性', 'WittyCode Harness', '不会自动改用 API Key', 'Grok Build'].every(s => text.includes(s)); })()"));
 ok("API Provider is the last account/model card", await page.eval("document.querySelector('.providers > .pcard:last-child h4')?.textContent === 'API Provider'"));
 ok("no console errors (accounts page)", page.consoleErrors().length === 0);
 await page.close();
@@ -608,7 +624,7 @@ for (const width of [1500, 1100, 900]) {
   await page.click(".newbtn");
   for (const [chip, text] of [[0, "GPT-6-Astra"], [1, "XHigh"], [2, "完全访问"]]) {
     await page.click(".controls .chip", chip);
-    await page.click(".menu-item", await page.eval(`[...document.querySelectorAll('.menu-item')].findIndex((e) => e.textContent.includes(${JSON.stringify(text)}))`));
+    await page.click(".menu-item", await page.findText(".menu-item", text));
   }
   ok(`the first message box at ${width}px wide: one row, permission and mode left, model and reasoning right by the send button, no value cut short`, await page.eval("(() => { const bar = document.querySelector('.composer-bar'); const b = bar.getBoundingClientRect(); const send = document.querySelector('.composer-bar .send').getBoundingClientRect(); const left = (s) => document.querySelector(s).getBoundingClientRect().left; const chips = [...document.querySelectorAll('.controls .chip')].map((c) => c.getBoundingClientRect()); return b.height < 40 && new Set(chips.map((c) => Math.round(c.top))).size === 1 && send.top >= b.top - 1 && send.bottom <= b.bottom + 1 && Math.abs(send.right - b.right) < 3 && left('.chip-permission') < left('.chip-mode') && left('.chip-mode') < left('.chip-model') && left('.chip-model') < left('.chip-reasoning') && left('.chip-reasoning') < send.left && [...document.querySelectorAll('.controls .chip-v')].every((v) => v.scrollWidth <= v.clientWidth); })()"));
   ok(`…and under it only the project (no line of key hints, they are in the box)`, await page.eval("(() => { const h = document.querySelector('.hint'); return !!h && h.querySelector('.chip-k').textContent === '项目' && !/Enter/.test(h.textContent) && /Enter 发送/.test(document.querySelector('.input').placeholder); })()"));
@@ -627,7 +643,8 @@ ok("an empty session moved to a ChatGPT Plan model takes that engine's levels: C
 await page.close();
 
 page = await openPage(`${index}?scene=done&settings=providers&chatgpt=signed-out&theme=dark&review=0`);
-ok("the page has four cards including optional Factory CLI", await page.eval("document.querySelectorAll('.providers .pcard').length === 4"));
+await page.waitFor("!!document.querySelector('.grok-card')", 3000);
+ok("the page has five cards including Grok subscription and optional Factory CLI", await page.eval("document.querySelectorAll('.providers .pcard').length === 5"));
 ok("ChatGPT Plan starts signed out, with OpenAI's wording on a black button", await page.eval("document.querySelector('.pcard:nth-child(1)').textContent.includes('ChatGPT Plan') && document.querySelector('.pcard:nth-child(1) .pstate.off')?.textContent.includes('未登录') && document.querySelector('.pcard:nth-child(1) .btn.chatgpt-btn').textContent.trim() === 'Continue with ChatGPT' && getComputedStyle(document.querySelector('.pcard:nth-child(1) .btn.chatgpt-btn')).backgroundColor === 'rgb(0, 0, 0)'"));
 await page.click(".pcard:nth-child(1) .btn.chatgpt-btn");
 await page.waitFor("document.querySelector('.pcard:nth-child(1)').textContent.includes('正在等你在浏览器里完成登录')", 2000);
@@ -670,16 +687,16 @@ ok("a ChatGPT Plan session whose account signed out says it is not signed in", a
 await page.close();
 
 page = await openPage(`${index}?scene=done&settings=programs&theme=light&review=0`);
-ok("the 外部程序 page holds the Devin program path", await page.eval("document.querySelector('.settings-body').textContent.includes('Devin 命令行')"));
-ok("external program cards and their title/input edges align without inherited page-header padding", await page.eval("(() => { const f = document.querySelector('.factory-program'), d = document.querySelector('.program-path'); const fr = f.getBoundingClientRect(), dr = d.getBoundingClientRect(); const title = f.querySelector('h4').getBoundingClientRect(), input = f.querySelector('input').getBoundingClientRect(), label = d.querySelector('.field-label').getBoundingClientRect(), path = d.querySelector('.pathbox').getBoundingClientRect(); return Math.abs(fr.left-dr.left)<1 && Math.abs(fr.width-dr.width)<1 && Math.abs(title.left-input.left)<1 && Math.abs(title.left-label.left)<1 && Math.abs(label.left-path.left)<1 && Math.abs(dr.top-fr.bottom-14)<1 && getComputedStyle(f.querySelector('header')).paddingLeft==='0px'; })()"));
+ok("the 外部程序 page holds only the Factory and Devin program paths", await page.eval("[...document.querySelectorAll('.program-path .field-label')].map(e => e.textContent).join() === 'Factory 命令行,Devin 命令行' && !document.querySelector('.programs :is(.switch, .mvis)')"));
+ok("external program cards align along their card, title, mode switch and path edges", await page.eval("(() => { const f = document.querySelector('.factory-program'), d = document.querySelector('.devin-program'); const fr = f.getBoundingClientRect(), dr = d.getBoundingClientRect(); return Math.abs(fr.left-dr.left)<1 && Math.abs(fr.width-dr.width)<1 && Math.abs(dr.top-fr.bottom-14)<1 && ['.field-label', '.segc', '.pathbox'].every(sel => { const a = f.querySelector(sel).getBoundingClientRect(), b = d.querySelector(sel).getBoundingClientRect(); return Math.abs(a.left-b.left)<1 && Math.abs(a.top-fr.top-(b.top-dr.top))<1; }); })()"));
 await page.close();
 
 // accounts and models: which models the conversation's model menu offers
 page = await openPage(`${index}?scene=done&settings=providers&theme=light&review=0`);
 const mvis = (source) => `.mvis[data-source="${source}"]`;
-const mvisCount = (source) => page.eval(`document.querySelector('${mvis(source)} .mvis-count').textContent.replace(/\\s+/g, '')`);
+const mvisCount = (source) => page.call((selector) => document.querySelector(selector).textContent.replace(/\s+/g, ''), `${mvis(source)} .mvis-count`);
 const rowSwitch = async (source, label) => {
-  const i = await page.eval(`[...document.querySelectorAll('${mvis(source)} .mvis-row')].findIndex(e => e.textContent.includes(${JSON.stringify(label)}))`);
+  const i = await page.findText(`${mvis(source)} .mvis-row`, label);
   if (i < 0) throw new Error(`no ${source} model "${label}"`);
   await page.click(`${mvis(source)} .mvis-row .switch`, i);
 };
@@ -694,10 +711,13 @@ ok("so does the Devin card", (await mvisCount("devin")) === "4/4");
 ok("and every API provider", await page.eval("[...document.querySelectorAll('.mvis[data-source^=\"api:\"]')].length === 3 && [...document.querySelectorAll('.mvis[data-source^=\"api:\"] .mvis-count')].every(e => /^(\\d+)\\s*\\/\\s*\\1$/.test(e.textContent.trim()))"));
 ok("the lists are folded away until asked for", await page.eval("!document.querySelector('.mvis-body')"));
 await page.click(`${mvis("chatgpt")} .disclose`);
-ok("unfolded: a switch for each model, all on", await page.eval(`(() => { const s = [...document.querySelectorAll('${mvis("chatgpt")} .switch')]; return s.length === 3 && s.every(x => x.getAttribute('aria-checked') === 'true'); })()`));
+ok("unfolded: a switch for each model, all on", await page.call((selector) => {
+  const switches = [...document.querySelectorAll(selector)];
+  return switches.length === 3 && switches.every(x => x.getAttribute('aria-checked') === 'true');
+}, `${mvis("chatgpt")} .switch`));
 await rowSwitch("chatgpt", "GPT-6-Luna");
 ok("turning one off updates the count", (await mvisCount("chatgpt")) === "2/3");
-ok("and the switch", await page.eval(`document.querySelectorAll('${mvis("chatgpt")} .switch')[2].getAttribute('aria-checked') === 'false'`));
+ok("and the switch", await page.call((selector) => document.querySelectorAll(selector)[2].getAttribute('aria-checked') === 'false', `${mvis("chatgpt")} .switch`));
 await page.key("Escape");
 ok("the model menu no longer offers it", !(await menuLabels()).includes("GPT-6-Luna"));
 await openSettings(1);
@@ -711,7 +731,8 @@ ok("a hidden model that is in use is still offered, saying why", inUse.includes(
 await openSettings(1);
 await page.click(`${mvis("devin")} .disclose`);
 await clickText(`${mvis("devin")} .btn`, "全部隐藏");
-ok("hiding all of Devin's models: 0 of 4, the button is spent", (await mvisCount("devin")) === "0/4" && (await page.eval(`[...document.querySelectorAll('${mvis("devin")} .btn')].find(b => b.textContent.includes('全部隐藏')).disabled`)));
+ok("hiding all of Devin's models: 0 of 4, the button is spent", (await mvisCount("devin")) === "0/4" &&
+  await page.call((selector) => [...document.querySelectorAll(selector)].find(b => b.textContent.includes('全部隐藏')).disabled, `${mvis("devin")} .btn`));
 await page.key("Escape");
 await page.click(".controls .chip", 0);
 ok("the menu keeps the DEVIN heading and says nothing is shown (and where to change that)", await page.eval("(() => { const items = [...document.querySelectorAll('.menu-item')].map(e => e.textContent); return !items.some(t => t.includes('SWE-2')) && items.some(t => t.includes('没有显示的模型') && t.includes('账号与模型')); })()"));
@@ -780,7 +801,7 @@ await setValue('input[aria-label="Base URL"]', "groq.com");
 await page.click(".pe-foot .btn.primary");
 ok("a Base URL without http(s):// is refused", await page.eval("document.querySelector('.stack-err')?.textContent.includes('http')"));
 await setValue('input[aria-label="Base URL"]', "https://api.groq.com/openai/v1");
-ok("environment variables are the default and direct entry is explicitly discouraged", await page.eval("document.querySelector('.pe .segc .on')?.textContent === '环境变量' && [...document.querySelectorAll('.pe .segc button')].map(e => e.textContent).join() === '环境变量,命令获取,不需要,直接输入（不推荐）' && !document.querySelector('.pe input[type=password]')"));
+ok("environment variables are the default and direct entry is explicitly discouraged", await page.eval("document.querySelector('.pe .segc .on')?.textContent === '环境变量' && [...document.querySelectorAll('.pe .segc button')].map(e => e.textContent).join() === '环境变量,不需要,直接输入（不推荐）' && !document.querySelector('.pe input[type=password]')"));
 await page.waitFor("document.querySelector('.envline.unset')", 2000);
 ok("a variable that is not set says so and gives the setx line to run", await page.eval("document.querySelector('.envline.unset').textContent.includes('setx GROQ_API_KEY')"));
 await page.click(".pe-foot .btn:not(.primary)");
@@ -809,7 +830,13 @@ await page.click(".pe-foot .btn.primary");
 ok("an unknown API window must be filled before saving", await page.eval("!!document.querySelector('.pe') && document.querySelector('.stack-err')?.textContent.includes('上下文窗口未知')"));
 const unknownWindows = await page.eval("document.querySelectorAll('input[aria-label=\"上下文窗口\"]').length");
 for (let i = 0; i < unknownWindows; i++) {
-  await page.eval(`(() => { const e = document.querySelectorAll('input[aria-label="上下文窗口"]')[${i}]; if (!e.value) { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(e, '64000'); e.dispatchEvent(new Event('input', { bubbles: true })); } })()`);
+  await page.call((index) => {
+    const e = document.querySelectorAll('input[aria-label="上下文窗口"]')[index];
+    if (!e.value) {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(e, '64000');
+      e.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+  }, i);
 }
 await page.click(".pe-foot .btn.primary");
 await page.waitFor("!document.querySelector('.pe')", 3000);
@@ -845,8 +872,7 @@ await page.close();
 
 // shared memory: the switches, what agents wrote lately (and undoing it), the notes (search, write, edit, forget, restore)
 page = await openPage(`${index}?scene=done&settings=memory&theme=dark&review=0`);
-const textarea = (selector, value) =>
-  page.eval(`(() => { const e = document.querySelector(${JSON.stringify(selector)}); Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(e, ${JSON.stringify(value)}); e.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+const textarea = (selector, value) => page.setInput(selector, value);
 const noteTitles = () => page.eval("[...document.querySelectorAll('.mem-note .mem-title')].map(e => e.textContent)");
 const notice = () => page.eval("document.querySelector('.notice-text')?.textContent ?? ''");
 ok("the settings have a memory page, with the number of new notes on its tab", await page.eval("(() => { const n = [...document.querySelectorAll('.snav')].find(e => e.textContent.includes('共享记忆')); return !!n && n.classList.contains('on') && n.querySelector('.snav-badge')?.textContent === '5' && document.querySelector('.settings-body h2').textContent === '共享记忆'; })()"));
@@ -933,14 +959,19 @@ const listed = await page.eval("document.querySelectorAll('.mem-note').length");
 ok("the notes can be drawn as a star map", await page.eval("[...document.querySelectorAll('.mem-head-btns .segc button')].map((e) => e.textContent.trim()).join() === '列表,星图'"));
 await clickText(".mem-head-btns .segc button", "星图");
 await page.waitFor("!!document.querySelector('.sm-panel')", 3000);
-ok("every note in the list is a star", await page.eval(`document.querySelectorAll('.sm-star').length === ${listed}`));
+ok("every note in the list is a star", await page.call((count) => document.querySelectorAll('.sm-star').length === count, listed));
 ok("the map fills the notes area, not a sliver of it", await page.eval("(() => { const r = document.querySelector('.sm-panel').getBoundingClientRect(); return r.width > 400 && r.height >= 440; })()"));
-const starId = await page.eval("[...document.querySelectorAll('.sm-star')].find((s) => s.getAttribute('data-id'))?.getAttribute('data-id') ?? ''");
-await page.click(`.sm-star[data-id="${starId}"]`);
-await page.waitFor(`!!document.querySelector('.mem-note.open[data-id="${starId}"]')`, 3000);
-ok("clicking a star rings it and opens that note under the map", await page.eval(`!!document.querySelector('.sm-star[data-id="${starId}"].sm-selected') && !!document.querySelector('.mem-note.open[data-id="${starId}"] .mem-note-body')`));
+const starAttr = await page.call(() => {
+  const id = document.querySelector('.sm-star[data-id]')?.dataset.id;
+  if (!id) throw new Error('missing note id on the first star');
+  return `[data-id=${CSS.escape(id)}]`;
+});
+await page.click(`.sm-star${starAttr}`);
+await page.waitForCall((attr) => !!document.querySelector(`.mem-note.open${attr}`), [starAttr], 3000);
+ok("clicking a star rings it and opens that note under the map", await page.call((attr) =>
+  !!document.querySelector(`.sm-star${attr}.sm-selected`) && !!document.querySelector(`.mem-note.open${attr} .mem-note-body`), starAttr));
 await clickText(".mem-head-btns .segc button", "列表");
-await page.waitFor(`!document.querySelector('.sm-panel') && document.querySelectorAll('.mem-note').length === ${listed}`, 3000);
+await page.waitForCall((count) => !document.querySelector('.sm-panel') && document.querySelectorAll('.mem-note').length === count, [listed], 3000);
 ok("列表 brings the plain list back", await page.eval("!document.querySelector('.sm-panel')"));
 ok("no console errors (memory)", page.consoleErrors().length === 0);
 ok("nothing was blocked by the Content-Security-Policy (memory)", page.cspViolations().length === 0);
@@ -1076,6 +1107,7 @@ await import("./check-plan.mjs");
 await import("./check-usage-plan-updates.mjs");
 await import("./check-turn-navigation.mjs");
 await import("./check-step-limit.mjs");
+await import("./check-fusion-timeout.mjs");
 await import("./check-connections.mjs");
 console.log(failed ? `${failed} check(s) FAILED` : "all checks passed");
 process.exit(failed ? 1 : 0);

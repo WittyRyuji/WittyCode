@@ -12,7 +12,7 @@ from desktop.core import secret_protection
 from desktop.core.chatgpt.errors import ChatGPTError, RequestNotSent
 from desktop.core.chatgpt.responses import Finished, TextDelta, TextDone
 from desktop.core.llm.backend import ApiBackend
-from desktop.core.provider_secrets import PROTECTED_KEY_FIELD, seal
+from desktop.core.provider_secrets import PROTECTED_KEY_FIELD, PROTECTED_KEYS_FIELD, seal
 from desktop.core.providers import BACKUP_SUFFIX, ProviderError
 from tests.fakes import until
 from tests.llm_support import FakeApi, http_error
@@ -61,11 +61,48 @@ def test_dpapi_save_and_reopen_without_plaintext_or_ciphertext_in_the_view(tmp_p
     assert not run(reopened.test(saved))["ok"]
 
 
+def test_named_keys_are_write_only_and_can_be_kept_renamed_or_removed(tmp_path, monkeypatch):
+    opener = Opener({"data": []})
+    store = make_store(tmp_path, opener=opener)
+    pending = direct(newApiKey="", newApiKeys=[{"name": "Primary", "key": KEY}, {"name": "Secondary", "key": NEXT_KEY}],
+                     models=[model("a"), model("b", selectedKeyIndex=1)])
+    saved = store.save(pending)
+    assert saved["availableKeys"] == [{"name": "Primary"}, {"name": "Secondary"}]
+    assert run(store.test(saved))["ok"] and opener.headers["authorization"] == "Bearer " + KEY
+    assert [store.api_key(spec) for spec in store.api_models()] == [KEY, NEXT_KEY]
+    row = entries_of(store)[0]
+    packed = row[PROTECTED_KEYS_FIELD]
+    assert PROTECTED_KEY_FIELD not in row and packed not in json.dumps(saved)
+    for key in (KEY, NEXT_KEY):
+        assert key not in json.dumps(saved) and key not in store.models_file.read_text(encoding="utf-8")
+    # Showing settings/model metadata does not decrypt keys; a damaged key cannot select a different one.
+    broken = json.loads(packed)
+    broken[1]["data"] = "invalid"
+    second = entries_of(store)[1]
+    put_settings(store, {"customModels": [row, {**second, PROTECTED_KEYS_FIELD: json.dumps(broken)}]})
+    with monkeypatch.context() as no_decrypt:
+        no_decrypt.setattr(secret_protection, "crypt", lambda *a, **kw: pytest.fail("decrypted metadata"))
+        assert store.list() == [saved]
+        specs = store.api_models()
+    assert store.api_key(specs[0]) == KEY
+    with pytest.raises(ProviderError, match="无法读取"):
+        store.api_key(specs[1])
+    changed = {**saved, "newApiKeys": [{"name": "Renamed", "storedIndex": 1}], "models": [model("a"), model("b")]}
+    with pytest.raises(ProviderError, match="已更改"):
+        store.save({**changed, "baseUrl": "https://different.test/v1"})
+    updated = store.save(changed)
+    assert updated["availableKeys"] == [{"name": "Renamed"}]
+    assert [store.api_key(spec) for spec in store.api_models()] == [NEXT_KEY, NEXT_KEY]
+    assert json.loads(entries_of(store)[0][PROTECTED_KEYS_FIELD])[0]["data"] == json.loads(packed)[1]["data"]
+    backup = store.models_file.with_name(store.models_file.name + BACKUP_SUFFIX)
+    assert PROTECTED_KEYS_FIELD not in backup.read_text(encoding="utf-8")
+
+
 @pytest.mark.parametrize("mode, hint, expected", [
-    ("env", "${DEMO_KEY}", "from-env"), ("command", "mint-demo", "from-command"), ("none", "", None),
+    ("env", "${DEMO_KEY}", "from-env"), ("none", "", None),
 ])
 def test_switch_source_removes_old_protected_key_and_switching_back_needs_input(tmp_path, mode, hint, expected):
-    store = make_store(tmp_path, environ={"DEMO_KEY": "from-env"}, run_command=lambda _: "from-command")
+    store = make_store(tmp_path, environ={"DEMO_KEY": "from-env"})
     saved = store.save(direct())
     changed = store.save({**saved, "keyMode": mode, "keyHint": hint})
     assert PROTECTED_KEY_FIELD not in entries_of(store)[0]
@@ -160,10 +197,10 @@ def test_direct_entry_rejects_auth_headers_for_save_probe_fetch_and_runtime(tmp_
         assert KEY not in str(error.value) and not api.posts
 
 
-@pytest.mark.parametrize("mode, hint", [("env", "${PRIMARY_KEY}"), ("command", "mint-demo"), ("none", "")])
+@pytest.mark.parametrize("mode, hint", [("env", "${PRIMARY_KEY}"), ("none", "")])
 def test_other_key_modes_still_allow_custom_auth_headers(tmp_path, mode, hint):
     opener = Opener({"data": []})
-    store = make_store(tmp_path, opener=opener, environ={"PRIMARY_KEY": "primary", "OVERRIDE_KEY": "demo-header"}, run_command=lambda _: "primary")
+    store = make_store(tmp_path, opener=opener, environ={"PRIMARY_KEY": "primary", "OVERRIDE_KEY": "demo-header"})
     saved = store.save(draft(keyMode=mode, keyHint=hint, headers=[{"k": "Authorization", "v": "Bearer ${OVERRIDE_KEY}"}]))
     assert run(store.test(saved))["ok"] and opener.headers["authorization"] == "Bearer demo-header"
     assert run(ApiBackend(store).route(store.api_models()[0])).headers["Authorization"] == "Bearer demo-header"

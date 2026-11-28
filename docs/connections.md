@@ -50,7 +50,7 @@ Codex 激活配置与 Hooks 来源规则参见 [官方配置参考](https://deve
 
 ## Factory CLI
 
-在「账号与模型」或「外部程序」指定 `droid` 路径（留空从 PATH 检测），按需启用。先在终端运行 Factory CLI 完成它自己的登录，WittyCode 不复制它的凭据或 API 模型设置。
+在「外部程序」查看或指定 Factory 命令行路径。选择「自动检测」会查找 `droid`，包括 Windows 桌面版自带的 CLI，不要求它在 PATH 中；已选中时再点一次可重新检测。若手动指定的路径因升级失效，可切回自动检测。在「账号与模型」启用 Factory、管理模型可见性，或点「重新检测」刷新已启用的模型目录。先在终端运行 Factory CLI 完成它自己的登录，WittyCode 不复制它的凭据或 API 模型设置。
 
 适配器直接运行：
 

@@ -8,6 +8,7 @@ import { formatTokens, usageTotal } from "../lib/format";
 import { AgentFlow } from "./AgentFlow";
 import { DragonSprite } from "./DragonSprite";
 import { TurnView } from "./Transcript";
+import { OlderTurns, useOlderTurns } from "./OlderTurns";
 import { MenuButton, StateDot, type MenuItem } from "./ui";
 
 /** The conversation's team in the right rail and in the inspector. */
@@ -21,7 +22,7 @@ function AgentTeam({ session, onClose, inspector }: { session: Session; onClose?
   // Keep the graph inputs stable when the session changes only because a draft was edited.
   const { active, history, flowAgents } = useMemo(() => {
     const { active, history } = groupAgents(agents ?? []);
-    return { active, history, flowAgents: [...active, ...history] };
+    return { active, history, flowAgents: [...active, ...history.filter((agent) => !agent.unstartedTransfer)] };
   }, [agents]);
   const open = useStore((s) => s.agentPanel);
   const openAgent = useStore((s) => s.openAgent);
@@ -47,7 +48,7 @@ function AgentTeam({ session, onClose, inspector }: { session: Session; onClose?
                 <span className="agent-caption">{a.role || "Sub-Agent"}{a.model ? ` · ${a.model}` : ""}</span>
               </span>
               {inspector && a.tokens && <span className="agent-chip-tokens num">{formatTokens(usageTotal(a.tokens))} Token</span>}
-              <span className="agent-state">{AGENT_STATE[a.status].text}</span>
+              <span className="agent-state">{a.unstartedTransfer ? "未启动" : AGENT_STATE[a.status].text}</span>
             </button>
           </li>
         ))}
@@ -58,7 +59,7 @@ function AgentTeam({ session, onClose, inspector }: { session: Session; onClose?
       <header className="agentbar-head">
         <UsersRound size={16} aria-hidden />
         <h3 className="agentbar-title">Agents Team</h3>
-        <span className="agentbar-count num">{agents.length}</span>
+        <span className="agentbar-count num">{flowAgents.length}</span>
         {teamTokens !== null && <span className="agentbar-tokens num" title="已知专家的累计 Token 用量">{formatTokens(teamTokens)} Token</span>}
         {onClose && <button type="button" className="icon-btn sm" aria-label="关闭 Agents Team" onClick={onClose}><X size={15} aria-hidden /></button>}
       </header>
@@ -114,6 +115,7 @@ function AgentTokens({ tokens }: { tokens: Usage }) {
 export function AgentPanel() {
   const panel = useStore((s) => s.agentPanel);
   const turns = useStore((s) => s.agentTurns);
+  const history = useStore((s) => s.agentHistory);
   const session = useStore(currentSession);
   const close = useStore((s) => s.closeAgent);
   const models = useStore((s) => s.models);
@@ -127,13 +129,32 @@ export function AgentPanel() {
   const shown = !!panel && !!session && session.id === panel.sessionId;
   const agentId = panel?.agentId;
   const sessionId = panel?.sessionId;
-  useEffect(() => {
-    stick.current = true;
-  }, [sessionId, agentId]);
-  useEffect(() => {
+  const first = turns[0]?.id;
+  const older = useOlderTurns(sessionId, agentId, history, first);
+  const anchor = useRef<{ id: string; offset: number } | null>(null);
+  const prevTop = useRef(0);
+  const loadOlder = () => older.load(() => {
     const el = scroller.current;
-    if (el && stick.current) el.scrollTop = el.scrollHeight;
-  }, [turns, shown, sessionId, agentId]);
+    const turn = el?.querySelector<HTMLElement>(".turn[data-turn-id]");
+    if (!el || !turn || !first) return;
+    stick.current = false;
+    anchor.current = { id: first, offset: turn.getBoundingClientRect().top - el.getBoundingClientRect().top };
+  });
+  useLayoutEffect(() => {
+    stick.current = true;
+    anchor.current = null;
+  }, [sessionId, agentId, history?.generation]);
+  useLayoutEffect(() => {
+    const el = scroller.current;
+    if (!el) return;
+    const saved = anchor.current;
+    if (saved && saved.id !== first) {
+      const turn = el.querySelector<HTMLElement>(`.turn[data-turn-id="${CSS.escape(saved.id)}"]`);
+      if (turn) el.scrollTop += turn.getBoundingClientRect().top - el.getBoundingClientRect().top - saved.offset;
+      anchor.current = null;
+    } else if (stick.current) el.scrollTop = el.scrollHeight;
+    prevTop.current = el.scrollTop;
+  }, [turns, shown, first, sessionId, agentId]);
   useEffect(() => {
     if (!shown) return;
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && close();
@@ -146,7 +167,7 @@ export function AgentPanel() {
   if (!agent) return null;
   const state = AGENT_STATE[agent.status];
   // The run is drawn like a conversation; its prompts are answered through this id (live.ts splits it).
-  const run: Session = { ...session, id: `${session.id}::${agent.id}`, turns, workingLabel: state.text };
+  const runId = `${session.id}::${agent.id}`;
   const facts = [agent.role, agent.model, agent.effort && `推理 ${agent.effort}`].filter(Boolean).join(" · ");
   const choices = session.fusionPolicy ? [
     ...session.fusionPolicy.workers.map((model) => ({ model, role: "worker" as const })),
@@ -191,11 +212,16 @@ export function AgentPanel() {
         className="agentpanel-run"
         onScroll={() => {
           const el = scroller.current!;
+          const up = el.scrollTop < prevTop.current;
+          prevTop.current = el.scrollTop;
           stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+          if (up && el.scrollTop < 48) loadOlder();
         }}
+        onWheel={(event) => { if (event.deltaY < 0 && event.currentTarget.scrollTop < 48) loadOlder(); }}
       >
         <div className="transcript agentpanel-transcript">
-          {turns.length === 0 ? <div className="snote">{agent.fusionState === "idle" ? "等待主代理分配任务。" : agent.fusionState === "interrupted" ? "尚无可显示的运行记录；继续前请检查原专家记录与工作区。" : "正在读取它的运行…"}</div> : turns.map((t) => <TurnView key={t.id} turn={t} session={run} />)}
+          {older.canLoad && <OlderTurns loading={older.loading} onLoad={loadOlder} />}
+          {turns.length === 0 ? <div className="snote">{agent.fusionState === "idle" ? "等待主代理分配任务。" : agent.fusionState === "interrupted" ? "尚无可显示的运行记录；继续前请检查原专家记录与工作区。" : "正在读取它的运行…"}</div> : turns.map((t) => <TurnView key={t.id} turn={t} sessionId={runId} workingLabel={t.status === "running" ? state.text : undefined} />)}
         </div>
       </div>
     </aside>

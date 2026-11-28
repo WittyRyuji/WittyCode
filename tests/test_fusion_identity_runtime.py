@@ -79,6 +79,13 @@ def _names(tools):
     return {item["name"] for item in tools}
 
 
+def _manual_steps(main, low=1, high=1):
+    """Only a both-manual band can give an expert a tiny real step limit; adaptive sizing floors at 16."""
+    settings = main.manager.settings
+    settings.fusion_steps_min, settings.fusion_steps_min_adaptive = low, False
+    settings.fusion_steps_max, settings.fusion_steps_max_adaptive = high, False
+
+
 def test_structured_models_reuse_and_batch_ownership(tmp_path):
     async def go():
         async with _fusion(tmp_path) as (main, fake):
@@ -105,8 +112,25 @@ def test_structured_models_reuse_and_batch_ownership(tmp_path):
             tasks = manifest["delegate_tasks"]["properties"]["tasks"]
             assert tasks["items"] == BRIEF_PARAMETERS and tasks["maxItems"] == 4
             instructions = main._fusion.instructions()
-            assert instructions.startswith(DECOMPOSITION) and "cost x1.25, efficiency x0.75" in instructions
+            assert instructions.startswith(DECOMPOSITION) and "cost x1.25, quality x0.75" in instructions
             assert WORKER not in instructions and LIGHT not in instructions
+    asyncio.run(go())
+
+
+def test_current_profile_refreshes_text_but_preserves_legacy_limits(tmp_path):
+    from desktop.core.fusion.expert_catalog import ExpertCatalog
+    (_identity_folder() / "Coder.md").write_text("---\nname: Coder\ntools: read\n---\nLegacy prompt.", encoding="utf-8")
+
+    async def go():
+        async with _fusion(tmp_path) as (main, _):
+            catalog = ExpertCatalog(default_settings_path().parent / "fusion-experts")
+            assert (await main._fusion._current_profile("Coder")).instructions == "Legacy prompt."
+            for version in (1, 2):
+                text = f"Check inventory using protocol {version}."
+                catalog.update("Coder", name=f"Implementer {version}", markdown="---\n---\n" + text)
+                profile = await main._fusion._current_profile("Coder")
+                assert (profile.name, profile.display_name, profile.tools) == ("Coder", f"Implementer {version}", {"read"})
+                assert profile.instructions == text + "\nDo not delegate or write to long-term memory."
     asyncio.run(go())
 
 
@@ -114,6 +138,7 @@ def test_bad_and_legacy_calls_return_parser_refusals(tmp_path):
     async def go():
         async with _fusion(tmp_path) as (main, fake):
             bad = _brief(budget={"steps": 0})
+            del bad["goal"]  # A tolerated budget error must not hide a missing required field.
             await _turn(main, fake, call("delegate_task", bad, call_id="bad"),
                         call("delegate_task", LEGACY, call_id="old"), say("Need a brief."))
             assert _output(main, "bad") == parse_brief(bad)[1]
@@ -194,6 +219,7 @@ def test_expert_memory_is_read_only_and_external_mcp_follows_identity(tmp_path, 
 def test_step_budget_interrupts_the_expert(tmp_path):
     async def go():
         async with _fusion(tmp_path) as (main, fake):
+            _manual_steps(main)
             await _turn(main, fake, call("delegate_task", _brief(budget={"steps": 1}), call_id="delegate"),
                         call("list_dir", {"directory_path": "."}, call_id="read"), say("Reviewed the interruption."))
             expert = next(iter(main.agents.values()))
@@ -263,6 +289,31 @@ def test_user_identity_override_is_loaded_once_and_bad_file_noticed(tmp_path):
     asyncio.run(go())
 
 
+@pytest.mark.parametrize("tool_name", ["delegate_task", "delegate_tasks"])
+def test_read_only_brief_with_paths_is_refused_for_coder_override_without_edit(tmp_path, tool_name):
+    (_identity_folder() / "Coder.md").write_text(
+        "---\nname: Coder\ntools: read,exec\n---\nCheck the inventory.", encoding="utf-8")
+
+    async def go():
+        async with _fusion(tmp_path, active=("brief", "route", "v3")) as (main, fake):
+            assert main._fusion.identities.get("Coder").tools == {"read", "exec"}
+            declare = call("declare_topic", {"kind": "simple", "intent": "execute", "topic": "Check stock."})
+            brief = _brief(read_only=True)
+            args = brief if tool_name == "delegate_task" else {"tasks": [brief]}
+            await _turn(main, fake, declare, call(tool_name, args, call_id="delegate"), say("Reviewed."))
+            assert "A read-only brief must have no write paths." in _output(main, "delegate")
+            assert not main.agents and main._fusion.registry.calls == 0
+            assert not list(main.project.iterdir())
+
+            # An already-pathless brief still follows the override's existing permissions.
+            await _turn(main, fake, declare, call("delegate_task", _brief(read_only=True, paths=[]), call_id="pathless"),
+                        say("Inspected."), say("Reviewed."))
+            agent, = main.agents.values()
+            assert agent.record.status == "done" and not agent.controller._fusion_read_only
+            assert "Inspected." in _output(main, "pathless")
+    asyncio.run(go())
+
+
 def test_identity_file_sets_its_own_compaction_point(tmp_path):
     from types import SimpleNamespace
 
@@ -290,7 +341,9 @@ def test_drive_retains_rendered_brief_with_the_expert_label(tmp_path):
             records = await asyncio.to_thread(drive.candidates, shared=False, retention=Retention())
             brief = next(item.record for item in records if item.record.kind == "brief")
             assert brief.summary.startswith("Coder-Inventory:") and not brief.open
-            assert await asyncio.to_thread(drive.read, brief.pointers[0]) == parse_brief(args)[0].text()
+            # The record keeps the rendered brief with the resolved budget and its origin, not the raw request.
+            text = await asyncio.to_thread(drive.read, brief.pointers[0])
+            assert text.startswith("Goal:\nVerify stock totals.") and text.endswith("Budget: 20 steps (adaptive 20-40; requested 8)")
     asyncio.run(go())
 
 

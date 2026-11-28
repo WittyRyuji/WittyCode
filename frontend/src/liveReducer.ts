@@ -6,7 +6,10 @@
 // "dv:...") or an open conversation ("c1", "c2", ...). Saved rows have no `mark`; open conversations always have one.
 
 import type {
+  ActivityEntry,
   ApiProvider,
+  Block,
+  BlockUpdate,
   ChatGPTAccount,
   DevinAccount,
   Engine,
@@ -19,14 +22,18 @@ import type {
   SessionSettings,
   ThemeChoice,
   Turn,
+  TurnHistory,
   TurnUpdate,
 } from "./types";
 import type { Events, FollowUp, InitResult, SavedRow, SettingsView } from "./protocol";
+import { pinnedOrder } from "./lib/sessionOrder.ts"; // (with the extension: scripts/unit.mjs runs this file in Node)
 
 /** The part of the store that Python owns in the live app. */
 export interface LiveData {
   projects: Project[];
   sessions: Record<string, Session>;
+  /** the pinned strip's rows in order (Python's `pinnedSessionIds`, or derived from the flags): one partition across projects */
+  pinnedSessionIds: string[];
   /** saved conversations the user archived (hidden from the project lists), the one archived last first */
   archived: SavedRow[];
   tabs: string[];
@@ -40,6 +47,8 @@ export interface LiveData {
   providers: ApiProvider[];
   maxOpen: number;
   maxSteps: number;
+  reconnectInterval: number;
+  reconnectLimit: number;
   devinPath: string;
   /** model ids left out of the conversation's model menu (a model in use is shown anyway) */
   hiddenModels: string[];
@@ -62,16 +71,25 @@ export interface LiveData {
   compactAt: number;
   fusionMain: string;
   fusionWorkers: string[];
+  fusionLights: string[];
   fusionLight: string;
   fusionReasoning: Record<string, string>;
   fusionPreference: number;
   fusionMaxCalls: number;
   fusionMaxTokens: number;
   fusionMaxSeconds: number;
+  fusionMaxSecondsAdaptive: boolean;
+  /** per-delegation step band shared by all experts; each side is adaptive or the remembered number */
+  fusionStepsMin: number;
+  fusionStepsMinAdaptive: boolean;
+  fusionStepsMax: number;
+  fusionStepsMaxAdaptive: boolean;
   /** every model is asked to write its thinking in Chinese */
   thinkChinese: boolean;
   answerLanguage: "auto" | "zh-CN" | "en";
   thinkingLanguage: "auto" | "zh-CN" | "en";
+  /** the bundled numbered-reply skill injected into user-facing messages */
+  numberedReply: boolean;
   soundEnabled: boolean;
   soundQuestion: string;
   soundComplete: string;
@@ -85,6 +103,7 @@ export interface LiveData {
   /** the sub-agent open in the side panel (of a conversation, by its thread id) and its run */
   agentPanel: { sessionId: string; agentId: string } | null;
   agentTurns: Turn[];
+  agentHistory?: TurnHistory;
   /** The file inspector replaces the sub-agent's; video frames go directly to the mounted player, never into this state. */
   filePanel: FilePanelState | null;
   /** the menu of a file path in the conversation (right click): which path, and where */
@@ -104,6 +123,8 @@ export const ALL_ENGINES: Engine[] = ["devin", "chatgpt", "factory"];
 export const COMPACT_AT_MIN = 50;
 export const COMPACT_AT_MAX = 95;
 export const COMPACT_AT_DEFAULT = 85;
+export const DEFAULT_RECONNECT_INTERVAL = 30;
+export const DEFAULT_RECONNECT_LIMIT = 5;
 export const clampCompactAt = (percent: number): number => Math.max(COMPACT_AT_MIN, Math.min(COMPACT_AT_MAX, Math.round(percent)));
 export const NO_MEMORY: MemoryState = { latest: 0, unseen: 0, seen: 0, pending: 0 };
 
@@ -122,6 +143,7 @@ export function emptyLiveData(theme: ThemeChoice = "system", fontScale: FontScal
   return {
     projects: [],
     sessions: {},
+    pinnedSessionIds: [],
     archived: [],
     tabs: [],
     currentId: null,
@@ -133,6 +155,8 @@ export function emptyLiveData(theme: ThemeChoice = "system", fontScale: FontScal
     providers: [],
     maxOpen: 4,
     maxSteps: 80,
+    reconnectInterval: DEFAULT_RECONNECT_INTERVAL,
+    reconnectLimit: DEFAULT_RECONNECT_LIMIT,
     devinPath: "",
     hiddenModels: [],
     themeChoice: theme,
@@ -150,15 +174,22 @@ export function emptyLiveData(theme: ThemeChoice = "system", fontScale: FontScal
     compactAt: COMPACT_AT_DEFAULT,
     fusionMain: "",
     fusionWorkers: [],
+    fusionLights: [],
     fusionLight: "",
     fusionReasoning: {},
     fusionPreference: 50,
     fusionMaxCalls: 8,
     fusionMaxTokens: 500000,
     fusionMaxSeconds: 900,
+    fusionMaxSecondsAdaptive: true,
+    fusionStepsMin: 16,
+    fusionStepsMinAdaptive: true,
+    fusionStepsMax: 32,
+    fusionStepsMaxAdaptive: true,
     thinkChinese: true,
     answerLanguage: "auto",
     thinkingLanguage: "zh-CN",
+    numberedReply: true,
     soundEnabled: true,
     soundQuestion: "",
     soundComplete: "",
@@ -232,6 +263,8 @@ export function settingsFields(v: SettingsView): Partial<LiveData> {
   return {
     maxOpen: v.maxOpen,
     maxSteps: v.maxSteps ?? 80,
+    reconnectInterval: v.reconnectInterval ?? DEFAULT_RECONNECT_INTERVAL,
+    reconnectLimit: v.reconnectLimit ?? DEFAULT_RECONNECT_LIMIT,
     devinPath: v.devinPath ?? "",
     hiddenModels: v.hiddenModels ?? [],
     themeChoice: v.theme,
@@ -249,15 +282,22 @@ export function settingsFields(v: SettingsView): Partial<LiveData> {
     compactAt: v.compactAt ?? COMPACT_AT_DEFAULT,
     fusionMain: v.fusionMain ?? "",
     fusionWorkers: v.fusionWorkers ?? [],
-    fusionLight: v.fusionLight ?? "",
+    fusionLights: v.fusionLights ?? (v.fusionLight ? [v.fusionLight] : []),
+    fusionLight: (v.fusionLights ?? (v.fusionLight ? [v.fusionLight] : []))[0] ?? "",
     fusionReasoning: v.fusionReasoning ?? {},
     fusionPreference: v.fusionPreference ?? 50,
     fusionMaxCalls: v.fusionMaxCalls ?? 8,
     fusionMaxTokens: v.fusionMaxTokens ?? 500000,
     fusionMaxSeconds: v.fusionMaxSeconds ?? 900,
+    fusionMaxSecondsAdaptive: v.fusionMaxSecondsAdaptive ?? (v.fusionMaxSeconds === undefined),
+    fusionStepsMin: v.fusionStepsMin ?? 16,
+    fusionStepsMinAdaptive: v.fusionStepsMinAdaptive ?? true,
+    fusionStepsMax: v.fusionStepsMax ?? 32,
+    fusionStepsMaxAdaptive: v.fusionStepsMaxAdaptive ?? true,
     thinkChinese: v.thinkChinese ?? true,
     answerLanguage: v.answerLanguage ?? "auto",
     thinkingLanguage: v.thinkingLanguage ?? (v.thinkChinese === false ? "auto" : "zh-CN"),
+    numberedReply: v.numberedReply ?? true,
     soundEnabled: v.soundEnabled ?? true,
     soundQuestion: v.soundQuestion ?? "",
     soundComplete: v.soundComplete ?? "",
@@ -271,6 +311,34 @@ export function selectWhenKnown(s: Pick<LiveData, "sessions">, id: string): Part
   return s.sessions[id]?.projectId ? { currentId: id, pendingSelect: null } : { pendingSelect: id };
 }
 
+function patchFields<T extends object>(base: T, patch: { fields?: Partial<T>; remove?: string[]; suffix?: string }, append: string): T {
+  const fields = { ...base, ...patch.fields } as Record<string, unknown>;
+  for (const key of patch.remove ?? []) delete fields[key];
+  if (patch.suffix !== undefined) fields[append] = String(fields[append] ?? "") + patch.suffix;
+  return fields as T;
+}
+
+function applyBlock(block: BlockUpdate, base: Block | undefined): Block | undefined {
+  switch (block.kind) {
+    case "unchanged": return base;
+    case "textPatch": return base?.kind === "text" ? patchFields(base, block, "markdown") : undefined;
+    case "activityPatch": {
+      if (base?.kind !== "activity") return undefined;
+      const entries = new Map(base.entries.map((entry) => [entry.id, entry]));
+      for (const entry of block.entries) {
+        if (entry.kind !== "entryPatch") entries.set(entry.id, entry);
+        else {
+          const old = entries.get(entry.id);
+          if (old) entries.set(entry.id, patchFields<ActivityEntry>(old, entry, old.kind === "thinking" ? "text" : "output"));
+        }
+      }
+      const list = block.order ? block.order.flatMap((id) => entries.has(id) ? [entries.get(id)!] : []) : [...entries.values()];
+      return { ...base, entries: list };
+    }
+    default: return block;
+  }
+}
+
 /** Changed turns replace the ones with the same id; new ones are appended in the order given. */
 export function upsertTurns(turns: Turn[], incoming: TurnUpdate[]): Turn[] {
   if (incoming.length === 0) return turns;
@@ -278,12 +346,12 @@ export function upsertTurns(turns: Turn[], incoming: TurnUpdate[]): Turn[] {
   const out = [...turns];
   for (const update of incoming) {
     const i = at.get(update.id);
-    const previous = new Map((i === undefined ? [] : out[i]!.blocks).map((block) => [block.id, block]));
-    const turn: Turn = !update.blocks.some((block) => block.kind === "unchanged") ? update as Turn : { ...update, blocks: update.blocks.flatMap((block) => {
-      if (block.kind !== "unchanged") return [block];
-      const kept = previous.get(block.id);
-      return kept ? [kept] : [];
-    }) };
+    const delta = update.blocks.some((block) => block.kind === "unchanged" || block.kind === "textPatch" || block.kind === "activityPatch");
+    const previous = delta ? new Map((i === undefined ? [] : out[i]!.blocks).map((block) => [block.id, block])) : null;
+    const turn: Turn = previous ? { ...update, blocks: update.blocks.flatMap((block) => {
+      const next = applyBlock(block, previous.get(block.id));
+      return next ? [next] : [];
+    }) } : update as Turn;
     if (i === undefined) {
       at.set(turn.id, out.length);
       out.push(turn);
@@ -313,9 +381,12 @@ function withTabs(s: LiveData, tabs: string[], sessions: Record<string, Session>
 
 /** `app.init`: the snapshot replaces whatever the page had. */
 export function applyInit(s: LiveData, init: InitResult): Partial<LiveData> {
+  const sessions = withSavedRows(s.sessions, init.sessions ?? {});
+  const projects = mergeProjects(s.projects, init.projects);
   return {
-    ...withTabs(s, [...init.tabs], withSavedRows(s.sessions, init.sessions ?? {}), null),
-    projects: mergeProjects(s.projects, init.projects),
+    ...withTabs(s, [...init.tabs], sessions, null),
+    projects,
+    pinnedSessionIds: pinnedOrder(projects, sessions, init.pinnedSessionIds),
     archived: init.archived ?? [],
     models: init.models,
     defaults: init.defaults,
@@ -334,6 +405,7 @@ function onSession(s: LiveData, e: Events["session"]): Partial<LiveData> {
   const before = s.sessions[e.id] ?? newConversation(e.id);
   const { handoff, queued, preparing, ...rest } = e.patch;
   const next: Session = { ...before, ...rest, id: e.id };
+  if (rest.pinned === undefined && s.pinnedSessionIds.includes(e.id)) next.pinned = true; // the strip's declared order already knows this row
   if ("handoff" in e.patch) next.handoff = handoff ?? undefined;
   if ("queued" in e.patch) next.queued = queued && queued.length > 0 ? queued : undefined;
   if ("preparing" in e.patch) {
@@ -354,21 +426,34 @@ function onSession(s: LiveData, e: Events["session"]): Partial<LiveData> {
   if (s.agentPanel?.sessionId === e.id && e.patch.agents && !e.patch.agents.some((a) => a.id === s.agentPanel?.agentId)) {
     patch.agentPanel = null;
     patch.agentTurns = [];
+    patch.agentHistory = undefined;
   }
   return patch;
+}
+
+function mergeTurnEvent(turns: Turn[], history: TurnHistory | undefined, e: Events["turns"]) {
+  if (e.history && !e.all && history?.generation !== e.history.generation) return null;
+  if (e.prepend) {
+    // Preserve the loaded turn and block objects (and any newer deltas) when an older page arrives.
+    const loaded = new Set(turns.map((t) => t.id));
+    return { turns: [...upsertTurns([], e.turns.filter((t) => !loaded.has(t.id))), ...turns], history: { ...history, ...e.history! } };
+  }
+  const base = e.all ? [] : e.trim ? turns.slice(e.trim) : turns;
+  return { turns: upsertTurns(base, e.turns), history: e.all ? e.history : e.history ? { ...history, ...e.history } : history };
 }
 
 function onAgentTurns(s: LiveData, e: Events["agentTurns"]): Partial<LiveData> {
   const panel = s.agentPanel;
   if (!panel || panel.sessionId !== e.id || panel.agentId !== e.agentId) return {};
-  return { agentTurns: e.all ? [...e.turns] : upsertTurns(s.agentTurns, e.turns) };
+  const next = mergeTurnEvent(s.agentTurns, s.agentHistory, e);
+  return next ? { agentTurns: next.turns, agentHistory: next.history } : {};
 }
 
 function onTurns(s: LiveData, e: Events["turns"]): Partial<LiveData> {
   if (!s.tabs.includes(e.id)) return {};
   const before = s.sessions[e.id] ?? newConversation(e.id);
-  const turns = upsertTurns(e.all ? [] : before.turns, e.turns);
-  return { sessions: { ...s.sessions, [e.id]: { ...before, turns } } };
+  const next = mergeTurnEvent(before.turns, before.turnHistory, e);
+  return next ? { sessions: { ...s.sessions, [e.id]: { ...before, turns: next.turns, turnHistory: next.history } } } : {};
 }
 
 /** A message that did not go out comes back (a failed send, a withdrawn queue entry, a steer nobody took in): its text
@@ -392,13 +477,15 @@ export function applyEvent(s: LiveData, name: string, payload: unknown): Applied
       const fileGone = s.filePanel !== null && !e.tabs.includes(s.filePanel.sessionId);
       return done({
         ...withTabs(s, [...e.tabs], s.sessions, e.select),
-        ...(gone ? { agentPanel: null, agentTurns: [] } : {}),
+        ...(gone ? { agentPanel: null, agentTurns: [], agentHistory: undefined } : {}),
         ...(fileGone ? { filePanel: null } : {}),
       });
     }
     case "sidebar": {
       const e = payload as Events["sidebar"];
-      return done({ projects: mergeProjects(s.projects, e.projects), sessions: withSavedRows(s.sessions, e.sessions), archived: e.archived ?? s.archived });
+      const projects = mergeProjects(s.projects, e.projects);
+      const sessions = withSavedRows(s.sessions, e.sessions);
+      return done({ projects, sessions, pinnedSessionIds: pinnedOrder(projects, sessions, e.pinnedSessionIds), archived: e.archived ?? s.archived });
     }
     case "models": {
       const e = payload as Events["models"];
